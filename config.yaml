@@ -1,0 +1,50 @@
+httpServer:
+  host: "*"
+  port: 8080
+
+database:
+  user: "admin"
+  password: "secret"
+  name: "mydb"
+
+
+# Logger
+logger:
+  info:
+    Filename: "app/storage/logs/info.log"
+    MaxSize: 100
+    MaxAge: 30
+    MaxBackups: 3
+    LocalTime: true
+    Compress: true
+  error:
+    Filename: "app/storage/logs/error.log"
+    MaxSize: 100
+    MaxAge: 30
+    MaxBackups: 3
+    LocalTime: true
+    Compress: true
+
+requestLogger:
+  info:
+    Filename: "app/storage/logs/request.log"
+    MaxSize: 100
+    MaxAge: 30
+    MaxBackups: 3
+    LocalTime: true
+    Compress: true
+
+systemLogger:
+  error:
+    Filename: "app/storage/logs/system_error.log"
+    MaxSize: 100
+    MaxAge: 30
+    MaxBackups: 3
+    LocalTime: true
+    Compress: true
+
+
+
+features:
+  - "auth"
+  - "logging"
