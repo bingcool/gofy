@@ -32,25 +32,25 @@ func Log(msg string, fields ...zap.Field) {
 }
 
 func initRequestLogger() *zap.Logger {
-	errorLogWriter := &lumberjack.Logger{
-		Filename:   log.ParseDayLogPath(viper.GetString("requestLogger.error.Filename")), // 日志文件路径
-		MaxSize:    viper.GetInt("requestLogger.error.MaxSize"),                          // 单文件最大100MB（非必须，按天切割可设较大值）
-		MaxBackups: viper.GetInt("requestLogger.error.MaxBackups"),                       // 保留最近7天的日志
-		MaxAge:     viper.GetInt("requestLogger.error.MaxAge"),                           // 保留7天
-		Compress:   viper.GetBool("requestLogger.error.MaxAge"),                          // 是否压缩旧日志                               // 是否压缩旧日志
+	requestLogWriter := &lumberjack.Logger{
+		Filename:   log.ParseDayLogPath(viper.GetString("requestLogger.info.Filename")), // 日志文件路径
+		MaxSize:    viper.GetInt("requestLogger.info.MaxSize"),                          // 单文件最大100MB（非必须，按天切割可设较大值）
+		MaxBackups: viper.GetInt("requestLogger.info.MaxBackups"),                       // 保留最近7天的日志
+		MaxAge:     viper.GetInt("requestLogger.info.MaxAge"),                           // 保留7天
+		Compress:   viper.GetBool("requestLogger.info.MaxAge"),                          // 是否压缩旧日志
 	}
 
 	encoderConfig := log.GetEncoderConfig()
 	errorCore := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderConfig),
-		zapcore.AddSync(errorLogWriter),
+		zapcore.AddSync(requestLogWriter),
 		zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
-			return lvl >= zap.ErrorLevel
+			return lvl >= zap.InfoLevel && lvl < zap.ErrorLevel
 		}),
 	)
 
 	// 构建 Logger
-	zapLogger := zap.New(errorCore, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
+	zapLogger := zap.New(errorCore, zap.AddCaller())
 	defer func(zapLogger *zap.Logger) {
 		_ = zapLogger.Sync()
 	}(zapLogger)

@@ -7,7 +7,7 @@ import (
 )
 
 func ValidateLogin() gin.HandlerFunc {
-	return func(c *gin.Context) {
+	return func(ctx *gin.Context) {
 		fmt.Println("validate login middleware")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"reflect"
 
+	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
 )
 
@@ -13,6 +14,11 @@ type Response struct {
 	Msg   string `json:"msg"`
 	Data  any    `json:"data"`
 	ReqId string `json:"req_id"`
+}
+
+// NewResponse 创建响应结构体
+func NewResponse() *Response {
+	return &Response{}
 }
 
 func (response *Response) Write(code int, data any, msg string) gin.HandlerFunc {
@@ -30,11 +36,13 @@ func (response *Response) Write(code int, data any, msg string) gin.HandlerFunc 
 	response.Code = code
 	response.Msg = msg
 	response.Data = data
-	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, response)
+
+	return func(ctx *gin.Context) {
+		response.ReqId = requestid.Get(ctx)
+		ctx.JSON(http.StatusOK, response)
 	}
 }
 
-func (response *Response) ReturnJson(c *gin.Context, code int, data any, msg string) {
-	response.Write(code, data, msg)(c)
+func (response *Response) ReturnJson(ctx *gin.Context, code int, data any, msg string) {
+	response.Write(code, data, msg)(ctx)
 }

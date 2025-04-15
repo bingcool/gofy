@@ -7,4 +7,5 @@ import (
 func SetGlobalMiddleware(router *gin.Engine) {
 	SetGlobalRequestId(router)
 	SetGlobalRecovery(router)
+	SetGlobalCors(router)
 }

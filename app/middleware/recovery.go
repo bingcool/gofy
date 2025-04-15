@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	"github.com/bingcool/gofy/src/log"
+	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -19,20 +20,31 @@ func SetGlobalRecovery(router *gin.Engine) {
 
 // CustomRecovery 自定义全局Recovery的响应
 func customRecovery() gin.HandlerFunc {
-	handleFn := func(c *gin.Context, err any) {
-		c.AbortWithStatus(http.StatusOK)
+	handleFn := func(ctx *gin.Context, err any) {
 		// 捕获恐慌并获取堆栈信息
 		stackRes := stack(3)
-		errorMsg := fmt.Sprintf("%s 【stack trace:%s】", err, stackRes)
-		response := &Response{
-			ReqId: "",
-		}
-		response.ReturnJson(c, -1, struct{}{}, errorMsg)
+		stackMsg := fmt.Sprintf("%s 【stack trace:%s】", err, stackRes)
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Println("Recovered from a panic:", r)
+				}
+			}()
+			reqId := requestid.Get(ctx)
+			reqUri := ctx.Request.RequestURI
+			reqParams, exists := ctx.Get("req_params")
+			if !exists {
+				reqParams = make(map[string]any)
+			}
+			log.SysError("请求报错"+reqUri, zap.String("req_id", reqId), zap.Any("req_params", reqParams), zap.String("stacktrace", stackMsg))
+		}()
+
+		ctx.AbortWithStatus(http.StatusOK)
+		response := NewResponse()
+		response.ReturnJson(ctx, 500, struct{}{}, stackMsg)
 	}
-	// 捕获恐慌并记录日志
-	go func() {
-		log.SysError("panic", zap.String("req_id", ""))
-	}()
+
 	return gin.RecoveryWithWriter(gin.DefaultErrorWriter, handleFn)
 }
 

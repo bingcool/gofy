@@ -90,11 +90,11 @@ func Error(msg string, fields ...zap.Field) {
 
 func initSystemLogger() *zap.Logger {
 	errorLogWriter := &lumberjack.Logger{
-		Filename:   ParseDayLogPath(viper.GetString("logger.error.Filename")), // 日志文件路径
-		MaxSize:    viper.GetInt("logger.error.MaxSize"),                      // 单文件最大100MB（非必须，按天切割可设较大值）
-		MaxBackups: viper.GetInt("logger.error.MaxBackups"),                   // 保留最近7天的日志
-		MaxAge:     viper.GetInt("logger.error.MaxAge"),                       // 保留7天
-		Compress:   viper.GetBool("logger.error.MaxAge"),                      // 是否压缩旧日志                               // 是否压缩旧日志
+		Filename:   ParseDayLogPath(viper.GetString("systemLogger.error.Filename")), // 日志文件路径
+		MaxSize:    viper.GetInt("systemLogger.error.MaxSize"),                      // 单文件最大100MB（非必须，按天切割可设较大值）
+		MaxBackups: viper.GetInt("systemLogger.error.MaxBackups"),                   // 保留最近7天的日志
+		MaxAge:     viper.GetInt("systemLogger.error.MaxAge"),                       // 保留7天
+		Compress:   viper.GetBool("systemLogger.error.MaxAge"),                      // 是否压缩旧日志                               // 是否压缩旧日志
 	}
 
 	encoderConfig := GetEncoderConfig()
@@ -107,7 +107,7 @@ func initSystemLogger() *zap.Logger {
 	)
 
 	// 构建 Logger
-	zapLogger := zap.New(errorCore, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
+	zapLogger := zap.New(errorCore, zap.AddCaller())
 	defer func(zapLogger *zap.Logger) {
 		_ = zapLogger.Sync()
 	}(zapLogger)
