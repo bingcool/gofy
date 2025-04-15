@@ -1,12 +1,17 @@
 httpServer:
   host: "*"
   port: 8080
+  pidFilePath: "app/server.pid"
+  logFilePath: "/dev/null"
 
-database:
-  user: "admin"
-  password: "secret"
-  name: "mydb"
+daemonServer:
+   pidFilePath: "app/daemon.pid"
 
+cronServer:
+  pidFilePath: "app/cron.pid"
+
+scriptServer:
+  pidFilePath: "app/script.pid"
 
 # Logger
 logger:
@@ -44,6 +49,10 @@ systemLogger:
     Compress: true
 
 
+database:
+  user: "admin"
+  password: "secret"
+  name: "mydb"
 
 features:
   - "auth"

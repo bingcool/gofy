@@ -6,7 +6,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bingcool/gofy/src/system"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var StopCmd = &cobra.Command{
@@ -34,13 +36,26 @@ var StopCmd = &cobra.Command{
 
 func stopRun(cmd *cobra.Command, args []string) {
 	// 检查 PID 文件是否存在
+	var pidFilePath string
+	if system.IsCliService() {
+		pidFilePath = viper.GetString("httpServer.pidFilePath")
+	} else if system.IsDaemonService() {
+		pidFilePath = viper.GetString("daemonServer.pidFilePath")
+	} else if system.IsCronService() {
+		pidFilePath = viper.GetString("cronServer.pidFilePath")
+	} else if system.IsScriptService() {
+		pidFilePath = viper.GetString("scriptServer.pidFilePath")
+	} else {
+		pidFilePath = viper.GetString("httpServer.pidFilePath")
+	}
+
 	if _, err := os.Stat(pidFilePath); os.IsNotExist(err) {
 		fmt.Println("Daemon is not running")
 		os.Exit(1)
 	}
 
 	// 读取 PID 文件并终止进程
-	pid := GetServerPid()
+	pid := GetHttpServerPid()
 	if pid == 0 {
 		fmt.Println("Daemon is not running")
 		os.Exit(1)

@@ -2,15 +2,17 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 
 	_ "github.com/bingcool/gofy/src/conf"
-	_ "github.com/bingcool/gofy/src/system"
+	"github.com/bingcool/gofy/src/system"
 	"github.com/bingcool/gofy/src/utils"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var rootCmd = &cobra.Command{
@@ -27,8 +29,11 @@ var rootCmd = &cobra.Command{
 }
 
 var (
-	startCommandName = "start"
-	stopCommandName  = "stop"
+	startCommandName  = "start"
+	stopCommandName   = "stop"
+	daemonCommandName = "daemon"
+	cronCommandName   = "cron"
+	scriptCommandName = "script"
 )
 
 // init
@@ -69,6 +74,19 @@ func initStartParseFlag() {
 		}) {
 			fmt.Errorf("os.Args[2] error")
 		}
+	}
+
+	switch args[1] {
+	case startCommandName:
+		system.RunModel = "cli"
+	case daemonCommandName:
+		system.RunModel = "daemon"
+	case cronCommandName:
+		system.RunModel = "cron"
+	case scriptCommandName:
+		system.RunModel = "script"
+	default:
+		system.RunModel = "cli"
 	}
 
 	if _, ok := utils.IsValidIndexOfSlice(args, 1); ok {
@@ -117,19 +135,30 @@ func bindParseFlag(runCmd *cobra.Command, args []string) {
 	}
 }
 
-func GetServerPid() int {
-	pid1, err := os.ReadFile(pidFilePath)
-	pidStr := string(pid1)
+// savePidFile 保存pid文件
+func savePidFile(pidFilePath string, pid int) {
+	serverFile, _ := os.Create(pidFilePath)
+	_, err := serverFile.WriteString(strconv.Itoa(pid))
+	if err != nil {
+		log.Fatal("save pid error")
+	}
+}
+
+// GetHttpServerPid 获取服务pid
+func GetHttpServerPid() int {
+	pid, err := os.ReadFile(viper.GetString("httpServer.pidFilePath"))
+	pidStr := string(pid)
 	if err != nil {
 		return 0
 	}
-	pid, err1 := strconv.Atoi(pidStr)
+	pid1, err1 := strconv.Atoi(pidStr)
 	if err1 != nil {
 		return 0
 	}
-	return pid
+	return pid1
 }
 
+// IsServerRunning 判断服务是否正在运行
 func IsServerRunning(pid int) (bool, error) {
 	process, err := os.FindProcess(pid)
 	if err != nil {

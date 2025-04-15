@@ -7,21 +7,17 @@ import (
 	"strconv"
 	"syscall"
 
-	middleware "github.com/bingcool/gofy/app/middleware"
+	"github.com/bingcool/gofy/app/middleware"
 	"github.com/bingcool/gofy/app/route"
-	"github.com/bingcool/gofy/src/log"
 	"github.com/gin-gonic/gin"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"go.uber.org/zap"
 )
 
 // startCommandName is the name of the start command
 var (
-	daemonCtx   *daemon.Context
-	pidFilePath = "mydaemon.pid" // PID 文件路径
-	logFilePath = "/dev/stdout"  // 日志文件路径
+	daemonCtx *daemon.Context
 )
 
 var StartCmd = &cobra.Command{
@@ -62,17 +58,19 @@ func getArgs() []string {
 }
 
 func startRun(cmd *cobra.Command, args []string) {
-	// 配置守护进程上下文
-	daemonCtx = &daemon.Context{
-		PidFileName: pidFilePath,
-		PidFilePerm: 0644,
-		LogFileName: logFilePath,
-		LogFilePerm: 0640,
-		WorkDir:     "./",
-		Umask:       027,
-	}
+	pidFilePath := viper.GetString("httpServer.pidFilePath")
+	savePidFile(pidFilePath, os.Getpid())
 	isDaemon, _ := cmd.Flags().GetInt("daemon")
 	if isDaemon > 0 {
+		// 配置守护进程上下文
+		daemonCtx = &daemon.Context{
+			PidFileName: pidFilePath,
+			PidFilePerm: 0644,
+			LogFileName: viper.GetString("httpServer.logFilePath"),
+			LogFilePerm: 0640,
+			WorkDir:     "./",
+			Umask:       027,
+		}
 		// 守护进程化
 		d, err := daemonCtx.Reborn()
 
@@ -86,14 +84,8 @@ func startRun(cmd *cobra.Command, args []string) {
 		}
 		defer daemonCtx.Release()
 	}
-
-	log.Info("hello", zap.String("name", "bingcool"))
-
-	log.SysError("ggggggggggggg")
 	// 处理系统信号
 	handleSignals()
-
-	fmt.Println("Starting daemon=" + fmt.Sprintf("%d", isDaemon))
 	// 守护进程主逻辑
 	startServer()
 }
@@ -112,13 +104,15 @@ func handleSignals() {
 
 // startServer 启动服务
 func startServer() {
-	router := gin.Default()
+	// 将日志输出重定向到空设备（静默模式）
+	engine := gin.New()
+	engine.Use(gin.Recovery())
 	// 设置全局中间件
-	middleware.SetGlobalMiddleware(router)
+	middleware.SetGlobalMiddleware(engine)
 	// 注册路由
-	route.RegisterRouter(router)
+	route.RegisterRouter(engine)
 	port := ":" + strconv.Itoa(viper.GetInt("httpServer.port"))
-	err := router.Run(port)
+	err := engine.Run(port)
 	if err != nil {
 		fmt.Println("Error starting server:", err)
 	}

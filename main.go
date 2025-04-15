@@ -6,8 +6,6 @@ import (
 	_ "go.uber.org/automaxprocs"
 )
 
-const RootDir = "./"
-
 func main() {
 	cmd.Execute()
 }
