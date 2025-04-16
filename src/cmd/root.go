@@ -2,15 +2,18 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/bingcool/gofy/src/cmd/runmodel"
 	_ "github.com/bingcool/gofy/src/conf"
+	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/bingcool/gofy/src/utils"
+	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -29,11 +32,7 @@ var rootCmd = &cobra.Command{
 }
 
 var (
-	startCommandName  = "start"
-	stopCommandName   = "stop"
-	daemonCommandName = "daemon"
-	cronCommandName   = "cron"
-	scriptCommandName = "script"
+	daemonCtx *daemon.Context
 )
 
 // init
@@ -44,51 +43,29 @@ func init() {
 func init() {
 	rootCmd.AddCommand(StartCmd)
 	rootCmd.AddCommand(StopCmd)
+	rootCmd.AddCommand(CronCmd)
 	//rootCmd.AddCommand(VersionCmd)
 	//rootCmd.AddCommand(ScriptCmd)
 	//rootCmd.AddCommand(DaemonStartCmd)
 	//rootCmd.AddCommand(DaemonStartAllCmd)
 	//rootCmd.AddCommand(DaemonStopCmd)
 	//rootCmd.AddCommand(DaemonStopAllCmd)
-	//rootCmd.AddCommand(CronStartCmd)
+
 	//rootCmd.AddCommand(CronStopCmd)
 }
 
 // Execute executes the root command.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Println(err.Error())
 		os.Exit(1)
 	}
 }
 
-// initStartParseFlag 初始化命令flag参数
+// InitStartParseFlag 初始化命令flag参数
 func initStartParseFlag() {
+	runmodel.SystemRunModel()
 	args := os.Args
-	if len(args) == 1 {
-		args = append(args, "start")
-		os.Args = args
-	} else if len(args) >= 2 {
-		if !utils.InSlice(args[1], []string{
-			startCommandName,
-		}) {
-			fmt.Errorf("os.Args[2] error")
-		}
-	}
-
-	switch args[1] {
-	case startCommandName:
-		system.RunModel = "cli"
-	case daemonCommandName:
-		system.RunModel = "daemon"
-	case cronCommandName:
-		system.RunModel = "cron"
-	case scriptCommandName:
-		system.RunModel = "script"
-	default:
-		system.RunModel = "cli"
-	}
-
 	if _, ok := utils.IsValidIndexOfSlice(args, 1); ok {
 		if len(args) > 2 {
 			bindParseFlag(StartCmd, os.Args[2:])
@@ -136,17 +113,36 @@ func bindParseFlag(runCmd *cobra.Command, args []string) {
 }
 
 // savePidFile 保存pid文件
-func savePidFile(pidFilePath string, pid int) {
-	serverFile, _ := os.Create(pidFilePath)
-	_, err := serverFile.WriteString(strconv.Itoa(pid))
-	if err != nil {
-		log.Fatal("save pid error")
+func savePidFile(pidFilePath string, pid int, pidFilePerm os.FileMode) {
+	fullPidFilePath := GetFullPidFilePath(pidFilePath)
+	dir := filepath.Dir(fullPidFilePath)
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		panicMsg := "创建fullPidFilePath=" + fullPidFilePath + ", error=" + err.Error()
+		log.SysError(panicMsg)
+		panic(panicMsg)
 	}
+
+	serverPidFile, err1 := os.OpenFile(fullPidFilePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, pidFilePerm)
+	if err1 != nil {
+		log.SysError("Error OpenPidFile=" + fullPidFilePath + ", error=" + err1.Error())
+	}
+
+	_, err2 := serverPidFile.WriteString(strconv.Itoa(pid))
+	if err2 != nil {
+		errorMsg := fmt.Sprintf("Error save server pidFile=%s, error=%s", fullPidFilePath, err2.Error())
+		log.SysError(errorMsg)
+		panic(errorMsg)
+	}
+
+	_ = serverPidFile.Close()
 }
 
 // GetHttpServerPid 获取服务pid
 func GetHttpServerPid() int {
-	pid, err := os.ReadFile(viper.GetString("httpServer.pidFilePath"))
+	pidFilePath := viper.GetString("httpServer.pidFilePath")
+	fullPidFilePath := GetFullPidFilePath(pidFilePath)
+	pid, err := os.ReadFile(fullPidFilePath)
 	pidStr := string(pid)
 	if err != nil {
 		return 0
@@ -156,6 +152,18 @@ func GetHttpServerPid() int {
 		return 0
 	}
 	return pid1
+}
+
+// GetFullPidFilePath 获取pid文件绝对路径
+func GetFullPidFilePath(pidFilePath string) string {
+	var fullPidFilePath string
+	startRootPath := system.GetStartRootPath()
+	if !strings.Contains(pidFilePath, startRootPath) {
+		fullPidFilePath = filepath.Join(startRootPath, pidFilePath)
+	} else {
+		fullPidFilePath = pidFilePath
+	}
+	return fullPidFilePath
 }
 
 // IsServerRunning 判断服务是否正在运行

@@ -6,13 +6,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bingcool/gofy/src/cmd/runmodel"
+	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 )
 
 var StopCmd = &cobra.Command{
-	Use:   stopCommandName,
+	Use:   runmodel.StopCommandName,
 	Short: "start the gofy",
 	Long:  `start the gofy`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -23,7 +26,7 @@ var StopCmd = &cobra.Command{
 
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		stopRun(cmd, args)
+		stopServer(cmd, args)
 	},
 	PostRun: func(cmd *cobra.Command, args []string) {
 
@@ -34,7 +37,8 @@ var StopCmd = &cobra.Command{
 	},
 }
 
-func stopRun(cmd *cobra.Command, args []string) {
+// stopRun停止服务
+func stopServer(cmd *cobra.Command, args []string) {
 	// 检查 PID 文件是否存在
 	var pidFilePath string
 	if system.IsCliService() {
@@ -50,34 +54,40 @@ func stopRun(cmd *cobra.Command, args []string) {
 	}
 
 	if _, err := os.Stat(pidFilePath); os.IsNotExist(err) {
-		fmt.Println("Daemon is not running")
+		log.SysInfo("server pid file is not exist", zap.Any("pidFilePath", pidFilePath))
 		os.Exit(1)
 	}
 
 	// 读取 PID 文件并终止进程
 	pid := GetHttpServerPid()
+	log.SysInfo("server ready to stop!!!", zap.Any("pidFilePath", pidFilePath), zap.Any("pid", pid))
+
 	if pid == 0 {
-		fmt.Println("Daemon is not running")
+		errorMsg := fmt.Sprintf("Http Server is not running")
+		fmt.Println(errorMsg)
+		log.SysInfo(errorMsg)
 		os.Exit(1)
 	}
 
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		fmt.Println("Error finding process:", err)
+		errorMsg := fmt.Sprintf("Server is not find process")
+		fmt.Println(errorMsg)
+		log.SysError(errorMsg, zap.Any("pid", pid))
 		os.Exit(1)
 	}
 
-	// 发送 SIGTERM 信号
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		fmt.Println("Error stopping daemon:", err)
-		os.Exit(1)
+	// send SIGTERM Signal
+	if err1 := process.Signal(syscall.SIGTERM); err1 != nil {
+		log.SysInfo("Server send SIGTERM Signal", zap.Any("pidFilePath", pidFilePath), zap.Any("pid", pid))
+		os.Exit(0)
 	}
 
 	time.Sleep(time.Second * 1)
 
 	isRunning, _ := IsServerRunning(pid)
 	if !isRunning {
-		fmt.Println("进程已停止", err)
+		log.SysInfo("Server had Stop Stop Stop", zap.Any("pidFilePath", pidFilePath), zap.Any("pid", pid))
+		fmt.Println("Server had Stop Stop Stop!!!")
 	}
-
 }

@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bingcool/gofy/src/conf"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/natefinch/lumberjack"
 	"github.com/spf13/viper"
@@ -19,6 +20,7 @@ var (
 )
 
 func init() {
+	conf.LoadYaml()
 	logSyncOnce.Do(func() {
 		currentDate = time.Now().Format("2006-01-02")
 		requestLogger = initRequestLogger()
@@ -31,6 +33,7 @@ func Log(msg string, fields ...zap.Field) {
 	requestLogger.Info(msg, fields...)
 }
 
+// initRequestLogger 初始化日志
 func initRequestLogger() *zap.Logger {
 	requestLogWriter := &lumberjack.Logger{
 		Filename:   log.ParseDayLogPath(viper.GetString("requestLogger.info.Filename")), // 日志文件路径
@@ -58,6 +61,7 @@ func initRequestLogger() *zap.Logger {
 	return zapLogger
 }
 
+// syncDailyLogger 同步动态日期日志
 func syncDailyLogger() {
 	today := time.Now().Format("2006-01-02")
 	if today != currentDate {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	_ "github.com/bingcool/gofy/src/cmd/runmodel"
 	"github.com/spf13/viper"
 )
 
@@ -22,6 +23,4 @@ func LoadYaml() {
 			panic(fmt.Errorf("Fatal error config file: %w", err))
 		}
 	})
-
-	//
 }

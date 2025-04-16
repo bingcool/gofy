@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/spf13/viper"
 )
 
 const DEV_ENV = "dev"
@@ -15,6 +17,7 @@ const PROD_ENV = "prod"
 var env string
 var RunModel string
 
+// init 初始化
 func init() {
 	env = os.Getenv("GOFY_ENV")
 }
@@ -58,10 +61,15 @@ func IsProd() bool {
 
 // IsCliService 判断是否是命令行http服务
 func IsCliService() bool {
-	if RunModel == "cli" {
+	if RunModel == "http" {
 		return true
 	}
 	return false
+}
+
+// IsHttpService 判断是否是命令行http服务
+func IsHttpService() bool {
+	return IsCliService()
 }
 
 // IsDaemonService 判断是否是守护进程服务
@@ -96,6 +104,54 @@ func IsWorkerService() bool {
 	return false
 }
 
+// IsWindows 判断是否是windows系统
+func IsWindows() bool {
+	osName := runtime.GOOS
+	switch osName {
+	case "windows":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsLinux 判断是否是linux系统
+func IsLinux() bool {
+	osName := runtime.GOOS
+	switch osName {
+	case "linux":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsMacos 判断是否是macos系统
+func IsMacos() bool {
+	osName := runtime.GOOS
+	switch osName {
+	case "darwin":
+		return true
+	default:
+		return false
+	}
+}
+
+// GetStartRootPath 获取启动根目录
+func GetStartRootPath() string {
+	var startRootPath string
+	if IsWindows() {
+		startRootPath = viper.GetString("windows_start_root")
+	} else if IsLinux() {
+		startRootPath = viper.GetString("linux_start_root")
+	} else if IsMacos() {
+		startRootPath = viper.GetString("macos_start_root")
+	} else {
+		startRootPath, _ = os.Getwd()
+	}
+	return startRootPath
+}
+
 // GetAppRoot 获取应用根目录
 func GetAppRoot() string {
 	dir, err := os.Getwd()
@@ -116,6 +172,7 @@ func GetConfigRoot() string {
 	return filepath.Join(parts...)
 }
 
+// GetGoroutineID 获取当前协程ID
 func GetGoroutineID() uint64 {
 	defer func() {
 		if err := recover(); err != nil {

@@ -1,17 +1,25 @@
+windows_start_root: D:/wwwroot/gofy
+linux_start_root: /home/wwwroot/gofy
+mac_start_root: /Users/wwwroot/gofy
+
 httpServer:
   host: "*"
   port: 8080
   pidFilePath: "app/server.pid"
-  logFilePath: "/dev/null"
+  pidFilePerm: 0644
+  logFilePath: "app/server.log"
 
 daemonServer:
    pidFilePath: "app/daemon.pid"
+   pidFilePerm: 0644
 
 cronServer:
   pidFilePath: "app/cron.pid"
+  pidFilePerm: 0644
 
 scriptServer:
   pidFilePath: "app/script.pid"
+  pidFilePerm: 0644
 
 # Logger
 logger:
@@ -40,6 +48,13 @@ requestLogger:
     Compress: true
 
 systemLogger:
+  info:
+    Filename: "app/storage/logs/system_info.log"
+    MaxSize: 100
+    MaxAge: 30
+    MaxBackups: 3
+    LocalTime: true
+    Compress: true
   error:
     Filename: "app/storage/logs/system_error.log"
     MaxSize: 100

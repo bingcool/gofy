@@ -9,21 +9,20 @@ import (
 
 	"github.com/bingcool/gofy/app/middleware"
 	"github.com/bingcool/gofy/app/route"
+	"github.com/bingcool/gofy/src/cmd/runmodel"
+	"github.com/bingcool/gofy/src/log"
 	"github.com/gin-gonic/gin"
+	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-)
-
-// startCommandName is the name of the start command
-var (
-	daemonCtx *daemon.Context
+	"go.uber.org/zap"
 )
 
 var StartCmd = &cobra.Command{
-	Use:   startCommandName,
-	Short: "start the gofy",
-	Long:  `start the gofy`,
+	Use:   runmodel.StartCommandName,
+	Short: "start the http server",
+	Long:  `start the http server`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// 读取os.Args
 		if len(os.Args) > 1 {
@@ -31,6 +30,7 @@ var StartCmd = &cobra.Command{
 		}
 		// 在每个命令执行之前执行的操作
 		fmt.Println("before start run ")
+		log.SysInfo("http server before start run args=")
 	},
 	PreRun: func(cmd *cobra.Command, args []string) {
 
@@ -48,6 +48,7 @@ var StartCmd = &cobra.Command{
 	},
 }
 
+// getArgs 获取命令行参数
 func getArgs() []string {
 	args := make([]string, 0)
 	// 读取os.Args
@@ -59,13 +60,20 @@ func getArgs() []string {
 
 func startRun(cmd *cobra.Command, args []string) {
 	pidFilePath := viper.GetString("httpServer.pidFilePath")
-	savePidFile(pidFilePath, os.Getpid())
+	pidFilePerm := os.FileMode(viper.GetUint32("httpServer.pidFilePerm"))
+	savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
 	isDaemon, _ := cmd.Flags().GetInt("daemon")
+	log.SysInfo("Http server read to start",
+		zap.String("pidFilePath", pidFilePath),
+		zap.Uint32("pidFilePerm", uint32(pidFilePerm)),
+		zap.Int("pid", os.Getpid()),
+		zap.Int("daemon", isDaemon),
+	)
 	if isDaemon > 0 {
 		// 配置守护进程上下文
 		daemonCtx = &daemon.Context{
 			PidFileName: pidFilePath,
-			PidFilePerm: 0644,
+			PidFilePerm: pidFilePerm,
 			LogFileName: viper.GetString("httpServer.logFilePath"),
 			LogFilePerm: 0640,
 			WorkDir:     "./",
@@ -75,19 +83,37 @@ func startRun(cmd *cobra.Command, args []string) {
 		d, err := daemonCtx.Reborn()
 
 		if err != nil {
-			fmt.Println("Error starting daemon:", err)
+			log.SysError(fmt.Sprintf("Error starting daemon:%s", err.Error()))
 			os.Exit(1)
 		}
 		if d != nil {
 			// 父进程退出
 			return
 		}
-		defer daemonCtx.Release()
+		defer func(daemonCtx *daemon.Context) {
+			_ = daemonCtx.Release()
+		}(daemonCtx)
 	}
+	// 支持使用秒级表达式（支持6位）
+	cronTab := cron.New(cron.WithSeconds())
+	// 添加cron任务定时记录pid
+	_, _ = cronTab.AddFunc("@every 10s", func() {
+		savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
+	})
+	cronTab.Start()
+
 	// 处理系统信号
 	handleSignals()
 	// 守护进程主逻辑
-	startServer()
+	err := startServer()
+	if err == nil {
+		log.SysInfo("Http server start successful!!!",
+			zap.String("pidFilePath", pidFilePath),
+			zap.Uint32("pidFilePerm", uint32(pidFilePerm)),
+			zap.Int("pid", os.Getpid()),
+			zap.Int("daemon", isDaemon),
+		)
+	}
 }
 
 // handleSignals 处理系统信号
@@ -97,13 +123,14 @@ func handleSignals() {
 
 	go func() {
 		<-sig
-		fmt.Println("Shutting down gracefully...")
+		fmt.Println("Http server Shutting down gracefully...")
+		log.SysInfo("Http server Shutting down gracefully......")
 		os.Exit(0)
 	}()
 }
 
 // startServer 启动服务
-func startServer() {
+func startServer() error {
 	// 将日志输出重定向到空设备（静默模式）
 	engine := gin.New()
 	engine.Use(gin.Recovery())
@@ -115,5 +142,8 @@ func startServer() {
 	err := engine.Run(port)
 	if err != nil {
 		fmt.Println("Error starting server:", err)
+		log.SysError(fmt.Sprintf("Error starting http server,error=%s", err.Error()),
+			zap.Any("port", viper.GetInt("httpServer.port")))
 	}
+	return err
 }
