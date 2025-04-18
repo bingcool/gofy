@@ -1,6 +1,6 @@
-windows_start_root: D:/wwwroot/gofy
-linux_start_root: /home/wwwroot/gofy
-mac_start_root: /Users/wwwroot/gofy
+windows_work_root_dir: D:/wwwroot/gofy
+linux_work_root_dir: /home/wwwroot/gofy
+mac_work_root_dir: /Users/wwwroot/gofy
 
 date:
   timezone: "Asia/Shanghai"
@@ -24,7 +24,7 @@ cronServer:
   timeLocation: "Asia/Shanghai"
 
 scriptServer:
-  pidFilePath: "script/server.pid"
+  pidFilePath: ""
   pidFilePerm: 0644
   logFilePath: "/dev/null"
 

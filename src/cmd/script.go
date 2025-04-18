@@ -7,6 +7,7 @@ import (
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/src/cmd/command"
 	"github.com/bingcool/gofy/src/log"
+	"github.com/bingcool/gofy/src/system"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -45,8 +46,10 @@ func scriptRun(cmd *cobra.Command, args []string) {
 	pidFilePerm := os.FileMode(viper.GetUint32("scriptServer.pidFilePerm"))
 	logFilePath := viper.GetString("scriptServer.logFilePath")
 	isDaemon, _ := cmd.Flags().GetInt("daemon")
+
 	log.SysInfo("scriptServer script read to exec",
 		zap.String("pidFilePath", pidFilePath),
+		zap.String("logFilePath", logFilePath),
 		zap.Uint32("pidFilePerm", uint32(pidFilePerm)),
 		zap.Int("pid", os.Getpid()),
 		zap.Int("daemon", isDaemon),
@@ -54,18 +57,18 @@ func scriptRun(cmd *cobra.Command, args []string) {
 	if isDaemon > 0 {
 		// 配置守护进程上下文
 		daemonCtx = &daemon.Context{
-			PidFileName: pidFilePath,
+			PidFileName: "",
 			PidFilePerm: pidFilePerm,
-			LogFileName: logFilePath,
+			LogFileName: "",
 			LogFilePerm: 0640,
-			WorkDir:     "./",
+			WorkDir:     system.GetWorkRootDir(),
 			Umask:       027,
 		}
 		// 守护进程化
 		d, err := daemonCtx.Reborn()
 
 		if err != nil {
-			log.SysError(fmt.Sprintf("Error starting daemon:%s", err.Error()))
+			log.SysError(fmt.Sprintf("Error starting script server daemon process:%s", err.Error()))
 			os.Exit(1)
 		}
 		if d != nil {
@@ -84,6 +87,6 @@ func scriptRun(cmd *cobra.Command, args []string) {
 	if fn, ok := scriptScheduleList[commandName]; ok {
 		fn(cmd)
 	} else {
-		log.SysError(fmt.Sprintf("script --c=%s not found in kernel", commandName))
+		log.SysError(fmt.Sprintf("script command [--c=%s] not found in kernel", commandName))
 	}
 }

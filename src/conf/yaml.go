@@ -13,7 +13,7 @@ var yamlSyncOnce sync.Once
 
 func init() {
 	LoadYaml()
-	timelocal.SetTimenoze()
+	timelocal.SetTimezone()
 }
 
 func LoadYaml() {

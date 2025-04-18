@@ -23,11 +23,11 @@ func RegisterScriptSchedule() *map[string]func(cmd *cobra.Command) {
 	return scriptSchedule
 }
 
-var cronScheduleMap *map[string]*crontab.CronMeta
+var cronScheduleMap *map[string]*crontab.CronTaskMeta
 
 // RegisterCronSchedule 注册定时任务
-func RegisterCronSchedule() *map[string]*crontab.CronMeta {
-	cronScheduleMap = &map[string]*crontab.CronMeta{
+func RegisterCronSchedule() *map[string]*crontab.CronTaskMeta {
+	cronScheduleMap = &map[string]*crontab.CronTaskMeta{
 		// 修复用户数据
 		user.UserFixedCommandName: {
 			//BinFile: getBinFile(user.UserFixedCommandName),
@@ -37,13 +37,9 @@ func RegisterCronSchedule() *map[string]*crontab.CronMeta {
 				"--type=1",
 			},
 			Desc: "修复用户数据",
-			SkipDateTime: []string{
-				"2023-01-01 00:00:00",
-				"2023-01-02 00:00:00",
-			},
 			BetweenDateTime: []string{
 				"2023-01-01 00:00:00",
-				"2023-01-02 00:00:00",
+				"2026-01-02 00:00:00",
 			},
 		},
 	}

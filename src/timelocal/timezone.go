@@ -7,7 +7,9 @@ import (
 	"github.com/spf13/viper"
 )
 
-func SetTimenoze() {
+// SetTimezone 设置时区
+func SetTimezone() {
+
 	timezone := viper.GetString("date.timezone")
 	if timezone == "" {
 		timezone = "Asia/Shanghai"

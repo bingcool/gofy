@@ -87,14 +87,14 @@ func initStartParseFlag() {
 
 // bindParseFlag bind console flag params name
 func bindParseFlag(runCmd *cobra.Command, args []string) {
-	charsToRemove := "-"
+	charsToRemove := "--"
 	for _, v := range args {
 		item := strings.Split(v, "=")
 		if len(item) != 2 {
 			continue
 		}
 
-		flagName := strings.Replace(item[0], charsToRemove, "", 2)
+		flagName := strings.Replace(item[0], charsToRemove, "", 1)
 		flagValue := item[1]
 		// flag已存在则跳过
 		if runCmd.Flags().Lookup(flagName) != nil {
@@ -169,7 +169,7 @@ func GetHttpServerPid() int {
 // GetFullPidFilePath 获取pid文件绝对路径
 func GetFullPidFilePath(pidFilePath string) string {
 	var fullPidFilePath string
-	startRootPath := system.GetStartRootPath()
+	startRootPath := system.GetWorkRootDir()
 	if !strings.Contains(pidFilePath, startRootPath) {
 		fullPidFilePath = filepath.Join(startRootPath, pidFilePath)
 	} else {

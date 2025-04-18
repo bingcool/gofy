@@ -3,7 +3,6 @@ package system
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 
 	"github.com/spf13/viper"
@@ -140,39 +139,19 @@ func IsMacos() bool {
 	}
 }
 
-// GetStartRootPath 获取启动根目录
-func GetStartRootPath() string {
+// GetWorkRootDir 获取启动根目录
+func GetWorkRootDir() string {
 	var startRootPath string
 	if IsWindows() {
-		startRootPath = viper.GetString("windows_start_root")
+		startRootPath = viper.GetString("windows_work_root_dir")
 	} else if IsLinux() {
-		startRootPath = viper.GetString("linux_start_root")
+		startRootPath = viper.GetString("linux_work_root_dir")
 	} else if IsMacos() {
-		startRootPath = viper.GetString("macos_start_root")
+		startRootPath = viper.GetString("mac_work_root_dir")
 	} else {
 		startRootPath, _ = os.Getwd()
 	}
 	return startRootPath
-}
-
-// GetAppRoot 获取应用根目录
-func GetAppRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		panic(err.Error())
-	}
-	parts := []string{dir, "app"}
-	return filepath.Join(parts...)
-}
-
-// GetConfigRoot 获取配置文件目录
-func GetConfigRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		panic(err.Error())
-	}
-	parts := []string{dir, "app", "config"}
-	return filepath.Join(parts...)
 }
 
 // GetGoroutineID 获取当前协程ID

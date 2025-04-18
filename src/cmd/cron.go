@@ -8,6 +8,7 @@ import (
 	"github.com/bingcool/gofy/src/cmd/command"
 	"github.com/bingcool/gofy/src/crontab"
 	"github.com/bingcool/gofy/src/log"
+	"github.com/bingcool/gofy/src/system"
 	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
@@ -56,6 +57,13 @@ func cronRun(cmd *cobra.Command, args []string) {
 		zap.Int("daemon", isDaemon),
 	)
 	savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
+
+	// 处理系统信号
+	handleExitSignals()
+
+	cronMetaMap := script.RegisterCronSchedule()
+	crontab.StartScheduleCronTask(cronMetaMap)
+
 	if isDaemon > 0 {
 		// 配置守护进程上下文
 		daemonCtx = &daemon.Context{
@@ -63,14 +71,14 @@ func cronRun(cmd *cobra.Command, args []string) {
 			PidFilePerm: pidFilePerm,
 			LogFileName: logFilePath,
 			LogFilePerm: 0640,
-			WorkDir:     "./",
+			WorkDir:     system.GetWorkRootDir(),
 			Umask:       027,
 		}
 		// 守护进程化
 		d, err := daemonCtx.Reborn()
 
 		if err != nil {
-			log.SysError(fmt.Sprintf("Error starting daemon:%s", err.Error()))
+			log.SysError(fmt.Sprintf("Error starting cron server daemon process:%s", err.Error()))
 			os.Exit(1)
 		}
 		if d != nil {
@@ -89,14 +97,6 @@ func cronRun(cmd *cobra.Command, args []string) {
 		savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
 	})
 	cronTab.Start()
-
-	// 处理系统信号
-	handleExitSignals()
-
-	cronMetaMap := script.RegisterCronSchedule()
-	crontab.StartScheduleCronTask(cronMetaMap)
-	fmt.Println("cron server run args=", args)
-
-	// 父进程退出
+	log.SysInfo("cron server start successful")
 	select {}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/bingcool/gofy/app/route"
 	"github.com/bingcool/gofy/src/cmd/command"
 	"github.com/bingcool/gofy/src/log"
+	"github.com/bingcool/gofy/src/system"
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
@@ -76,7 +77,7 @@ func startRun(cmd *cobra.Command, args []string) {
 			PidFilePerm: pidFilePerm,
 			LogFileName: logFilePath,
 			LogFilePerm: 0640,
-			WorkDir:     "./",
+			WorkDir:     system.GetWorkRootDir(),
 			Umask:       027,
 		}
 		// 守护进程化
