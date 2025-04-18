@@ -2,6 +2,9 @@ windows_start_root: D:/wwwroot/gofy
 linux_start_root: /home/wwwroot/gofy
 mac_start_root: /Users/wwwroot/gofy
 
+date:
+  timezone: "Asia/Shanghai"
+
 httpServer:
   host: "*"
   port: 8080
@@ -10,16 +13,20 @@ httpServer:
   logFilePath: "app/server.log"
 
 daemonServer:
-   pidFilePath: "app/daemon.pid"
+   pidFilePath: "daemon/server.pid"
    pidFilePerm: 0644
+   logFilePath: "/dev/null"
 
 cronServer:
-  pidFilePath: "app/cron.pid"
+  pidFilePath: "cron/server.pid"
   pidFilePerm: 0644
+  logFilePath: "/dev/null"
+  timeLocation: "Asia/Shanghai"
 
 scriptServer:
-  pidFilePath: "app/script.pid"
+  pidFilePath: "script/server.pid"
   pidFilePerm: 0644
+  logFilePath: "/dev/null"
 
 # Logger
 logger:

@@ -3,13 +3,11 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
 
 	"github.com/bingcool/gofy/app/middleware"
 	"github.com/bingcool/gofy/app/route"
-	"github.com/bingcool/gofy/src/cmd/runmodel"
+	"github.com/bingcool/gofy/src/cmd/command"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
@@ -20,7 +18,7 @@ import (
 )
 
 var StartCmd = &cobra.Command{
-	Use:   runmodel.StartCommandName,
+	Use:   command.StartCommandName,
 	Short: "start the http server",
 	Long:  `start the http server`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -58,9 +56,11 @@ func getArgs() []string {
 	return args
 }
 
+// startRun 启动服务
 func startRun(cmd *cobra.Command, args []string) {
 	pidFilePath := viper.GetString("httpServer.pidFilePath")
 	pidFilePerm := os.FileMode(viper.GetUint32("httpServer.pidFilePerm"))
+	logFilePath := viper.GetString("scriptServer.logFilePath")
 	savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
 	isDaemon, _ := cmd.Flags().GetInt("daemon")
 	log.SysInfo("Http server read to start",
@@ -74,7 +74,7 @@ func startRun(cmd *cobra.Command, args []string) {
 		daemonCtx = &daemon.Context{
 			PidFileName: pidFilePath,
 			PidFilePerm: pidFilePerm,
-			LogFileName: viper.GetString("httpServer.logFilePath"),
+			LogFileName: logFilePath,
 			LogFilePerm: 0640,
 			WorkDir:     "./",
 			Umask:       027,
@@ -103,7 +103,7 @@ func startRun(cmd *cobra.Command, args []string) {
 	cronTab.Start()
 
 	// 处理系统信号
-	handleSignals()
+	handleExitSignals()
 	// 守护进程主逻辑
 	err := startServer()
 	if err == nil {
@@ -114,19 +114,6 @@ func startRun(cmd *cobra.Command, args []string) {
 			zap.Int("daemon", isDaemon),
 		)
 	}
-}
-
-// handleSignals 处理系统信号
-func handleSignals() {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-
-	go func() {
-		<-sig
-		fmt.Println("Http server Shutting down gracefully...")
-		log.SysInfo("Http server Shutting down gracefully......")
-		os.Exit(0)
-	}()
 }
 
 // startServer 启动服务

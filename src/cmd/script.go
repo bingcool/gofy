@@ -6,56 +6,51 @@ import (
 
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/src/cmd/command"
-	"github.com/bingcool/gofy/src/crontab"
 	"github.com/bingcool/gofy/src/log"
-	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
-var CronCmd = &cobra.Command{
-	Use:   command.CronCommandName,
-	Short: "start the cron server",
-	Long:  `start the cron server`,
+// go run main.go script --c=fix-user --order_id=11111
+
+var ScriptCmd = &cobra.Command{
+	Use:   command.ScriptCommandName,
+	Short: "run script",
+	Long:  "run script",
+	//Args:  cobra.MaximumNArgs(1), //使用内置的验证函数，位置参数只能一个，即命令之后的变量，这里是指脚本名称
+	// 如果设置了PersistentPreRun，将会覆盖rootCmd设置的PersistentPreRun
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// 读取os.Args
-		if len(os.Args) > 1 {
-			args = os.Args[1:]
-		}
-		// 在每个命令执行之前执行的操作
-		fmt.Println("before start cron server")
-		log.SysInfo("cron server before start run args", zap.Any("args", os.Args))
+		fmt.Println("script PersistentPreRun")
 	},
 	PreRun: func(cmd *cobra.Command, args []string) {
 
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("start cron args=", args)
-		cronRun(cmd, args)
+		scriptRun(cmd, args)
 	},
 	PostRun: func(cmd *cobra.Command, args []string) {
 
 	},
+	// 如果设置了PersistentPostRun，将会覆盖rootCmd设置的PersistentPostRun
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 
 	},
 }
 
-// cronRun 启动cron服务
-func cronRun(cmd *cobra.Command, args []string) {
-	pidFilePath := viper.GetString("cronServer.pidFilePath")
-	pidFilePerm := os.FileMode(viper.GetUint32("cronServer.pidFilePerm"))
-	logFilePath := viper.GetString("cronServer.logFilePath")
+// scriptRun 执行脚本
+func scriptRun(cmd *cobra.Command, args []string) {
+	pidFilePath := viper.GetString("scriptServer.pidFilePath")
+	pidFilePerm := os.FileMode(viper.GetUint32("scriptServer.pidFilePerm"))
+	logFilePath := viper.GetString("scriptServer.logFilePath")
 	isDaemon, _ := cmd.Flags().GetInt("daemon")
-	log.SysInfo("cronServer script read to exec",
+	log.SysInfo("scriptServer script read to exec",
 		zap.String("pidFilePath", pidFilePath),
 		zap.Uint32("pidFilePerm", uint32(pidFilePerm)),
 		zap.Int("pid", os.Getpid()),
 		zap.Int("daemon", isDaemon),
 	)
-	savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
 	if isDaemon > 0 {
 		// 配置守护进程上下文
 		daemonCtx = &daemon.Context{
@@ -82,21 +77,13 @@ func cronRun(cmd *cobra.Command, args []string) {
 		}(daemonCtx)
 	}
 
-	// 支持使用秒级表达式
-	cronTab := cron.New(cron.WithSeconds())
-	// 添加cron任务定时记录pid
-	_, _ = cronTab.AddFunc("@every 10s", func() {
-		savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
-	})
-	cronTab.Start()
-
-	// 处理系统信号
 	handleExitSignals()
 
-	cronMetaMap := script.RegisterCronSchedule()
-	crontab.StartScheduleCronTask(cronMetaMap)
-	fmt.Println("cron server run args=", args)
-
-	// 父进程退出
-	select {}
+	scriptScheduleList := *script.RegisterScriptSchedule()
+	commandName, _ := cmd.Flags().GetString("c")
+	if fn, ok := scriptScheduleList[commandName]; ok {
+		fn(cmd)
+	} else {
+		log.SysError(fmt.Sprintf("script --c=%s not found in kernel", commandName))
+	}
 }

@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bingcool/gofy/src/cmd/runmodel"
+	"github.com/bingcool/gofy/src/cmd/command"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/spf13/cobra"
@@ -15,7 +15,7 @@ import (
 )
 
 var StopCmd = &cobra.Command{
-	Use:   runmodel.StopCommandName,
+	Use:   command.StopCommandName,
 	Short: "start the gofy",
 	Long:  `start the gofy`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -54,32 +54,32 @@ func stopServer(cmd *cobra.Command, args []string) {
 	}
 
 	if _, err := os.Stat(pidFilePath); os.IsNotExist(err) {
-		log.SysInfo("server pid file is not exist", zap.Any("pidFilePath", pidFilePath))
+		log.SysInfo("server pid file is not exist", zap.String("pidFilePath", pidFilePath))
 		os.Exit(1)
 	}
 
 	// 读取 PID 文件并终止进程
 	pid := GetHttpServerPid()
-	log.SysInfo("server ready to stop!!!", zap.Any("pidFilePath", pidFilePath), zap.Any("pid", pid))
+	log.SysInfo("server ready to stop!!!", zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
 
 	if pid == 0 {
 		errorMsg := fmt.Sprintf("Http Server is not running")
 		fmt.Println(errorMsg)
-		log.SysInfo(errorMsg)
+		log.SysInfo(errorMsg, zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
 		os.Exit(1)
 	}
 
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		errorMsg := fmt.Sprintf("Server is not find process")
+		errorMsg := fmt.Sprintf("Server is not find process by pid")
 		fmt.Println(errorMsg)
-		log.SysError(errorMsg, zap.Any("pid", pid))
+		log.SysError(errorMsg, zap.Int("pid", pid))
 		os.Exit(1)
 	}
 
 	// send SIGTERM Signal
 	if err1 := process.Signal(syscall.SIGTERM); err1 != nil {
-		log.SysInfo("Server send SIGTERM Signal", zap.Any("pidFilePath", pidFilePath), zap.Any("pid", pid))
+		log.SysInfo("Server send SIGTERM Signal", zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
 		os.Exit(0)
 	}
 
@@ -87,7 +87,7 @@ func stopServer(cmd *cobra.Command, args []string) {
 
 	isRunning, _ := IsServerRunning(pid)
 	if !isRunning {
-		log.SysInfo("Server had Stop Stop Stop", zap.Any("pidFilePath", pidFilePath), zap.Any("pid", pid))
+		log.SysInfo("Server had Stop Stop Stop", zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
 		fmt.Println("Server had Stop Stop Stop!!!")
 	}
 }

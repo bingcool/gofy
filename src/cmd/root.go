@@ -3,12 +3,13 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/bingcool/gofy/src/cmd/runmodel"
+	"github.com/bingcool/gofy/src/cmd/command"
 	_ "github.com/bingcool/gofy/src/conf"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
@@ -43,15 +44,10 @@ func init() {
 func init() {
 	rootCmd.AddCommand(StartCmd)
 	rootCmd.AddCommand(StopCmd)
+	rootCmd.AddCommand(DaemonCmd)
 	rootCmd.AddCommand(CronCmd)
-	//rootCmd.AddCommand(VersionCmd)
-	//rootCmd.AddCommand(ScriptCmd)
-	//rootCmd.AddCommand(DaemonStartCmd)
-	//rootCmd.AddCommand(DaemonStartAllCmd)
-	//rootCmd.AddCommand(DaemonStopCmd)
-	//rootCmd.AddCommand(DaemonStopAllCmd)
-
-	//rootCmd.AddCommand(CronStopCmd)
+	rootCmd.AddCommand(ScriptCmd)
+	rootCmd.AddCommand(VersionCmd)
 }
 
 // Execute executes the root command.
@@ -62,13 +58,29 @@ func Execute() {
 	}
 }
 
+// GetCommandNameMapCobraCmd 获取命令名称和 cobra.Command 的映射
+func GetCommandNameMapCobraCmd() map[string]*cobra.Command {
+	mapCobraCmd := map[string]*cobra.Command{
+		command.StartCommandName:   StartCmd,
+		command.StopCommandName:    StopCmd,
+		command.DaemonCommandName:  DaemonCmd,
+		command.CronCommandName:    CronCmd,
+		command.ScriptCommandName:  ScriptCmd,
+		command.VersionCommandName: VersionCmd,
+	}
+	return mapCobraCmd
+}
+
 // InitStartParseFlag 初始化命令flag参数
 func initStartParseFlag() {
-	runmodel.SystemRunModel()
+	command.SystemRunModel()
 	args := os.Args
 	if _, ok := utils.IsValidIndexOfSlice(args, 1); ok {
 		if len(args) > 2 {
-			bindParseFlag(StartCmd, os.Args[2:])
+			commandName := args[1]
+			mapCobraCmd := GetCommandNameMapCobraCmd()
+			runCmd := mapCobraCmd[commandName]
+			bindParseFlag(runCmd, os.Args[2:])
 		}
 	}
 }
@@ -179,4 +191,17 @@ func IsServerRunning(pid int) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// handleExitSignals 处理系统信号
+func handleExitSignals() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		<-sigChan
+		fmt.Println("server Shutting down gracefully...")
+		log.SysInfo("server Shutting down gracefully......")
+		os.Exit(0)
+	}()
 }

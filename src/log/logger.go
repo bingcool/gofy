@@ -1,7 +1,6 @@
 package log
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -35,13 +34,7 @@ func init() {
 func initLogger() *zap.Logger {
 	// 配置日志切割
 	logInfoFileName := ParseDayLogPath(viper.GetString("logger.info.Filename"))
-	if system.IsDaemonService() {
-		logInfoFileName = strings.Replace(logInfoFileName, "app", "daemon", 1)
-	} else if system.IsCronService() {
-		logInfoFileName = strings.Replace(logInfoFileName, "app", "cron", 1)
-	} else if system.IsScriptService() {
-		logInfoFileName = strings.Replace(logInfoFileName, "app", "script", 1)
-	}
+	logInfoFileName = parseLogFileName(logInfoFileName)
 
 	infoLogWriter := &lumberjack.Logger{
 		Filename:   logInfoFileName,                        // 日志文件路径
@@ -52,14 +45,8 @@ func initLogger() *zap.Logger {
 	}
 
 	logErrorFileName := ParseDayLogPath(viper.GetString("logger.info.Filename"))
-	if system.IsDaemonService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "daemon", 1)
-	} else if system.IsCronService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "cron", 1)
-	} else if system.IsScriptService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "script", 1)
-	}
-	// 配置日志切割（按天切割，保留7天）
+	logErrorFileName = parseLogFileName(logErrorFileName)
+	// 配置日志切割
 	errorLogWriter := &lumberjack.Logger{
 		Filename:   logErrorFileName,                        // 日志文件路径
 		MaxSize:    viper.GetInt("logger.error.MaxSize"),    // 单文件最大100MB（非必须，按天切割可设较大值）
@@ -110,20 +97,32 @@ func Error(msg string, fields ...zap.Field) {
 	logger.Error(msg, fields...)
 }
 
+// parseLogFileName 解析日志文件名
+func parseLogFileName(logErrorFileName string) string {
+	if system.IsHttpService() {
+		return logErrorFileName
+	}
+	if system.IsDaemonService() {
+		logErrorFileName = strings.Replace(logErrorFileName, "app", "daemon", 1)
+	} else if system.IsCronService() {
+		logErrorFileName = strings.Replace(logErrorFileName, "app", "cron", 1)
+	} else if system.IsScriptService() {
+		logErrorFileName = strings.Replace(logErrorFileName, "app", "script", 1)
+	}
+
+	return logErrorFileName
+}
+
 // initSystemLogger 初始化系统日志
 func initSystemLogger() *zap.Logger {
 	logInfoFileName := ParseDayLogPath(viper.GetString("systemLogger.info.Filename"))
-	fmt.Println("runModel", system.RunModel)
 	if system.IsDaemonService() {
 		logInfoFileName = strings.Replace(logInfoFileName, "app", "daemon", 1)
 	} else if system.IsCronService() {
-		fmt.Println("IsCronService")
 		logInfoFileName = strings.Replace(logInfoFileName, "app", "cron", 1)
 	} else if system.IsScriptService() {
 		logInfoFileName = strings.Replace(logInfoFileName, "app", "script", 1)
 	}
-
-	fmt.Println(logInfoFileName)
 
 	infoLogWriter := &lumberjack.Logger{
 		Filename:   logInfoFileName,                              // 日志文件路径
@@ -134,13 +133,7 @@ func initSystemLogger() *zap.Logger {
 	}
 
 	logErrorFileName := ParseDayLogPath(viper.GetString("systemLogger.error.Filename"))
-	if system.IsDaemonService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "daemon", 1)
-	} else if system.IsCronService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "cron", 1)
-	} else if system.IsScriptService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "script", 1)
-	}
+	logErrorFileName = parseLogFileName(logErrorFileName)
 
 	errorLogWriter := &lumberjack.Logger{
 		Filename:   logErrorFileName,                              // 日志文件路径

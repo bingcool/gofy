@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	_ "github.com/bingcool/gofy/src/cmd/runmodel"
+	_ "github.com/bingcool/gofy/src/cmd/command"
+	"github.com/bingcool/gofy/src/timelocal"
 	"github.com/spf13/viper"
 )
 
@@ -12,6 +13,7 @@ var yamlSyncOnce sync.Once
 
 func init() {
 	LoadYaml()
+	timelocal.SetTimenoze()
 }
 
 func LoadYaml() {

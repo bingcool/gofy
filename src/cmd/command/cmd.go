@@ -1,4 +1,4 @@
-package runmodel
+package command
 
 import (
 	"os"
@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	StartCommandName  = "start"
-	StopCommandName   = "stop"
-	DaemonCommandName = "daemon"
-	CronCommandName   = "cron"
-	ScriptCommandName = "script"
+	StartCommandName   = "start"
+	StopCommandName    = "stop"
+	DaemonCommandName  = "daemon"
+	CronCommandName    = "cron"
+	ScriptCommandName  = "script"
+	VersionCommandName = "version"
 )
 
 var flagSyncOnce sync.Once
@@ -51,6 +52,7 @@ func SystemRunModel() {
 	})
 }
 
+// GetCommandNameSlice 获取命令名称
 func GetCommandNameSlice() []string {
 	return []string{
 		StartCommandName,
@@ -58,5 +60,6 @@ func GetCommandNameSlice() []string {
 		DaemonCommandName,
 		CronCommandName,
 		ScriptCommandName,
+		VersionCommandName,
 	}
 }

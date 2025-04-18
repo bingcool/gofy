@@ -20,6 +20,9 @@ var RunModel string
 // init 初始化
 func init() {
 	env = os.Getenv("GOFY_ENV")
+	if env == "" {
+		panic("GOFY_ENV is not set!!!")
+	}
 }
 
 // GetEnv 获取当前环境
