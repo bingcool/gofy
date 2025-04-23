@@ -96,7 +96,7 @@ func startRun(cmd *cobra.Command, _ []string) {
 		}
 	}
 
-	// 支持使用秒级表达式（支持6位）
+	// 支持使用秒级表达式
 	cronTab := cron.New(cron.WithSeconds())
 	// 添加cron任务定时记录pid
 	_, _ = cronTab.AddFunc("@every 10s", func() {
@@ -120,7 +120,7 @@ func startRun(cmd *cobra.Command, _ []string) {
 
 // startServer 启动服务
 func startServer() error {
-	// 将日志输出重定向到空设备（静默模式）
+	// 将日志输出重定向到空设备
 	engine := gin.New()
 	engine.Use(gin.Recovery())
 	// 设置全局中间件

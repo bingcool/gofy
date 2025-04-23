@@ -12,7 +12,7 @@ httpServer:
   pidFilePerm: 0644
   logFilePath: "app/server.log"
   crontab:
-    enableCron: false
+    enableCron: true
     cronYamlFilePath: "/home/wwwroot/gofy/cron.yaml"
 
 daemonServer:

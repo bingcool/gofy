@@ -23,7 +23,6 @@ var ScriptCmd = &cobra.Command{
 	//Args:  cobra.MaximumNArgs(1), //使用内置的验证函数，位置参数只能一个，即命令之后的变量，这里是指脚本名称
 	// 如果设置了PersistentPreRun，将会覆盖rootCmd设置的PersistentPreRun
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		fmt.Println("script PersistentPreRun")
 	},
 	PreRun: func(cmd *cobra.Command, args []string) {
 
@@ -32,7 +31,6 @@ var ScriptCmd = &cobra.Command{
 		scriptRun(cmd, args)
 	},
 	PostRun: func(cmd *cobra.Command, args []string) {
-
 	},
 	// 如果设置了PersistentPostRun，将会覆盖rootCmd设置的PersistentPostRun
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
@@ -54,6 +52,7 @@ func scriptRun(cmd *cobra.Command, _ []string) {
 		zap.Int("pid", os.Getpid()),
 		zap.Int("daemon", isDaemon),
 	)
+
 	if isDaemon > 0 {
 		// 配置守护进程上下文
 		daemonCtx = &daemon.Context{
@@ -87,6 +86,8 @@ func scriptRun(cmd *cobra.Command, _ []string) {
 	if fn, ok := scriptScheduleList[commandName]; ok {
 		fn(cmd)
 	} else {
-		log.SysError(fmt.Sprintf("script command [--c=%s] not found in kernel", commandName))
+		errorMsg := fmt.Sprintf("error: script command [--c=%s] not found in kernel", commandName)
+		log.FmtPrint(errorMsg)
+		log.SysError(errorMsg)
 	}
 }

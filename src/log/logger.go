@@ -1,6 +1,7 @@
 package log
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -229,4 +230,9 @@ func syncDailyLogger() {
 			}
 		}()
 	}
+}
+
+// FmtPrint 格式化打印日志
+func FmtPrint(message string) {
+	fmt.Println(fmt.Sprintf("[%s] %s: %s", "gofy", time.Now().Format("2006-01-02 15:04:05"), message))
 }

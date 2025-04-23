@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -23,7 +24,11 @@ func init() {
 		env = "dev"
 	}
 
-	fmt.Println(fmt.Sprintf("this env=%s", env))
+	fmt.Println(fmt.Sprintf("[%s] %s: %s",
+		"gofy",
+		time.Now().Format("2006-01-02 15:04:05"),
+		fmt.Sprintf("this env=%s", env)),
+	)
 }
 
 // GetEnv 获取当前环境

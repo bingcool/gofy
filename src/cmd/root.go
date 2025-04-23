@@ -18,7 +18,6 @@ import (
 	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var rootCmd = &cobra.Command{
@@ -43,11 +42,14 @@ func init() {
 	initStartParseFlag()
 }
 
+// init
 func init() {
 	rootCmd.AddCommand(StartCmd)
 	rootCmd.AddCommand(StopCmd)
-	rootCmd.AddCommand(DaemonCmd)
-	rootCmd.AddCommand(CronCmd)
+	rootCmd.AddCommand(DaemonStartCmd)
+	rootCmd.AddCommand(DaemonStopCmd)
+	rootCmd.AddCommand(CronStartCmd)
+	rootCmd.AddCommand(CronStopCmd)
 	rootCmd.AddCommand(ScriptCmd)
 	rootCmd.AddCommand(VersionCmd)
 }
@@ -63,12 +65,14 @@ func Execute() {
 // GetCommandNameMapCobraCmd 获取命令名称和 cobra.Command 的映射
 func GetCommandNameMapCobraCmd() map[string]*cobra.Command {
 	mapCobraCmd := map[string]*cobra.Command{
-		command.StartCommandName:   StartCmd,
-		command.StopCommandName:    StopCmd,
-		command.DaemonCommandName:  DaemonCmd,
-		command.CronCommandName:    CronCmd,
-		command.ScriptCommandName:  ScriptCmd,
-		command.VersionCommandName: VersionCmd,
+		command.StartCommandName:       StartCmd,
+		command.StopCommandName:        StopCmd,
+		command.DaemonStartCommandName: DaemonStartCmd,
+		command.DaemonStopCommandName:  DaemonStopCmd,
+		command.CronStartCommandName:   CronStartCmd,
+		command.CronStopCommandName:    CronStopCmd,
+		command.ScriptCommandName:      ScriptCmd,
+		command.VersionCommandName:     VersionCmd,
 	}
 	return mapCobraCmd
 }
@@ -85,6 +89,9 @@ func initStartParseFlag() {
 			bindParseFlag(runCmd, os.Args[2:])
 		}
 	}
+
+	log.FmtPrint(fmt.Sprintf("this command=%s", os.Args[1]))
+
 }
 
 // bindParseFlag bind console flag params name
@@ -152,9 +159,8 @@ func savePidFile(pidFilePath string, pid int, pidFilePerm os.FileMode) {
 	_ = serverPidFile.Close()
 }
 
-// GetHttpServerPid 获取服务pid
-func GetHttpServerPid() int {
-	pidFilePath := viper.GetString("httpServer.pidFilePath")
+// GetServerPid 获取服务pid
+func GetServerPid(pidFilePath string) int {
 	fullPidFilePath := GetFullPidFilePath(pidFilePath)
 	pid, err := os.ReadFile(fullPidFilePath)
 	pidStr := string(pid)
@@ -202,7 +208,7 @@ func handleExitSignals() {
 
 	go func() {
 		<-sigChan
-		fmt.Println("server Shutting down gracefully...")
+		log.FmtPrint("server Shutting down gracefully...")
 		log.SysInfo("server Shutting down gracefully......")
 		os.Exit(0)
 	}()
@@ -217,14 +223,18 @@ func registerCronTask(cronYamlFilePath string) {
 		_, _ = systemCronSchedule.AddFunc("@every 3s", func() {
 			cronMetaMap, err := LoadWithCronYamlFile(cronYamlFilePath)
 			if err != nil {
-				log.SysError(fmt.Sprintf("Cron LoadWithCronYamlFile error: %s", err.Error()))
+				errorMsg := fmt.Sprintf("Cron LoadWithCronYamlFile error: %s", err.Error())
+				log.FmtPrint(errorMsg)
+				log.SysError(errorMsg)
 				return
 			}
 			crontab.StartScheduleCronTask(cronMetaMap)
 		})
 		systemCronSchedule.Start()
 	} else {
-		log.SysInfo("cron task not support windows")
+		infoMsg := fmt.Sprintf("cron server task not support windows system")
+		log.FmtPrint(infoMsg)
+		log.SysInfo(infoMsg)
 	}
 
 }

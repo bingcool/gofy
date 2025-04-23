@@ -15,24 +15,21 @@ import (
 	"go.uber.org/zap"
 )
 
-var CronCmd = &cobra.Command{
-	Use:   command.CronCommandName,
+var CronStartCmd = &cobra.Command{
+	Use:   command.CronStartCommandName,
 	Short: "start the cron server",
-	Long:  `start the cron server`,
+	Long:  "start the cron server",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// 读取os.Args
 		if len(os.Args) > 1 {
 			args = os.Args[1:]
 		}
-		// 在每个命令执行之前执行的操作
-		fmt.Println("before start cron server")
-		log.SysInfo("cron server before start run args", zap.Any("args", os.Args))
+
+		fmt.Println("cron cron")
 	},
 	PreRun: func(cmd *cobra.Command, args []string) {
 
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("start cron args=", args)
 		cronRun(cmd, args)
 	},
 	PostRun: func(cmd *cobra.Command, args []string) {
@@ -55,6 +52,7 @@ func cronRun(cmd *cobra.Command, _ []string) {
 		zap.Int("pid", os.Getpid()),
 		zap.Int("daemon", isDaemon),
 	)
+
 	savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
 	// 处理系统信号
 	handleExitSignals()
@@ -63,6 +61,9 @@ func cronRun(cmd *cobra.Command, _ []string) {
 	if cronYamlFilePath == "" {
 		cronYamlFilePath = "./cron.yaml"
 	}
+
+	log.FmtPrint(fmt.Sprintf("cronYamlFilePath=%s", cronYamlFilePath))
+
 	registerCronTask(cronYamlFilePath)
 
 	if isDaemon > 0 {
@@ -123,10 +124,10 @@ func LoadWithCronYamlFile(cronYamlFilePath string) (*map[string]*crontab.CronTas
 	// 验证关键字段
 	for key, task := range result {
 		if task.UniqueId == "" {
-			return nil, fmt.Errorf("任务 %s 缺少 UniqueId", key)
+			return nil, fmt.Errorf("cronTask.%s 缺少 UniqueId", key)
 		}
 		if task.BinFile == "" {
-			return nil, fmt.Errorf("任务 %s 缺少 BinFile", key)
+			return nil, fmt.Errorf("cronTask.%s 缺少 BinFile", key)
 		}
 	}
 

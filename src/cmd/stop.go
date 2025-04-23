@@ -16,8 +16,8 @@ import (
 
 var StopCmd = &cobra.Command{
 	Use:   command.StopCommandName,
-	Short: "start the gofy",
-	Long:  `start the gofy`,
+	Short: "stop the gofy",
+	Long:  "stop the gofy",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// 在每个命令执行之前执行的操作
 		fmt.Println("before stop run ")
@@ -54,17 +54,17 @@ func stopServer() {
 	}
 
 	if _, err := os.Stat(pidFilePath); os.IsNotExist(err) {
-		log.SysInfo("server pid file is not exist", zap.String("pidFilePath", pidFilePath))
+		log.SysInfo("Server pid file is not exist", zap.String("pidFilePath", pidFilePath))
 		os.Exit(1)
 	}
 
 	// 读取 PID 文件并终止进程
-	pid := GetHttpServerPid()
-	log.SysInfo("server ready to stop!!!", zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
+	pid := GetServerPid(pidFilePath)
+	log.SysInfo("Server ready to stop!!!", zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
 
 	if pid == 0 {
-		errorMsg := fmt.Sprintf("Http Server is not running")
-		fmt.Println(errorMsg)
+		errorMsg := fmt.Sprintf("Server is not running")
+		log.FmtPrint(errorMsg)
 		log.SysInfo(errorMsg, zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
 		os.Exit(1)
 	}
@@ -72,7 +72,7 @@ func stopServer() {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		errorMsg := fmt.Sprintf("Server is not find process by pid")
-		fmt.Println(errorMsg)
+		log.FmtPrint(errorMsg)
 		log.SysError(errorMsg, zap.Int("pid", pid))
 		os.Exit(1)
 	}
@@ -88,6 +88,6 @@ func stopServer() {
 	isRunning, _ := IsServerRunning(pid)
 	if !isRunning {
 		log.SysInfo("Server had Stop Stop Stop", zap.String("pidFilePath", pidFilePath), zap.Int("pid", pid))
-		fmt.Println("Server had Stop Stop Stop!!!")
+		log.FmtPrint("Server had Stop Stop Stop!!!")
 	}
 }

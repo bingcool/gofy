@@ -23,6 +23,6 @@ func NewUserFixed() *UserFixed {
 
 func (user *UserFixed) Handle(cmd *cobra.Command) {
 	log.Info("script test")
-	fmt.Println("script test fixed-user")
+	fmt.Println("script test fixed-user=" + time.Now().Format("2006-01-02 15:04:05"))
 	time.Sleep(time.Second * 20)
 }

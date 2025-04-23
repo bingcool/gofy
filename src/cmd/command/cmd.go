@@ -1,26 +1,68 @@
 package command
 
 import (
+	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/bingcool/gofy/src/system"
 	"github.com/bingcool/gofy/src/utils"
 )
 
 var (
-	StartCommandName   = "start"
-	StopCommandName    = "stop"
-	DaemonCommandName  = "daemon"
-	CronCommandName    = "cron"
-	ScriptCommandName  = "script"
-	VersionCommandName = "version"
+	StartCommandName       = "start"
+	StopCommandName        = "stop"
+	DaemonStartCommandName = "daemon-start"
+	DaemonStopCommandName  = "daemon-stop"
+	CronStartCommandName   = "cron-start"
+	CronStopCommandName    = "cron-stop"
+	ScriptCommandName      = "script"
+	VersionCommandName     = "version"
 )
+
+// 定义命令与运行模式的映射关系
+var commandRunModel = map[string]string{
+	StartCommandName:       "http",
+	DaemonStartCommandName: "daemon",
+	DaemonStopCommandName:  "daemon",
+	CronStartCommandName:   "cron",
+	CronStopCommandName:    "cron",
+	ScriptCommandName:      "script",
+}
 
 var flagSyncOnce sync.Once
 
 func init() {
 	SystemRunModel()
+	fmt.Println(
+		fmt.Sprintf("[%s] %s: %s",
+			"gofy",
+			time.Now().Format("2006-01-02 15:04:05"),
+			fmt.Sprintf("this runModel=%s", system.RunModel)),
+	)
+}
+
+// GetCommandNameSlice 获取命令名称
+func GetCommandNameSlice() []string {
+	return []string{
+		StartCommandName,
+		StopCommandName,
+		DaemonStartCommandName,
+		DaemonStopCommandName,
+		CronStartCommandName,
+		CronStopCommandName,
+		ScriptCommandName,
+		VersionCommandName,
+	}
+}
+
+// 根据命令获取运行模式
+func getRunModel(command string) string {
+	if mode, exists := commandRunModel[command]; exists {
+		return mode
+	}
+	return "http"
 }
 
 // SystemRunModel 初始化系统运行模式
@@ -32,34 +74,11 @@ func SystemRunModel() {
 			os.Args = args
 		} else if len(args) >= 2 {
 			if !utils.InSlice(args[1], GetCommandNameSlice()) {
-				errorMsg := "Args[2] Not define cmd command"
+				errorMsg := "[gofy] Args[2] Not define cmd command"
 				panic(errorMsg)
 			}
 		}
 
-		switch args[1] {
-		case StartCommandName:
-			system.RunModel = "http"
-		case DaemonCommandName:
-			system.RunModel = "daemon"
-		case CronCommandName:
-			system.RunModel = "cron"
-		case ScriptCommandName:
-			system.RunModel = "script"
-		default:
-			system.RunModel = "http"
-		}
+		system.RunModel = getRunModel(args[1])
 	})
-}
-
-// GetCommandNameSlice 获取命令名称
-func GetCommandNameSlice() []string {
-	return []string{
-		StartCommandName,
-		StopCommandName,
-		DaemonCommandName,
-		CronCommandName,
-		ScriptCommandName,
-		VersionCommandName,
-	}
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var DaemonCmd = &cobra.Command{
+var DaemonStartCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "daemon run",
 	Long:  "daemon run",

@@ -64,15 +64,16 @@ func (cronTask *CronTaskMeta) Exec() {
 		newCmd := exec.Command(binFile, newArgs...)
 
 		execCommand := fmt.Sprintf("%s %s", binFile, strings.Join(newArgs, " "))
-		log.SysInfo("执行脚本：" + execCommand)
+		log.SysInfo("exec script：" + execCommand)
 
 		newCmd.Stdin = os.Stdin
 		newCmd.Stdout = os.Stdout
 		newCmd.Stderr = os.Stderr
 		err := newCmd.Start()
 		if err != nil {
-			_, _ = fmt.Println("forkScriptProcess fork script process failed: ", err.Error())
-			log.SysError(fmt.Sprintf("forkScriptProcess fork script process failed: %s", err.Error()))
+			errorMsg := fmt.Sprintf("forkScriptProcess fork script process failed: %s", err.Error())
+			log.FmtPrint(errorMsg)
+			log.SysError(errorMsg)
 		}
 		// wait gc children process
 		go func() {
@@ -80,13 +81,13 @@ func (cronTask *CronTaskMeta) Exec() {
 				newCmd = nil
 			}()
 			if err1 := newCmd.Wait(); err1 != nil {
-				fmt.Printf("子进程退出错误: %v", err1)
+				log.FmtPrint(fmt.Sprintf("子进程退出异常:%s， error=%s", cronTask.BinFile, err1.Error()))
 				log.SysError(fmt.Sprintf("forkScriptProcess fork script process exit error: %s", err1.Error()),
 					zap.Any("binFile", binFile),
 					zap.Any("cronMeta", cronTask),
 					zap.Any("newArgs", newArgs))
 			} else {
-				fmt.Println("子进程正常退出")
+				log.FmtPrint(fmt.Sprintf("子进程正常退出:%s", cronTask.BinFile))
 				log.SysInfo(fmt.Sprintf("cron fork task script process exit successful --c=%s",
 					cronTask.BinFile),
 					zap.Any("cronMeta", cronTask),
@@ -138,6 +139,7 @@ func (cronTask *CronTaskMeta) filterSkipDateTime() error {
 	))
 }
 
+// parseTime 解析时间
 func parseTime(timeField string, timeItems []string) (nowTime int64, startTime int64, endTime int64, err error) {
 	num := len(timeItems)
 	if timeItems == nil || num == 0 {

@@ -59,7 +59,7 @@ func runScheduleCronTask(scheduleCronTask *map[string]*CronTaskMeta) {
 			})
 
 			if err != nil {
-				fmt.Println("cron AddFunc error=", err)
+				fmt.Println("Cron AddFunc error=", err)
 				return
 			}
 			if CronUniqueIdEntryIDMap == nil {
