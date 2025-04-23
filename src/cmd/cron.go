@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/src/cmd/command"
 	"github.com/bingcool/gofy/src/crontab"
 	"github.com/bingcool/gofy/src/log"
@@ -45,7 +44,7 @@ var CronCmd = &cobra.Command{
 }
 
 // cronRun 启动cron服务
-func cronRun(cmd *cobra.Command, args []string) {
+func cronRun(cmd *cobra.Command, _ []string) {
 	pidFilePath := viper.GetString("cronServer.pidFilePath")
 	pidFilePerm := os.FileMode(viper.GetUint32("cronServer.pidFilePerm"))
 	logFilePath := viper.GetString("cronServer.logFilePath")
@@ -57,12 +56,14 @@ func cronRun(cmd *cobra.Command, args []string) {
 		zap.Int("daemon", isDaemon),
 	)
 	savePidFile(pidFilePath, os.Getpid(), pidFilePerm)
-
 	// 处理系统信号
 	handleExitSignals()
 
-	cronMetaMap := script.RegisterCronSchedule()
-	crontab.StartScheduleCronTask(cronMetaMap)
+	cronYamlFilePath := viper.GetString("cronServer.cronYamlFilePath")
+	if cronYamlFilePath == "" {
+		cronYamlFilePath = "./cron.yaml"
+	}
+	registerCronTask(cronYamlFilePath)
 
 	if isDaemon > 0 {
 		// 配置守护进程上下文
@@ -99,4 +100,35 @@ func cronRun(cmd *cobra.Command, args []string) {
 	cronTab.Start()
 	log.SysInfo("cron server start successful")
 	select {}
+}
+
+// LoadWithCronYamlFile 加载cron.yaml文件
+func LoadWithCronYamlFile(cronYamlFilePath string) (*map[string]*crontab.CronTaskMeta, error) {
+	v := viper.New()
+	// 配置解析设置
+	v.SetConfigFile(cronYamlFilePath) // 直接指定文件路径
+	v.SetConfigType("yaml")           // 明确指定类型
+
+	// 读取配置
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("读取cron配置文件cron.yaml失败: %w", err)
+	}
+
+	// 解析到目标结构
+	var result map[string]*crontab.CronTaskMeta
+	if err := v.Unmarshal(&result); err != nil {
+		return nil, fmt.Errorf("cron.yaml配置解析失败: %w", err)
+	}
+
+	// 验证关键字段
+	for key, task := range result {
+		if task.UniqueId == "" {
+			return nil, fmt.Errorf("任务 %s 缺少 UniqueId", key)
+		}
+		if task.BinFile == "" {
+			return nil, fmt.Errorf("任务 %s 缺少 BinFile", key)
+		}
+	}
+
+	return &result, nil
 }

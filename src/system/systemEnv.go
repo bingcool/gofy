@@ -20,8 +20,10 @@ var RunModel string
 func init() {
 	env = os.Getenv("GOFY_ENV")
 	if env == "" {
-		panic("GOFY_ENV is not set!!!")
+		env = "dev"
 	}
+
+	fmt.Println(fmt.Sprintf("this env=%s", env))
 }
 
 // GetEnv 获取当前环境

@@ -11,9 +11,11 @@ import (
 
 	"github.com/bingcool/gofy/src/cmd/command"
 	_ "github.com/bingcool/gofy/src/conf"
+	"github.com/bingcool/gofy/src/crontab"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/bingcool/gofy/src/utils"
+	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -204,4 +206,25 @@ func handleExitSignals() {
 		log.SysInfo("server Shutting down gracefully......")
 		os.Exit(0)
 	}()
+}
+
+// registerCronTask 注册cron任务
+func registerCronTask(cronYamlFilePath string) {
+	if system.IsLinux() || system.IsMacos() {
+		var opts []cron.Option
+		opts = append(opts, cron.WithSeconds(), cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
+		systemCronSchedule := cron.New(opts...)
+		_, _ = systemCronSchedule.AddFunc("@every 3s", func() {
+			cronMetaMap, err := LoadWithCronYamlFile(cronYamlFilePath)
+			if err != nil {
+				log.SysError(fmt.Sprintf("Cron LoadWithCronYamlFile error: %s", err.Error()))
+				return
+			}
+			crontab.StartScheduleCronTask(cronMetaMap)
+		})
+		systemCronSchedule.Start()
+	} else {
+		log.SysInfo("cron task not support windows")
+	}
+
 }

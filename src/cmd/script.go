@@ -41,7 +41,7 @@ var ScriptCmd = &cobra.Command{
 }
 
 // scriptRun 执行脚本
-func scriptRun(cmd *cobra.Command, args []string) {
+func scriptRun(cmd *cobra.Command, _ []string) {
 	pidFilePath := viper.GetString("scriptServer.pidFilePath")
 	pidFilePerm := os.FileMode(viper.GetUint32("scriptServer.pidFilePerm"))
 	logFilePath := viper.GetString("scriptServer.logFilePath")

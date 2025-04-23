@@ -11,6 +11,9 @@ httpServer:
   pidFilePath: "app/server.pid"
   pidFilePerm: 0644
   logFilePath: "app/server.log"
+  crontab:
+    enableCron: false
+    cronYamlFilePath: "/home/wwwroot/gofy/cron.yaml"
 
 daemonServer:
    pidFilePath: "daemon/server.pid"
@@ -22,6 +25,7 @@ cronServer:
   pidFilePerm: 0644
   logFilePath: "/dev/null"
   timeLocation: "Asia/Shanghai"
+  cronYamlFilePath: "/home/wwwroot/gofy/cron.yaml"
 
 scriptServer:
   pidFilePath: ""

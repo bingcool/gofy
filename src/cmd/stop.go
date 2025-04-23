@@ -26,7 +26,7 @@ var StopCmd = &cobra.Command{
 
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		stopServer(cmd, args)
+		stopServer()
 	},
 	PostRun: func(cmd *cobra.Command, args []string) {
 
@@ -38,7 +38,7 @@ var StopCmd = &cobra.Command{
 }
 
 // stopRun停止服务
-func stopServer(cmd *cobra.Command, args []string) {
+func stopServer() {
 	// 检查 PID 文件是否存在
 	var pidFilePath string
 	if system.IsCliService() {

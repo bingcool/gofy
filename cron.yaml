@@ -1,0 +1,26 @@
+fixed-user:
+  UniqueId: "fixed-user"
+  BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
+  Express: "@every 10s"
+  Flags: ["--type=1"]
+  Desc: "fixed-user"
+  BetweenDateTime: []
+  SkipDateTime: []
+
+fixed-user1:
+  UniqueId: "fixed-user1"
+  BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
+  Express: "@every 10s"
+  Flags: ["--type=2"]
+  Desc: "fixed-user"
+  BetweenDateTime: []
+  SkipDateTime: []
+
+fixed-user2:
+  UniqueId: "fixed-user-44"
+  BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
+  Express: "@every 10s"
+  Flags: ["--type=3"]
+  Desc: "fixed-user"
+  BetweenDateTime: []
+  SkipDateTime: []

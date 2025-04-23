@@ -47,18 +47,8 @@ var StartCmd = &cobra.Command{
 	},
 }
 
-// getArgs 获取命令行参数
-func getArgs() []string {
-	args := make([]string, 0)
-	// 读取os.Args
-	if len(os.Args) > 1 {
-		args = os.Args[1:]
-	}
-	return args
-}
-
 // startRun 启动服务
-func startRun(cmd *cobra.Command, args []string) {
+func startRun(cmd *cobra.Command, _ []string) {
 	pidFilePath := viper.GetString("httpServer.pidFilePath")
 	pidFilePerm := os.FileMode(viper.GetUint32("httpServer.pidFilePerm"))
 	logFilePath := viper.GetString("scriptServer.logFilePath")
@@ -95,6 +85,17 @@ func startRun(cmd *cobra.Command, args []string) {
 			_ = daemonCtx.Release()
 		}(daemonCtx)
 	}
+
+	// 注册cron任务
+	crontab := viper.Get("httpServer.crontab")
+	if crontab != nil {
+		enableCron := viper.Get("httpServer.crontab.enableCron")
+		if enableCron != nil && enableCron.(bool) && enableCron == true {
+			cronYamlFilePath := viper.GetString("httpServer.crontab.cronYamlFilePath")
+			registerCronTask(cronYamlFilePath)
+		}
+	}
+
 	// 支持使用秒级表达式（支持6位）
 	cronTab := cron.New(cron.WithSeconds())
 	// 添加cron任务定时记录pid

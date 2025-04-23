@@ -10,6 +10,7 @@ import (
 
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
+	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 )
 
@@ -20,14 +21,17 @@ type CronMetaHandle interface {
 }
 
 type CronTaskMeta struct {
-	BinFile         string
-	Express         string   // cron表达式
-	Flags           []string // 参数标识--id=1
-	Desc            string   // 描述
-	BetweenDateTime []string //只能在某个时间段执行
-	SkipDateTime    []string // 跳过某个时间段执行
+	UniqueId        string       `yaml:"UniqueId"`        // 唯一id，标志本次定时任务的唯一id
+	BinFile         string       `yaml:"BinFile"`         // 二进制执行文件
+	Express         string       `yaml:"Express"`         // cron表达式
+	Flags           []string     `yaml:"Flags"`           // 参数标识--id=1
+	Desc            string       `yaml:"Desc"`            // 描述
+	BetweenDateTime []string     `yaml:"BetweenDateTime"` //只能在某个时间段执行
+	SkipDateTime    []string     `yaml:"SkipDateTime"`    // 跳过某个时间段执行
+	EntryID         cron.EntryID `yaml:"-"`               // cron任务id
 }
 
+// BeforeHandle 执行前处理
 func (cronTask *CronTaskMeta) BeforeHandle() error {
 	// 过滤Between时间段
 	err := cronTask.filterBetweenDateTime()
@@ -44,6 +48,7 @@ func (cronTask *CronTaskMeta) BeforeHandle() error {
 	return nil
 }
 
+// Exec 执行定时任务
 func (cronTask *CronTaskMeta) Exec() {
 	if system.IsLinux() || system.IsMacos() {
 		newArgs := make([]string, 0)
@@ -91,6 +96,7 @@ func (cronTask *CronTaskMeta) Exec() {
 	}
 }
 
+// AfterHandle 执行后处理
 func (cronTask *CronTaskMeta) AfterHandle() {
 
 }
@@ -173,8 +179,9 @@ func parseTime(timeField string, timeItems []string) (nowTime int64, startTime i
 	return now, ts1, ts2, nil
 }
 
+// isValidTimeFormat 判断时间格式是否正确
 func isValidTimeFormat(s string) bool {
-	const targetLayout = "2006-01-02 15:04:05" // 目标格式
+	const targetLayout = "2006-01-02 15:04:05"
 	_, err := time.Parse(targetLayout, s)
 	return err == nil
 }
