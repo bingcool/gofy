@@ -149,19 +149,26 @@ func parseTime(timeField string, timeItems []string) (nowTime int64, startTime i
 	var endDateTime string
 	if num == 1 {
 		startDateTime = timeItems[0]
-		if !isValidTimeFormat(startDateTime) {
-			return 0, 0, 0, errors.New(fmt.Sprintf("%s=[%s] time format error", timeField, startDateTime))
-		}
-
 		endDateTime = time.Now().Format("2006-01-02 15:04:05")
-	}
-
-	if num >= 2 {
+	} else {
 		startDateTime = timeItems[0]
 		endDateTime = timeItems[1]
-		if !isValidTimeFormat(startDateTime) || !isValidTimeFormat(endDateTime) {
-			return 0, 0, 0, errors.New(fmt.Sprintf("%s=[%s,%s] time format error", timeField, startDateTime, endDateTime))
-		}
+	}
+
+	// 12:10 -> 2022-01-01 12:10
+	startDateTimeItems := strings.Split(startDateTime, ":")
+	if len(startDateTime) == 5 && len(startDateTimeItems) == 2 {
+		startDateTime = time.Now().Format("2006-01-02") + " " + startDateTime
+	}
+
+	// 18:10 -> 2022-01-01 18:10
+	endDateTimeItems := strings.Split(endDateTime, ":")
+	if len(endDateTime) == 5 && len(endDateTimeItems) == 2 {
+		endDateTime = time.Now().Format("2006-01-02") + " " + endDateTime
+	}
+
+	if !isValidTimeFormat(startDateTime) || !isValidTimeFormat(endDateTime) {
+		return 0, 0, 0, errors.New(fmt.Sprintf("%s=[%s,%s] time format error", timeField, startDateTime, endDateTime))
 	}
 
 	t1, err1 := time.Parse(time.DateTime, startDateTime)

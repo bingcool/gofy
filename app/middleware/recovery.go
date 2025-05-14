@@ -27,8 +27,8 @@ func customRecovery() gin.HandlerFunc {
 
 		go func() {
 			defer func() {
-				if r := recover(); r != nil {
-					fmt.Println("Recovered from a panic:", r)
+				if err1 := recover(); err1 != nil {
+					fmt.Println("Recovered from a panic:", err1)
 				}
 			}()
 			reqId := requestid.Get(ctx)
@@ -98,14 +98,6 @@ func function(pc uintptr) []byte {
 		return dunno
 	}
 	name := []byte(fn.Name())
-	// The name includes the path name to the package, which is unnecessary
-	// since the file name is already included.  Plus, it has center dots.
-	// That is, we see
-	//	runtime/debug.*T·ptrmethod
-	// and want
-	//	*T.ptrmethod
-	// Also the package path might contain dot (e.g. code.google.com/...),
-	// so first eliminate the path prefix
 	if lastSlash := bytes.LastIndex(name, slash); lastSlash >= 0 {
 		name = name[lastSlash+1:]
 	}
