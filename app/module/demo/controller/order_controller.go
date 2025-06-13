@@ -50,7 +50,6 @@ type OrderItem struct {
 }
 
 func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (res *GetOrderListResponse, err error) {
-
 	query := builder.Use(db.GetDb())
 
 	cronTaskQuery := query.CronTask
@@ -84,7 +83,7 @@ func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (re
 	first := cronTaskRepos.First(ctx, where)
 	first.CronSkip = make([][]string, 0)
 	first.CronSkip = append(first.CronSkip, cronSkip1, cronSkip2)
-	rowsAffected := cronTaskRepos.Update(ctx, where, first)
+	rowsAffected, _ := cronTaskRepos.Update(ctx, where, first)
 
 	where1 := []gen.Condition{
 		cronTaskRepos.Query().CronTask.ID.Eq(3),
@@ -93,7 +92,7 @@ func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (re
 	cronTaskEntity := entity.NewCronTaskEntity()
 	cronTaskEntity.CronSkip = make([][]string, 0)
 	cronTaskEntity.CronSkip = append(cronTaskEntity.CronSkip, cronSkip1, cronSkip2)
-	rowsAffected1 := cronTaskRepos.Update(ctx, where1, cronTaskEntity)
+	rowsAffected1, _ := cronTaskRepos.Update(ctx, where1, cronTaskEntity)
 	fmt.Println("rowsAffected1", rowsAffected1)
 
 	fmt.Println("rowsAffected", rowsAffected)
@@ -110,7 +109,7 @@ func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (re
 		Xyz:   "456",
 	}
 
-	insertId1 := cronTaskRepos.Create(ctx, cronTaskEntity)
+	insertId1, err := cronTaskRepos.Create(ctx, cronTaskEntity)
 
 	fmt.Println("insertId1", insertId1)
 

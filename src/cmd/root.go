@@ -221,9 +221,9 @@ func registerCronTask(cronYamlFilePath string) {
 		opts = append(opts, cron.WithSeconds(), cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
 		systemCronSchedule := cron.New(opts...)
 		_, _ = systemCronSchedule.AddFunc("@every 3s", func() {
-			cronMetaMap, err := LoadWithCronYamlFile(cronYamlFilePath)
+			cronMetaMap, err := crontab.LoadWithCronTaskYamlFile(cronYamlFilePath)
 			if err != nil {
-				errorMsg := fmt.Sprintf("Cron LoadWithCronYamlFile error: %s", err.Error())
+				errorMsg := fmt.Sprintf("Cron LoadWithCronTaskYamlFile error: %s", err.Error())
 				log.FmtPrint(errorMsg)
 				log.SysError(errorMsg)
 				return

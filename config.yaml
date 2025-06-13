@@ -26,6 +26,7 @@ cronServer:
   logFilePath: "/dev/null"
   timeLocation: "Asia/Shanghai"
   cronYamlFilePath: "/home/wwwroot/gofy/cron.yaml"
+  cronTaskDatabaseDns: "root:root@galaxy1024@tcp(localhost:3306)/bingcool?charset=utf8mb4&parseTime=True&loc=Local"
 
 scriptServer:
   pidFilePath: ""

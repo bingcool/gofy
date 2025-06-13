@@ -1,5 +1,6 @@
 fixed-user:
   UniqueId: "fixed-user"
+  Name: "fixed-user"
   BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
   Express: "@every 10s"
   Flags: ["--type=1"]
@@ -9,6 +10,7 @@ fixed-user:
 
 fixed-user1:
   UniqueId: "fixed-user1"
+  Name: "fixed-user1"
   BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
   Express: "@every 10s"
   Flags: ["--type=2"]
@@ -18,6 +20,7 @@ fixed-user1:
 
 fixed-user2:
   UniqueId: "fixed-user-44"
+  Name: "fixed-user2"
   BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
   Express: "@every 10s"
   Flags: ["--type=3"]

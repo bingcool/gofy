@@ -1,6 +1,8 @@
 package demo
 
 import (
+	"fmt"
+
 	"github.com/bingcool/gofy/app/middleware"
 	"github.com/bingcool/gofy/app/module/demo/controller"
 	"github.com/bingcool/gofy/app/route/build"
@@ -24,6 +26,8 @@ func SetOrderRouter(engine *gin.Engine, route build.RouteInterface) {
 			route.BuildReq(ctx, request)
 			res, err := controller.NewOrder().GetOrderList(ctx, request)
 			route.Response(ctx, res, err)
+		}, func(ctx *gin.Context) {
+			fmt.Println("request finish !!!!!!!!!!!!!")
 		})
 	}
 }

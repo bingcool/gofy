@@ -1,0 +1,22 @@
+CREATE TABLE `cron_task_go` (
+     `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+     `name` varchar(128) NOT NULL DEFAULT '' COMMENT '任务名称',
+     `unique_id` varchar(128) NOT NULL DEFAULT '' COMMENT '任务唯一标志',
+     `expression` varchar(128) NOT NULL DEFAULT '' COMMENT 'cron表达式',
+     `exec_script` varchar(256) NOT NULL DEFAULT '' COMMENT '执行命令',
+     `exec_type` tinyint(2) NOT NULL DEFAULT '1' COMMENT '执行类型 1-shell，2-http',
+     `status` tinyint(2) NOT NULL DEFAULT '0' COMMENT '状态 0-禁用，1-启用',
+     `description` varchar(256) NOT NULL DEFAULT '' COMMENT '描述',
+     `cron_between` json DEFAULT NULL COMMENT '允许执行时间段',
+     `cron_skip` json DEFAULT NULL COMMENT '不允许执行时间段(即需跳过的时间段)',
+     `http_method` varchar(16) NOT NULL DEFAULT '' COMMENT 'http请求方法',
+     `http_body` json DEFAULT NULL COMMENT 'http请求体',
+     `http_headers` json DEFAULT NULL COMMENT 'http请求头',
+     `http_request_time_out` int(11) NOT NULL DEFAULT '0' COMMENT 'http请求超时时间，单位：秒',
+     `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+     `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
+     `deleted_at` datetime DEFAULT NULL COMMENT '删除时间',
+     PRIMARY KEY (`id`),
+     UNIQUE KEY `uniq_id` (`unique_id`),
+     KEY `expression` (`expression`)
+) ENGINE=InnoDB COMMENT='定时任务表';

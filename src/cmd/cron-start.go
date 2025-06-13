@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/bingcool/gofy/src/cmd/command"
-	"github.com/bingcool/gofy/src/crontab"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/robfig/cron/v3"
@@ -101,35 +100,4 @@ func cronRun(cmd *cobra.Command, _ []string) {
 	cronTab.Start()
 	log.SysInfo("cron server start successful")
 	select {}
-}
-
-// LoadWithCronYamlFile 加载cron.yaml文件
-func LoadWithCronYamlFile(cronYamlFilePath string) (*map[string]*crontab.CronTaskMeta, error) {
-	v := viper.New()
-	// 配置解析设置
-	v.SetConfigFile(cronYamlFilePath) // 直接指定文件路径
-	v.SetConfigType("yaml")           // 明确指定类型
-
-	// 读取配置
-	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("读取cron配置文件cron.yaml失败: %w", err)
-	}
-
-	// 解析到目标结构
-	var result map[string]*crontab.CronTaskMeta
-	if err := v.Unmarshal(&result); err != nil {
-		return nil, fmt.Errorf("cron.yaml配置解析失败: %w", err)
-	}
-
-	// 验证关键字段
-	for key, task := range result {
-		if task.UniqueId == "" {
-			return nil, fmt.Errorf("cronTask.%s 缺少 UniqueId", key)
-		}
-		if task.BinFile == "" {
-			return nil, fmt.Errorf("cronTask.%s 缺少 BinFile", key)
-		}
-	}
-
-	return &result, nil
 }

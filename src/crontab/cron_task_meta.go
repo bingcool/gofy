@@ -29,6 +29,7 @@ type CronTaskMeta struct {
 	BetweenDateTime []string     `yaml:"BetweenDateTime"` //只能在某个时间段执行
 	SkipDateTime    []string     `yaml:"SkipDateTime"`    // 跳过某个时间段执行
 	EntryID         cron.EntryID `yaml:"-"`               // cron任务id
+	UpdatedAt       time.Time    `yaml:"UpdatedAt"`       // 更新时间
 }
 
 // BeforeHandle 执行前处理

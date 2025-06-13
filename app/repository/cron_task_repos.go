@@ -23,11 +23,11 @@ type CronTaskRepos struct {
 type CronTaskReposInterface interface {
 	Query() *builder.Query
 	First(ctx context.Context, where []gen.Condition) *entity.CronTaskEntity
-	Create(ctx context.Context, cronTaskEntity *entity.CronTaskEntity) int64
-	Update(ctx context.Context, where []gen.Condition, cronTaskEntity *entity.CronTaskEntity) int64
+	Create(ctx context.Context, cronTaskEntity *entity.CronTaskEntity) (int64, error)
+	Update(ctx context.Context, where []gen.Condition, cronTaskEntity *entity.CronTaskEntity) (int64, error)
 	SimpleList(ctx context.Context, where []gen.Condition, orderBy []field.Expr) []*entity.CronTaskEntity
-	Delete(ctx context.Context, where []gen.Condition) int64
-	ForceDelete(ctx context.Context, where []gen.Condition) int64
+	Delete(ctx context.Context, where []gen.Condition) (int64, error)
+	ForceDelete(ctx context.Context, where []gen.Condition) (int64, error)
 	ModelConvertToEntity(cronTask *entity.CronTask) *entity.CronTaskEntity
 	BatchModelConvertToEntity(cronTaskEntityList []*entity.CronTask) []*entity.CronTaskEntity
 	EntityConvertToModel(cronTaskEntity *entity.CronTaskEntity) *entity.CronTask
@@ -59,24 +59,43 @@ func (r *CronTaskRepos) First(ctx context.Context, where []gen.Condition) *entit
 }
 
 // Create 保存数据
-func (r *CronTaskRepos) Create(ctx context.Context, cronTaskEntity *entity.CronTaskEntity) int64 {
+func (r *CronTaskRepos) Create(ctx context.Context, cronTaskEntity *entity.CronTaskEntity) (int64, error) {
 	conTask := r.EntityConvertToModel(cronTaskEntity)
 	result := r.Db.Create(conTask)
-	return result.RowsAffected
+	return result.RowsAffected, result.Error
+}
+
+// CreateInBatches 批量插入
+func (r *CronTaskRepos) CreateInBatches(ctx context.Context, cronTaskEntityList []*entity.CronTaskEntity) error {
+	if len(cronTaskEntityList) == 0 {
+		return nil
+	}
+
+	conTaskList := make([]*entity.CronTask, 0)
+	for _, v := range cronTaskEntityList {
+		conTaskList = append(conTaskList, r.EntityConvertToModel(v))
+	}
+
+	return r.query.CronTask.WithContext(ctx).CreateInBatches(conTaskList, 100)
 }
 
 // Update 保存数据
-func (r *CronTaskRepos) Update(ctx context.Context, where []gen.Condition, cronTaskEntity *entity.CronTaskEntity) int64 {
+func (r *CronTaskRepos) Update(
+	ctx context.Context,
+	where []gen.Condition,
+	cronTaskEntity *entity.CronTaskEntity,
+) (int64, error) {
 	conTask := r.EntityConvertToModel(cronTaskEntity)
 	updates, err := r.query.CronTask.WithContext(ctx).Where(where...).Updates(conTask)
-	if err != nil {
-		panic(err)
-	}
-	return updates.RowsAffected
+	return updates.RowsAffected, err
 }
 
 // SimpleList 简单少数量的数据分页查询，不适合分页
-func (r *CronTaskRepos) SimpleList(ctx context.Context, where []gen.Condition, orderBy []field.Expr) []*entity.CronTaskEntity {
+func (r *CronTaskRepos) SimpleList(
+	ctx context.Context,
+	where []gen.Condition,
+	orderBy []field.Expr,
+) []*entity.CronTaskEntity {
 	var list1 []*entity.CronTask
 	var list2 []*entity.CronTaskEntity
 	var err error
@@ -85,6 +104,7 @@ func (r *CronTaskRepos) SimpleList(ctx context.Context, where []gen.Condition, o
 	} else {
 		list1, err = r.query.CronTask.WithContext(ctx).Where(where...).Find()
 	}
+
 	if err != nil {
 		panic(err)
 	}
@@ -98,30 +118,30 @@ func (r *CronTaskRepos) SimpleList(ctx context.Context, where []gen.Condition, o
 }
 
 // List 批量加载数据
-func (r *CronTaskRepos) List(ctx context.Context, ids []int32) []*entity.CronTask {
+func (r *CronTaskRepos) List(ctx context.Context, ids []int32) ([]*entity.CronTask, error) {
 	list, err := r.query.CronTask.WithContext(ctx).Where(r.query.CronTask.ID.In(ids...)).Find()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return list
+	return list, nil
 }
 
 // Delete 删除数据--模型包含了 gorm.DeletedAt字段（在gorm.Model中），那么该模型将会自动获得软删除的能力
-func (r *CronTaskRepos) Delete(ctx context.Context, where []gen.Condition) int64 {
+func (r *CronTaskRepos) Delete(ctx context.Context, where []gen.Condition) (int64, error) {
 	deletes, err := r.query.CronTask.WithContext(ctx).Where(where...).Delete()
 	if err != nil {
-		panic(err)
+		return 0, err
 	}
-	return deletes.RowsAffected
+	return deletes.RowsAffected, err
 }
 
 // ForceDelete 强制删除数据
-func (r *CronTaskRepos) ForceDelete(ctx context.Context, where []gen.Condition) int64 {
+func (r *CronTaskRepos) ForceDelete(ctx context.Context, where []gen.Condition) (int64, error) {
 	deletes, err := r.query.CronTask.WithContext(ctx).Unscoped().Where(where...).Delete()
 	if err != nil {
-		panic(err)
+		return 0, err
 	}
-	return deletes.RowsAffected
+	return deletes.RowsAffected, err
 }
 
 // ModelConvertToEntity 查询数据后将model数据赋值到entity实体
