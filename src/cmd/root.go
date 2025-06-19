@@ -15,6 +15,7 @@ import (
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/bingcool/gofy/src/utils"
+	"github.com/gogf/gf/v2/util/gutil"
 	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
@@ -222,6 +223,9 @@ func registerCronTask(cronYamlFilePath string) {
 		systemCronSchedule := cron.New(opts...)
 		_, _ = systemCronSchedule.AddFunc("@every 3s", func() {
 			cronMetaMap, err := crontab.LoadWithCronTaskYamlFile(cronYamlFilePath)
+
+			gutil.Dump(cronMetaMap)
+
 			if err != nil {
 				errorMsg := fmt.Sprintf("Cron LoadWithCronTaskYamlFile error: %s", err.Error())
 				log.FmtPrint(errorMsg)

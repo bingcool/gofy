@@ -61,8 +61,6 @@ func cronRun(cmd *cobra.Command, _ []string) {
 		cronYamlFilePath = "./cron.yaml"
 	}
 
-	log.FmtPrint(fmt.Sprintf("cronYamlFilePath=%s", cronYamlFilePath))
-
 	registerCronTask(cronYamlFilePath)
 
 	if isDaemon > 0 {

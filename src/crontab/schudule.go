@@ -38,8 +38,12 @@ func runScheduleCronTask(scheduleCronTask *map[string]*CronTaskMeta) {
 	for _, cronTaskMeta := range *scheduleCronTask {
 		express := cronTaskMeta.Express
 
-		cronUniqueId := getUniqueId(cronTaskMeta)
-		cronTaskMeta.UniqueId = cronUniqueId
+		var cronUniqueId string
+		if cronTaskMeta.UniqueId == "" {
+			cronUniqueId = getUniqueId(cronTaskMeta)
+			cronTaskMeta.UniqueId = cronUniqueId
+		}
+
 		scheduleCronTaskMap[cronUniqueId] = cronTaskMeta
 
 		// 不存在的定时任务, 新增定时任务
@@ -82,6 +86,8 @@ func runScheduleCronTask(scheduleCronTask *map[string]*CronTaskMeta) {
 			delete(CronUniqueIdEntryIDMap, cronUniqueId)
 		}
 	}
+
+	// 任务cronUniqueId不变，只是改变了meta信息，比如Express=“@every 10s” 改成@every 30s，这时定时任务也需要重新注册
 }
 
 // getUniqueId 获取唯一id
@@ -95,13 +101,21 @@ func getUniqueId(cronTaskMeta *CronTaskMeta) string {
 		}
 
 		if cronTaskMeta.BetweenDateTime != nil && len(cronTaskMeta.BetweenDateTime) > 0 {
-			betweenDateTimeStr := strings.Join(cronTaskMeta.BetweenDateTime, "_")
-			cronUniqueId = cronUniqueId + "_" + betweenDateTimeStr
+			if len(cronTaskMeta.BetweenDateTime) > 1 {
+				for i := 1; i < len(cronTaskMeta.BetweenDateTime); i++ {
+					betweenDateTimeStr := strings.Join(cronTaskMeta.BetweenDateTime[i], "_")
+					cronUniqueId = cronUniqueId + "_" + betweenDateTimeStr
+				}
+			}
 		}
 
 		if cronTaskMeta.SkipDateTime != nil && len(cronTaskMeta.SkipDateTime) > 0 {
-			skipDateTimeStr := strings.Join(cronTaskMeta.SkipDateTime, "_")
-			cronUniqueId = cronUniqueId + "_" + skipDateTimeStr
+			if len(cronTaskMeta.SkipDateTime) > 1 {
+				for i := 1; i < len(cronTaskMeta.SkipDateTime); i++ {
+					skipDateTimeStr := strings.Join(cronTaskMeta.SkipDateTime[i], "_")
+					cronUniqueId = cronUniqueId + "_" + skipDateTimeStr
+				}
+			}
 		}
 
 		// md5
@@ -146,12 +160,14 @@ func LoadWithCronTaskYamlFile(cronYamlFilePath string) (*map[string]*CronTaskMet
 		return nil, fmt.Errorf("cron.yaml配置解析失败: %w", err)
 	}
 
-	// 验证关键字段
-	for key, task := range result {
-		if task.UniqueId == "" {
+	for key, resultItem := range result {
+		resultItem.UniqueId = key
+
+		if resultItem.UniqueId == "" {
 			return nil, fmt.Errorf("cronTask.%s 缺少 UniqueId", key)
 		}
-		if task.BinFile == "" {
+
+		if resultItem.BinFile == "" {
 			return nil, fmt.Errorf("cronTask.%s 缺少 BinFile", key)
 		}
 	}

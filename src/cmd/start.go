@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"strconv"
 
 	"github.com/bingcool/gofy/app/middleware"
 	"github.com/bingcool/gofy/app/route"
@@ -127,7 +126,7 @@ func startServer() error {
 	middleware.SetGlobalMiddleware(engine)
 	// 注册路由
 	route.RegisterRouter(engine)
-	port := ":" + strconv.Itoa(viper.GetInt("httpServer.port"))
+	port := fmt.Sprintf(":%d", viper.GetInt("httpServer.port"))
 	err := engine.Run(port)
 	if err != nil {
 		fmt.Println("Error starting server:", err)

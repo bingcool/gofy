@@ -1,5 +1,4 @@
 fixed-user:
-  UniqueId: "fixed-user"
   Name: "fixed-user"
   BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
   Express: "@every 10s"
@@ -9,7 +8,6 @@ fixed-user:
   SkipDateTime: []
 
 fixed-user1:
-  UniqueId: "fixed-user1"
   Name: "fixed-user1"
   BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
   Express: "@every 10s"
@@ -19,11 +17,10 @@ fixed-user1:
   SkipDateTime: []
 
 fixed-user2:
-  UniqueId: "fixed-user-44"
   Name: "fixed-user2"
   BinFile: "/home/wwwroot/gofy/gofy script --c=fixed-user"
   Express: "@every 10s"
   Flags: ["--type=3"]
   Desc: "fixed-user"
-  BetweenDateTime: []
+  BetweenDateTime: [["12:00","20:00"]]
   SkipDateTime: []

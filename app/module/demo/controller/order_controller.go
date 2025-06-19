@@ -114,7 +114,7 @@ func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (re
 	fmt.Println("insertId1", insertId1)
 
 	// 列表查询
-	list := cronTaskRepos.SimpleList(
+	list, _ := cronTaskRepos.SimpleList(
 		ctx,
 		[]gen.Condition{
 			cronTaskRepos.Query().CronTask.ID.Gt(5),
@@ -130,7 +130,7 @@ func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (re
 		cronTaskRepos.Query().CronTask.ID.Lt(10),
 	).Order(cronTaskRepos.Query().CronTask.ID.Desc()).Find()
 
-	list2 := cronTaskRepos.BatchModelConvertToEntity(cronTaskList1)
+	list2, err := cronTaskRepos.BatchModelConvertToEntity(cronTaskList1)
 
 	gutil.Dump(list2)
 
@@ -149,8 +149,6 @@ func (order *Order) GetOrderList(ctx *gin.Context, req *GetOrderListRequest) (re
 		Env:      system.GetEnv(),
 		RunModel: system.IsCliService(),
 	}
-
-	fmt.Println("aaaaaaaaaaaaaa")
 
 	orderList := make([]OrderItem, 0)
 	orderList = append(orderList, *orderItem)

@@ -15,6 +15,9 @@ func NewCronTaskService() *CronTaskService {
 
 // GetCronTaskList 获取任务列表
 func (s *CronTaskService) GetCronTaskList() []*entity.CronTask {
-	list := repository.NewCronTaskRepos().List(nil, []int32{1, 2, 3})
+	list, err := repository.NewCronTaskRepos().List(nil, []int32{1, 2, 3})
+	if err != nil {
+		return nil
+	}
 	return list
 }

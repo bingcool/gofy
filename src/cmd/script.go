@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// go run main.go script --c=fix-user --order_id=11111
+// go run main.go script --c=fixed-user --order_id=11111
 
 var ScriptCmd = &cobra.Command{
 	Use:   command.ScriptCommandName,

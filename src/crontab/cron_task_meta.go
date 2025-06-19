@@ -26,8 +26,8 @@ type CronTaskMeta struct {
 	Express         string       `yaml:"Express"`         // cron表达式
 	Flags           []string     `yaml:"Flags"`           // 参数标识--id=1
 	Desc            string       `yaml:"Desc"`            // 描述
-	BetweenDateTime []string     `yaml:"BetweenDateTime"` //只能在某个时间段执行
-	SkipDateTime    []string     `yaml:"SkipDateTime"`    // 跳过某个时间段执行
+	BetweenDateTime [][]string   `yaml:"BetweenDateTime"` // 只能在某个时间段执行
+	SkipDateTime    [][]string   `yaml:"SkipDateTime"`    // 跳过某个时间段执行
 	EntryID         cron.EntryID `yaml:"-"`               // cron任务id
 	UpdatedAt       time.Time    `yaml:"UpdatedAt"`       // 更新时间
 }
@@ -105,39 +105,44 @@ func (cronTask *CronTaskMeta) AfterHandle() {
 
 // filterBetweenDateTime 过滤Between时间段
 func (cronTask *CronTaskMeta) filterBetweenDateTime() error {
-	nowTime, ts1, ts2, err := parseTime("BetweenDateTime", cronTask.BetweenDateTime)
-	if err != nil {
-		return err
-	}
+	for _, betweenDateTime := range cronTask.BetweenDateTime {
+		nowTime, ts1, ts2, err := parseTime("BetweenDateTime", betweenDateTime)
+		if err != nil {
+			return err
+		}
 
-	if ts1 <= nowTime && nowTime <= ts2 {
-		return nil
-	}
+		if ts1 <= nowTime && nowTime <= ts2 {
+			return nil
+		}
 
-	return errors.New(fmt.Sprintf(" Now time[%s] not in betweenDateTime=[%s,%s]",
-		time.Now().Format("2006-01-02 15:04:05"),
-		time.Unix(ts1, 0).Format("2006-01-02 15:04:05"),
-		time.Unix(ts2, 0).Format("2006-01-02 15:04:05"),
-	))
+		return errors.New(fmt.Sprintf(" Now time[%s] not in betweenDateTime=[%s,%s]",
+			time.Now().Format("2006-01-02 15:04:05"),
+			time.Unix(ts1, 0).Format("2006-01-02 15:04:05"),
+			time.Unix(ts2, 0).Format("2006-01-02 15:04:05"),
+		))
+	}
+	return nil
 }
 
 // filterSkipDateTime 过滤Skip时间段
 func (cronTask *CronTaskMeta) filterSkipDateTime() error {
-	nowTime, ts1, ts2, err := parseTime("SkipDateTime", cronTask.SkipDateTime)
-	if err != nil {
-		return err
-	}
+	for _, skipDateTime := range cronTask.SkipDateTime {
+		nowTime, ts1, ts2, err := parseTime("SkipDateTime", skipDateTime)
+		if err != nil {
+			return err
+		}
+		// 跳过某些阶段
+		if nowTime <= ts1 || nowTime >= ts2 {
+			return nil
+		}
 
-	// 跳过某些阶段
-	if nowTime <= ts1 || nowTime >= ts2 {
-		return nil
+		return errors.New(fmt.Sprintf(" Now time[%s] not in SkipDateTime=[%s,%s]",
+			time.Now().Format("2006-01-02 15:04:05"),
+			time.Unix(ts1, 0).Format("2006-01-02 15:04:05"),
+			time.Unix(ts2, 0).Format("2006-01-02 15:04:05"),
+		))
 	}
-
-	return errors.New(fmt.Sprintf(" Now time[%s] not in SkipDateTime=[%s,%s]",
-		time.Now().Format("2006-01-02 15:04:05"),
-		time.Unix(ts1, 0).Format("2006-01-02 15:04:05"),
-		time.Unix(ts2, 0).Format("2006-01-02 15:04:05"),
-	))
+	return nil
 }
 
 // parseTime 解析时间

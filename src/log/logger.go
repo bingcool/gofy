@@ -218,7 +218,7 @@ func ParseDayLogPath(filePath string) string {
 
 // syncDailyLogger 同步动态日期日志
 func syncDailyLogger() {
-	today := time.Now().Format("2006-01-02")
+	today := time.Now().Local().Format("2006-01-02")
 	if today != currentDate {
 		go func() {
 			logSyncMutex.Lock()

@@ -3,14 +3,16 @@ package repository
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"errors"
 
 	"github.com/bingcool/gen"
 	"github.com/bingcool/gen/field"
 	"github.com/bingcool/gofy/app/Io/db"
 	"github.com/bingcool/gofy/app/dao/builder"
 	"github.com/bingcool/gofy/app/entity"
+	"github.com/bingcool/gofy/src/log"
 	"github.com/jinzhu/copier"
+	"go.uber.org/zap"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -25,13 +27,13 @@ type CronTaskReposInterface interface {
 	First(ctx context.Context, where []gen.Condition) *entity.CronTaskEntity
 	Create(ctx context.Context, cronTaskEntity *entity.CronTaskEntity) (int64, error)
 	Update(ctx context.Context, where []gen.Condition, cronTaskEntity *entity.CronTaskEntity) (int64, error)
-	SimpleList(ctx context.Context, where []gen.Condition, orderBy []field.Expr) []*entity.CronTaskEntity
+	SimpleList(ctx context.Context, where []gen.Condition, orderBy []field.Expr) ([]*entity.CronTaskEntity, error)
 	Delete(ctx context.Context, where []gen.Condition) (int64, error)
 	ForceDelete(ctx context.Context, where []gen.Condition) (int64, error)
-	ModelConvertToEntity(cronTask *entity.CronTask) *entity.CronTaskEntity
-	BatchModelConvertToEntity(cronTaskEntityList []*entity.CronTask) []*entity.CronTaskEntity
-	EntityConvertToModel(cronTaskEntity *entity.CronTaskEntity) *entity.CronTask
-	BatchEntityConvertToModel(cronTaskEntityList []*entity.CronTaskEntity) []*entity.CronTask
+	ModelConvertToEntity(cronTask *entity.CronTask) (*entity.CronTaskEntity, error)
+	BatchModelConvertToEntity(cronTaskEntityList []*entity.CronTask) ([]*entity.CronTaskEntity, error)
+	EntityConvertToModel(cronTaskEntity *entity.CronTaskEntity) (*entity.CronTask, error)
+	BatchEntityConvertToModel(cronTaskEntityList []*entity.CronTaskEntity) ([]*entity.CronTask, error)
 }
 
 func NewCronTaskRepos() *CronTaskRepos {
@@ -54,13 +56,19 @@ func (r *CronTaskRepos) First(ctx context.Context, where []gen.Condition) *entit
 	if err != nil {
 		return nil
 	}
-	cronTaskEntity := r.ModelConvertToEntity(first)
+	cronTaskEntity, err1 := r.ModelConvertToEntity(first)
+	if err1 != nil {
+		return nil
+	}
 	return cronTaskEntity
 }
 
 // Create 保存数据
-func (r *CronTaskRepos) Create(ctx context.Context, cronTaskEntity *entity.CronTaskEntity) (int64, error) {
-	conTask := r.EntityConvertToModel(cronTaskEntity)
+func (r *CronTaskRepos) Create(_ context.Context, cronTaskEntity *entity.CronTaskEntity) (int64, error) {
+	conTask, err := r.EntityConvertToModel(cronTaskEntity)
+	if err != nil {
+		return 0, err
+	}
 	result := r.Db.Create(conTask)
 	return result.RowsAffected, result.Error
 }
@@ -73,9 +81,12 @@ func (r *CronTaskRepos) CreateInBatches(ctx context.Context, cronTaskEntityList 
 
 	conTaskList := make([]*entity.CronTask, 0)
 	for _, v := range cronTaskEntityList {
-		conTaskList = append(conTaskList, r.EntityConvertToModel(v))
+		conTask, err := r.EntityConvertToModel(v)
+		if err != nil {
+			return err
+		}
+		conTaskList = append(conTaskList, conTask)
 	}
-
 	return r.query.CronTask.WithContext(ctx).CreateInBatches(conTaskList, 100)
 }
 
@@ -85,7 +96,10 @@ func (r *CronTaskRepos) Update(
 	where []gen.Condition,
 	cronTaskEntity *entity.CronTaskEntity,
 ) (int64, error) {
-	conTask := r.EntityConvertToModel(cronTaskEntity)
+	conTask, err := r.EntityConvertToModel(cronTaskEntity)
+	if err != nil {
+		return 0, err
+	}
 	updates, err := r.query.CronTask.WithContext(ctx).Where(where...).Updates(conTask)
 	return updates.RowsAffected, err
 }
@@ -95,7 +109,7 @@ func (r *CronTaskRepos) SimpleList(
 	ctx context.Context,
 	where []gen.Condition,
 	orderBy []field.Expr,
-) []*entity.CronTaskEntity {
+) ([]*entity.CronTaskEntity, error) {
 	var list1 []*entity.CronTask
 	var list2 []*entity.CronTaskEntity
 	var err error
@@ -106,15 +120,18 @@ func (r *CronTaskRepos) SimpleList(
 	}
 
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	for _, v := range list1 {
-		cronTaskEntity := r.ModelConvertToEntity(v)
+		cronTaskEntity, err1 := r.ModelConvertToEntity(v)
+		if err1 != nil {
+			return nil, err1
+		}
 		list2 = append(list2, cronTaskEntity)
 	}
 
-	return list2
+	return list2, nil
 }
 
 // List 批量加载数据
@@ -145,19 +162,28 @@ func (r *CronTaskRepos) ForceDelete(ctx context.Context, where []gen.Condition) 
 }
 
 // ModelConvertToEntity 查询数据后将model数据赋值到entity实体
-func (r *CronTaskRepos) ModelConvertToEntity(cronTask *entity.CronTask) *entity.CronTaskEntity {
+func (r *CronTaskRepos) ModelConvertToEntity(cronTask *entity.CronTask) (*entity.CronTaskEntity, error) {
 	// 自动处理类型转换和嵌套字段
 	cronTaskEntity := &entity.CronTaskEntity{}
 	err := copier.Copy(cronTaskEntity, cronTask)
 	if err != nil {
-		panic(err.Error())
+		log.Info(
+			"CronTaskEntity的copy失败",
+			zap.Any("error", err.Error()),
+			zap.Any("CronTaskModel", cronTask),
+		)
+		return nil, errors.New("CronTaskEntity的copy失败")
 	}
 
 	if cronTask.CronSkip != nil {
 		// json 数据转换为结构体
 		var cronSkip [][]string
 		if err := json.Unmarshal(*cronTask.CronSkip, &cronSkip); err != nil {
-			log.Fatal("解析失败:", err)
+			log.Info(
+				"CronTaskEntity的ModelConvertToEntity解析CronSkip失败",
+				zap.Any("error", err.Error()),
+				zap.Any("CronTaskModel", cronTask),
+			)
 		}
 		cronTaskEntity.CronSkip = cronSkip
 	}
@@ -166,39 +192,55 @@ func (r *CronTaskRepos) ModelConvertToEntity(cronTask *entity.CronTask) *entity.
 		// json 数据转换为结构体
 		httpHeaders := &entity.HttpHeaders{}
 		if err := json.Unmarshal(*cronTask.HTTPHeaders, httpHeaders); err != nil {
-			log.Fatal("解析失败:", err)
+			log.Info(
+				"CronTaskEntity的ModelConvertToEntity解析HTTPHeaders失败",
+				zap.Any("error", err.Error()),
+				zap.Any("CronTaskModel", cronTask),
+			)
 		}
 		cronTaskEntity.HTTPHeaders = httpHeaders
 	}
 
-	return cronTaskEntity
+	return cronTaskEntity, nil
 }
 
 // BatchModelConvertToEntity 查询数据后将model数据赋值到entity实体
 func (r *CronTaskRepos) BatchModelConvertToEntity(
 	cronTaskList []*entity.CronTask,
-) []*entity.CronTaskEntity {
+) ([]*entity.CronTaskEntity, error) {
 	// 自动处理类型转换和嵌套字段
 	cronTaskEntityList := make([]*entity.CronTaskEntity, 0)
 	for _, v := range cronTaskList {
-		cronTaskEntity := r.ModelConvertToEntity(v)
+		cronTaskEntity, err := r.ModelConvertToEntity(v)
+		if err != nil {
+			return make([]*entity.CronTaskEntity, 0), err
+		}
 		cronTaskEntityList = append(cronTaskEntityList, cronTaskEntity)
 	}
 
-	return cronTaskEntityList
+	return cronTaskEntityList, nil
 }
 
 // EntityConvertToModel Entity实体数据转换为model
-func (r *CronTaskRepos) EntityConvertToModel(cronTaskEntity *entity.CronTaskEntity) *entity.CronTask {
+func (r *CronTaskRepos) EntityConvertToModel(cronTaskEntity *entity.CronTaskEntity) (*entity.CronTask, error) {
 	conTask := &entity.CronTask{}
 	err := copier.Copy(conTask, cronTaskEntity)
 	if err != nil {
-		panic(err.Error())
+		log.Info(
+			"CronTaskEntity的copy失败",
+			zap.Any("error", err.Error()),
+			zap.Any("cronTaskEntity", cronTaskEntity),
+		)
+		return nil, errors.New("EntityConvertToModel的copy失败")
 	}
 	if cronTaskEntity.CronSkip != nil {
 		CronSkip, err := json.Marshal(cronTaskEntity.CronSkip)
 		if err != nil {
-			log.Fatal("json.Marshal() 失败:", err)
+			log.Info(
+				"CronTaskEntity的EntityConvertToModel解析CronSkip失败",
+				zap.Any("error", err.Error()),
+				zap.Any("cronTaskEntity", cronTaskEntity),
+			)
 		}
 		conTask.CronSkip = (*datatypes.JSON)(&CronSkip)
 	}
@@ -206,24 +248,27 @@ func (r *CronTaskRepos) EntityConvertToModel(cronTaskEntity *entity.CronTaskEnti
 	if cronTaskEntity.HTTPHeaders != nil {
 		httpHeaders, err := json.Marshal(cronTaskEntity.HTTPHeaders)
 		if err != nil {
-			log.Fatal("json.Marshal() 失败:", err)
+			return nil, err
 		}
 		conTask.HTTPHeaders = (*datatypes.JSON)(&httpHeaders)
 	}
 
-	return conTask
+	return conTask, nil
 }
 
 // BatchEntityConvertToModel Entity实体数据转换为model
 func (r *CronTaskRepos) BatchEntityConvertToModel(
 	cronTaskEntityList []*entity.CronTaskEntity,
-) []*entity.CronTask {
+) ([]*entity.CronTask, error) {
 	// 自动处理类型转换和嵌套字段
 	cronTaskList := make([]*entity.CronTask, 0)
 	for _, v := range cronTaskEntityList {
-		cronTaskEntity := r.EntityConvertToModel(v)
+		cronTaskEntity, err := r.EntityConvertToModel(v)
+		if err != nil {
+			return nil, err
+		}
 		cronTaskList = append(cronTaskList, cronTaskEntity)
 	}
 
-	return cronTaskList
+	return cronTaskList, nil
 }
