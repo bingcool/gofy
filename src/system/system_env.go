@@ -89,14 +89,6 @@ func IsDaemonService() bool {
 	return false
 }
 
-// IsCronService 判断是否是定时任务服务
-func IsCronService() bool {
-	if RunModel == "cron" {
-		return true
-	}
-	return false
-}
-
 // IsScriptService 判断是否是脚本服务
 func IsScriptService() bool {
 	if RunModel == "script" {
@@ -107,7 +99,7 @@ func IsScriptService() bool {
 
 // IsWorkerService 判断是否是worker模式服务
 func IsWorkerService() bool {
-	if IsDaemonService() || IsCronService() || IsScriptService() {
+	if IsDaemonService() || IsScriptService() {
 		return true
 	}
 	return false

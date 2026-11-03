@@ -105,8 +105,6 @@ func parseLogFileName(logErrorFileName string) string {
 	}
 	if system.IsDaemonService() {
 		logErrorFileName = strings.Replace(logErrorFileName, "app", "daemon", 1)
-	} else if system.IsCronService() {
-		logErrorFileName = strings.Replace(logErrorFileName, "app", "cron", 1)
 	} else if system.IsScriptService() {
 		logErrorFileName = strings.Replace(logErrorFileName, "app", "script", 1)
 	}
@@ -119,8 +117,6 @@ func initSystemLogger() *zap.Logger {
 	logInfoFileName := ParseDayLogPath(viper.GetString("systemLogger.info.Filename"))
 	if system.IsDaemonService() {
 		logInfoFileName = strings.Replace(logInfoFileName, "app", "daemon", 1)
-	} else if system.IsCronService() {
-		logInfoFileName = strings.Replace(logInfoFileName, "app", "cron", 1)
 	} else if system.IsScriptService() {
 		logInfoFileName = strings.Replace(logInfoFileName, "app", "script", 1)
 	}

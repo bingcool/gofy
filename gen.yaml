@@ -9,9 +9,7 @@ database:
   #    - banks
   #    - book_queue
   #    - credit_cards
-  tables :
-    - cron_task
-    - cron_task_log
+  tables : []
 
   # only generate models (without query file)
   onlyModel : false

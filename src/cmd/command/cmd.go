@@ -15,8 +15,6 @@ var (
 	StopCommandName        = "stop"
 	DaemonStartCommandName = "daemon-start"
 	DaemonStopCommandName  = "daemon-stop"
-	CronStartCommandName   = "cron-start"
-	CronStopCommandName    = "cron-stop"
 	ScriptCommandName      = "script"
 	VersionCommandName     = "version"
 )
@@ -26,8 +24,6 @@ var commandRunModel = map[string]string{
 	StartCommandName:       "http",
 	DaemonStartCommandName: "daemon",
 	DaemonStopCommandName:  "daemon",
-	CronStartCommandName:   "cron",
-	CronStopCommandName:    "cron",
 	ScriptCommandName:      "script",
 }
 
@@ -50,8 +46,6 @@ func GetCommandNameSlice() []string {
 		StopCommandName,
 		DaemonStartCommandName,
 		DaemonStopCommandName,
-		CronStartCommandName,
-		CronStopCommandName,
 		ScriptCommandName,
 		VersionCommandName,
 	}

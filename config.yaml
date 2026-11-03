@@ -1,6 +1,6 @@
 windows_work_root_dir: D:/wwwroot/gofy
 linux_work_root_dir: /home/wwwroot/gofy
-mac_work_root_dir: /Users/wwwroot/gofy
+mac_work_root_dir: /Users/huangzengbing/Documents/wwwroot/gofy
 
 date:
   timezone: "Asia/Shanghai"
@@ -11,22 +11,11 @@ httpServer:
   pidFilePath: "app/server.pid"
   pidFilePerm: 0644
   logFilePath: "app/server.log"
-  crontab:
-    enableCron: true
-    cronYamlFilePath: "/home/wwwroot/gofy/cron.yaml"
 
 daemonServer:
    pidFilePath: "daemon/server.pid"
    pidFilePerm: 0644
    logFilePath: "/dev/null"
-
-cronServer:
-  pidFilePath: "cron/server.pid"
-  pidFilePerm: 0644
-  logFilePath: "/dev/null"
-  timeLocation: "Asia/Shanghai"
-  cronYamlFilePath: "/home/wwwroot/gofy/cron.yaml"
-  cronTaskDatabaseDns: "root:root@galaxy1024@tcp(localhost:3306)/bingcool?charset=utf8mb4&parseTime=True&loc=Local"
 
 scriptServer:
   pidFilePath: ""

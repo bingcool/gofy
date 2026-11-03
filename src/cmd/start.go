@@ -85,16 +85,6 @@ func startRun(cmd *cobra.Command, _ []string) {
 		}(daemonCtx)
 	}
 
-	// 注册cron任务
-	crontab := viper.Get("httpServer.crontab")
-	if crontab != nil {
-		enableCron := viper.Get("httpServer.crontab.enableCron")
-		if enableCron != nil && enableCron.(bool) && enableCron == true {
-			cronYamlFilePath := viper.GetString("httpServer.crontab.cronYamlFilePath")
-			registerCronTask(cronYamlFilePath)
-		}
-	}
-
 	// 支持使用秒级表达式
 	cronTab := cron.New(cron.WithSeconds())
 	// 添加cron任务定时记录pid

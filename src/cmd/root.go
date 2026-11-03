@@ -11,12 +11,9 @@ import (
 
 	"github.com/bingcool/gofy/src/cmd/command"
 	_ "github.com/bingcool/gofy/src/conf"
-	"github.com/bingcool/gofy/src/crontab"
 	"github.com/bingcool/gofy/src/log"
 	"github.com/bingcool/gofy/src/system"
 	"github.com/bingcool/gofy/src/utils"
-	"github.com/gogf/gf/v2/util/gutil"
-	"github.com/robfig/cron/v3"
 	"github.com/sevlyar/go-daemon"
 	"github.com/spf13/cobra"
 )
@@ -49,8 +46,6 @@ func init() {
 	rootCmd.AddCommand(StopCmd)
 	rootCmd.AddCommand(DaemonStartCmd)
 	rootCmd.AddCommand(DaemonStopCmd)
-	rootCmd.AddCommand(CronStartCmd)
-	rootCmd.AddCommand(CronStopCmd)
 	rootCmd.AddCommand(ScriptCmd)
 	rootCmd.AddCommand(VersionCmd)
 }
@@ -70,8 +65,6 @@ func GetCommandNameMapCobraCmd() map[string]*cobra.Command {
 		command.StopCommandName:        StopCmd,
 		command.DaemonStartCommandName: DaemonStartCmd,
 		command.DaemonStopCommandName:  DaemonStopCmd,
-		command.CronStartCommandName:   CronStartCmd,
-		command.CronStopCommandName:    CronStopCmd,
 		command.ScriptCommandName:      ScriptCmd,
 		command.VersionCommandName:     VersionCmd,
 	}
@@ -213,32 +206,4 @@ func handleExitSignals() {
 		log.SysInfo("server Shutting down gracefully......")
 		os.Exit(0)
 	}()
-}
-
-// registerCronTask 注册cron任务
-func registerCronTask(cronYamlFilePath string) {
-	if system.IsLinux() || system.IsMacos() {
-		var opts []cron.Option
-		opts = append(opts, cron.WithSeconds(), cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
-		systemCronSchedule := cron.New(opts...)
-		_, _ = systemCronSchedule.AddFunc("@every 3s", func() {
-			cronMetaMap, err := crontab.LoadWithCronTaskYamlFile(cronYamlFilePath)
-
-			gutil.Dump(cronMetaMap)
-
-			if err != nil {
-				errorMsg := fmt.Sprintf("Cron LoadWithCronTaskYamlFile error: %s", err.Error())
-				log.FmtPrint(errorMsg)
-				log.SysError(errorMsg)
-				return
-			}
-			crontab.StartScheduleCronTask(cronMetaMap)
-		})
-		systemCronSchedule.Start()
-	} else {
-		infoMsg := fmt.Sprintf("cron server task not support windows system")
-		log.FmtPrint(infoMsg)
-		log.SysInfo(infoMsg)
-	}
-
 }

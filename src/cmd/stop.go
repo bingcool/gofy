@@ -45,8 +45,6 @@ func stopServer() {
 		pidFilePath = viper.GetString("httpServer.pidFilePath")
 	} else if system.IsDaemonService() {
 		pidFilePath = viper.GetString("daemonServer.pidFilePath")
-	} else if system.IsCronService() {
-		pidFilePath = viper.GetString("cronServer.pidFilePath")
 	} else if system.IsScriptService() {
 		pidFilePath = viper.GetString("scriptServer.pidFilePath")
 	} else {
