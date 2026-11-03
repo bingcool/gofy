@@ -1,0 +1,11 @@
+package dto
+
+// HelloRequest is bound from the query string.
+type HelloRequest struct {
+	Name string `form:"name" json:"name" validate:"max=64" message:"max:name must be at most 64 characters"`
+}
+
+// HelloResponse is rendered as the response body.
+type HelloResponse struct {
+	Message string `json:"message"`
+}

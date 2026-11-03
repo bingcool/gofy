@@ -3,3 +3,7 @@
 *.pid
 .idea
 */storage/*
+bin/
+dist/
+coverage.out
+.DS_Store

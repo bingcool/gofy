@@ -1,0 +1,36 @@
+package script
+
+import (
+	"context"
+
+	gofyscript "github.com/bingcool/gofy/script"
+	"github.com/spf13/pflag"
+	"go.uber.org/zap"
+{{- if .WithDB }}
+	"github.com/bingcool/gofy/apperr"
+{{- end }}
+)
+
+// Example is a maintenance script created by the scaffold.
+func Example() gofyscript.Script {
+	return gofyscript.Script{
+		Name:  "example",
+		Short: "example maintenance script",
+		Flags: func(fs *pflag.FlagSet) {
+			fs.String("message", "hello", "message to log")
+		},
+		Run: func(ctx context.Context, rt *gofyscript.Runtime, fs *pflag.FlagSet) error {
+			message, _ := fs.GetString("message")
+			rt.Logger.Info("example script ran", zap.String("message", message))
+{{- if .WithDB }}
+			if rt.DB == nil {
+				return apperr.Internal("database is not configured")
+			}
+			if err := rt.DB.WithContext(ctx).Exec("SELECT 1").Error; err != nil {
+				return apperr.Internal("database check failed").WithCause(err)
+			}
+{{- end }}
+			return nil
+		},
+	}
+}

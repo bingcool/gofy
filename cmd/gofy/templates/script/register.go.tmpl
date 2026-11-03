@@ -1,0 +1,12 @@
+package script
+
+import (
+	gofyscript "github.com/bingcool/gofy/script"
+)
+
+// Register returns the maintenance scripts exposed by `go run . script`.
+func Register() []gofyscript.Script {
+	return []gofyscript.Script{
+		Example(),
+	}
+}

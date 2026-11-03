@@ -1,0 +1,28 @@
+package config
+
+import (
+	"context"
+
+	"github.com/bingcool/gofy"
+	gofyconfig "github.com/bingcool/gofy/config"
+	"github.com/bingcool/gofy/logging"
+{{- if .WithDB }}
+	"github.com/bingcool/gofy/support/mysql"
+{{- end }}
+)
+
+// Config is the application configuration loaded from config.yaml.
+type Config struct {
+	Env     string          `yaml:"env" default:"dev"`
+	HTTP    gofy.HTTPConfig `yaml:"http"`
+	Log     logging.Config  `yaml:"log"`
+{{- if .WithDB }}
+	DB      mysql.Config    `yaml:"db"`
+{{- end }}
+	PIDFile string          `yaml:"pid_file"`
+}
+
+// Load reads and validates the configuration file.
+func Load(ctx context.Context, path string) (*Config, error) {
+	return gofyconfig.Load[Config](ctx, path, gofyconfig.WithStrict(true))
+}

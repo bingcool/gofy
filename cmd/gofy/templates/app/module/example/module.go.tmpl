@@ -1,0 +1,35 @@
+package example
+
+import (
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/transport"
+
+	"{{.Module}}/app/module/example/handler"
+)
+
+// Module registers the example HTTP routes.
+type Module struct{}
+
+// NewModuleFactory builds the module during application startup.
+func NewModuleFactory() gofy.ModuleFactory {
+	return func(_ *gofy.Runtime) (transport.Module, error) {
+		return NewModule(), nil
+	}
+}
+
+// NewModule builds the module without a runtime. It is useful in tests.
+func NewModule() *Module {
+	return &Module{}
+}
+
+// Name satisfies transport.Module.
+func (m *Module) Name() string {
+	return "example"
+}
+
+// Register mounts the module at /api/v1/example.
+func (m *Module) Register(r *transport.Router) error {
+	h := handler.New()
+	transport.GET(r, "/hello", h.Hello)
+	return nil
+}

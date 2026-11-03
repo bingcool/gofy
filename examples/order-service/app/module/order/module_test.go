@@ -1,0 +1,266 @@
+package order_test
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/gofytest"
+	"github.com/yourorg/order-service/app/module/order"
+	"github.com/yourorg/order-service/app/module/order/dto"
+	"github.com/yourorg/order-service/app/module/order/model"
+	"github.com/yourorg/order-service/app/module/order/repository"
+	"github.com/yourorg/order-service/app/module/order/service"
+	"go.uber.org/zap"
+)
+
+type fakeRepository struct {
+	mu     sync.Mutex
+	nextID uint64
+	orders map[uint64]*model.Order
+}
+
+func newFakeRepository() *fakeRepository {
+	return &fakeRepository{nextID: 1, orders: map[uint64]*model.Order{
+		1: {ID: 1, UserID: 100, Amount: 9900, Status: "paid"},
+	}}
+}
+
+func (f *fakeRepository) FindByID(_ context.Context, id uint64) (*model.Order, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id == 9999 {
+		panic("boom: database password is hunter2")
+	}
+	o, ok := f.orders[id]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	cp := *o
+	return &cp, nil
+}
+
+func (f *fakeRepository) Create(_ context.Context, o *model.Order) (*model.Order, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o.ID = f.nextID
+	f.nextID++
+	cp := *o
+	f.orders[o.ID] = &cp
+	return o, nil
+}
+
+func (f *fakeRepository) ListByUser(_ context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var all []model.Order
+	for _, o := range f.orders {
+		if o.UserID == userID {
+			all = append(all, *o)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID > all[j].ID })
+	total := int64(len(all))
+	if offset >= len(all) {
+		return []model.Order{}, total, nil
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[offset:end], total, nil
+}
+
+func (f *fakeRepository) UpdateStatus(_ context.Context, id uint64, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.orders[id]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	o.Status = status
+	return nil
+}
+
+func newTestApp(t *testing.T) *gofytest.App {
+	t.Helper()
+	return newTestAppWithConfig(t, order.Config{})
+}
+
+func newTestAppWithConfig(t *testing.T, cfg order.Config) *gofytest.App {
+	t.Helper()
+	svc := service.New(newFakeRepository(), zap.NewNop(), service.Config{
+		PaymentTimeout: time.Second,
+	})
+	module := order.NewModule(cfg, svc)
+	return gofytest.New(t,
+		gofy.WithName("order-service-test"),
+		gofy.WithModules(module),
+	)
+}
+
+func TestGetOrderContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders/1")
+	gofytest.Status(t, rr, http.StatusOK)
+
+	body := gofytest.RawJSON(t, rr)
+	if body["code"] != float64(0) || body["msg"] != "success" {
+		t.Fatalf("envelope = %v", body)
+	}
+	reqID, _ := body["req_id"].(string)
+	if reqID == "" {
+		t.Fatal("response envelope has no req_id")
+	}
+	if got := rr.Header().Get("X-Request-ID"); got != reqID {
+		t.Fatalf("header req_id = %q, body req_id = %q", got, reqID)
+	}
+
+	order := gofytest.JSON[dto.GetOrderResponse](t, rr)
+	if order.ID != 1 || order.UserID != 100 || order.Amount != 9900 || order.Status != "paid" {
+		t.Fatalf("order = %+v", order)
+	}
+}
+
+func TestGetOrderRequestIDIsPropagated(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders/1", "X-Request-ID", "client-request-id")
+	gofytest.Status(t, rr, http.StatusOK)
+	if got := gofytest.RawJSON(t, rr)["req_id"]; got != "client-request-id" {
+		t.Fatalf("req_id = %v, want client-request-id", got)
+	}
+}
+
+func TestGetOrderValidationContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders/0")
+	gofytest.Status(t, rr, http.StatusBadRequest)
+
+	body := gofytest.RawJSON(t, rr)
+	if body["code"] != float64(40001) || body["msg"] != "invalid argument" {
+		t.Fatalf("envelope = %v", body)
+	}
+	details, _ := body["details"].(map[string]any)
+	if details["id"] != "订单ID不能为空" {
+		t.Fatalf("details = %v", details)
+	}
+}
+
+func TestGetOrderNotFoundContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders/999")
+	gofytest.Status(t, rr, http.StatusNotFound)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40400) {
+		t.Fatalf("code = %v, want 40400", code)
+	}
+}
+
+func TestPanicContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders/9999")
+	gofytest.Status(t, rr, http.StatusInternalServerError)
+
+	body := gofytest.RawJSON(t, rr)
+	if body["code"] != float64(50000) || body["msg"] != "internal server error" {
+		t.Fatalf("envelope = %v", body)
+	}
+	raw := rr.Body.String()
+	if strings.Contains(raw, "hunter2") || strings.Contains(raw, "goroutine") {
+		t.Fatalf("panic response leaked internals: %s", raw)
+	}
+}
+
+func TestCreateOrderContract(t *testing.T) {
+	app := newTestApp(t)
+
+	rr := app.POSTJSON("/api/v1/order/orders", map[string]any{})
+	gofytest.Status(t, rr, http.StatusBadRequest)
+	details, _ := gofytest.RawJSON(t, rr)["details"].(map[string]any)
+	if details["user_id"] != "用户ID不能为空" || details["amount"] != "金额不能为空" {
+		t.Fatalf("details = %v", details)
+	}
+
+	rr = app.POSTJSON("/api/v1/order/orders", map[string]any{"user_id": 100, "amount": 500})
+	gofytest.Status(t, rr, http.StatusOK)
+	created := gofytest.JSON[dto.GetOrderResponse](t, rr)
+	if created.ID == 0 || created.UserID != 100 || created.Amount != 500 || created.Status != "created" {
+		t.Fatalf("created = %+v", created)
+	}
+}
+
+func TestListOrderDefaultsAndPagination(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders?user_id=100")
+	gofytest.Status(t, rr, http.StatusOK)
+
+	list := gofytest.JSON[dto.ListOrderResponse](t, rr)
+	if list.Total != 1 || len(list.Items) != 1 {
+		t.Fatalf("list = %+v", list)
+	}
+
+	rr = app.GET("/api/v1/order/orders?user_id=100&size=101")
+	gofytest.Status(t, rr, http.StatusBadRequest)
+	details, _ := gofytest.RawJSON(t, rr)["details"].(map[string]any)
+	if details["size"] != "每页最多100条" {
+		t.Fatalf("details = %v", details)
+	}
+}
+
+func TestCancelWithoutTokenConfigured(t *testing.T) {
+	app := newTestApp(t)
+
+	rr := app.DELETE("/api/v1/order/orders/1")
+	gofytest.Status(t, rr, http.StatusNoContent)
+	if rr.Body.Len() != 0 {
+		t.Fatalf("204 body = %q", rr.Body.String())
+	}
+
+	rr = app.DELETE("/api/v1/order/orders/999")
+	gofytest.Status(t, rr, http.StatusNotFound)
+}
+
+func TestCancelWithTokenConfigured(t *testing.T) {
+	app := newTestAppWithConfig(t, order.Config{AuthToken: "test-token"})
+
+	rr := app.DELETE("/api/v1/order/orders/1")
+	gofytest.Status(t, rr, http.StatusUnauthorized)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40100) {
+		t.Fatalf("code = %v, want 40100", code)
+	}
+
+	rr = app.DELETE("/api/v1/order/orders/1", "Authorization", "Bearer test-token")
+	gofytest.Status(t, rr, http.StatusNoContent)
+
+	rr = app.DELETE("/api/v1/order/orders/999", "Authorization", "Bearer test-token")
+	gofytest.Status(t, rr, http.StatusNotFound)
+}
+
+func TestVersionAndStopDoNotConnectToDatabase(t *testing.T) {
+	app, err := gofy.New(
+		gofy.WithName("order-service-test"),
+		gofy.WithDatabase(gofy.DatabaseConfig{
+			DSN:         "invalid:invalid@tcp(127.0.0.1:1)/missing?timeout=50ms",
+			PingTimeout: time.Millisecond,
+		}),
+		gofy.WithPIDFile(t.TempDir()+"/missing.pid"),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := app.ExecuteArgs(context.Background(), []string{"version"}); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if err := app.ExecuteArgs(context.Background(), []string{"version", "--json"}); err != nil {
+		t.Fatalf("version --json: %v", err)
+	}
+	err = app.ExecuteArgs(context.Background(), []string{"stop"})
+	if !errors.Is(err, gofy.ErrNotRunning) {
+		t.Fatalf("stop error = %v, want ErrNotRunning", err)
+	}
+}
