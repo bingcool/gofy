@@ -1,3 +1,10 @@
+// Package order wires the demo order module.
+//
+// Layering convention:
+//   - controller speaks the gofy-interface-service contract and never imports model;
+//   - service accepts plain values and returns orderdto.OrderDTO, touching model
+//     only in its DTO conversion;
+//   - repository owns the persistence interface and the model type.
 package order
 
 import (
@@ -7,11 +14,11 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/transport"
 	"github.com/yourorg/demo-service/app/middleware"
-	"github.com/yourorg/demo-service/app/module/order/handler"
+	"github.com/yourorg/demo-service/app/module/order/controller"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-	"gofy/gofy-interface-service/appclient/demoservice"
+	"gofy/gofy-interface-service/appinterface/demoservice"
 )
 
 // Config holds order module settings.
@@ -55,10 +62,12 @@ func NewModule(cfg Config, svc *service.OrderService) *Module {
 	return &Module{svc: svc, auth: middleware.Auth(verify)}
 }
 
+// Name returns the route prefix of the module.
 func (m *Module) Name() string { return "order" }
 
+// Register binds every demoservice contract route to the handler.
 func (m *Module) Register(r *transport.Router) error {
-	h := handler.New(m.svc)
+	h := controller.New(m.svc)
 	return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
 		Auth: m.auth,
 	})

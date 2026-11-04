@@ -1751,8 +1751,8 @@ demo-service/
 │   └── module/
 │       └── order/
 │           ├── module.go
-│           ├── handler/
-│           │   └── order_handler.go
+│           ├── controller/
+│           │   └── order_controller.go
 │           ├── service/
 │           │   └── order_service.go
 │           ├── repository/
@@ -1879,11 +1879,11 @@ import (
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/transport"
     "github.com/yourorg/demo-service/app/middleware"
-    "github.com/yourorg/demo-service/app/module/order/handler"
+    "github.com/yourorg/demo-service/app/module/order/controller"
     "github.com/yourorg/demo-service/app/module/order/repository"
     "github.com/yourorg/demo-service/app/module/order/service"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-    "gofy/gofy-interface-service/appclient/demoservice"
+    "gofy/gofy-interface-service/appinterface/demoservice"
 )
 
 type Config struct {
@@ -1950,12 +1950,12 @@ DELETE /api/v1/order/orders/:id
 
 | 用途 | 包 | 类型 |
 | --- | --- | --- |
-| 请求 | `appclient/demoservice/orderrequest` | `GetOrderRequest`、`ListOrdersRequest`、`CreateOrderRequest`、`CancelOrderRequest` |
-| 响应 | `appclient/demoservice/orderresponse` | `GetOrderResponse`、`CreateOrderResponse` |
+| 请求 | `appinterface/demoservice/orderrequest` | `GetOrderRequest`、`ListOrdersRequest`、`CreateOrderRequest`、`CancelOrderRequest` |
+| 响应 | `appinterface/demoservice/orderresponse` | `GetOrderResponse`、`CreateOrderResponse` |
 | 列表 | `contracts/common/paging` | `ListData[orderdto.OrderDTO]` |
-| DTO | `appclient/demoservice/orderdto` | `OrderDTO` |
-| 枚举 | `appclient/demoservice/orderenum` | `OrderStatus`、`PayType` |
-| 错误 | `appclient/demoservice` | `ErrOrderNotFound`（40401）、`ErrOrderClosed`（40402） |
+| DTO | `appinterface/demoservice/orderdto` | `OrderDTO` |
+| 枚举 | `appinterface/demoservice/orderenum` | `OrderStatus`、`PayType` |
+| 错误 | `appinterface/demoservice` | `ErrOrderNotFound`（40401）、`ErrOrderClosed`（40402） |
 
 `go.mod` 通过 replace 指向同级仓库：
 
@@ -1967,71 +1967,75 @@ replace gofy/gofy-interface-service => ../../../gofy-interface-service
 
 示例因此成为契约的第一个真实消费者：服务端、客户端和文档使用同一组类型，不再出现本地重复 DTO。
 
-### 9.6 `app/module/order/handler/order_handler.go`
+分层约定：
+
+| 层 | 输入/输出 | 约束 |
+| --- | --- | --- |
+| controller | 契约 `orderrequest` / `orderresponse` / `orderdto` | 只做协议转换与错误映射，不导入 `model` |
+| service | 普通值入参，返回 `orderdto.OrderDTO` | 只在 `toDTO` 中接触 `model` |
+| repository | 返回 `model.Order` | 定义持久化接口并持有 `model`，是唯一直接操作 `model` 的层 |
+| model | 仅 repository 内部使用 | 不得出现在 handler、module 或 script 中 |
+
+维护脚本同样通过 repository 访问数据，不直接拼 GORM 查询。
+
+### 9.6 `app/module/order/controller/order_controller.go`
 
 ```go
-package handler
+package controller
 
 import (
     "context"
     "errors"
 
     "github.com/bingcool/gofy/apperr"
-    "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/service"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-    "gofy/gofy-interface-service/appclient/demoservice"
-    "gofy/gofy-interface-service/appclient/demoservice/orderdto"
-    "gofy/gofy-interface-service/appclient/demoservice/orderenum"
-    "gofy/gofy-interface-service/appclient/demoservice/orderrequest"
-    "gofy/gofy-interface-service/appclient/demoservice/orderresponse"
+    "gofy/gofy-interface-service/appinterface/demoservice"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
     "gofy/gofy-interface-service/contracts/common/paging"
-    "gofy/gofy-interface-service/contracts/common/types"
 )
 
-var _ demoservice.Service = (*OrderHandler)(nil)
+var _ demoservice.Service = (*OrderController)(nil)
 
-type OrderHandler struct {
-    svc *service.OrderService
+type OrderController struct {
+    orderService *service.OrderService
 }
 
-func New(svc *service.OrderService) *OrderHandler {
-    return &OrderHandler{svc: svc}
+func New(svc *service.OrderService) *OrderController {
+    return &OrderController{orderService: svc}
 }
 
-func (h *OrderHandler) GetOrder(ctx context.Context, req *orderrequest.GetOrderRequest) (*orderresponse.GetOrderResponse, error) {
-    o, err := h.svc.Get(ctx, req.ID.Uint64())
+func (c *OrderController) GetOrder(ctx context.Context, req *orderrequest.GetOrderRequest) (*orderresponse.GetOrderResponse, error) {
+    o, err := c.orderService.Get(ctx, req.ID.Uint64())
     if err != nil {
         if errors.Is(err, service.ErrOrderNotFound) {
             return nil, gofyadapter.Error(demoservice.ErrOrderNotFound)
         }
         return nil, apperr.Internal("get order failed").WithCause(err)
     }
-    return &orderresponse.GetOrderResponse{Order: toDTO(o)}, nil
+    return &orderresponse.GetOrderResponse{Order: o}, nil
 }
 
-func (h *OrderHandler) ListOrders(ctx context.Context, req *orderrequest.ListOrdersRequest) (*paging.ListData[orderdto.OrderDTO], error) {
-    items, total, err := h.svc.List(ctx, req.UserID.Uint64(), req.Page, req.PageSize)
+func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.ListOrdersRequest) (*paging.ListData[orderdto.OrderDTO], error) {
+    items, total, err := c.orderService.List(ctx, req.UserID.Uint64(), req.Page, req.PageSize)
     if err != nil {
         return nil, apperr.Internal("list orders failed").WithCause(err)
     }
-    list := make([]orderdto.OrderDTO, 0, len(items))
-    for i := range items {
-        list = append(list, *toDTO(&items[i]))
-    }
-    return &paging.ListData[orderdto.OrderDTO]{Total: total, List: list}, nil
+    return &paging.ListData[orderdto.OrderDTO]{Total: total, List: items}, nil
 }
 
-func (h *OrderHandler) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
-    o, err := h.svc.Create(ctx, req.UserID.Uint64(), req.Amount)
+func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
+    o, err := c.orderService.Create(ctx, req.UserID.Uint64(), req.Amount)
     if err != nil {
         return nil, apperr.Internal("create order failed").WithCause(err)
     }
-    return &orderresponse.CreateOrderResponse{Order: toDTO(o)}, nil
+    return &orderresponse.CreateOrderResponse{Order: o}, nil
 }
 
-func (h *OrderHandler) CancelOrder(ctx context.Context, req *orderrequest.CancelOrderRequest) error {
-    if err := h.svc.Cancel(ctx, req.ID.Uint64()); err != nil {
+func (c *OrderController) CancelOrder(ctx context.Context, req *orderrequest.CancelOrderRequest) error {
+    if err := c.orderService.Cancel(ctx, req.ID.Uint64()); err != nil {
         if errors.Is(err, service.ErrOrderNotFound) {
             return gofyadapter.Error(demoservice.ErrOrderNotFound)
         }
@@ -2039,19 +2043,11 @@ func (h *OrderHandler) CancelOrder(ctx context.Context, req *orderrequest.Cancel
     }
     return nil
 }
-
-func toDTO(o *model.Order) *orderdto.OrderDTO {
-    return &orderdto.OrderDTO{
-        ID:        types.Uint64String(o.ID),
-        UserID:    types.Uint64String(o.UserID),
-        Amount:    o.Amount,
-        Status:    orderenum.OrderStatus(o.Status),
-        CreatedAt: o.CreatedAt,
-    }
-}
 ```
 
 方法名必须与契约 `OperationID` 一致（`GetOrder`、`ListOrders`、`CreateOrder`、`CancelOrder`），签名在 `BindAll` 启动时校验。业务错误通过 `gofyadapter.Error(demoservice.ErrOrderNotFound)` 映射为 `40401`，与 OpenAPI 声明保持一致；`CancelOrder` 由契约声明为 `NoContent`，适配器写入 `204`。
+
+controller 只做协议转换，不接触 `model`；`service` 返回 `orderdto.OrderDTO`，`model` 仅在 `repository` 内部使用。
 
 ### 9.7 `app/module/order/service/order_service.go`（节选）
 
@@ -2065,7 +2061,9 @@ import (
     "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/repository"
     "go.uber.org/zap"
-    "gofy/gofy-interface-service/appclient/demoservice/orderenum"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderenum"
+    "gofy/gofy-interface-service/contracts/common/types"
 )
 
 type Config struct {
@@ -2075,12 +2073,12 @@ type Config struct {
 var ErrOrderNotFound = repository.ErrNotFound
 
 type OrderService struct {
-    repo   *repository.OrderRepository
+    repo   repository.OrderRepositoryInterface
     logger *zap.Logger
     cfg    Config
 }
 
-func New(repo *repository.OrderRepository, logger *zap.Logger, cfg Config) *OrderService {
+func New(repo repository.OrderRepositoryInterface, logger *zap.Logger, cfg Config) *OrderService {
     return &OrderService{
         repo:   repo,
         logger: logger.With(zap.String("component", "order.service")),
@@ -2088,24 +2086,51 @@ func New(repo *repository.OrderRepository, logger *zap.Logger, cfg Config) *Orde
     }
 }
 
-func (s *OrderService) Get(ctx context.Context, id uint64) (*model.Order, error) {
-    return s.repo.FindByID(ctx, id)
+func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, error) {
+    o, err := s.repo.FindByID(ctx, id)
+    if err != nil {
+        return nil, err
+    }
+    return toDTO(o), nil
 }
 
-func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*model.Order, error) {
-    return s.repo.Create(ctx, &model.Order{
+func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*orderdto.OrderDTO, error) {
+    o, err := s.repo.Create(ctx, &model.Order{
         UserID: userID,
         Amount: amount,
         Status: string(orderenum.OrderStatusPending),
     })
+    if err != nil {
+        return nil, err
+    }
+    return toDTO(o), nil
 }
 
-func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]model.Order, int64, error) {
-    return s.repo.ListByUser(ctx, userID, (page-1)*size, size)
+func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderdto.OrderDTO, int64, error) {
+    items, total, err := s.repo.ListByUser(ctx, userID, (page-1)*size, size)
+    if err != nil {
+        return nil, 0, err
+    }
+    list := make([]orderdto.OrderDTO, 0, len(items))
+    for i := range items {
+        list = append(list, *toDTO(&items[i]))
+    }
+    return list, total, nil
 }
 
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
     return s.repo.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
+}
+
+// toDTO is the only place service touches the persistence model.
+func toDTO(o *model.Order) *orderdto.OrderDTO {
+    return &orderdto.OrderDTO{
+        ID:        types.Uint64String(o.ID),
+        UserID:    types.Uint64String(o.UserID),
+        Amount:    o.Amount,
+        Status:    orderenum.OrderStatus(o.Status),
+        CreatedAt: o.CreatedAt,
+    }
 }
 ```
 
@@ -2123,11 +2148,22 @@ import (
     "gorm.io/gorm"
 )
 
+// OrderRepositoryInterface is the persistence contract used by the order
+// service. Tests provide their own implementation.
+type OrderRepositoryInterface interface {
+    FindByID(ctx context.Context, id uint64) (*model.Order, error)
+    Create(ctx context.Context, o *model.Order) (*model.Order, error)
+    ListByUser(ctx context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error)
+    UpdateStatus(ctx context.Context, id uint64, status string) error
+}
+
 var ErrNotFound = errors.New("order not found")
 
 type OrderRepository struct {
     db *gorm.DB
 }
+
+var _ OrderRepositoryInterface = (*OrderRepository)(nil)
 
 func New(db *gorm.DB) *OrderRepository {
     return &OrderRepository{db: db}
@@ -2383,14 +2419,14 @@ next steps:
 ### 11.2 业务方测试
 
 ```go
-package handler_test
+package controller_test
 
 import (
     "testing"
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/gofytest"
-    "gofy/gofy-interface-service/appclient/demoservice/orderresponse"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
 )
 
 func TestGetOrder(t *testing.T) {
@@ -2603,7 +2639,7 @@ fi
 | `app/route/build/route.go` | `transport/handler.go` / `bind.go` / `validate.go` | 改为泛型 handler；删除 `panic`、`validator.New()`/请求、`gconv` |
 | `app/route/init.go` | `examples/demo-service/app/module/order/module.go` | 业务路由注册 |
 | `app/route/demo/*` | `examples/demo-service/app/module/order/*` | 改写为 order 示例 |
-| `app/module/demo/controller/order_controller.go` | `examples/demo-service/app/module/order/handler` | 改为 `context.Context` handler |
+| `app/module/demo/controller/order_controller.go` | `examples/demo-service/app/module/order/controller` | 改为 `context.Context` handler |
 | `app/Io/db/mysql.go` | `support/mysql/mysql.go` | 配置驱动、可关闭、可 Ping、无 `sync.Once` |
 | `app/config/db.go` | `examples/demo-service/app/config/config.go` | 业务配置 |
 | `app/repository/tool.go` | `examples/demo-service/app/module/order/repository` | 改写为业务仓储 |

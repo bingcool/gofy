@@ -7,9 +7,8 @@ import (
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/spf13/pflag"
 	"github.com/yourorg/demo-service/app/config"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/repository"
 	"go.uber.org/zap"
-	"gofy/gofy-interface-service/appclient/demoservice/orderenum"
 )
 
 // FixOrder repairs inconsistent order status.
@@ -38,14 +37,11 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 			if rt.DB == nil {
 				return apperr.Internal("database is not configured")
 			}
-			res := rt.DB.WithContext(ctx).
-				Model(&model.Order{}).
-				Where("id = ? AND status = ?", id, string(orderenum.OrderStatusPending)).
-				Update("status", string(orderenum.OrderStatusCancelled))
-			if res.Error != nil {
-				return apperr.Internal("fix order failed").WithCause(res.Error)
+			rows, err := repository.New(rt.DB).CancelPending(ctx, id)
+			if err != nil {
+				return apperr.Internal("fix order failed").WithCause(err)
 			}
-			rt.Logger.Info("order fixed", zap.Uint64("order_id", id), zap.Int64("rows", res.RowsAffected))
+			rt.Logger.Info("order fixed", zap.Uint64("order_id", id), zap.Int64("rows", rows))
 			return nil
 		},
 	}

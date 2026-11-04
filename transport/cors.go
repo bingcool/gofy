@@ -2,6 +2,7 @@ package transport
 
 import (
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -22,10 +23,8 @@ func (c CORSConfig) Validate() error {
 		return errors.New("transport: cors max age must not be negative")
 	}
 	if c.AllowCredentials {
-		for _, origin := range c.AllowOrigins {
-			if origin == "*" {
-				return errors.New(`transport: cors cannot combine AllowCredentials with wildcard origin "*"`)
-			}
+		if slices.Contains(c.AllowOrigins, "*") {
+			return errors.New(`transport: cors cannot combine AllowCredentials with wildcard origin "*"`)
 		}
 	}
 	return nil

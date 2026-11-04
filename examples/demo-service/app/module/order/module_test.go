@@ -17,9 +17,9 @@ import (
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
-	"gofy/gofy-interface-service/appclient/demoservice/orderdto"
-	"gofy/gofy-interface-service/appclient/demoservice/orderenum"
-	"gofy/gofy-interface-service/appclient/demoservice/orderresponse"
+	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
+	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
+	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
 	"gofy/gofy-interface-service/contracts/common/paging"
 )
 
