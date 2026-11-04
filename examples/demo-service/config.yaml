@@ -22,7 +22,7 @@ log:
     max_backups: 7
     compress: true
   base_fields:
-    service: order-service
+    service: demo-service
 
 db:
   dsn: ${ORDER_DB_DSN}
@@ -35,8 +35,8 @@ db:
   log_level: warn
   prepare_stmt: false
 
-pid_file: app/order-service.pid
+pid_file: app/demo-service.pid
 
 order:
   payment_timeout: 3s
-  # auth_token: set to enable bearer-token auth on DELETE
+  # auth_token: set to require a bearer token on every contract route

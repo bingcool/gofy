@@ -6,9 +6,10 @@ import (
 	"github.com/bingcool/gofy/apperr"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/spf13/pflag"
-	"github.com/yourorg/order-service/app/config"
-	"github.com/yourorg/order-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/config"
+	"github.com/yourorg/demo-service/app/module/order/model"
 	"go.uber.org/zap"
+	"gofy/gofy-interface-service/appclient/demoservice/orderenum"
 )
 
 // FixOrder repairs inconsistent order status.
@@ -39,8 +40,8 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 			}
 			res := rt.DB.WithContext(ctx).
 				Model(&model.Order{}).
-				Where("id = ? AND status = ?", id, "created").
-				Update("status", "cancelled")
+				Where("id = ? AND status = ?", id, string(orderenum.OrderStatusPending)).
+				Update("status", string(orderenum.OrderStatusCancelled))
 			if res.Error != nil {
 				return apperr.Internal("fix order failed").WithCause(res.Error)
 			}

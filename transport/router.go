@@ -122,6 +122,20 @@ func (r *Router) Prefix() string { return r.prefix }
 // gofy compatibility promise.
 func (r *Router) Gin() *gin.RouterGroup { return r.group }
 
+// Responder returns the responder configured for this application so adapters
+// can render results with the same envelope.
+func (r *Router) Responder() Responder { return r.engine.responder }
+
+// Validator returns the validator shared by this application.
+func (r *Router) Validator() *validator.Validate { return r.engine.validator }
+
+// BindAndValidate applies defaults, binds path/query/body values and validates
+// req. It is exported for typed adapters that invoke handlers outside the
+// generic helpers.
+func (r *Router) BindAndValidate(c *gin.Context, req any) error {
+	return r.engine.bindAndValidate(c, req)
+}
+
 // NormalizePrefix makes prefix start with "/" and removes a trailing "/".
 // An empty prefix stays empty.
 func NormalizePrefix(prefix string) string {

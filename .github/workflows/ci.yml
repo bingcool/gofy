@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.24", "1.25"]
+        go: ["1.26"]
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
@@ -29,9 +29,21 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test -race -count=1 ./...
-      - name: example module
-        working-directory: examples/order-service
+      - name: prepare sibling contracts
         run: |
+          if [ ! -d ../gofy-interface-service ]; then
+            GIT_TERMINAL_PROMPT=0 git clone --depth 1 \
+              https://github.com/bingcool/gofy-interface-service.git \
+              ../gofy-interface-service || \
+              echo "::warning::gofy-interface-service is not reachable; example module will be skipped"
+          fi
+      - name: example module
+        working-directory: examples/demo-service
+        run: |
+          if [ ! -d ../../../gofy-interface-service ]; then
+            echo "::warning::gofy-interface-service checkout missing; skipping example module"
+            exit 0
+          fi
           go build ./...
           go vet ./...
           go test -race -count=1 ./...
@@ -43,7 +55,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: true
       - name: default project
         run: |
@@ -57,13 +69,13 @@ jobs:
           go vet ./...
       - name: database and docker project
         run: |
-          go run ./cmd/gofy new order-service \
-            --module example.com/order-service \
-            --dir "$RUNNER_TEMP/order-service" \
+          go run ./cmd/gofy new demo-service \
+            --module example.com/demo-service \
+            --dir "$RUNNER_TEMP/demo-service" \
             --replace "$GITHUB_WORKSPACE" \
             --with-db \
             --with-docker
-          cd "$RUNNER_TEMP/order-service"
+          cd "$RUNNER_TEMP/demo-service"
           go mod tidy
           go build ./...
           go vet ./...
@@ -75,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: true
       - name: import direction
         run: ./scripts/check-imports.sh
@@ -94,7 +106,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: true
       - uses: golangci/golangci-lint-action@v6
         with:

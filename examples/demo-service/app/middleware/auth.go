@@ -1,4 +1,4 @@
-// Package middleware contains business middleware for order-service.
+// Package middleware contains business middleware for demo-service.
 package middleware
 
 import (

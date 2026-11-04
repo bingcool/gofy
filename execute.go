@@ -50,6 +50,7 @@ func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 		},
 		Start:              a.Run,
 		Stop:               a.stop,
+		Restart:            a.restart,
 		RunScript:          a.runScript,
 		Version:            a.printVersion,
 		Scripts:            scripts,
@@ -63,7 +64,7 @@ func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 
 func (a *App) isKnownCommand(name string) bool {
 	switch name {
-	case "start", "stop", "script", "version", "help", "completion":
+	case "start", "stop", "restart", "script", "version", "help", "completion":
 		return true
 	}
 	for _, c := range a.opts.commands {

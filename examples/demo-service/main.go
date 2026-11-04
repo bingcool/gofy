@@ -9,9 +9,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/bingcool/gofy"
-	"github.com/yourorg/order-service/app/config"
-	"github.com/yourorg/order-service/app/module/order"
-	appscript "github.com/yourorg/order-service/script"
+	"github.com/yourorg/demo-service/app/config"
+	"github.com/yourorg/demo-service/app/module/order"
+	appscript "github.com/yourorg/demo-service/script"
 )
 
 var (
@@ -30,7 +30,7 @@ func main() {
 	}
 
 	app, err := gofy.New(
-		gofy.WithName("order-service"),
+		gofy.WithName("demo-service"),
 		gofy.WithEnv(cfg.Env),
 		gofy.WithLogConfig(cfg.Log),
 		gofy.WithHTTP(cfg.HTTP),
@@ -54,7 +54,7 @@ func main() {
 	}
 
 	if err := app.Execute(ctx); err != nil {
-		app.Logger().Error("order-service exit", zap.Error(err))
+		app.Logger().Error("demo-service exit", zap.Error(err))
 		os.Exit(gofy.ExitCode(err))
 	}
 }

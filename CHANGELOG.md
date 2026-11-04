@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `restart` subcommand: stops the instance recorded in the pid file (when
+  present), then runs the server in the foreground.
+
+### Changed
+
+- `examples/demo-service` now binds its routes to the `gofy-interface-service`
+  `demoservice` contract; the local `app/module/order/dto` package is gone and
+  responses use the contract envelope shapes (`order`, `paging.ListData`).
+
 ## [1.0.0] - 2026-11-03
 
 ### Added
@@ -24,9 +35,9 @@ All notable changes to this project are documented here. The format follows
   redaction.
 - `script` and `command` registries, `gofytest` helpers, an optional YAML
   loader with `${VAR}` expansion, and pid-file based `stop`.
-- `examples/order-service`, a standalone module demonstrating the full
+- `examples/demo-service`, a standalone module demonstrating the full
   application shape and contract tests.
-- Import/`init()` guards, Makefile and a Go 1.24/1.25 CI matrix.
+- Import/`init()` guards, Makefile and a Go 1.26 CI matrix.
 
 ### Changed
 

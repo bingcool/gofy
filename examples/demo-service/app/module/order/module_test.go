@@ -12,12 +12,15 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
-	"github.com/yourorg/order-service/app/module/order"
-	"github.com/yourorg/order-service/app/module/order/dto"
-	"github.com/yourorg/order-service/app/module/order/model"
-	"github.com/yourorg/order-service/app/module/order/repository"
-	"github.com/yourorg/order-service/app/module/order/service"
+	"github.com/yourorg/demo-service/app/module/order"
+	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/repository"
+	"github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
+	"gofy/gofy-interface-service/appclient/demoservice/orderdto"
+	"gofy/gofy-interface-service/appclient/demoservice/orderenum"
+	"gofy/gofy-interface-service/appclient/demoservice/orderresponse"
+	"gofy/gofy-interface-service/contracts/common/paging"
 )
 
 type fakeRepository struct {
@@ -100,7 +103,7 @@ func newTestAppWithConfig(t *testing.T, cfg order.Config) *gofytest.App {
 	})
 	module := order.NewModule(cfg, svc)
 	return gofytest.New(t,
-		gofy.WithName("order-service-test"),
+		gofy.WithName("demo-service-test"),
 		gofy.WithModules(module),
 	)
 }
@@ -122,9 +125,13 @@ func TestGetOrderContract(t *testing.T) {
 		t.Fatalf("header req_id = %q, body req_id = %q", got, reqID)
 	}
 
-	order := gofytest.JSON[dto.GetOrderResponse](t, rr)
-	if order.ID != 1 || order.UserID != 100 || order.Amount != 9900 || order.Status != "paid" {
-		t.Fatalf("order = %+v", order)
+	resp := gofytest.JSON[orderresponse.GetOrderResponse](t, rr)
+	if resp.Order == nil {
+		t.Fatal("order is nil")
+	}
+	if resp.Order.ID.Uint64() != 1 || resp.Order.UserID.Uint64() != 100 ||
+		resp.Order.Amount != 9900 || resp.Order.Status != orderenum.OrderStatusPaid {
+		t.Fatalf("order = %+v", resp.Order)
 	}
 }
 
@@ -147,7 +154,7 @@ func TestGetOrderValidationContract(t *testing.T) {
 		t.Fatalf("envelope = %v", body)
 	}
 	details, _ := body["details"].(map[string]any)
-	if details["id"] != "订单ID不能为空" {
+	if msg, _ := details["id"].(string); msg == "" {
 		t.Fatalf("details = %v", details)
 	}
 }
@@ -156,8 +163,8 @@ func TestGetOrderNotFoundContract(t *testing.T) {
 	app := newTestApp(t)
 	rr := app.GET("/api/v1/order/orders/999")
 	gofytest.Status(t, rr, http.StatusNotFound)
-	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40400) {
-		t.Fatalf("code = %v, want 40400", code)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40401) {
+		t.Fatalf("code = %v, want 40401", code)
 	}
 }
 
@@ -182,15 +189,25 @@ func TestCreateOrderContract(t *testing.T) {
 	rr := app.POSTJSON("/api/v1/order/orders", map[string]any{})
 	gofytest.Status(t, rr, http.StatusBadRequest)
 	details, _ := gofytest.RawJSON(t, rr)["details"].(map[string]any)
-	if details["user_id"] != "用户ID不能为空" || details["amount"] != "金额不能为空" {
-		t.Fatalf("details = %v", details)
+	for _, field := range []string{"user_id", "amount", "items"} {
+		if msg, _ := details[field].(string); msg == "" {
+			t.Fatalf("details missing %q: %v", field, details)
+		}
 	}
 
-	rr = app.POSTJSON("/api/v1/order/orders", map[string]any{"user_id": 100, "amount": 500})
+	rr = app.POSTJSON("/api/v1/order/orders", map[string]any{
+		"user_id": 100,
+		"amount":  500,
+		"items":   []map[string]any{{"sku_id": 90001, "num": 1}},
+	})
 	gofytest.Status(t, rr, http.StatusOK)
-	created := gofytest.JSON[dto.GetOrderResponse](t, rr)
-	if created.ID == 0 || created.UserID != 100 || created.Amount != 500 || created.Status != "created" {
-		t.Fatalf("created = %+v", created)
+	created := gofytest.JSON[orderresponse.CreateOrderResponse](t, rr)
+	if created.Order == nil {
+		t.Fatal("created order is nil")
+	}
+	if created.Order.ID.Uint64() == 0 || created.Order.UserID.Uint64() != 100 ||
+		created.Order.Amount != 500 || created.Order.Status != orderenum.OrderStatusPending {
+		t.Fatalf("created = %+v", created.Order)
 	}
 }
 
@@ -199,15 +216,18 @@ func TestListOrderDefaultsAndPagination(t *testing.T) {
 	rr := app.GET("/api/v1/order/orders?user_id=100")
 	gofytest.Status(t, rr, http.StatusOK)
 
-	list := gofytest.JSON[dto.ListOrderResponse](t, rr)
-	if list.Total != 1 || len(list.Items) != 1 {
+	list := gofytest.JSON[paging.ListData[orderdto.OrderDTO]](t, rr)
+	if list.Total != 1 || len(list.List) != 1 {
 		t.Fatalf("list = %+v", list)
 	}
+	if list.List[0].ID.Uint64() != 1 || list.List[0].Status != orderenum.OrderStatusPaid {
+		t.Fatalf("first order = %+v", list.List[0])
+	}
 
-	rr = app.GET("/api/v1/order/orders?user_id=100&size=101")
+	rr = app.GET("/api/v1/order/orders?user_id=100&page_size=101")
 	gofytest.Status(t, rr, http.StatusBadRequest)
 	details, _ := gofytest.RawJSON(t, rr)["details"].(map[string]any)
-	if details["size"] != "每页最多100条" {
+	if msg, _ := details["page_size"].(string); msg == "" {
 		t.Fatalf("details = %v", details)
 	}
 }
@@ -223,6 +243,9 @@ func TestCancelWithoutTokenConfigured(t *testing.T) {
 
 	rr = app.DELETE("/api/v1/order/orders/999")
 	gofytest.Status(t, rr, http.StatusNotFound)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40401) {
+		t.Fatalf("code = %v, want 40401", code)
+	}
 }
 
 func TestCancelWithTokenConfigured(t *testing.T) {
@@ -239,11 +262,14 @@ func TestCancelWithTokenConfigured(t *testing.T) {
 
 	rr = app.DELETE("/api/v1/order/orders/999", "Authorization", "Bearer test-token")
 	gofytest.Status(t, rr, http.StatusNotFound)
+
+	rr = app.GET("/api/v1/order/orders/1")
+	gofytest.Status(t, rr, http.StatusUnauthorized)
 }
 
 func TestVersionAndStopDoNotConnectToDatabase(t *testing.T) {
 	app, err := gofy.New(
-		gofy.WithName("order-service-test"),
+		gofy.WithName("demo-service-test"),
 		gofy.WithDatabase(gofy.DatabaseConfig{
 			DSN:         "invalid:invalid@tcp(127.0.0.1:1)/missing?timeout=50ms",
 			PingTimeout: time.Millisecond,

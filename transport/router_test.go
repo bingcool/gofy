@@ -75,6 +75,27 @@ func codeOf(t *testing.T, body map[string]any) int {
 	return int(raw)
 }
 
+func TestRouterExposesResponderValidatorAndBinding(t *testing.T) {
+	_, router := newEngine(t, transport.RouterConfig{Prefix: "/api/v1"})
+	if router.Responder() == nil {
+		t.Fatal("Responder() is nil")
+	}
+	if router.Validator() == nil {
+		t.Fatal("Validator() is nil")
+	}
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(`{"user_id":3,"amount":10}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	var req createRequest
+	if err := router.BindAndValidate(c, &req); err != nil {
+		t.Fatalf("BindAndValidate: %v", err)
+	}
+	if req.UserID != 3 || req.Amount != 10 {
+		t.Fatalf("req = %+v", req)
+	}
+}
+
 func TestNormalizePrefix(t *testing.T) {
 	cases := map[string]string{
 		"":            "",

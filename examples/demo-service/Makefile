@@ -1,4 +1,4 @@
-APP      := order-service
+APP      := demo-service
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_AT ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -13,10 +13,10 @@ test:
 	go test -race -count=1 ./...
 
 run:
-	ORDER_DB_DSN="$${ORDER_DB_DSN:?set ORDER_DB_DSN}" go run . start
+	go run . start
 
 script:
-	ORDER_DB_DSN="$${ORDER_DB_DSN:?set ORDER_DB_DSN}" go run . script $(ARGS)
+	go run . script $(ARGS)
 
 docker:
 	docker build -t $(APP):$(VERSION) .

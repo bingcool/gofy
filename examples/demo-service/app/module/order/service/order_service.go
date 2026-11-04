@@ -4,9 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/yourorg/order-service/app/module/order/model"
-	"github.com/yourorg/order-service/app/module/order/repository"
+	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/repository"
 	"go.uber.org/zap"
+	"gofy/gofy-interface-service/appclient/demoservice/orderenum"
 )
 
 // Config holds order service settings.
@@ -54,7 +55,11 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*model.Order, error)
 
 func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*model.Order, error) {
 	s.logger.Debug("create order", zap.Uint64("user_id", userID), zap.Int64("amount", amount))
-	return s.repo.Create(ctx, &model.Order{UserID: userID, Amount: amount, Status: "created"})
+	return s.repo.Create(ctx, &model.Order{
+		UserID: userID,
+		Amount: amount,
+		Status: string(orderenum.OrderStatusPending),
+	})
 }
 
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]model.Order, int64, error) {
@@ -62,5 +67,5 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 }
 
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-	return s.repo.UpdateStatus(ctx, id, "cancelled")
+	return s.repo.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
 }

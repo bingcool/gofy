@@ -1,7 +1,7 @@
 GO      ?= go
 GOFLAGS ?=
 PKGS    := ./...
-EXAMPLE := examples/order-service
+EXAMPLE := examples/demo-service
 
 .PHONY: all fmt fmt-check vet test test-race example guards check build clean
 
@@ -11,7 +11,7 @@ fmt:
 	gofmt -l -w .
 
 fmt-check:
-	@files="$$(gofmt -l . | grep -v '^examples/order-service/go.sum$$' || true)"; \
+	@files="$$(gofmt -l . | grep -v '^examples/demo-service/go.sum$$' || true)"; \
 	if [ -n "$$files" ]; then echo "gofmt required:"; echo "$$files"; exit 1; fi
 
 vet:

@@ -29,6 +29,7 @@ var reservedNames = map[string]struct{}{
 	"list":       {},
 	"help":       {},
 	"completion": {},
+	"restart":    {},
 }
 
 // Validate checks names, reserved words, duplicates and required fields.

@@ -2,7 +2,7 @@ package script
 
 import (
 	gofyscript "github.com/bingcool/gofy/script"
-	"github.com/yourorg/order-service/app/config"
+	"github.com/yourorg/demo-service/app/config"
 )
 
 func Register(cfg *config.Config) []gofyscript.Script {

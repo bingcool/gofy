@@ -6,7 +6,7 @@ import (
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logging"
-	"github.com/yourorg/order-service/app/module/order"
+	"github.com/yourorg/demo-service/app/module/order"
 )
 
 type Config struct {

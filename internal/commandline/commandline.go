@@ -44,6 +44,7 @@ type Deps struct {
 
 	Start     func(ctx context.Context) error
 	Stop      func(ctx context.Context, opts StopOptions) error
+	Restart   func(ctx context.Context, opts StopOptions) error
 	RunScript func(ctx context.Context, name string, args []string) error
 	Version   func(ctx context.Context, jsonOutput bool) error
 
@@ -89,6 +90,7 @@ func Build(d Deps) *cobra.Command {
 
 	root.AddCommand(newStartCmd(d))
 	root.AddCommand(newStopCmd(d))
+	root.AddCommand(newRestartCmd(d))
 	root.AddCommand(newScriptCmd(d))
 	root.AddCommand(newVersionCmd(d))
 	for _, spec := range d.Commands {
@@ -118,10 +120,7 @@ func noArgs(d Deps, name string) cobra.PositionalArgs {
 }
 
 func newStopCmd(d Deps) *cobra.Command {
-	opts := StopOptions{
-		PIDFile: d.DefaultPIDFile,
-		Timeout: d.DefaultStopTimeout,
-	}
+	opts := newStopOptions(d)
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop a running instance using its pid file",
@@ -130,10 +129,35 @@ func newStopCmd(d Deps) *cobra.Command {
 			return d.Stop(cmd.Context(), opts)
 		},
 	}
+	addStopFlags(cmd, &opts)
+	return cmd
+}
+
+func newRestartCmd(d Deps) *cobra.Command {
+	opts := newStopOptions(d)
+	cmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Stop the running instance, then start in the foreground",
+		Args:  noArgs(d, "restart"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return d.Restart(cmd.Context(), opts)
+		},
+	}
+	addStopFlags(cmd, &opts)
+	return cmd
+}
+
+func newStopOptions(d Deps) StopOptions {
+	return StopOptions{
+		PIDFile: d.DefaultPIDFile,
+		Timeout: d.DefaultStopTimeout,
+	}
+}
+
+func addStopFlags(cmd *cobra.Command, opts *StopOptions) {
 	cmd.Flags().StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "path to the pid file")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "how long to wait for the process to exit")
 	cmd.Flags().BoolVar(&opts.Force, "force", false, "send SIGKILL when the timeout expires")
-	return cmd
 }
 
 func newScriptCmd(d Deps) *cobra.Command {

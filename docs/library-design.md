@@ -2,7 +2,9 @@
 
 > 状态：**已锁定**（2026-11-03）
 >
-> 关联文档：[架构与设计评审](./architecture-review.md)
+> 关联文档：[架构与设计评审](./architecture-review.md)、[gofy-library 设计](./gofy-library-design.md)、[gofy-interface-service 设计](./gofy-interface-service-design.md)
+>
+> 生态中有三个仓库：本仓库 `gofy`（框架）、`gofy-library`（可选组件库，零依赖 gofy）、`gofy-interface-service`（契约仓库）。三者互不反向依赖，业务服务按需组合。
 >
 > 本文的结论只有一个：**gofy 是一个 Go library / package，业务项目是独立的 Go module，通过 `go get github.com/bingcool/gofy` 依赖它。** 本文不再讨论"项目模板"与"library"的取舍，只描述 library 形态下每一个包、每一个导出符号、每一条运行时语义应该如何设计。
 >
@@ -12,7 +14,7 @@
 > - 锁定 library-first，删除"项目模板 / library 二选一"的讨论；
 > - 补全每个公共包的导出 API、默认值、校验规则与错误语义；
 > - 补全 CLI、生命周期、配置、HTTP 请求/响应契约；
-> - 增加完整 `order-service` 示例、`gofy new` 脚手架、CI、逐文件迁移与验收清单；
+> - 增加完整 `demo-service` 示例、`gofy new` 脚手架、CI、逐文件迁移与验收清单；
 > - 明确移除 `viper`、`gogf/gf`、`go-daemon`、`robfig/cron` 等不适用于 library 的依赖。
 
 ---
@@ -27,7 +29,7 @@
 6. [配置规范](#6-配置规范)
 7. [HTTP 请求与响应契约](#7-http-请求与响应契约)
 8. [并发、资源所有权与优雅关停](#8-并发资源所有权与优雅关停)
-9. [order-service 完整接入示例](#9-order-service-完整接入示例)
+9. [demo-service 完整接入示例](#9-demo-service-完整接入示例)
 10. [脚手架 gofy new](#10-脚手架-gofy-new)
 11. [测试策略](#11-测试策略)
 12. [版本、CI 与发布](#12-版本ci-与发布)
@@ -44,19 +46,20 @@
 | # | 决策 | 结果 |
 | --- | --- | --- |
 | D1 | gofy 的发布形态 | 只作为 library / package，不维护项目模板 |
-| D2 | 业务项目形态 | 独立 module，如 `github.com/yourorg/order-service` |
+| D2 | 业务项目形态 | 独立 module，如 `github.com/yourorg/demo-service` |
 | D3 | 业务入口 | 业务方拥有 `main.go`，调用 `gofy.New(...)` / `app.Execute(ctx)` |
 | D4 | 业务目录 | 业务方自己创建 `app/`、`script/`，gofy 不感知其内部结构 |
 | D5 | 配置所有权 | 业务方拥有配置文件和配置结构；gofy 只定义自身需要的配置 |
 | D6 | 生命周期 | `New` 无副作用；`Run` / `Execute` 启动；`Shutdown` 幂等关闭 |
 | D7 | 全局状态 | 公共包内禁止 `init()` 副作用、禁止包级可变单例 |
 | D8 | 退出 | 库不调用 `os.Exit`；由业务 `main` 根据返回的 `error` 决定退出码 |
-| D9 | 示例 | 仓库保留 `examples/order-service`，独立 module，CI 中随框架编译 |
+| D9 | 示例 | 仓库保留 `examples/demo-service`，独立 module，CI 中随框架编译 |
 | D10 | 脚手架 | 提供 `gofy new <service>`，生成业务项目骨架 |
 | D11 | 定时任务系统 | 不在 gofy 内实现；由业务或外部调度系统负责 |
 | D12 | 守护进程 | v1 不内置 daemon；推荐 systemd / 容器编排；`start/stop` 只做前台进程 + pid |
 | D13 | 代码生成 | 不在 gofy 内实现；DAO 由业务使用 `bingcool/gen` 等工具生成 |
 | D14 | 兼容目标 | v1 提供稳定公共 API；内部实现可自由重构 |
+| D15 | 可选组件库 | Redis、对象存储、短信、队列等不进 gofy 核心，统一放 `gofy-library`；gofy 不依赖它 |
 
 ### 1.2 目标
 
@@ -82,7 +85,7 @@
 
 ```go
 app, _ := gofy.New(
-    gofy.WithName("order-service"),
+    gofy.WithName("demo-service"),
     gofy.WithHTTP(gofy.HTTPConfig{Port: 8080}),
     gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order)),
 )
@@ -105,7 +108,7 @@ github.com/bingcool/gofy/
 ├── option.go                    # Option 与全部 WithXxx
 ├── config.go                    # HTTPConfig、CORSConfig、VersionInfo、Runtime 别名
 ├── errors.go                    # 哨兵错误、ExitCode
-├── run.go                       # HTTP 运行、模块构建、优雅关停
+├── start.go                     # HTTP 运行、模块构建、优雅关停
 ├── execute.go                   # CLI 分发：start/stop/script/version/自定义
 ├── stop.go                      # start/stop 的进程控制
 ├── signal.go                    # SignalContext 辅助函数
@@ -150,7 +153,7 @@ github.com/bingcool/gofy/
 │       ├── main.go              # 脚手架入口（go install github.com/bingcool/gofy/cmd/gofy@latest）
 │       └── templates/           # go:embed 模板
 ├── examples/
-│   └── order-service/           # 独立 module，通过 replace 指向 ../..
+│   └── demo-service/           # 独立 module，通过 replace 指向 ../..
 ├── docs/
 │   ├── architecture-review.md
 │   └── library-design.md
@@ -164,7 +167,7 @@ github.com/bingcool/gofy/
 - **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`transport`、`logging`、`support/mysql`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
-- `examples/order-service` 是**独立 module**，不进入 gofy 的依赖图。
+- `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
 
 ### 2.2 包依赖图
 
@@ -1055,9 +1058,9 @@ func Validate(cmds []Command, reserved ...string) error
 约束：
 
 - `Use` 只允许单个单词（不含空格）；`Use: "migrate up"` 属于错误用法；
-- 保留名：`start`、`stop`、`script`、`version`、`help`、`completion`；
+- 保留名：`start`、`stop`、`restart`、`script`、`version`、`help`、`completion`、`list`；
 - 名称唯一；
-- 自定义命令挂在根命令下，例如 `order-service migrate`。
+- 自定义命令挂在根命令下，例如 `demo-service migrate`。
 
 ### 3.10 `config`
 
@@ -1174,6 +1177,7 @@ func RawJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any
 | --- | --- | --- | --- |
 | `app start` | 是 | 配置了才连 | 默认命令；前台运行 HTTP |
 | `app stop` | 否 | 否 | 读取 pid，发送 SIGTERM，等待退出 |
+| `app restart` | 是 | 配置了才连 | 先 stop（无实例时忽略），再前台 start |
 | `app script <name>` | 是 | 配置了才连（可 opt-out） | 执行注册脚本 |
 | `app script --list` | 否 | 否 | 列出脚本名与描述 |
 | `app version` | 否 | 否 | 输出 `VersionInfo` |
@@ -1187,13 +1191,17 @@ func RawJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any
 - 配置由业务在 `New` 之前加载；
 - 如果部署需要覆盖端口，使用环境变量 + `${VAR}` 展开，或在业务 `main` 里处理。
 
-`stop` 参数：
+`stop` / `restart` 参数：
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--pid-file` | `WithPIDFile` 的值 | 覆盖 pid 路径 |
 | `--timeout` | `WithShutdownTimeout` | 等待进程退出的时间 |
 | `--force` | `false` | 超时后发送 SIGKILL（危险，显式开启） |
+
+`restart` 不改变"无 daemon"的定位：它在当前进程内先停旧实例，再以**前台**方式
+启动；没有运行中的实例（`ErrNotRunning`）、未启用 pid 文件
+（`ErrPIDFileDisabled`）或平台不支持 `stop`（`ErrUnsupported`）时直接启动。
 
 ### 4.2 参数解析规则
 
@@ -1328,6 +1336,19 @@ Execute("stop")
 - Windows 上 `stop` 返回 `ErrUnsupported`，推荐使用服务管理器停止；
 - `start` 在 Windows 上可以正常工作。
 
+### 5.3.1 `restart` 的流程
+
+```text
+Execute("restart")
+  │
+  ├─ 1. 复用 stop 的 --pid-file / --timeout / --force
+  ├─ 2. stop
+  │      - 成功 -> 继续
+  │      - ErrNotRunning / ErrPIDFileDisabled / ErrUnsupported -> 忽略
+  │      - 其他错误（含 ErrStopTimeout）-> 返回，不启动新实例
+  └─ 3. Run(ctx) 前台启动
+```
+
 ### 5.4 pid 文件
 
 | 项目 | 规则 |
@@ -1421,7 +1442,7 @@ func (c HTTPConfig) Validate() error
 ### 6.3 业务配置示例
 
 ```go
-// order-service/app/config/config.go
+// demo-service/app/config/config.go
 package config
 
 import (
@@ -1430,7 +1451,7 @@ import (
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logging"
-    "github.com/yourorg/order-service/app/module/order"
+    "github.com/yourorg/demo-service/app/module/order"
 )
 
 type Config struct {
@@ -1464,9 +1485,9 @@ log:
   encoding: json
   outputs:
     - stdout
-    - /var/log/order-service/app.log
+    - /var/log/demo-service/app.log
   error_outputs:
-    - /var/log/order-service/error.log
+    - /var/log/demo-service/error.log
   rotation:
     enabled: true
     max_size_mb: 100
@@ -1474,7 +1495,7 @@ log:
     max_backups: 7
     compress: true
   base_fields:
-    service: order-service
+    service: demo-service
     env: prod
 
 db:
@@ -1484,7 +1505,7 @@ db:
   conn_max_lifetime: 1h
   ping_timeout: 5s
 
-pid_file: /var/run/order-service.pid
+pid_file: /var/run/demo-service.pid
 
 order:
   payment_timeout: 3s
@@ -1694,24 +1715,28 @@ func (m *Module) Stop(ctx context.Context) error {
 
 ---
 
-## 9. order-service 完整接入示例
+## 9. demo-service 完整接入示例
 
 ### 9.1 module 与目录
 
 ```go
-// order-service/go.mod
-module github.com/yourorg/order-service
+// demo-service/go.mod
+module github.com/yourorg/demo-service
 
-go 1.24
+go 1.26.0
 
-require github.com/bingcool/gofy v1.0.0
+require (
+    github.com/bingcool/gofy v1.0.0
+    gofy/gofy-interface-service v0.1.0
+)
 
 // 本地联调：
 // replace github.com/bingcool/gofy => ../gofy
+// replace gofy/gofy-interface-service => ../gofy-interface-service
 ```
 
 ```text
-order-service/
+demo-service/
 ├── go.mod
 ├── go.sum
 ├── main.go
@@ -1726,8 +1751,6 @@ order-service/
 │   └── module/
 │       └── order/
 │           ├── module.go
-│           ├── dto/
-│           │   └── order.go
 │           ├── handler/
 │           │   └── order_handler.go
 │           ├── service/
@@ -1757,9 +1780,9 @@ import (
     "go.uber.org/zap"
 
     "github.com/bingcool/gofy"
-    "github.com/yourorg/order-service/app/config"
-    "github.com/yourorg/order-service/app/module/order"
-    appscript "github.com/yourorg/order-service/script"
+    "github.com/yourorg/demo-service/app/config"
+    "github.com/yourorg/demo-service/app/module/order"
+    appscript "github.com/yourorg/demo-service/script"
 )
 
 var (
@@ -1778,7 +1801,7 @@ func main() {
     }
 
     app, err := gofy.New(
-        gofy.WithName("order-service"),
+        gofy.WithName("demo-service"),
         gofy.WithEnv(cfg.Env),
         gofy.WithLogConfig(cfg.Log),
         gofy.WithHTTP(cfg.HTTP),
@@ -1801,7 +1824,7 @@ func main() {
     }
 
     if err := app.Execute(ctx); err != nil {
-        app.Logger().Error("order-service exit", zap.Error(err))
+        app.Logger().Error("demo-service exit", zap.Error(err))
         os.Exit(gofy.ExitCode(err))
     }
 }
@@ -1827,7 +1850,7 @@ import (
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logging"
-    "github.com/yourorg/order-service/app/module/order"
+    "github.com/yourorg/demo-service/app/module/order"
 )
 
 type Config struct {
@@ -1851,22 +1874,27 @@ package order
 
 import (
     "errors"
-    "net/http"
     "time"
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/transport"
-    "github.com/yourorg/order-service/app/module/order/handler"
-    "github.com/yourorg/order-service/app/module/order/repository"
-    "github.com/yourorg/order-service/app/module/order/service"
+    "github.com/yourorg/demo-service/app/middleware"
+    "github.com/yourorg/demo-service/app/module/order/handler"
+    "github.com/yourorg/demo-service/app/module/order/repository"
+    "github.com/yourorg/demo-service/app/module/order/service"
+    gofyadapter "gofy/gofy-interface-service/adapter/gofy"
+    "gofy/gofy-interface-service/appclient/demoservice"
 )
 
 type Config struct {
     PaymentTimeout time.Duration `yaml:"payment_timeout" default:"3s"`
+    // 非空时所有契约路由都要求该 Bearer Token；为空则跳过校验。
+    AuthToken string `yaml:"auth_token"`
 }
 
 type Module struct {
-    svc *service.OrderService
+    svc  *service.OrderService
+    auth transport.Middleware
 }
 
 func NewModuleFactory(cfg Config) gofy.ModuleFactory {
@@ -1878,21 +1906,34 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
         svc := service.New(repo, rt.Logger, service.Config{
             PaymentTimeout: cfg.PaymentTimeout,
         })
-        return &Module{svc: svc}, nil
+        return NewModule(cfg, svc), nil
     }
+}
+
+func NewModule(cfg Config, svc *service.OrderService) *Module {
+    verify := func(string) error { return nil }
+    if cfg.AuthToken != "" {
+        verify = func(token string) error {
+            if token != cfg.AuthToken {
+                return errors.New("invalid token")
+            }
+            return nil
+        }
+    }
+    return &Module{svc: svc, auth: middleware.Auth(verify)}
 }
 
 func (m *Module) Name() string { return "order" }
 
 func (m *Module) Register(r *transport.Router) error {
     h := handler.New(m.svc)
-    transport.GET(r, "/orders/:id", h.Get)
-    transport.POST(r, "/orders", h.Create)
-    transport.GET(r, "/orders", h.List)
-    transport.NoContent(r, http.MethodDelete, "/orders/:id", h.Cancel)
-    return nil
+    return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
+        Auth: m.auth,
+    })
 }
 ```
+
+`BindAll` 校验并注册 `demoservice.Routes()`：路由路径、`{id}` 占位符、方法签名和 `AuthRequired` 都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`。
 
 最终路由：
 
@@ -1903,38 +1944,28 @@ GET    /api/v1/order/orders
 DELETE /api/v1/order/orders/:id
 ```
 
-### 9.5 `app/module/order/dto/order.go`
+### 9.5 请求/响应类型（来自 `gofy-interface-service`）
+
+示例服务不保留 `app/module/order/dto`。所有载荷类型由公共契约层提供：
+
+| 用途 | 包 | 类型 |
+| --- | --- | --- |
+| 请求 | `appclient/demoservice/orderrequest` | `GetOrderRequest`、`ListOrdersRequest`、`CreateOrderRequest`、`CancelOrderRequest` |
+| 响应 | `appclient/demoservice/orderresponse` | `GetOrderResponse`、`CreateOrderResponse` |
+| 列表 | `contracts/common/paging` | `ListData[orderdto.OrderDTO]` |
+| DTO | `appclient/demoservice/orderdto` | `OrderDTO` |
+| 枚举 | `appclient/demoservice/orderenum` | `OrderStatus`、`PayType` |
+| 错误 | `appclient/demoservice` | `ErrOrderNotFound`（40401）、`ErrOrderClosed`（40402） |
+
+`go.mod` 通过 replace 指向同级仓库：
 
 ```go
-package dto
+require gofy/gofy-interface-service v0.0.0
 
-type GetOrderRequest struct {
-    ID uint64 `uri:"id" validate:"required,min=1" message:"required:订单ID不能为空,min:订单ID非法"`
-}
-
-type GetOrderResponse struct {
-    ID     uint64 `json:"id"`
-    UserID uint64 `json:"user_id"`
-    Amount int64  `json:"amount"`
-    Status string `json:"status"`
-}
-
-type CreateOrderRequest struct {
-    UserID uint64 `json:"user_id" validate:"required,min=1" message:"required:用户ID不能为空,min:用户ID非法"`
-    Amount int64  `json:"amount" validate:"required,min=1" message:"required:金额不能为空,min:金额必须大于0"`
-}
-
-type ListOrderRequest struct {
-    UserID uint64 `form:"user_id" validate:"required,min=1" message:"required:用户ID不能为空,min:用户ID非法"`
-    Page   int    `form:"page" default:"1" validate:"min=1" message:"min:页码必须大于0"`
-    Size   int    `form:"size" default:"20" validate:"min=1,max=100" message:"min:每页至少1条,max:每页最多100条"`
-}
-
-type ListOrderResponse struct {
-    Items []GetOrderResponse `json:"items"`
-    Total int64              `json:"total"`
-}
+replace gofy/gofy-interface-service => ../../../gofy-interface-service
 ```
+
+示例因此成为契约的第一个真实消费者：服务端、客户端和文档使用同一组类型，不再出现本地重复 DTO。
 
 ### 9.6 `app/module/order/handler/order_handler.go`
 
@@ -1946,9 +1977,19 @@ import (
     "errors"
 
     "github.com/bingcool/gofy/apperr"
-    "github.com/yourorg/order-service/app/module/order/dto"
-    "github.com/yourorg/order-service/app/module/order/service"
+    "github.com/yourorg/demo-service/app/module/order/model"
+    "github.com/yourorg/demo-service/app/module/order/service"
+    gofyadapter "gofy/gofy-interface-service/adapter/gofy"
+    "gofy/gofy-interface-service/appclient/demoservice"
+    "gofy/gofy-interface-service/appclient/demoservice/orderdto"
+    "gofy/gofy-interface-service/appclient/demoservice/orderenum"
+    "gofy/gofy-interface-service/appclient/demoservice/orderrequest"
+    "gofy/gofy-interface-service/appclient/demoservice/orderresponse"
+    "gofy/gofy-interface-service/contracts/common/paging"
+    "gofy/gofy-interface-service/contracts/common/types"
 )
+
+var _ demoservice.Service = (*OrderHandler)(nil)
 
 type OrderHandler struct {
     svc *service.OrderService
@@ -1958,68 +1999,59 @@ func New(svc *service.OrderService) *OrderHandler {
     return &OrderHandler{svc: svc}
 }
 
-func (h *OrderHandler) Get(ctx context.Context, req *dto.GetOrderRequest) (*dto.GetOrderResponse, error) {
-    o, err := h.svc.Get(ctx, req.ID)
+func (h *OrderHandler) GetOrder(ctx context.Context, req *orderrequest.GetOrderRequest) (*orderresponse.GetOrderResponse, error) {
+    o, err := h.svc.Get(ctx, req.ID.Uint64())
     if err != nil {
         if errors.Is(err, service.ErrOrderNotFound) {
-            return nil, apperr.NotFound("order not found")
+            return nil, gofyadapter.Error(demoservice.ErrOrderNotFound)
         }
         return nil, apperr.Internal("get order failed").WithCause(err)
     }
-    return &dto.GetOrderResponse{
-        ID:     o.ID,
-        UserID: o.UserID,
-        Amount: o.Amount,
-        Status: o.Status,
-    }, nil
+    return &orderresponse.GetOrderResponse{Order: toDTO(o)}, nil
 }
 
-func (h *OrderHandler) Create(ctx context.Context, req *dto.CreateOrderRequest) (*dto.GetOrderResponse, error) {
-    o, err := h.svc.Create(ctx, req.UserID, req.Amount)
-    if err != nil {
-        return nil, apperr.Internal("create order failed").WithCause(err)
-    }
-    return &dto.GetOrderResponse{
-        ID:     o.ID,
-        UserID: o.UserID,
-        Amount: o.Amount,
-        Status: o.Status,
-    }, nil
-}
-
-func (h *OrderHandler) List(ctx context.Context, req *dto.ListOrderRequest) (*dto.ListOrderResponse, error) {
-    items, total, err := h.svc.List(ctx, req.UserID, req.Page, req.Size)
+func (h *OrderHandler) ListOrders(ctx context.Context, req *orderrequest.ListOrdersRequest) (*paging.ListData[orderdto.OrderDTO], error) {
+    items, total, err := h.svc.List(ctx, req.UserID.Uint64(), req.Page, req.PageSize)
     if err != nil {
         return nil, apperr.Internal("list orders failed").WithCause(err)
     }
-    res := make([]dto.GetOrderResponse, 0, len(items))
-    for _, o := range items {
-        res = append(res, dto.GetOrderResponse{
-            ID:     o.ID,
-            UserID: o.UserID,
-            Amount: o.Amount,
-            Status: o.Status,
-        })
+    list := make([]orderdto.OrderDTO, 0, len(items))
+    for i := range items {
+        list = append(list, *toDTO(&items[i]))
     }
-    return &dto.ListOrderResponse{Items: res, Total: total}, nil
+    return &paging.ListData[orderdto.OrderDTO]{Total: total, List: list}, nil
 }
 
-func (h *OrderHandler) Cancel(ctx context.Context, req *dto.GetOrderRequest) error {
-    if err := h.svc.Cancel(ctx, req.ID); err != nil {
+func (h *OrderHandler) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
+    o, err := h.svc.Create(ctx, req.UserID.Uint64(), req.Amount)
+    if err != nil {
+        return nil, apperr.Internal("create order failed").WithCause(err)
+    }
+    return &orderresponse.CreateOrderResponse{Order: toDTO(o)}, nil
+}
+
+func (h *OrderHandler) CancelOrder(ctx context.Context, req *orderrequest.CancelOrderRequest) error {
+    if err := h.svc.Cancel(ctx, req.ID.Uint64()); err != nil {
         if errors.Is(err, service.ErrOrderNotFound) {
-            return apperr.NotFound("order not found")
+            return gofyadapter.Error(demoservice.ErrOrderNotFound)
         }
         return apperr.Internal("cancel order failed").WithCause(err)
     }
     return nil
 }
+
+func toDTO(o *model.Order) *orderdto.OrderDTO {
+    return &orderdto.OrderDTO{
+        ID:        types.Uint64String(o.ID),
+        UserID:    types.Uint64String(o.UserID),
+        Amount:    o.Amount,
+        Status:    orderenum.OrderStatus(o.Status),
+        CreatedAt: o.CreatedAt,
+    }
+}
 ```
 
-`Cancel` 使用 `transport.NoContent` 注册：
-
-```go
-transport.NoContent(r, http.MethodDelete, "/orders/:id", h.Cancel)
-```
+方法名必须与契约 `OperationID` 一致（`GetOrder`、`ListOrders`、`CreateOrder`、`CancelOrder`），签名在 `BindAll` 启动时校验。业务错误通过 `gofyadapter.Error(demoservice.ErrOrderNotFound)` 映射为 `40401`，与 OpenAPI 声明保持一致；`CancelOrder` 由契约声明为 `NoContent`，适配器写入 `204`。
 
 ### 9.7 `app/module/order/service/order_service.go`（节选）
 
@@ -2030,9 +2062,10 @@ import (
     "context"
     "time"
 
-    "github.com/yourorg/order-service/app/module/order/model"
-    "github.com/yourorg/order-service/app/module/order/repository"
+    "github.com/yourorg/demo-service/app/module/order/model"
+    "github.com/yourorg/demo-service/app/module/order/repository"
     "go.uber.org/zap"
+    "gofy/gofy-interface-service/appclient/demoservice/orderenum"
 )
 
 type Config struct {
@@ -2060,7 +2093,11 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*model.Order, error)
 }
 
 func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*model.Order, error) {
-    return s.repo.Create(ctx, &model.Order{UserID: userID, Amount: amount, Status: "created"})
+    return s.repo.Create(ctx, &model.Order{
+        UserID: userID,
+        Amount: amount,
+        Status: string(orderenum.OrderStatusPending),
+    })
 }
 
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]model.Order, int64, error) {
@@ -2068,7 +2105,7 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 }
 
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-    return s.repo.UpdateStatus(ctx, id, "cancelled")
+    return s.repo.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
 }
 ```
 
@@ -2082,7 +2119,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/yourorg/order-service/app/module/order/model"
+    "github.com/yourorg/demo-service/app/module/order/model"
     "gorm.io/gorm"
 )
 
@@ -2149,7 +2186,7 @@ package script
 
 import (
     gofyscript "github.com/bingcool/gofy/script"
-    "github.com/yourorg/order-service/app/config"
+    "github.com/yourorg/demo-service/app/config"
 )
 
 func Register(cfg *config.Config) []gofyscript.Script {
@@ -2168,7 +2205,7 @@ import (
     "github.com/bingcool/gofy/apperr"
     gofyscript "github.com/bingcool/gofy/script"
     "github.com/spf13/pflag"
-    "github.com/yourorg/order-service/app/config"
+    "github.com/yourorg/demo-service/app/config"
     "go.uber.org/zap"
 )
 
@@ -2201,8 +2238,8 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 执行：
 
 ```bash
-./order-service script fix-order --order-id=1001 --dry-run=false
-./order-service script --list
+./demo-service script fix-order --order-id=1001 --dry-run=false
+./demo-service script --list
 ```
 
 ### 9.10 业务中间件
@@ -2240,15 +2277,16 @@ func Auth(verify func(token string) error) transport.Middleware {
 
 | 命令 | 行为 |
 | --- | --- |
-| `./order-service` | 等价于 `./order-service start` |
-| `./order-service start` | 前台启动，阻塞到信号 |
-| `./order-service stop` | 读取 pid，SIGTERM，等待退出 |
-| `./order-service stop --force` | 超时后 SIGKILL |
-| `./order-service version` | 输出版本/commit/构建时间/Go 版本 |
-| `./order-service version --json` | JSON 输出 |
-| `./order-service script --list` | 列出脚本 |
-| `./order-service script fix-order --order-id=1` | 执行脚本 |
-| `./order-service <custom>` | 自定义命令 |
+| `./demo-service` | 等价于 `./demo-service start` |
+| `./demo-service start` | 前台启动，阻塞到信号 |
+| `./demo-service stop` | 读取 pid，SIGTERM，等待退出 |
+| `./demo-service restart` | 先停止已有实例，再前台启动 |
+| `./demo-service stop --force` | 超时后 SIGKILL |
+| `./demo-service version` | 输出版本/commit/构建时间/Go 版本 |
+| `./demo-service version --json` | JSON 输出 |
+| `./demo-service script --list` | 列出脚本 |
+| `./demo-service script fix-order --order-id=1` | 执行脚本 |
+| `./demo-service <custom>` | 自定义命令 |
 
 ---
 
@@ -2259,9 +2297,9 @@ func Auth(verify func(token string) error) transport.Middleware {
 ```bash
 go install github.com/bingcool/gofy/cmd/gofy@latest
 
-gofy new order-service \
-  --module github.com/yourorg/order-service \
-  --dir ./order-service \
+gofy new demo-service \
+  --module github.com/yourorg/demo-service \
+  --dir ./demo-service \
   --with-db \
   --with-scripts \
   --with-docker
@@ -2304,9 +2342,9 @@ gofy new order-service \
 生成后输出：
 
 ```text
-created order-service
+created demo-service
 next steps:
-  cd order-service
+  cd demo-service
   go mod tidy
   go run . start
 ```
@@ -2333,7 +2371,7 @@ next steps:
 | 生命周期测试 | 启动顺序、Stop 逆序、Shutdown 幂等、端口占用错误 |
 | 进程测试 | pid 写入/读取/stale 处理、`stop` 超时（用子进程） |
 | 依赖测试 | 公共包 import 方向、公共包无 `init()` |
-| 示例测试 | `examples/order-service` 编译 + handler 测试 |
+| 示例测试 | `examples/demo-service` 编译 + handler 测试 |
 
 测试约束：
 
@@ -2352,21 +2390,21 @@ import (
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/gofytest"
-    "github.com/yourorg/order-service/app/module/order/dto"
+    "gofy/gofy-interface-service/appclient/demoservice/orderresponse"
 )
 
 func TestGetOrder(t *testing.T) {
     app := gofytest.New(t,
-        gofy.WithName("order-service-test"),
+        gofy.WithName("demo-service-test"),
         gofy.WithModules(newFakeOrderModule(t)),
     )
 
     rr := app.GET("/api/v1/order/orders/1")
     gofytest.Status(t, rr, 200)
 
-    body := gofytest.JSON[dto.GetOrderResponse](t, rr)
-    if body.ID != 1 {
-        t.Fatalf("want id=1, got %d", body.ID)
+    body := gofytest.JSON[orderresponse.GetOrderResponse](t, rr)
+    if body.Order == nil || body.Order.ID.Uint64() != 1 {
+        t.Fatalf("want id=1, got %+v", body.Order)
     }
 }
 ```
@@ -2381,7 +2419,7 @@ func TestGetOrder(t *testing.T) {
 
 ### 11.3 契约测试（框架升级的回归网）
 
-在 `examples/order-service` 中维护一组"行为契约"测试：
+在 `examples/demo-service` 中维护一组"行为契约"测试：
 
 - 成功响应包络字段；
 - 校验失败的状态码、code、details；
@@ -2399,7 +2437,7 @@ func TestGetOrder(t *testing.T) {
 ### 12.1 语义化版本
 
 - module path：`github.com/bingcool/gofy`；
-- `go.mod` 的 `go` 指令：`1.24`（最低支持版本）；CI 覆盖 `1.24` / `1.25`，业务可使用更高版本；
+- `go.mod` 的 `go` 指令：`1.26.0`（最低支持版本）；CI 覆盖 `1.26`，业务可使用更高版本；
 - v1 之前（`v0.x`）允许调整 API；
 - `v1.0.0` 之后：
   - 删除/重命名导出符号 -> major；
@@ -2453,7 +2491,7 @@ jobs:
   test:
     strategy:
       matrix:
-        go: ["1.24", "1.25"]
+        go: ["1.26"]
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
@@ -2465,7 +2503,7 @@ jobs:
       - run: go test -race -count=1 ./...
       - name: example (separate module)
         run: |
-          cd examples/order-service
+          cd examples/demo-service
           go build ./...
           go test -race -count=1 ./...
 
@@ -2520,7 +2558,7 @@ fi
 2. 确认 `apidiff` 无不兼容变更（或已升 major）；
 3. 打 tag：`v1.2.0`；
 4. `go list -m github.com/bingcool/gofy@v1.2.0` 验证可拉取；
-5. 在 `examples/order-service` 中把版本改成新 tag 并跑一次 CI；
+5. 在 `examples/demo-service` 中把版本改成新 tag 并跑一次 CI；
 6. 同步更新脚手架模板中的默认版本。
 
 ---
@@ -2538,9 +2576,9 @@ fi
 
 | 当前文件/目录 | 目标 | 处理 |
 | --- | --- | --- |
-| `main.go` | `examples/order-service/main.go` | 改写为 `gofy.New` 接入；根目录删除 |
+| `main.go` | `examples/demo-service/main.go` | 改写为 `gofy.New` 接入；根目录删除 |
 | `src/cmd/root.go` | `gofy.go` / `option.go` / `internal/commandline` | 拆分；删除 `init()`、`os.Args` 解析、全局 `rootCmd` |
-| `src/cmd/start.go` | `run.go` / `internal/pidfile` | `gin.New` + 中间件 + `net.Listen` + `Shutdown`；daemon 分支删除 |
+| `src/cmd/start.go` | `start.go` / `internal/pidfile` | `gin.New` + 中间件 + `net.Listen` + `Shutdown`；daemon 分支删除 |
 | `src/cmd/stop.go` | `stop.go` / `internal/process` | 改为返回 error；删除 `os.Exit` |
 | `src/cmd/script.go` | `execute.go` + `script` | 改为 `script <name>` 子命令；删除 `--c=` |
 | `src/cmd/version.go` | `internal/version` + `execute.go` | 使用 `debug.ReadBuildInfo` |
@@ -2560,18 +2598,18 @@ fi
 | `app/middleware/requestid.go` | `transport/middleware/requestid.go` | 内部实现；Header 校验 |
 | `app/middleware/response.go` | `transport/responder.go` | 包络结构保留，改为 `Responder` 接口 |
 | `app/middleware/registermiddleware.go` | 删除 | 中间件顺序由 App 统一安装 |
-| `app/middleware/validateLogin.go` | `examples/order-service/app/middleware/auth.go` | 示例业务中间件 |
+| `app/middleware/validateLogin.go` | `examples/demo-service/app/middleware/auth.go` | 示例业务中间件 |
 | `app/middleware/test.go` | 删除 | 测试用中间件不属于框架 |
 | `app/route/build/route.go` | `transport/handler.go` / `bind.go` / `validate.go` | 改为泛型 handler；删除 `panic`、`validator.New()`/请求、`gconv` |
-| `app/route/init.go` | `examples/order-service/app/module/order/module.go` | 业务路由注册 |
-| `app/route/demo/*` | `examples/order-service/app/module/order/*` | 改写为 order 示例 |
-| `app/module/demo/controller/order_controller.go` | `examples/order-service/app/module/order/handler` | 改为 `context.Context` handler |
+| `app/route/init.go` | `examples/demo-service/app/module/order/module.go` | 业务路由注册 |
+| `app/route/demo/*` | `examples/demo-service/app/module/order/*` | 改写为 order 示例 |
+| `app/module/demo/controller/order_controller.go` | `examples/demo-service/app/module/order/handler` | 改为 `context.Context` handler |
 | `app/Io/db/mysql.go` | `support/mysql/mysql.go` | 配置驱动、可关闭、可 Ping、无 `sync.Once` |
-| `app/config/db.go` | `examples/order-service/app/config/config.go` | 业务配置 |
-| `app/repository/tool.go` | `examples/order-service/app/module/order/repository` | 改写为业务仓储 |
-| `script/kernel.go` | `examples/order-service/script/register.go` | 改为返回 `[]script.Script` |
-| `script/user/test.go` | `examples/order-service/script/fix_order.go` | 改为示例脚本 |
-| `config.yaml` | `examples/order-service/config.yaml` | 业务自己维护；删除机器相关路径与明文密码 |
+| `app/config/db.go` | `examples/demo-service/app/config/config.go` | 业务配置 |
+| `app/repository/tool.go` | `examples/demo-service/app/module/order/repository` | 改写为业务仓储 |
+| `script/kernel.go` | `examples/demo-service/script/register.go` | 改为返回 `[]script.Script` |
+| `script/user/test.go` | `examples/demo-service/script/fix_order.go` | 改为示例脚本 |
+| `config.yaml` | `examples/demo-service/config.yaml` | 业务自己维护；删除机器相关路径与明文密码 |
 | `gen.yaml` | 业务方维护 | 不进入框架库 |
 | `cron.sql` / `cron.yaml` | 删除 | 定时任务系统已移除 |
 | `app/server.pid`、`app/storage/logs` | 删除并加入 `.gitignore` | 运行时产物 |
@@ -2588,12 +2626,12 @@ fi
 
 - 新建 `core`、`apperr`、`transport`、`logging`、`support/mysql`、`script`、`command`、`config`；
 - 先实现最小可编译版本：`Runtime`、`Router`、`Responder`、`logging.New`、`mysql.New`；
-- 保持 `examples/order-service` 能跑通；
+- 保持 `examples/demo-service` 能跑通；
 - 此时旧 `src/` 仍在，CI 同时编译两者。
 
 #### Phase 2：迁移示例
 
-- 把 `app/`、`script/`、`main.go` 复制到 `examples/order-service`，改写为图书馆 API；
+- 把 `app/`、`script/`、`main.go` 复制到 `examples/demo-service`，改写为图书馆 API；
 - 删除对 `src/system`、`src/conf`、`src/log` 的引用；
 - 修复评审文档中的 P0 问题（绑定错误、panic 校验、堆栈泄漏、CORS、日志级别等）。
 
@@ -2621,7 +2659,7 @@ gofy/
 ├── option.go
 ├── config.go
 ├── errors.go
-├── run.go
+├── start.go
 ├── execute.go
 ├── stop.go
 ├── signal.go
@@ -2636,7 +2674,7 @@ gofy/
 ├── gofytest/
 ├── internal/
 ├── cmd/gofy/
-├── examples/order-service/
+├── examples/demo-service/
 ├── docs/
 ├── CHANGELOG.md
 ├── Makefile
@@ -2689,7 +2727,7 @@ gofy/
 
 ### 14.4 示例与脚手架
 
-- [ ] `examples/order-service` 可独立 `go build ./...`；
+- [ ] `examples/demo-service` 可独立 `go build ./...`；
 - [ ] 示例覆盖成功、校验失败、404、panic 四类契约测试；
 - [ ] `go run ./cmd/gofy new /tmp/demo --module example.com/demo` 生成的项目可编译；
 - [ ] 脚手架不写入 secret，不自动联网。

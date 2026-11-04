@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/yourorg/order-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model"
 	"gorm.io/gorm"
 )
 
