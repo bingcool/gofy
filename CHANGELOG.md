@@ -8,11 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `start --daemon=1`: re-executes the service in a detached session and exits
+  the parent process. `stop` and `restart` still work through the pid file.
+  Windows is unsupported and panics with an explicit message.
 - `restart` subcommand: stops the instance recorded in the pid file (when
   present), then runs the server in the foreground.
+- `support/nacos`: pulls a Nacos config over the Open API into a local
+  `config.yaml` at startup, then keeps it current with long polling. The
+  generated file is validated as YAML and replaced atomically;
+  `WithRestartOnChange` hands the restart to a supervisor after a change.
 
 ### Changed
 
+- `stop` and `restart` now ask `你确定 [停止|重启] 应用【X】? (yes or no)` and
+  only proceed on `yes`; `--force=1` skips the prompt. Non-interactive callers
+  must pass `--force=1`, since EOF is treated as a refusal.
+- `start`, `stop` and `restart` print colored status lines and a startup table;
+  colors are disabled for non-TTY output, Windows and `NO_COLOR`.
 - `examples/demo-service` now binds its routes to the `gofy-interface-service`
   `demoservice` contract; the local `app/module/order/dto` package is gone and
   responses use the contract envelope shapes (`order`, `paging.ListData`).

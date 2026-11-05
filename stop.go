@@ -46,6 +46,8 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 
 	logger := a.Logger()
 	logger.Info("stopping application", zap.Int("pid", pid), zap.String("pid_file", fullPath))
+	c := a.con()
+	c.Info("正在停止应用【%s】 (pid %d)", a.opts.name, pid)
 	if err := process.Terminate(pid); err != nil {
 		return err
 	}
@@ -59,6 +61,7 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	err = process.WaitExit(waitCtx, pid, 100*time.Millisecond)
 	if err == nil {
 		logger.Info("application stopped", zap.Int("pid", pid))
+		c.Success("应用【%s】已停止 (pid %d)", a.opts.name, pid)
 		return nil
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -69,6 +72,7 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	}
 
 	logger.Warn("sending SIGKILL", zap.Int("pid", pid))
+	c.Warn("应用【%s】停止超时，发送 SIGKILL (pid %d)", a.opts.name, pid)
 	if err := process.Kill(pid); err != nil {
 		return err
 	}
@@ -78,5 +82,6 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 		return fmt.Errorf("%w: pid %d", ErrStopTimeout, pid)
 	}
 	logger.Info("application killed", zap.Int("pid", pid))
+	c.Success("应用【%s】已强制停止 (pid %d)", a.opts.name, pid)
 	return nil
 }

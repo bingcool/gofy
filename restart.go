@@ -11,8 +11,14 @@ import (
 // server in the foreground. It never daemonizes: process supervision belongs
 // to systemd or the container runtime.
 func (a *App) restart(ctx context.Context, opts commandline.StopOptions) error {
-	if err := a.stop(ctx, opts); err != nil && !isRestartIgnorableError(err) {
-		return err
+	c := a.con()
+	c.Info("正在重启应用【%s】", a.opts.name)
+	if err := a.stop(ctx, opts); err != nil {
+		if isRestartIgnorableError(err) {
+			c.Note("未发现运行中的实例，直接启动")
+		} else {
+			return err
+		}
 	}
 	return a.Run(ctx)
 }

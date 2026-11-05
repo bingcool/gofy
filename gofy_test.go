@@ -413,7 +413,7 @@ func TestExecuteStopWithoutPIDFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	err = app.ExecuteArgs(context.Background(), []string{"stop"})
+	err = app.ExecuteArgs(context.Background(), []string{"stop", "--force=1"})
 	if !errors.Is(err, gofy.ErrPIDFileDisabled) {
 		t.Fatalf("ExecuteArgs error = %v, want ErrPIDFileDisabled", err)
 	}
@@ -425,7 +425,7 @@ func TestExecuteStopNotRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	err = app.ExecuteArgs(context.Background(), []string{"stop"})
+	err = app.ExecuteArgs(context.Background(), []string{"stop", "--force=1"})
 	if !errors.Is(err, gofy.ErrNotRunning) {
 		t.Fatalf("ExecuteArgs error = %v, want ErrNotRunning", err)
 	}

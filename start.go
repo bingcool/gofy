@@ -161,6 +161,7 @@ func (a *App) run(parent context.Context) error {
 		zap.String("addr", addr),
 		zap.String("version", a.version.Version),
 	)
+	a.printStartup(addr)
 	a.markReady()
 
 	var reason error

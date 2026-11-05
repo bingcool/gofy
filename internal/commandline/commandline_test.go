@@ -1,12 +1,139 @@
 package commandline_test
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bingcool/gofy/internal/commandline"
 )
+
+func TestStopRequiresYesConfirmation(t *testing.T) {
+	var out bytes.Buffer
+	called := false
+	d := commandline.Deps{
+		Name: "app",
+		In:   strings.NewReader("no\n"),
+		Out:  &out,
+		Stop: func(context.Context, commandline.StopOptions) error {
+			called = true
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"stop"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if called {
+		t.Fatal("stop ran without confirmation")
+	}
+	if !strings.Contains(out.String(), "你已放弃停止应用【app】") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestStopConfirmYesRuns(t *testing.T) {
+	called := false
+	d := commandline.Deps{
+		Name: "app",
+		In:   strings.NewReader("YES\n"),
+		Stop: func(context.Context, commandline.StopOptions) error {
+			called = true
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"stop"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !called {
+		t.Fatal("stop skipped after yes")
+	}
+}
+
+func TestStopForceSkipsConfirmation(t *testing.T) {
+	var got commandline.StopOptions
+	d := commandline.Deps{
+		Name: "app",
+		In:   strings.NewReader(""),
+		Stop: func(_ context.Context, opts commandline.StopOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"stop", "--force=1"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !got.Force {
+		t.Fatalf("force = %+v", got)
+	}
+}
+
+func TestRestartRequiresConfirmation(t *testing.T) {
+	called := false
+	d := commandline.Deps{
+		Name: "app",
+		In:   strings.NewReader("no\n"),
+		Out:  &bytes.Buffer{},
+		Restart: func(context.Context, commandline.StopOptions) error {
+			called = true
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"restart"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if called {
+		t.Fatal("restart ran without confirmation")
+	}
+}
+
+func TestRestartForceSkipsConfirmation(t *testing.T) {
+	var got commandline.StopOptions
+	d := commandline.Deps{
+		Name: "app",
+		In:   strings.NewReader(""),
+		Restart: func(_ context.Context, opts commandline.StopOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"restart", "--force=1"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if !got.Force {
+		t.Fatalf("force = %+v", got)
+	}
+}
+
+func TestStartDaemonFlag(t *testing.T) {
+	var got commandline.StartOptions
+	d := commandline.Deps{
+		Name: "app",
+		Start: func(_ context.Context, opts commandline.StartOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"start", "--daemon=1"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !got.Daemon {
+		t.Fatalf("daemon = %+v", got)
+	}
+}
 
 func TestRestartUsesStopFlags(t *testing.T) {
 	var got commandline.StopOptions
@@ -33,6 +160,7 @@ func TestRestartDefaults(t *testing.T) {
 	var got commandline.StopOptions
 	d := commandline.Deps{
 		Name: "app",
+		In:   strings.NewReader("yes\n"),
 		Restart: func(_ context.Context, opts commandline.StopOptions) error {
 			got = opts
 			return nil

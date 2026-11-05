@@ -45,10 +45,11 @@ func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 		Short:  a.opts.name + " service",
 		Out:    os.Stdout,
 		ErrOut: os.Stderr,
+		In:     os.Stdin,
 		Usage: func(err error) error {
 			return fmt.Errorf("%w: %v", ErrUsage, err)
 		},
-		Start:              a.Run,
+		Start:              a.start,
 		Stop:               a.stop,
 		Restart:            a.restart,
 		RunScript:          a.runScript,

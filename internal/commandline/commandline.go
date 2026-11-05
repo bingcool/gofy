@@ -8,9 +8,15 @@ import (
 	"io"
 	"time"
 
+	"github.com/bingcool/gofy/internal/console"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+// StartOptions are the flags of the start command.
+type StartOptions struct {
+	Daemon bool
+}
 
 // StopOptions are the flags of the stop command.
 type StopOptions struct {
@@ -39,10 +45,11 @@ type Deps struct {
 	Short  string
 	Out    io.Writer
 	ErrOut io.Writer
+	In     io.Reader
 
 	Usage func(error) error
 
-	Start     func(ctx context.Context) error
+	Start     func(ctx context.Context, opts StartOptions) error
 	Stop      func(ctx context.Context, opts StopOptions) error
 	Restart   func(ctx context.Context, opts StopOptions) error
 	RunScript func(ctx context.Context, name string, args []string) error
@@ -79,7 +86,7 @@ func Build(d Deps) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return d.Start(cmd.Context())
+			return d.Start(cmd.Context(), StartOptions{})
 		},
 	}
 	root.SetOut(d.Out)
@@ -100,14 +107,17 @@ func Build(d Deps) *cobra.Command {
 }
 
 func newStartCmd(d Deps) *cobra.Command {
-	return &cobra.Command{
+	var opts StartOptions
+	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start the HTTP server in the foreground",
+		Short: "Start the HTTP server",
 		Args:  noArgs(d, "start"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return d.Start(cmd.Context())
+			return d.Start(cmd.Context(), opts)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.Daemon, "daemon", false, "detach into the background and exit the parent process")
+	return cmd
 }
 
 func noArgs(d Deps, name string) cobra.PositionalArgs {
@@ -126,6 +136,12 @@ func newStopCmd(d Deps) *cobra.Command {
 		Short: "Stop a running instance using its pid file",
 		Args:  noArgs(d, "stop"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !opts.Force {
+				ok, err := confirmAction(d, "停止")
+				if err != nil || !ok {
+					return err
+				}
+			}
 			return d.Stop(cmd.Context(), opts)
 		},
 	}
@@ -140,11 +156,30 @@ func newRestartCmd(d Deps) *cobra.Command {
 		Short: "Stop the running instance, then start in the foreground",
 		Args:  noArgs(d, "restart"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !opts.Force {
+				ok, err := confirmAction(d, "重启")
+				if err != nil || !ok {
+					return err
+				}
+			}
 			return d.Restart(cmd.Context(), opts)
 		},
 	}
 	addStopFlags(cmd, &opts)
 	return cmd
+}
+
+// confirmAction asks for a yes/no confirmation. Anything but "yes" cancels.
+func confirmAction(d Deps, verb string) (bool, error) {
+	c := console.New(d.Out, d.ErrOut)
+	ok, err := c.Confirm(d.In, "你确定 [%s] 应用【%s】? (yes or no): ", verb, d.Name)
+	if err != nil {
+		return false, d.Usage(err)
+	}
+	if !ok {
+		c.Info("你已放弃%s应用【%s】，应用继续运行中", verb, d.Name)
+	}
+	return ok, nil
 }
 
 func newStopOptions(d Deps) StopOptions {
@@ -157,7 +192,7 @@ func newStopOptions(d Deps) StopOptions {
 func addStopFlags(cmd *cobra.Command, opts *StopOptions) {
 	cmd.Flags().StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "path to the pid file")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "how long to wait for the process to exit")
-	cmd.Flags().BoolVar(&opts.Force, "force", false, "send SIGKILL when the timeout expires")
+	cmd.Flags().BoolVar(&opts.Force, "force", false, "skip confirmation and send SIGKILL when the timeout expires")
 }
 
 func newScriptCmd(d Deps) *cobra.Command {
