@@ -16,6 +16,7 @@ import (
 	"github.com/bingcool/gofy/internal/process"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/support/mysql"
+	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/transport"
 	"github.com/bingcool/gofy/transport/middleware"
 	"github.com/gin-gonic/gin"
@@ -111,6 +112,9 @@ func (a *App) run(parent context.Context) error {
 		return a.abort(err)
 	}
 	a.modules = modules
+	// The server keeps this wrapper for its whole life; Reload only swaps the
+	// handler stored inside it, so the listener is never touched.
+	a.handlerRef = newHandlerSwap(engine)
 
 	pidPath, err := a.resolvePIDPath()
 	if err != nil {
@@ -142,7 +146,7 @@ func (a *App) run(parent context.Context) error {
 	}
 	a.setState(stateRunning)
 
-	srv := a.newServer(engine, lg)
+	srv := a.newServer(a.handlerRef, lg)
 	if a.opts.serverConf != nil {
 		if err := a.opts.serverConf(srv); err != nil {
 			return a.abort(fmt.Errorf("gofy: server configurator: %w", err))
@@ -154,6 +158,12 @@ func (a *App) run(parent context.Context) error {
 	go func() {
 		serveErr <- srv.Serve(listener)
 	}()
+
+	// Register only once the listener is accepting connections, so discovery
+	// clients never receive traffic for a port that is not ready.
+	if err := a.startNacosRegistration(ctx, listener, lg); err != nil {
+		return a.abort(err)
+	}
 
 	lg.Info("application started",
 		zap.String("name", a.opts.name),
@@ -194,6 +204,10 @@ func (a *App) run(parent context.Context) error {
 }
 
 func (a *App) buildHTTP(rt *core.Runtime, lg *zap.Logger) (*gin.Engine, []transport.Module, error) {
+	return a.buildHTTPWith(rt, lg, a.opts.moduleFactories, a.opts.modules)
+}
+
+func (a *App) buildHTTPWith(rt *core.Runtime, lg *zap.Logger, factories []transport.ModuleFactory, injected []transport.Module) (*gin.Engine, []transport.Module, error) {
 	gin.SetMode(ginMode(a.opts.http.Mode))
 	engine := gin.New()
 	if len(a.opts.trusted) > 0 {
@@ -236,7 +250,7 @@ func (a *App) buildHTTP(rt *core.Runtime, lg *zap.Logger) (*gin.Engine, []transp
 		Responder: a.opts.responder,
 		Validator: transport.NewValidator(),
 	})
-	modules, err := a.buildModules(rt)
+	modules, err := a.buildModulesWith(rt, factories, injected)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -247,7 +261,11 @@ func (a *App) buildHTTP(rt *core.Runtime, lg *zap.Logger) (*gin.Engine, []transp
 }
 
 func (a *App) buildModules(rt *core.Runtime) ([]transport.Module, error) {
-	modules := make([]transport.Module, 0, len(a.opts.moduleFactories)+len(a.opts.modules))
+	return a.buildModulesWith(rt, a.opts.moduleFactories, a.opts.modules)
+}
+
+func (a *App) buildModulesWith(rt *core.Runtime, factories []transport.ModuleFactory, injected []transport.Module) ([]transport.Module, error) {
+	modules := make([]transport.Module, 0, len(factories)+len(injected))
 	seen := make(map[string]struct{}, cap(modules))
 
 	add := func(m transport.Module) error {
@@ -263,7 +281,7 @@ func (a *App) buildModules(rt *core.Runtime) ([]transport.Module, error) {
 		return nil
 	}
 
-	for i, factory := range a.opts.moduleFactories {
+	for i, factory := range factories {
 		m, err := callFactory(factory, rt)
 		if err != nil {
 			return nil, fmt.Errorf("gofy: module factory %d: %w", i, err)
@@ -275,7 +293,7 @@ func (a *App) buildModules(rt *core.Runtime) ([]transport.Module, error) {
 			return nil, err
 		}
 	}
-	for _, m := range a.opts.modules {
+	for _, m := range injected {
 		if err := add(m); err != nil {
 			return nil, err
 		}
@@ -338,10 +356,44 @@ func (a *App) startModules(rt *core.Runtime) error {
 	return nil
 }
 
-func (a *App) newServer(engine *gin.Engine, lg *zap.Logger) *http.Server {
+// startNacosRegistration publishes this instance once the listener is up. A
+// registration failure aborts startup: running without being discoverable is
+// worse than failing fast.
+func (a *App) startNacosRegistration(ctx context.Context, listener net.Listener, lg *zap.Logger) error {
+	cfg := a.opts.nacosRegistration
+	if cfg == nil || !cfg.Enabled || !cfg.Register.Enabled {
+		return nil
+	}
+	regCfg := *cfg
+	if regCfg.Register.Port == 0 {
+		regCfg.Register.Port = listenerPort(listener, a.opts.http.Port)
+	}
+	registrar, err := nacos.NewRegistrar(regCfg, lg)
+	if err != nil {
+		return fmt.Errorf("gofy: nacos service registration: %w", err)
+	}
+	if err := registrar.Start(ctx); err != nil {
+		return fmt.Errorf("gofy: nacos service registration: %w", err)
+	}
+	a.mu.Lock()
+	a.registrar = registrar
+	a.mu.Unlock()
+	return nil
+}
+
+func listenerPort(listener net.Listener, fallback int) int {
+	if listener != nil {
+		if addr, ok := listener.Addr().(*net.TCPAddr); ok && addr.Port > 0 {
+			return addr.Port
+		}
+	}
+	return fallback
+}
+
+func (a *App) newServer(handler http.Handler, lg *zap.Logger) *http.Server {
 	cfg := a.opts.http
 	return &http.Server{
-		Handler:           engine,
+		Handler:           handler,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -459,6 +511,11 @@ func (a *App) abort(err error) error {
 // cleanup runs once and releases every resource the App owns.
 func (a *App) cleanup() error {
 	a.cleanupOnce.Do(func() {
+		// Wait for an in-flight Reload: it may still be swapping modules and
+		// resources, and cleanup must see the final state.
+		a.reloadMu.Lock()
+		defer a.reloadMu.Unlock()
+
 		timeout := a.opts.shutdownTimeout
 		if timeout <= 0 {
 			timeout = 10 * time.Second
@@ -468,6 +525,15 @@ func (a *App) cleanup() error {
 
 		lg := a.Logger()
 		var errs []error
+
+		// Deregister before closing the server so discovery clients stop
+		// routing new requests here while in-flight ones finish.
+		if a.registrar != nil {
+			if err := a.registrar.Stop(ctx); err != nil {
+				lg.Warn("nacos service deregistration failed", zap.Error(err))
+			}
+			a.registrar = nil
+		}
 
 		if a.srv != nil && a.serving {
 			if err := a.srv.Shutdown(ctx); err != nil {

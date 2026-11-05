@@ -14,6 +14,7 @@ import (
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support/mysql"
+	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/transport"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -45,6 +46,10 @@ type options struct {
 
 	dbConfig *mysql.Config
 	db       *gorm.DB
+
+	// nacosRegistration publishes this instance in Nacos naming when
+	// cfg.Register.Enabled is true.
+	nacosRegistration *nacos.Config
 
 	moduleFactories []transport.ModuleFactory
 	modules         []transport.Module
@@ -227,6 +232,23 @@ func WithDB(db *gorm.DB) Option {
 			return fmt.Errorf("gofy: db must not be nil")
 		}
 		o.db = db
+		return nil
+	}
+}
+
+// WithNacosRegistration publishes the running instance in Nacos using the
+// Register block of cfg, and deregisters it during shutdown. The advertised
+// port defaults to the HTTP listener port; the service is registered after the
+// listener starts and is not re-registered by Reload.
+//
+// It is a no-op when cfg.Enabled or cfg.Register.Enabled is false.
+func WithNacosRegistration(cfg nacos.Config) Option {
+	return func(o *options) error {
+		if cfg.Register.Enabled && strings.TrimSpace(cfg.Register.ServiceName) == "" {
+			return fmt.Errorf("gofy: nacos service_register.service_name is required")
+		}
+		c := cfg
+		o.nacosRegistration = &c
 		return nil
 	}
 }

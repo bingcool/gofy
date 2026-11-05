@@ -1,0 +1,301 @@
+package gofy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/bingcool/gofy/core"
+	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/support/mysql"
+	"github.com/bingcool/gofy/transport"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// handlerSwap lets Reload replace the route table while the process keeps its
+// listener.
+type handlerSwap struct {
+	inner atomic.Value // http.Handler
+}
+
+func newHandlerSwap(h http.Handler) *handlerSwap {
+	s := &handlerSwap{}
+	s.Store(h)
+	return s
+}
+
+func (s *handlerSwap) Store(h http.Handler) { s.inner.Store(h) }
+
+func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.inner.Load().(http.Handler).ServeHTTP(w, r)
+}
+
+// ReloadSpec describes what Reload replaces. Nil fields keep their current
+// value.
+//
+// The listener is never rebound: HTTP host, port and server timeouts keep
+// their startup values, so changing them requires a restart.
+type ReloadSpec struct {
+	// Env replaces the environment reported by the Runtime and the App.
+	Env string
+
+	// Log replaces the logger. A logger injected with WithLogger is replaced
+	// too and is not synced afterwards, because the App does not own it.
+	Log *logging.Config
+
+	// Database reconnects the MySQL pool. When set, the App owns the new
+	// connection and closes the previous one after the old modules stop.
+	Database *mysql.Config
+
+	// ModuleFactories rebuild the modules registered through
+	// WithModuleFactories, and with them the routes. Nil rebuilds from the
+	// factories passed to New.
+	ModuleFactories []transport.ModuleFactory
+}
+
+// Reload applies a new configuration to a running App without exiting the
+// process. It rebuilds the logger, the database pool and the modules, starts
+// the new modules, swaps the HTTP handler atomically and then stops the old
+// modules.
+//
+// New modules start before the old ones stop, so requests are served
+// throughout the swap. The overhead is a short window where both module sets
+// are alive; modules that hold an exclusive resource (a socket, a lock file)
+// should not be rebuilt this way without stopping the old instance first.
+//
+// Modules passed to WithModules are reused: they stay running and are only
+// re-registered on the new router, because Reload cannot rebuild instances it
+// did not create. Their Runtime is whatever they captured at construction.
+//
+// Reload never changes the listening address, the pid file or the registered
+// middleware. Those are fixed at startup.
+//
+// A reload proceeds in five steps: validate the spec, build the new logger and
+// DB pool, rebuild and start the new modules, publish the new state and
+// handler, then stop the old modules. A failure in the first three steps
+// discards what was built and leaves the current app serving.
+func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Validate first: a bad spec must never disturb the running app.
+	if spec.Log != nil {
+		if err := spec.Log.Validate(); err != nil {
+			return fmt.Errorf("gofy: reload log config: %w", err)
+		}
+	}
+	if spec.Database != nil {
+		if err := spec.Database.Validate(); err != nil {
+			return fmt.Errorf("gofy: reload database config: %w", err)
+		}
+	}
+
+	// Serialize with cleanup and with other reloads.
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
+
+	// Snapshot the current state and release a.mu: rebuilding below is slow
+	// (logger, DB handshake, module factories) and must not block requests.
+	a.mu.Lock()
+	if a.state != stateRunning || a.handlerRef == nil || a.rt == nil {
+		a.mu.Unlock()
+		return fmt.Errorf("%w: reload requires a running server", ErrNotRunning)
+	}
+	env := a.opts.env
+	lg, ownLogger := a.logger, a.ownLogger
+	db, ownDB := a.db, a.ownDB
+	startedAt := a.rt.StartedAt
+	runCtx := a.rt.Context()
+	factories := spec.ModuleFactories
+	if factories == nil {
+		factories = a.opts.moduleFactories
+	}
+	injected := append([]transport.Module(nil), a.opts.modules...)
+	// Module names are unique within a build (buildModulesWith rejects
+	// duplicates), so the name identifies an injected instance across reloads
+	// without comparing interface values.
+	injectedNames := make(map[string]struct{}, len(injected))
+	for _, m := range injected {
+		injectedNames[m.Name()] = struct{}{}
+	}
+	oldStarted := make([]transport.Module, 0, len(a.started))
+	injectedStarted := make([]transport.Module, 0, len(injected))
+	for _, m := range a.started {
+		if _, ok := injectedNames[m.Name()]; ok {
+			// Injected instances keep running across the swap; remember them
+			// so Shutdown still stops them.
+			injectedStarted = append(injectedStarted, m)
+			continue
+		}
+		oldStarted = append(oldStarted, m)
+	}
+	timeout := a.opts.shutdownTimeout
+	a.mu.Unlock()
+
+	if v := strings.TrimSpace(spec.Env); v != "" {
+		env = v
+	}
+
+	// Nil spec fields reuse the current logger/database. Anything built here is
+	// owned by the App and released by discard on a later failure.
+	rebuiltLogger := false
+	if spec.Log != nil {
+		newLogger, err := logging.New(*spec.Log)
+		if err != nil {
+			return fmt.Errorf("gofy: reload logger: %w", err)
+		}
+		lg, ownLogger, rebuiltLogger = newLogger, true, true
+	}
+
+	rebuiltDB := false
+	if spec.Database != nil {
+		newDB, err := mysql.New(ctx, *spec.Database, lg)
+		if err != nil {
+			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg)
+			return fmt.Errorf("gofy: reload database: %w", err)
+		}
+		db, ownDB, rebuiltDB = newDB, true, true
+	}
+	discard := func() { discardReloadResources(rebuiltDB, rebuiltLogger, db, lg) }
+
+	rt := core.NewRuntime(core.RuntimeConfig{
+		Name:      a.opts.name,
+		Env:       env,
+		Logger:    lg,
+		DB:        db,
+		Version:   a.version,
+		StartedAt: startedAt,
+		Ctx:       runCtx,
+		Fail:      func(err error) { a.cancel(err) },
+	})
+	engine, modules, err := a.buildHTTPWith(rt, lg, factories, injected)
+	if err != nil {
+		discard()
+		return err
+	}
+
+	// Start the new modules before publishing them: if any of them fails, the
+	// old routes and modules are still the live ones.
+	started := make([]transport.Module, 0, len(modules))
+	for _, m := range modules {
+		// Injected instances were started at startup and keep running.
+		if _, ok := injectedNames[m.Name()]; ok {
+			continue
+		}
+		starter, ok := m.(transport.Starter)
+		if !ok {
+			continue
+		}
+		if err := starter.Start(rt.Context()); err != nil {
+			stopModuleList(rt.Context(), started, timeout)
+			discard()
+			return fmt.Errorf("gofy: reload module %q start: %w", m.Name(), err)
+		}
+		started = append(started, m)
+	}
+	allStarted := make([]transport.Module, 0, len(started)+len(injectedStarted))
+	allStarted = append(allStarted, started...)
+	allStarted = append(allStarted, injectedStarted...)
+
+	// Every replacement resource is ready, so publish all of it in one critical
+	// section; readers never see a half-swapped app.
+	a.mu.Lock()
+	if a.state != stateRunning {
+		a.mu.Unlock()
+		stopModuleList(rt.Context(), started, timeout)
+		discard()
+		return fmt.Errorf("%w: reload requires a running server", ErrNotRunning)
+	}
+	oldLogger, oldOwnLogger := a.logger, a.ownLogger
+	oldDB, oldOwnDB := a.db, a.ownDB
+	a.opts.env = env
+	if spec.Log != nil {
+		a.opts.logConfig = *spec.Log
+	}
+	if spec.Database != nil {
+		cfg := *spec.Database
+		a.opts.dbConfig = &cfg
+	}
+	if spec.ModuleFactories != nil {
+		a.opts.moduleFactories = append([]transport.ModuleFactory(nil), spec.ModuleFactories...)
+	}
+	a.logger, a.ownLogger = lg, ownLogger
+	a.db, a.ownDB = db, ownDB
+	a.rt = rt
+	a.modules = modules
+	a.started = allStarted
+	a.mu.Unlock()
+
+	// Requests already in flight finish on the old engine; new requests use
+	// the rebuilt routes.
+	a.handlerRef.Store(engine)
+
+	// Retire the old modules only after the swap, using a background context so
+	// a cancelled caller cannot leave them running. Their errors do not undo the
+	// reload; they are logged and returned so the caller can report them.
+	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	errs := stopModuleList(stopCtx, oldStarted, timeout)
+	cancel()
+	for _, err := range errs {
+		lg.Error("module stop after reload failed", zap.Error(err))
+	}
+	if oldOwnDB && oldDB != db {
+		if err := mysql.Close(oldDB); err != nil {
+			lg.Error("close previous database after reload failed", zap.Error(err))
+			errs = append(errs, err)
+		}
+	}
+	if oldOwnLogger && oldLogger != lg {
+		_ = logging.Sync(oldLogger)
+	}
+
+	lg.Info("application reloaded",
+		zap.String("env", env),
+		zap.Bool("logger_rebuilt", rebuiltLogger),
+		zap.Bool("database_rebuilt", rebuiltDB),
+		zap.Int("modules", len(modules)),
+	)
+	return errors.Join(errs...)
+}
+
+// discardReloadResources releases only resources this Reload built, so a
+// rejected reload never closes the live database or syncs the live logger.
+func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg *zap.Logger) {
+	if rebuiltDB && db != nil {
+		_ = mysql.Close(db)
+	}
+	if rebuiltLogger {
+		_ = logging.Sync(lg)
+	}
+}
+
+// stopModuleList stops modules in reverse registration order, like cleanup,
+// and gives each Stop its own timeout so one hung module cannot block the
+// others.
+func stopModuleList(ctx context.Context, modules []transport.Module, timeout time.Duration) []error {
+	if len(modules) == 0 {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	var errs []error
+	for i := len(modules) - 1; i >= 0; i-- {
+		stopper, ok := modules[i].(transport.Stopper)
+		if !ok {
+			continue
+		}
+		stopCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := stopper.Stop(stopCtx)
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("gofy: module %q stop: %w", modules[i].Name(), err))
+		}
+	}
+	return errs
+}

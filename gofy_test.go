@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/transport"
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
@@ -464,4 +466,170 @@ func TestExitCode(t *testing.T) {
 
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
+}
+
+func reloadFactory(body string, events *recorder) gofy.ModuleFactory {
+	return func(*gofy.Runtime) (transport.Module, error) {
+		return &testModule{
+			name:  "reload",
+			order: events,
+			reg: func(r *transport.Router) error {
+				r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, body) })
+				return nil
+			},
+		}, nil
+	}
+}
+
+func TestReloadSwapsRoutesInPlace(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	app, err := gofy.New(
+		gofy.WithName("reload-test"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(reloadFactory("v1", events)),
+		gofy.WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	if got := getText(t, port, "/api/v1/reload/ping"); got != "v1" {
+		t.Fatalf("before reload: %q", got)
+	}
+
+	err = app.Reload(context.Background(), gofy.ReloadSpec{
+		Env:             "prd",
+		ModuleFactories: []gofy.ModuleFactory{reloadFactory("v2", events)},
+	})
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := getText(t, port, "/api/v1/reload/ping"); got != "v2" {
+		t.Fatalf("after reload: %q", got)
+	}
+	if got := countEvents(events, "stop:reload"); got != 1 {
+		t.Fatalf("old module stop count = %d, want 1", got)
+	}
+
+	// An invalid spec must leave the running routes untouched.
+	err = app.Reload(context.Background(), gofy.ReloadSpec{
+		Database:        &gofy.DatabaseConfig{},
+		ModuleFactories: []gofy.ModuleFactory{reloadFactory("v3", events)},
+	})
+	if err == nil {
+		t.Fatal("Reload accepted an empty DSN")
+	}
+	if got := getText(t, port, "/api/v1/reload/ping"); got != "v2" {
+		t.Fatalf("after rejected reload: %q", got)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
+func TestReloadRequiresRunningServer(t *testing.T) {
+	app, err := gofy.New(gofy.WithName("reload-idle"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := app.Reload(context.Background(), gofy.ReloadSpec{}); !errors.Is(err, gofy.ErrNotRunning) {
+		t.Fatalf("Reload error = %v, want ErrNotRunning", err)
+	}
+}
+
+func TestReloadKeepsInjectedModulesRunning(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	embedded := &testModule{
+		name:  "embedded",
+		order: events,
+		reg: func(r *transport.Router) error {
+			r.GET("/key", func(c *gin.Context) { c.String(http.StatusOK, "static") })
+			return nil
+		},
+	}
+	app, err := gofy.New(
+		gofy.WithName("reload-injected"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModules(embedded),
+		gofy.WithModuleFactories(reloadFactory("v1", events)),
+		gofy.WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	if err := app.Reload(context.Background(), gofy.ReloadSpec{
+		ModuleFactories: []gofy.ModuleFactory{reloadFactory("v2", events)},
+	}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := getText(t, port, "/api/v1/embedded/key"); got != "static" {
+		t.Fatalf("injected route after reload: %q", got)
+	}
+	if got := countEvents(events, "start:embedded"); got != 1 {
+		t.Fatalf("injected start count = %d, want 1", got)
+	}
+	if got := countEvents(events, "stop:embedded"); got != 0 {
+		t.Fatalf("injected stop count after reload = %d, want 0", got)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+	if got := countEvents(events, "stop:embedded"); got != 1 {
+		t.Fatalf("injected stop count after shutdown = %d, want 1", got)
+	}
+}
+
+func getText(t *testing.T, port int, path string) string {
+	t.Helper()
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func countEvents(r *recorder, want string) int {
+	count := 0
+	for _, event := range r.snapshot() {
+		if event == want {
+			count++
+		}
+	}
+	return count
 }

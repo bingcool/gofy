@@ -222,6 +222,171 @@ func TestLoadConfigRejectsInvalidYAML(t *testing.T) {
 	}
 }
 
+func TestLoadMergesNacosAndApplicationFiles(t *testing.T) {
+	clearNacosEnv(t)
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", `nacos:
+  host: 10.0.0.2
+  port: 8849
+  username: nacos
+  password: secret
+  namespace: dev
+`)
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  service_config:
+    data_id: gofy-service
+    group: GO_GROUP
+    tenant: test
+  enable_nacos_config_change_restart: true
+  monitor_config_change:
+    listener_timeout_ms: 15000
+    failed_wait_ms: 1200
+`)
+
+	cfg, err := Load(nacosPath, appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Enabled {
+		t.Fatal("Enabled = false, want true by default in the two-file layout")
+	}
+	if cfg.baseURL() != "http://10.0.0.2:8849" {
+		t.Fatalf("baseURL = %q", cfg.baseURL())
+	}
+	if cfg.Username != "nacos" || cfg.Password != "secret" {
+		t.Fatalf("credentials = %q/%q", cfg.Username, cfg.Password)
+	}
+	if cfg.Namespace != "dev" {
+		t.Fatalf("Namespace = %q, want nacos.yaml namespace", cfg.Namespace)
+	}
+	if cfg.DataID != "gofy-service" || cfg.Group != "GO_GROUP" {
+		t.Fatalf("service_config = %q/%q", cfg.DataID, cfg.Group)
+	}
+	if !cfg.Watch {
+		t.Fatal("Watch = false")
+	}
+	if cfg.PollTimeout != 15*time.Second || cfg.RetryDelay != 1200*time.Millisecond {
+		t.Fatalf("monitor = %s/%s", cfg.PollTimeout, cfg.RetryDelay)
+	}
+	if cfg.File != DefaultFile {
+		t.Fatalf("File = %q", cfg.File)
+	}
+}
+
+func TestLoadFallsBackToServiceTenant(t *testing.T) {
+	clearNacosEnv(t)
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  service_config:
+    data_id: gofy-service
+    group: GO_GROUP
+    tenant: test
+  enable_nacos_config_change_restart: false
+`)
+
+	cfg, err := Load(nacosPath, appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Namespace != "test" {
+		t.Fatalf("Namespace = %q, want application tenant", cfg.Namespace)
+	}
+	if cfg.Watch {
+		t.Fatal("Watch = true, want false from enable_nacos_config_change_restart")
+	}
+}
+
+func TestLoadTenantFromEnv(t *testing.T) {
+	clearNacosEnv(t)
+	t.Setenv("NACOS_TENANT", "prd")
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  service_config:
+    data_id: gofy-service
+    group: GO_GROUP
+`)
+
+	cfg, err := Load(nacosPath, appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Namespace != "prd" {
+		t.Fatalf("Namespace = %q, want NACOS_TENANT", cfg.Namespace)
+	}
+}
+
+func TestLoadFileWinsOverEnv(t *testing.T) {
+	clearNacosEnv(t)
+	t.Setenv("NACOS_ENABLED", "0")
+	t.Setenv("NACOS_DATA_ID", "env-service")
+	t.Setenv("NACOS_GROUP", "ENV_GROUP")
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  enabled: true
+  service_config:
+    data_id: gofy-service
+    group: GO_GROUP
+`)
+
+	cfg, err := Load(nacosPath, appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Enabled {
+		t.Fatal("Enabled = false, want application.yaml enabled")
+	}
+	if cfg.DataID != "gofy-service" || cfg.Group != "GO_GROUP" {
+		t.Fatalf("service_config = %q/%q, want file values", cfg.DataID, cfg.Group)
+	}
+}
+
+func TestLoadExplicitDisableAndMissingApplicationFile(t *testing.T) {
+	clearNacosEnv(t)
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  enabled: false\n  host: 10.0.0.2\n")
+	missing := filepath.Join(dir, "application.yaml")
+
+	cfg, err := Load(nacosPath, missing)
+	if err != nil {
+		t.Fatalf("Load with missing application.yaml: %v", err)
+	}
+	if cfg.Enabled {
+		t.Fatal("Enabled = true, want explicit disable from nacos.yaml")
+	}
+	if !cfg.Watch {
+		t.Fatal("Watch = false, want the default to stay on")
+	}
+}
+
+func clearNacosEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"NACOS_ENABLED", "NACOS_ADDR", "NACOS_HOST", "NACOS_PORT",
+		"NACOS_USERNAME", "NACOS_PASSWORD", "NACOS_NAMESPACE", "NACOS_TENANT",
+		"NACOS_DATA_ID", "NACOS_GROUP", "NACOS_FILE",
+		"NACOS_TIMEOUT_MS", "NACOS_LISTENER_TIMEOUT_MS", "NACOS_LISTENER_FAILED_MS",
+		"NACOS_SERVICE_NAMESPACE_ID", "NACOS_SERVICE_GROUP_NAME",
+		"NACOS_SERVICE_REGISTER_HOST", "NACOS_SERVICE_REGISTER_PORT",
+		"NACOS_DISCOVERY_LOAD_BALANCER", "NACOS_DISCOVERY_CACHE_TTL",
+		"NACOS_DISCOVERY_STALE_TTL", "NACOS_DISCOVERY_HEALTHY_ONLY",
+		"NACOS_DISCOVERY_CLUSTERS", "POD_IP",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func writeTestFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestSyncWritesConfigFile(t *testing.T) {
 	content := "env: dev\nhttp:\n  port: 8080\n"
 	fake := &fakeServer{content: content}

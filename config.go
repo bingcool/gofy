@@ -9,6 +9,7 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/support/mysql"
+	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/transport"
 )
 
@@ -35,6 +36,10 @@ type DatabaseConfig = mysql.Config
 
 // LogConfig is the logger configuration passed to WithLogConfig.
 type LogConfig = logging.Config
+
+// NacosConfig is the Nacos connection and service settings passed to
+// WithNacosRegistration.
+type NacosConfig = nacos.Config
 
 // HTTPConfig configures the HTTP server.
 type HTTPConfig struct {

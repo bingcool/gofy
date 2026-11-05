@@ -18,6 +18,7 @@ import (
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support/mysql"
+	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/transport"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -55,6 +56,10 @@ type App struct {
 	cleanupOnce sync.Once
 	cleanupErr  error
 
+	// reloadMu serializes Reload with cleanup and with other Reload calls, so a
+	// runtime swap never races a shutdown or a second swap.
+	reloadMu sync.Mutex
+
 	cancel   context.CancelCauseFunc
 	rt       *core.Runtime
 	db       *gorm.DB
@@ -62,8 +67,16 @@ type App struct {
 	srv      *http.Server
 	listener net.Listener
 	serving  bool
-	modules  []transport.Module
-	started  []transport.Module
+	// handlerRef is the http.Handler given to the server. run installs a
+	// handlerSwap here so Reload can replace the route table without rebinding
+	// the listener; Handler mode has no server and leaves it nil.
+	handlerRef *handlerSwap
+	modules    []transport.Module
+	started    []transport.Module
+
+	// registrar publishes this instance in Nacos naming; nil when
+	// registration is disabled or the App runs in Handler mode.
+	registrar *nacos.Registrar
 
 	pidPath       string
 	pidTicker     *time.Ticker
