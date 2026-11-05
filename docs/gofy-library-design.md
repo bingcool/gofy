@@ -308,8 +308,12 @@ gofy-library/
 │   ├── retry.go                    # 幂等方法重试
 │   ├── error.go                    # Error、状态码与请求 ID
 │   └── redact.go                   # Header/Body 脱敏
-├── nacos/
-│   └── nacos.go                    # ConfigClient、NamingClient
+├── support/nacos/
+│   ├── config.go                   # Config、Load、FromEnv、Register/Discovery 配置
+│   ├── client.go                   # Open API 客户端、鉴权 token 缓存
+│   ├── sync.go / watch.go          # 配置同步、长轮询、热更新回调
+│   ├── naming.go                   # Instance、Register/Deregister/Beat/List
+│   └── register.go                 # Registrar、心跳、IP 探测
 ├── storage/
 │   ├── storage.go                  # Store、ObjectInfo、Capabilities
 │   ├── fake/
@@ -2407,45 +2411,56 @@ type Error struct {
 
 ```go
 type Config struct {
-	Hosts       []string      `yaml:"hosts"` // 为空时使用 127.0.0.1:8848
-	Namespace   string        `yaml:"namespace"`
-	Group       string        `yaml:"group" default:"DEFAULT_GROUP"`
-	Username    string        `yaml:"username"`
-	Password    string        `yaml:"password"`
-	Timeout     time.Duration `yaml:"timeout" default:"5s"`
-	CacheDir    string        `yaml:"cache_dir"`
-	LogDir      string        `yaml:"log_dir"`
-	LogLevel    string        `yaml:"log_level" default:"warn"`
+	Enabled   bool
+	Addr      string // http://127.0.0.1:8848，优先级高于 Host/Port
+	Host      string
+	Port      int
+	Username  string
+	Password  string
+	Namespace string
+	DataID    string
+	Group     string
+	File      string
+	Watch     bool
+	Timeout   time.Duration
+	PollTimeout time.Duration
+	RetryDelay  time.Duration
+
+	Register  RegisterConfig  // application.yaml service_register
+	Discovery DiscoveryConfig // application.yaml discovery_service_client
 }
 
-type ServiceInstance struct {
-	IP       string
-	Port     uint64
-	Weight   float64
-	Healthy  bool
-	Metadata map[string]string
-}
+func Load(nacosPath, appPath string) (Config, error)
+func Sync(ctx context.Context, cfg Config) (Result, error)
+func Watch(ctx context.Context, cfg Config, opts ...WatchOption) error
 
-type Client struct{ /* configClient, namingClient */ }
+// Naming（服务注册与发现）
+func NewNamingClient(cfg Config) (*Client, error)
+func (c *Client) RegisterInstance(ctx context.Context, inst Instance) error
+func (c *Client) DeregisterInstance(ctx context.Context, inst Instance) error
+func (c *Client) BeatInstance(ctx context.Context, inst Instance, light bool) (BeatResult, error)
+func (c *Client) ListInstances(ctx context.Context, q InstanceQuery) ([]Instance, error)
 
-func New(cfg Config, opts ...Option) (*Client, error)
-func (c *Client) GetConfig(ctx context.Context, dataID, group string) (string, error)
-func (c *Client) WatchConfig(ctx context.Context, dataID, group string, h func(content string)) error
-func (c *Client) Register(ctx context.Context, svc ServiceInstance) error
-func (c *Client) Deregister(ctx context.Context, svc ServiceInstance) error
-func (c *Client) Instances(ctx context.Context, serviceName, group string) ([]ServiceInstance, error)
-func (c *Client) Close() error
+func NewRegistrar(cfg Config, logger *zap.Logger) (*Registrar, error)
+func (r *Registrar) Start(ctx context.Context) error // 注册 + 心跳
+func (r *Registrar) Stop(ctx context.Context) error  // 停止心跳 + 注销
 ```
 
 规则：
 
-1. 使用 `nacos-sdk-go/v2`；不手写 HTTP 与鉴权。
-2. `WatchConfig` 阻塞直到 `ctx` 取消；回调中不要执行长时间阻塞操作，必要时投递到队列。
-3. 服务注册默认临时实例（ephemeral），由 SDK 心跳维持；`Close` 时注销。
-4. 配置获取失败时**不返回空字符串**；返回错误，由业务决定是否使用本地缓存。
-5. 不在组件内实现本地配置缓存；需要时由业务把内容写入 `cache` 或文件。
-6. 启动时校验 hosts 非空；认证信息不写日志。
-7. `nacos` 是 P2 可选模块；不使用 Nacos 的服务不会引入该依赖。
+1. 直接调用 Nacos Open API（configs / listener / instance / beat），不引入 SDK；
+   长轮询、鉴权 token 缓存都在包内完成。
+2. `WatchConfig` 由 `Watch` 承担，阻塞直到 `ctx` 取消；回调中不要执行长时间阻塞操作，
+   必要时投递到队列。
+3. 服务实例固定为临时实例（ephemeral）：`Registrar` 维持重/轻心跳，Nacos 可在心跳
+   响应中调整间隔（限制 1s–30s）；连续失败后先补完整心跳，仍失败则重新注册；
+   `Stop` 注销。
+4. 配置获取失败时**不返回空字符串**；返回错误，由业务决定是否使用本地已同步的文件。
+5. `Sync` 先校验远端内容是合法 YAML，再以临时文件 + rename 原子替换本地文件（0600）。
+6. 启动时校验连接字段与端口；认证信息不写日志。
+7. `gofy.WithNacosRegistration(cfg)` 在监听端口可用后注册、`Shutdown` 前注销；
+   `App.Reload` 不重复注册或注销，热更新期间服务发现保持连续。
+8. `nacos` 是 P2 可选模块；不使用 Nacos 的服务不会引入该依赖。
 
 ---
 

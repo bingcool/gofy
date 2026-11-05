@@ -277,7 +277,9 @@ gofy-interface-service/
 │   ├── errors.go                   # APIError、HTTPError、ProtocolError
 │   ├── retry.go                    # 重试与退避
 │   ├── sse.go                      # SSE / 下载 / 分块客户端
-│   └── resolver.go                 # Resolver 接口、StaticResolver
+│   ├── resolver.go                 # Resolver 接口、StaticResolver
+│   └── nacos/
+│       └── resolver.go             # Nacos 服务发现、缓存/陈旧回退、负载均衡
 ├── docgen/
 │   ├── openapi.go                  # 文档构建入口
 │   ├── operation.go                # Operation 生成
@@ -1813,11 +1815,20 @@ func (r StaticResolver) Resolve(context.Context, string) (string, error) {
 
 **规则：**
 
-- `Config.BaseURL` 非空时优先，不使用 Resolver。
+- `Config.BaseURL` 非空时优先，不使用 Resolver；固定模式下重试退避后请求同一地址。
+- 生成客户端提供 `NewWithBaseURL`（域名或 IP，缺省 scheme 补 http）、
+  `NewWithResolver`（服务发现）和 `New(*client.Client)`（自定义 Client），
+  对应 interface-api-service `makeService()` 的三种模式。
 - Resolver 结果按 `Service` 缓存，默认 TTL 30s。
-- 连接错误时主动失效缓存并重解析一次。
-- v1 只提供 `StaticResolver`；Nacos/K8s/Consul 适配器放 `adapters/` 独立模块。
-- 不在客户端内置负载均衡；由 Resolver 返回单个可用地址，或由 Sidecar/Service Mesh 负责。
+- 连接错误时主动失效缓存，并在下一次重试前重新解析（`send` 在循环内取 base URL），
+  因此重试可能落到另一个实例。
+- 内置 `StaticResolver`（固定地址）与 `client/nacos`（Nacos 命名服务发现）。
+- `client/nacos.Resolver` 调用 `instance/list`，按 `cache_ttl` 缓存实例列表；Nacos
+  不可达时在 `stale_ttl` 内继续使用最后一次成功结果。负载均衡在 Resolver 内完成：
+  `random`（默认）、`round_robin`、`weight`。
+- 注册信息（`service_register` / `discovery_service_client`）由
+  `github.com/bingcool/gofy/support/nacos` 解析；客户端通过
+  `demoservice.NewWithResolver` 使用 `demoservice.ServiceName`（`demo-service`）。
 
 ### 6.8 生成强类型客户端
 
