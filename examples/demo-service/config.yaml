@@ -25,7 +25,7 @@ log:
     service: demo-service
 
 db:
-  dsn: ${ORDER_DB_DSN}
+  dsn: swoolefy:swoolefy123@tcp(192.168.10.187:3306)/gofy?charset=utf8mb4&parseTime=True&loc=Local
   max_idle_conns: 10
   max_open_conns: 50
   conn_max_lifetime: 1h
