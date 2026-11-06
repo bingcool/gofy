@@ -2784,30 +2784,33 @@ func (a healthAdapter) Check(ctx context.Context) error {
 
 ### 10.5 与 gofy 限流中间件对接
 
-组件库不提供 gin 中间件，业务侧 10 行适配：
+gofy 已内置 `transport/ratelimit.Store`、`middleware.RateLimit` 和 Redis 实现
+`transport/ratelimit/redisstore`（见 `docs/library-design.md` §3.4.10）。
+使用 Redis 时组件库不需要再写适配代码：
 
 ```go
-func RateLimit(limiter *ratelimit.SlidingWindow, limit int) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		key := c.ClientIP() + ":" + c.FullPath()
-		res, err := limiter.Allow(c.Request.Context(), key, 1)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"code": 50300, "msg": "rate limiter unavailable"})
-			return
-		}
-		c.Header("X-RateLimit-Limit", strconv.Itoa(res.Limit))
-		c.Header("X-RateLimit-Remaining", strconv.Itoa(res.Remaining))
-		if !res.Allowed {
-			c.Header("Retry-After", strconv.Itoa(int(res.RetryAfter.Seconds())))
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 42900, "msg": "too many requests"})
-			return
-		}
-		c.Next()
-	}
+client, err := redis.New(ctx, cfg.Redis)
+if err != nil {
+	return err
 }
+store, err := redisstore.New(client, "order-service")
+if err != nil {
+	return err
+}
+
+app, err := gofy.New(
+	gofy.WithRateLimit(transport.RateLimitConfig{
+		Store:  store,
+		Limit:  100,
+		Window: time.Minute,
+	}),
+)
 ```
 
-错误码与响应信封由业务决定；组件库不 import gin，也不假设 gofy 的 responder。
+只有自定义后端（例如本地缓存 + Redis 两级）才需要实现 `Store`；
+组件库不 import gin，也不假设 gofy 的 responder。
+
+`X-RateLimit-*`、`Retry-After`、429/503 包络由中间件统一处理。
 
 ### 10.6 与 gofy-interface-service 的关系
 

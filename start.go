@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/internal/process"
@@ -222,6 +223,13 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	}
 
 	engine.Use(middleware.RequestID(transport.DefaultRequestIDHeader))
+	if a.opts.securityHeaders != nil {
+		mw, err := middleware.SecurityHeaders(*a.opts.securityHeaders)
+		if err != nil {
+			return nil, nil, err
+		}
+		engine.Use(mw)
+	}
 	if a.opts.accessLog {
 		engine.Use(middleware.AccessLog(lg, middleware.DefaultAccessLogOptions()))
 	}
@@ -244,12 +252,29 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	if a.opts.health {
 		registerHealth(engine, rt)
 	}
+	registerFallbacks(engine, a.opts.responder)
 
 	base := transport.NewRouter(engine, transport.RouterConfig{
 		Prefix:    a.opts.apiPrefix,
 		Responder: a.opts.responder,
 		Validator: transport.NewValidator(),
 	})
+	// Rate limiting and JWT apply to module routes only, so probes and unknown
+	// paths keep their plain behavior (200 and 404).
+	if a.opts.rateLimit != nil {
+		mw, err := middleware.RateLimit(*a.opts.rateLimit, a.opts.responder)
+		if err != nil {
+			return nil, nil, err
+		}
+		base.Use(mw)
+	}
+	if a.opts.jwt != nil {
+		mw, err := middleware.JWTAuth(*a.opts.jwt, a.opts.responder)
+		if err != nil {
+			return nil, nil, err
+		}
+		base.Use(mw)
+	}
 	modules, err := a.buildModulesWith(rt, factories, injected)
 	if err != nil {
 		return nil, nil, err
@@ -441,6 +466,18 @@ func (a *App) startPIDRefresh(lg *zap.Logger) {
 			}
 		}
 	}()
+}
+
+// registerFallbacks renders unmatched paths and unsupported methods with the
+// same envelope as handlers. Without NoRoute, gin returns a plain-text 404.
+func registerFallbacks(engine *gin.Engine, responder transport.Responder) {
+	engine.HandleMethodNotAllowed = true
+	engine.NoRoute(func(c *gin.Context) {
+		responder.Error(c, apperr.NotFound("route not found"))
+	})
+	engine.NoMethod(func(c *gin.Context) {
+		responder.Error(c, apperr.MethodNotAllowed("method not allowed"))
+	})
 }
 
 func registerHealth(engine *gin.Engine, rt *core.Runtime) {

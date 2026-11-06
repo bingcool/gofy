@@ -95,6 +95,9 @@ func Forbidden(message string) *Error { return New(40300, http.StatusForbidden, 
 // NotFound returns a 404 with business code 40400.
 func NotFound(message string) *Error { return New(40400, http.StatusNotFound, message) }
 
+// MethodNotAllowed returns a 405 with business code 40500.
+func MethodNotAllowed(message string) *Error { return New(40500, http.StatusMethodNotAllowed, message) }
+
 // Conflict returns a 409 with business code 40900.
 func Conflict(message string) *Error { return New(40900, http.StatusConflict, message) }
 

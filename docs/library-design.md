@@ -75,7 +75,7 @@
 - 不做服务网格、配置中心、注册中心；
 - 不做 ORM 代码生成；
 - 不做定时任务调度；
-- 不做认证/授权体系（只提供中间件扩展点）；
+- 不做认证/授权平台：只内置 HMAC JWT 校验中间件，token 签发、角色模型和用户体系仍由业务负责；
 - 不做指标、链路追踪的默认实现（v1 只留扩展点）；
 - 不做热加载配置；
 - 不承诺 Windows 下的 `stop` 信号语义；
@@ -164,7 +164,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`transport`、`logging`、`support/mysql`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`transport`、`logging`、`support/mysql`、`support/redis`、`support/jwtauth`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -175,10 +175,14 @@ github.com/bingcool/gofy/
 gofy (root)
  ├── core
  ├── transport ──> apperr, core
+ ├── transport/jwtauth ──> support/jwtauth
+ ├── transport/ratelimit/redisstore ──> transport/ratelimit, support/redis
  ├── script ─────> core
  ├── command ────> core
  ├── logging
  ├── support/mysql
+ ├── support/redis ──> go-redis
+ ├── support/jwtauth
  └── config
 
 gofytest ──> gofy, transport
@@ -194,6 +198,7 @@ internal/* ──> core
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
 | `support/mysql` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
 
@@ -392,6 +397,9 @@ type Option func(*options) error
 | `WithRecovery(bool)` | `true` | 是否安装 panic 恢复中间件 | — |
 | `WithAccessLog(bool)` | `true` | 是否安装访问日志 | — |
 | `WithCORS(CORSConfig)` | 关闭 | 跨域配置 | credentials + wildcard 冲突时报错 |
+| `WithJWTAuth(JWTAuthConfig)` | 关闭 | 模块路由的 Bearer Token 校验 | `Parser` 非 nil |
+| `WithRateLimit(RateLimitConfig)` | 关闭 | 模块路由的滑动窗口限流 | Store 非 nil、Limit/Window > 0 |
+| `WithSecurityHeaders(SecurityHeadersConfig)` | 关闭 | 统一安全响应头 | 头值不得含换行 |
 | `WithHealthEndpoints(bool)` | `false` | 是否注册 `/healthz`、`/readyz` | — |
 | `WithMaxBodyBytes(int64)` | `4 << 20` | 请求体上限 | `> 0` |
 | `WithTrustedProxies(...string)` | 空（不信任代理） | 设置 gin 的 trusted proxies | CIDR 合法 |
@@ -760,28 +768,38 @@ func AccessLog(logger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc
 func Recovery(logger *zap.Logger, responder transport.Responder) gin.HandlerFunc
 func CORS(cfg transport.CORSConfig) (gin.HandlerFunc, error)
 func BodyLimit(maxBytes int64) gin.HandlerFunc
+func SecurityHeaders(cfg transport.SecurityHeadersConfig) (gin.HandlerFunc, error)
+func RateLimit(cfg transport.RateLimitConfig, responder transport.Responder) (gin.HandlerFunc, error)
+func JWTAuth(cfg transport.JWTAuthConfig, responder transport.Responder) (gin.HandlerFunc, error)
 ```
 
 安装顺序（由外到内）：
 
 ```text
 1. RequestID
-2. AccessLog
-3. CORS（可选）
-4. Recovery
-5. BodyLimit
-6. 业务全局中间件（WithMiddleware）
-7. 模块/路由中间件
-8. 业务 handler
+2. SecurityHeaders（可选）
+3. AccessLog
+4. CORS（可选）
+5. Recovery
+6. BodyLimit
+7. 业务全局中间件（WithMiddleware）
+8. 模块/路由中间件
+9. RateLimit（可选，WithRateLimit）
+10. JWTAuth（可选，WithJWTAuth）
+11. 业务 handler
 ```
 
 顺序理由：
 
 - `RequestID` 最外层，后续所有日志都能拿到 `req_id`；
+- `SecurityHeaders` 在 `AccessLog` 外层，404/405 和 panic 后的错误响应也带安全头；
 - `AccessLog` 必须在 `Recovery` 外层，它的 `defer` 才能记录到 panic 后的 `500`；
 - `CORS` 在 `Recovery` 外层，保证 panic 响应也带跨域头；
 - `Recovery` 在业务中间件外层，业务 panic 不会击穿进程；
-- `BodyLimit` 在业务之前，避免大请求进入业务逻辑。
+- `BodyLimit` 在业务之前，避免大请求进入业务逻辑；
+- `RateLimit` 与 `JWTAuth` 只挂在业务路由组上：`/healthz`、`/readyz` 和未匹配路径不受影响，
+  限流先于 JWT 执行，未通过认证的请求同样计入配额；
+- `JWTAuth` 在业务 handler 之前，handler 通过 `transport.JWTClaims(c)` 读取已校验的 claims。
 
 `AccessLogOptions`：
 
@@ -793,8 +811,14 @@ type AccessLogOptions struct {
     LogUserAgent   bool          // 默认 true
     LogClientIP    bool          // 默认 true
     MaxPathLength  int           // 默认 1024，防止超长 URL 污染日志
+    LogQuery       bool          // 默认 true，记录脱敏后的 query
+    SensitiveQuery []string      // 默认 DefaultSensitiveQueryKeys()
 }
 ```
+
+`SensitiveQuery` 为 nil 时使用默认敏感键（password、token、authorization、api_key、
+signature 等，大小写不敏感），匹配到的值替换为 `***` 后重新编码；query 无法解析时
+整个字段记为 `***`。传入空切片可关闭脱敏，但不建议。
 
 访问日志字段：
 
@@ -805,6 +829,7 @@ type AccessLogOptions struct {
   "req_id": "...",
   "method": "GET",
   "path": "/api/v1/order/orders/1",
+  "query": "page=2&token=%2A%2A%2A",
   "status": 200,
   "bytes": 123,
   "latency_ms": 3.1,
@@ -812,6 +837,8 @@ type AccessLogOptions struct {
   "user_agent": "curl/8.0"
 }
 ```
+
+`query` 仅在请求带 query 时出现，且已按 `SensitiveQuery` 脱敏。
 
 级别规则：`5xx -> error`，`4xx -> warn`，其余 `info`。
 
@@ -859,6 +886,131 @@ CORSConfig{
 - `AllowOrigins` 为空 -> 不启用；
 - 要允许任意来源但不带凭证，显式写 `"*"`。
 
+#### 3.4.8 404 / 405 统一响应
+
+`buildHTTP` 始终安装兜底处理器：
+
+```go
+engine.HandleMethodNotAllowed = true
+engine.NoRoute(...)  // apperr.NotFound("route not found")        -> 404 / 40400
+engine.NoMethod(...) // apperr.MethodNotAllowed("method not allowed") -> 405 / 40500
+```
+
+- 未匹配路径和错误方法返回与业务 handler 相同的包络，并带上 `req_id`；
+- gin 在 405 响应上写 `Allow` 响应头，列出该路径支持的方法；
+- 通过 `WithAlwaysOK` 时 HTTP 状态变为 200，`code` 仍为 40400 / 40500；
+- 业务 handler 主动返回的 `apperr.NotFound`（如 `40401`）不受影响。
+
+#### 3.4.9 JWT 认证
+
+`support/jwtauth` 只做校验，不签发 token：
+
+```go
+type Config struct {
+    Secret        []byte
+    Algorithms    []string      // 默认 ["HS256"]；支持 HS256/HS384/HS512
+    Issuer        string        // 非空时校验 iss
+    Audience      string        // 非空时要求 aud 包含该值
+    Leeway        time.Duration // exp/nbf 的时钟容差
+    RequireExpiry bool          // true 时缺少 exp 直接拒绝
+    Clock         func() time.Time
+}
+
+func NewParser(cfg Config) (*Parser, error)
+func (p *Parser) Parse(token string) (*Claims, error)
+```
+
+`Claims` 暴露 `Subject`、`Issuer`、`Audience`、`ExpiresAt`、`NotBefore`、`IssuedAt`、
+`ID` 和完整的 `Raw` map；`Get`/`String` 用于读取业务声明。
+
+拒绝原因用哨兵错误区分，便于日志与测试：
+`ErrMalformed`、`ErrUnsupportedAlgorithm`、`ErrSignature`、`ErrExpired`、
+`ErrNotYetValid`、`ErrIssuer`、`ErrAudience`、`ErrMissingExpiry`。
+`alg: none` 和配置外的算法一律拒绝，签名比较使用 `hmac.Equal`。
+
+中间件配置：
+
+```go
+type JWTAuthConfig struct {
+    Parser     *jwtauth.Parser
+    Header     string   // 默认 "Authorization"
+    Scheme     string   // 默认 "Bearer"
+    Optional   bool     // 无 token/非法 token 时放行，由业务自行判断
+    SkipPaths  []string
+    ContextKey string   // 默认 transport.JWTClaimsKey
+}
+```
+
+- 失败固定返回 401 / 40100 / `"unauthorized"`，不返回 token 解析细节；
+- 响应头 `WWW-Authenticate: Bearer realm="api"`；
+- 成功时 claims 存入 gin.Context，`transport.JWTClaims(c)` 或
+  `middleware.Claims(c, key)` 读取；
+- `WithJWTAuth` 只作用于模块路由，`/healthz`、`/readyz`、静态资源和未匹配路径不受影响；
+- 需要按角色/租户授权时，在业务中间件里读取 claims 后返回 `apperr.Forbidden`。
+
+#### 3.4.10 限流
+
+`transport/ratelimit` 定义存储接口，内存实现使用滑动窗口日志：
+
+```go
+type Result struct {
+    Allowed    bool
+    Limit      int
+    Remaining  int
+    RetryAfter time.Duration
+    ResetAt    time.Time
+}
+
+type Store interface {
+    Allow(ctx context.Context, key string, limit int, window time.Duration) (Result, error)
+}
+```
+
+`ratelimit.NewMemoryStore()` 适用于单进程部署；键在窗口过期后由周期性 sweep 清理。
+`Store.SetClock` 用于注入测试时钟。多实例部署使用
+`transport/ratelimit/redisstore`：它用 ZSET + Lua 实现同一套滑动窗口语义，
+以 Redis 服务器时间为准，多个实例共享计数；Redis 错误原样返回，由 `FailOpen`
+决定放行还是 503。
+
+```go
+type RateLimitConfig struct {
+    Store     ratelimit.Store
+    Limit     int
+    Window    time.Duration
+    KeyFunc   func(*gin.Context) string // 默认 ClientIP|Method|FullPath
+    SkipPaths []string
+    FailOpen  bool // Store 出错时放行；默认 false -> 503 / 50300
+}
+```
+
+- 每个响应都带 `X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`；
+- 超限返回 429 / 42900，并带 `Retry-After`（秒，向上取整）；
+- 默认按 `客户端 IP + 方法 + 路由` 分桶，单个热点接口不会耗尽其他接口的配额；
+- 限流在 JWT 之前执行，暴力尝试同样消耗配额；
+- 只作用于模块路由，健康检查不受影响；
+- `FailOpen` 只建议在限流器不可用不影响安全性的场景开启。
+
+#### 3.4.11 安全响应头
+
+```go
+type SecurityHeadersConfig struct {
+    ContentTypeOptions    string            // 默认 "nosniff"
+    FrameOptions          string            // 默认 "DENY"
+    ReferrerPolicy        string            // 默认 "strict-origin-when-cross-origin"
+    HSTS                  time.Duration     // 0 表示不发送
+    HSTSIncludeSubdomains bool
+    HSTSPreload           bool
+    ContentSecurityPolicy string            // 非空时发送
+    PermissionsPolicy     string            // 非空时发送
+    Custom                map[string]string // 最后写入，可覆盖默认值
+}
+```
+
+- 空字段使用 `transport.DefaultSecurityHeadersConfig()` 的默认值；
+- HSTS 只在确认全站 HTTPS 后开启；
+- 所有值在 `New` 阶段校验，包含 `\r`/`\n` 或非法头名直接返回错误，避免响应头注入；
+- 安全头安装在最外层，404、405、401、429 和 500 响应同样携带。
+
 ### 3.5 `apperr`
 
 ```go
@@ -883,6 +1035,7 @@ func InvalidArgument(message string) *Error   // 40001 / 400
 func Unauthorized(message string) *Error      // 40100 / 401
 func Forbidden(message string) *Error         // 40300 / 403
 func NotFound(message string) *Error          // 40400 / 404
+func MethodNotAllowed(message string) *Error  // 40500 / 405
 func Conflict(message string) *Error          // 40900 / 409
 func TooManyRequests(message string) *Error   // 42900 / 429
 func Internal(message string) *Error          // 50000 / 500
@@ -1019,6 +1172,48 @@ func (c Config) Validate() error
 - 不使用 `sync.Once`、不提供包级 `GetDb()`。
 
 > v1 把 GORM 作为主依赖。若未来要支持"不用 DB 的用户零 GORM 依赖"，可把 `support/mysql` 拆成独立子 module；这属于 v2 的开放问题（见 §15.2）。
+
+### 3.7.1 `support/redis`
+
+```go
+package redis
+
+import goredis "github.com/redis/go-redis/v9"
+
+type Config struct {
+    Network      string        `yaml:"network" default:"tcp"` // tcp|unix
+    Addr         string        `yaml:"addr"`
+    Username     string        `yaml:"username"`
+    Password     string        `yaml:"password"`
+    DB           int           `yaml:"db"`
+    PoolSize     int           `yaml:"pool_size" default:"10"`
+    MinIdleConns int           `yaml:"min_idle_conns" default:"2"`
+    DialTimeout  time.Duration `yaml:"dial_timeout" default:"5s"`
+    ReadTimeout  time.Duration `yaml:"read_timeout" default:"3s"`
+    WriteTimeout time.Duration `yaml:"write_timeout" default:"3s"`
+    PingTimeout  time.Duration `yaml:"ping_timeout" default:"5s"`
+    MaxRetries   int           `yaml:"max_retries"`
+}
+
+func New(ctx context.Context, cfg Config) (*goredis.Client, error)
+func Ping(ctx context.Context, client *goredis.Client, timeout time.Duration) error
+func Close(client *goredis.Client) error
+func (c Config) Validate() error
+```
+
+行为：
+
+- `Addr` 必填，空值返回 `ErrAddrRequired`；
+- `Network` 只接受 `tcp`、`unix`；`DB`、连接数和时长不能为负；
+  `MinIdleConns <= PoolSize`；
+- `MaxRetries == 0` 使用 go-redis 默认值 3，`-1` 关闭重试；
+- `New` 在 `PingTimeout` 内 `PING`，失败时关闭客户端并返回错误；
+- 错误信息包含 network、地址、DB 和超时，不包含密码；
+- 不调用 `redis.SetLogger`，不修改全局日志配置；
+- 与其他 support 包一样无全局状态、无 `init()`、不 panic。
+
+Redis 不进入 `Runtime`：需要时由业务自己创建并关闭，再把客户端传给
+`transport/ratelimit/redisstore` 等适配器。
 
 ### 3.8 `script`
 
@@ -1482,6 +1677,7 @@ import (
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logging"
+    "github.com/yourorg/demo-service/app/io/redis"
     "github.com/yourorg/demo-service/app/module/order"
 )
 
@@ -1489,7 +1685,8 @@ type Config struct {
     Env     string              `yaml:"env" default:"dev"`
     HTTP    gofy.HTTPConfig     `yaml:"http"`
     Log     logging.Config      `yaml:"log"`
-    DB      gofy.DatabaseConfig `yaml:"db"`
+    DB      map[string]gofy.DatabaseConfig `yaml:"db"` // 按实例名分组
+    Redis   redis.Config `yaml:"redis"`             // 多实例，按名字索引
     PIDFile string              `yaml:"pid_file"`
     Order   order.Config        `yaml:"order"`
 }
@@ -1537,11 +1734,35 @@ log:
     env: prod
 
 db:
-  dsn: ${ORDER_DB_DSN}
-  max_idle_conns: 10
-  max_open_conns: 50
-  conn_max_lifetime: 1h
-  ping_timeout: 5s
+  default:
+    dsn: &main_dsn ${ORDER_DB_DSN}
+    max_idle_conns: 10
+    max_open_conns: 50
+    conn_max_lifetime: 1h
+    ping_timeout: 5s
+  order:
+    dsn: *main_dsn
+  product:
+    dsn: *main_dsn
+
+# 多实例 Redis：enabled 为 false 时不建连，适合没有 Redis 的本地环境
+redis:
+  cache:
+    enabled: true
+    addr: ${CACHE_REDIS_ADDR}
+    db: 0
+    pool_size: 10
+  session:
+    enabled: true
+    addr: ${SESSION_REDIS_ADDR}
+    db: 1
+    pool_size: 5
+  ratelimit:
+    enabled: true
+    addr: ${RATE_LIMIT_REDIS_ADDR}
+    password: ${RATE_LIMIT_REDIS_PASSWORD}
+    db: 2
+    pool_size: 5
 
 pid_file: /var/run/demo-service.pid
 
@@ -1550,6 +1771,20 @@ order:
 ```
 
 `${ORDER_DB_DSN}` 在加载时展开；缺失时启动失败（除非显式允许）。
+
+`db` 和 `redis` 都按实例名分组，业务通过 `app/io` 下的包级句柄直接取用：
+
+| 句柄 | 来源 |
+| --- | --- |
+| `mysql.Db` | 框架托管的 `db.default`（`Runtime.DB`） |
+| `mysql.OrderDb` / `mysql.ProductDb` | `db.order` / `db.product`，由 `app/io` 创建 |
+| `redis.Cache` / `redis.Session` | `redis.cache` / `redis.session`，`enabled: false` 时为 nil |
+| `redis.RateLimit` | `redis.ratelimit`，供分布式限流使用 |
+
+`WithDatabase(cfg.DB["default"])` 负责主库的创建、热更新与关闭；`app/io`
+在 `Start` 中打开额外实例并 `Install` 到包级句柄，在 `Stop` 中关闭。热更新时新模块
+先 `Start`、旧模块再 `Stop`，关闭逻辑会比对句柄指针，不会误关新连接。没有 Redis 的
+环境把实例设为 `enabled: false` 即可跳过。
 
 ### 6.4 配置加载发生在 `New` 之前
 
@@ -1575,6 +1810,11 @@ func configPath() string {
 ### 6.5 安全要求
 
 - 框架不在日志中输出 DSN、密码、Token；
+- 访问日志默认对 `password`、`token`、`authorization`、`api_key`、`signature` 等
+  query 参数脱敏，无法解析的 query 整体记为 `***`；
+- JWT 校验失败只返回 `unauthorized`，不区分“token 过期”“签名错误”等内部原因；
+- 安全响应头在 `New` 阶段校验，拒绝含换行的头值；
+- 限流默认失败关闭（503），避免存储故障时失去保护；
 - `mysql.New` 的错误信息必须脱敏 DSN；
 - 配置加载错误只输出文件路径与解析位置，不输出文件内容；
 - 生产配置建议使用环境变量注入 secret，而不是把密码写进 YAML。
@@ -1587,12 +1827,14 @@ func configPath() string {
 
 ```text
 RequestID
+  -> SecurityHeaders（可选）
   -> AccessLog
   -> CORS
   -> Recovery
   -> BodyLimit
   -> 业务全局中间件
-  -> 模块/路由中间件
+  -> RateLimit（可选，仅模块路由）
+  -> JWTAuth（可选，仅模块路由）
   -> 参数绑定
   -> 默认值
   -> 校验
@@ -1622,6 +1864,11 @@ RequestID
 | --- | --- | --- | --- |
 | 绑定失败 | 400 | 40002 | invalid request |
 | 校验失败 | 400 | 40001 | invalid argument |
+| JWT 校验失败 | 401 | 40100 | unauthorized |
+| 未匹配路径 | 404 | 40400 | route not found |
+| 方法不允许 | 405 | 40500 | method not allowed |
+| 触发限流 | 429 | 42900 | too many requests |
+| 限流存储不可用 | 503 | 50300 | rate limiter unavailable |
 | `apperr.Error` | 其 `Status` | 其 `Code` | 其 `Message` |
 | `context.Canceled` | 499 | 49900 | client closed request |
 | `context.DeadlineExceeded` | 504 | 50400 | request timeout |
@@ -1633,6 +1880,7 @@ RequestID
 ### 7.4 日志与隐私
 
 - 访问日志默认不记录请求体、响应体、Header；
+- 访问日志记录 query 时按 `SensitiveQuery` 脱敏，密码、token、签名等值不会落盘；
 - `req_id` 必须出现在访问日志、错误日志、panic 日志中；
 - 错误日志记录 `cause` 与堆栈，但不记录 DSN/密码；
 - 客户端 IP 通过 `WithTrustedProxies` 控制是否信任 `X-Forwarded-For`；默认不信任，避免伪造。
@@ -1784,6 +2032,12 @@ demo-service/
 ├── app/
 │   ├── config/
 │   │   └── config.go
+│   ├── io/                     # 实例句柄 + 建连/Install/Close 生命周期
+│   │   ├── io_runtime.go       # 生命周期模块（NewModuleFactory）
+│   │   ├── mysql/
+│   │   │   └── mysql.go        # Db / OrderDb / ProductDb
+│   │   └── redis/
+│   │       └── redis.go        # Cache / Session / RateLimit
 │   ├── middleware/
 │   │   └── auth.go
 │   └── module/
@@ -1819,6 +2073,7 @@ import (
 
     "github.com/bingcool/gofy"
     "github.com/yourorg/demo-service/app/config"
+    appio "github.com/yourorg/demo-service/app/io"
     "github.com/yourorg/demo-service/app/module/order"
     appscript "github.com/yourorg/demo-service/script"
 )
@@ -1845,8 +2100,9 @@ func main() {
         gofy.WithHTTP(cfg.HTTP),
         gofy.WithAPIPrefix("/api/v1"),
         gofy.WithPIDFile(cfg.PIDFile),
-        gofy.WithDatabase(cfg.DB),
+        gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
         gofy.WithModuleFactories(
+            appio.NewModuleFactory(cfg.DB, cfg.Redis),
             order.NewModuleFactory(cfg.Order),
         ),
         gofy.WithScripts(appscript.Register(cfg)...),
@@ -1888,6 +2144,7 @@ import (
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logging"
+    "github.com/yourorg/demo-service/app/io/redis"
     "github.com/yourorg/demo-service/app/module/order"
 )
 
@@ -1895,7 +2152,8 @@ type Config struct {
     Env     string              `yaml:"env" default:"dev"`
     HTTP    gofy.HTTPConfig     `yaml:"http"`
     Log     logging.Config      `yaml:"log"`
-    DB      gofy.DatabaseConfig `yaml:"db"`
+    DB      map[string]gofy.DatabaseConfig `yaml:"db"` // 按实例名分组
+    Redis   redis.Config `yaml:"redis"`             // 多实例，按名字索引
     PIDFile string              `yaml:"pid_file"`
     Order   order.Config        `yaml:"order"`
 }
@@ -1904,6 +2162,35 @@ func Load(ctx context.Context, path string) (*Config, error) {
     return gofyconfig.Load[Config](ctx, path)
 }
 ```
+
+### 9.3.1 `app/io` 实例句柄
+
+```go
+// app/io/mysql/mysql.go
+var (
+    Db        *gorm.DB // db.default，框架托管
+    OrderDb   *gorm.DB // db.order
+    ProductDb *gorm.DB // db.product
+)
+
+// app/io/redis/redis.go
+var (
+    Cache     *goredis.Client // redis.cache
+    Session   *goredis.Client // redis.session
+    RateLimit *goredis.Client // redis.ratelimit
+)
+```
+
+业务代码直接取用，不需要依赖注入容器：
+
+```go
+o, err := mysql.OrderDb.WithContext(ctx).First(&order)
+s, err := redis.Cache.Get(ctx, "order:1").Result()
+```
+
+生命周期由 `app/io` 统一管理：`Start` 打开 `db.order`、`db.product` 和启用的
+Redis 实例并 `Install` 到句柄，`Stop` 关闭并清空。热更新时新模块先安装、旧模块后
+关闭，旧实例不会误清或误关新句柄。
 
 ### 9.4 `app/module/order/module.go`
 
@@ -1940,7 +2227,7 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
         if rt.DB == nil {
             return nil, errors.New("order module requires database")
         }
-        repo := repository.New(rt.DB)
+        repo := repository.NewFromHandle(rt.Logger)
         svc := service.New(repo, rt.Logger, service.Config{
             PaymentTimeout: cfg.PaymentTimeout,
         })
@@ -1971,6 +2258,10 @@ func (m *Module) Register(r *transport.Router) error {
 }
 ```
 
+`NewFromHandle` 把 `mysql.Db` 的读取推迟到每次查询：模块工厂执行时 `app/io` 尚未
+`Start`，句柄还是 nil；等 `Start` 安装连接后仓库自动使用新句柄，热更新也会切到新
+连接。脚本模式没有模块生命周期，改用 `repository.New(rt.DB, rt.Logger)` 显式传连接。
+
 `BindAll` 校验并注册 `demoservice.Routes()`：路由路径、`{id}` 占位符、方法签名和 `AuthRequired` 都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`。
 
 最终路由：
@@ -1980,6 +2271,7 @@ GET    /api/v1/order/orders/:id
 POST   /api/v1/order/orders
 GET    /api/v1/order/orders
 DELETE /api/v1/order/orders/:id
+GET    /api/v1/order/config
 ```
 
 ### 9.5 请求/响应类型（来自 `gofy-interface-service`）
@@ -2346,6 +2638,9 @@ func Auth(verify func(token string) error) transport.Middleware {
 ```
 
 > 中间件的错误响应有两种做法：一是像上面直接写；二是把错误放进 `c`，在统一中间件里交给 `Responder`。v1 推荐把认证失败收敛到 handler 返回 `apperr.Unauthorized`，避免每个中间件重复响应格式。
+
+标准 Bearer JWT 不需要业务自己写中间件：使用 `WithJWTAuth`（§3.4.9）即可；
+上面的 `Auth` 仍适合需要调用外部认证服务的场景。
 
 ### 9.11 CLI 行为
 

@@ -78,6 +78,50 @@ curl 'http://127.0.0.1:8080/api/v1/hello/greet?name=gofy'
 # {"code":0,"msg":"success","data":{"message":"hello gofy"},"req_id":"..."}
 ```
 
+## HTTP 安全与限流
+
+三个 option 都是可选的，只作用于业务模块路由，`/healthz`、`/readyz` 和未匹配路径不受影响：
+
+```go
+parser, err := jwtauth.NewParser(jwtauth.Config{
+	Secret:        []byte(os.Getenv("JWT_SECRET")),
+	Issuer:        "demo",
+	RequireExpiry: true,
+})
+if err != nil {
+	return err
+}
+
+app, err := gofy.New(
+	gofy.WithSecurityHeaders(transport.SecurityHeadersConfig{
+		HSTS: 24 * time.Hour, // 仅在确认全站 HTTPS 后开启
+	}),
+	gofy.WithRateLimit(transport.RateLimitConfig{
+		Store:  ratelimit.NewMemoryStore(),
+		Limit:  100,
+		Window: time.Minute,
+	}),
+	gofy.WithJWTAuth(transport.JWTAuthConfig{Parser: parser}),
+	// ...
+)
+```
+
+- **JWT**：失败固定返回 `401 / 40100`，成功后可 `transport.JWTClaims(c)` 读取 claims；
+  `Optional: true` 时无 token 也放行，由业务自己判断。
+- **限流**：滑动窗口，按 `客户端 IP + 方法 + 路由` 分桶；响应带 `X-RateLimit-*`，
+  超限返回 `429 / 42900` 和 `Retry-After`。单进程用
+  `ratelimit.NewMemoryStore()`；多实例用 `support/redis` +
+  `ratelimit/redisstore` 共享计数。存储故障默认返回 `503 / 50300`，
+  `FailOpen: true` 可放行。
+- **安全响应头**：默认 `nosniff`、`DENY`、`strict-origin-when-cross-origin`，
+  可追加 HSTS、CSP、Permissions-Policy 和自定义头；含换行的值在启动时报错。
+- **404 / 405**：未匹配路径和错误方法统一走响应包络（`40400` / `40500`），405 带
+  `Allow` 头。
+- **日志脱敏**：访问日志记录 query 时，`password`、`token`、`authorization`、
+  `api_key`、`signature` 等值替换为 `***`；无法解析的 query 整体记为 `***`。
+
+JWT 只做校验，不签发 token；签发由业务或独立认证服务完成。
+
 ## 热更新
 
 `App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
@@ -345,28 +389,32 @@ app, err := gofy.New(
 请求失败会清空缓存，重试时重新解析，从而切换到其他实例。
 
 ```go
-import resolvernacos "gofy/gofy-interface-service/client/nacos"
+import (
+    "gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
+    resolvernacos "gofy/gofy-interface-service/client/nacos"
+)
 
 resolver, err := resolvernacos.NewFromFiles("nacos.yaml", "application.yaml")
 if err != nil {
     return err
 }
-orders, err := demoservice.NewWithResolver(resolver) // serviceName = demo-service
+orders, err := demoserviceclient.NewWithResolver(resolver) // serviceName = demo-service
 if err != nil {
     return err
 }
 res, err := orders.GetOrder(ctx, &orderrequest.GetOrderRequest{ID: 1})
 ```
 
-`demoservice.NewWithResolver` 固定使用 `demoservice.ServiceName`（`demo-service`）。
+`demoserviceclient.NewWithResolver` 固定使用 `demoservice.ServiceName`（`demo-service`）。
 需要自定义客户端配置时用
 `client.New(client.Config{Service: demoservice.ServiceName, Resolver: resolver})`
-再交给 `demoservice.New`。
+再交给 `demoserviceclient.New`。
 
 不使用 Nacos 时用固定地址（域名或 IP，省略 scheme 默认 http）：
 
 ```go
-orders, err := demoservice.NewWithBaseURL("https://orders.example.com")
+orders, err := demoserviceclient.NewWithBaseURL("https://orders.example.com")
 ```
 
 ## CLI
@@ -419,11 +467,14 @@ GOFY_TEST_MYSQL_DSN='user:pass@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime
 gofy.go, option.go, start.go, execute.go, stop.go   App、生命周期、CLI
 apperr/        业务错误模型
 core/          共享 Runtime（叶子包）
-transport/     Router、类型化 handler、Responder、中间件
+transport/     Router、类型化 handler、Responder、中间件、限流
 logging/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
 support/mysql/ GORM MySQL 连接管理
+support/redis/ Redis 客户端（go-redis）
 support/nacos/ Nacos 配置拉取、本地生成与变更监听
+support/jwtauth/ HMAC JWT 校验
+transport/ratelimit/redisstore/  Redis 共享限流存储
 script/        维护脚本描述
 command/       自定义 CLI 命令描述
 config/        可选 YAML 加载器

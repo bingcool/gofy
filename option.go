@@ -69,6 +69,10 @@ type options struct {
 	trusted      []string
 	alwaysOK     bool
 	serverConf   func(*http.Server) error
+
+	jwt             *transport.JWTAuthConfig
+	rateLimit       *transport.RateLimitConfig
+	securityHeaders *transport.SecurityHeadersConfig
 }
 
 func defaultOptions() options {
@@ -350,6 +354,47 @@ func WithCORS(cfg transport.CORSConfig) Option {
 // WithHealthEndpoints registers /healthz and /readyz.
 func WithHealthEndpoints(enabled bool) Option {
 	return func(o *options) error { o.health = enabled; return nil }
+}
+
+// WithJWTAuth requires a valid bearer token on module routes. Health checks,
+// static handlers registered outside modules and unmatched paths are not
+// affected.
+func WithJWTAuth(cfg transport.JWTAuthConfig) Option {
+	return func(o *options) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		c := cfg
+		o.jwt = &c
+		return nil
+	}
+}
+
+// WithRateLimit limits requests to module routes per client, method and route.
+// A nil Store or non-positive Limit/Window is rejected at startup.
+func WithRateLimit(cfg transport.RateLimitConfig) Option {
+	return func(o *options) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		c := cfg
+		o.rateLimit = &c
+		return nil
+	}
+}
+
+// WithSecurityHeaders adds hardening headers such as nosniff, frame options
+// and referrer policy to every response. Zero fields use the defaults from
+// transport.DefaultSecurityHeadersConfig.
+func WithSecurityHeaders(cfg transport.SecurityHeadersConfig) Option {
+	return func(o *options) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		c := cfg
+		o.securityHeaders = &c
+		return nil
+	}
 }
 
 // WithMaxBodyBytes caps request body size. Requests above the limit get 413.

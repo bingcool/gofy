@@ -8,6 +8,36 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/jwtauth`: HMAC JWT verification for HS256/HS384/HS512. It validates
+  signature, `exp`/`nbf` with optional leeway, `iss` and `aud`, rejects
+  `alg: none`, and returns sentinel errors so callers can log the reason
+  without exposing it to clients.
+- `transport/ratelimit`: `Store` interface and `MemoryStore` sliding-window
+  limiter with injectable clock and idle-key sweep. Shared deployments use the
+  Redis implementation below; the interface stays small enough for other
+  backends.
+- `support/redis`: `Config` validation, `New` (pings within `PingTimeout`),
+  `Ping` and `Close` around `go-redis/v9`. No global state, no logger
+  overrides, and errors never include the password.
+- `transport/ratelimit/redisstore`: Redis sorted-set sliding window behind
+  `ratelimit.Store`, using server time and a Lua script so multiple instances
+  share one bucket. Backed by `go-redis/v9` and tested with `miniredis`.
+- `transport/middleware`: `JWTAuth`, `RateLimit` and `SecurityHeaders`.
+  JWT failures return 401/40100; rate limiting returns 429/42900 with
+  `X-RateLimit-*` and `Retry-After`, and fails closed with 503 when the store
+  errors unless `FailOpen` is set; security headers default to `nosniff`,
+  `DENY` and `strict-origin-when-cross-origin`.
+- `WithJWTAuth`, `WithRateLimit` and `WithSecurityHeaders`: install those
+  middleware on module routes only, so health checks and unmatched paths keep
+  working.
+- Unmatched paths and unsupported methods now use the shared envelope:
+  404/40400 via `NoRoute` and 405/40500 via `NoMethod`. gin writes the `Allow`
+  header on 405. `apperr.MethodNotAllowed` is new.
+- `transport/middleware`: the access log records the query string with
+  sensitive values (`password`, `token`, `authorization`, `api_key`,
+  `signature`, ...) replaced by `***`; unparseable queries are logged as
+  `***`. Controlled by `AccessLogOptions.LogQuery` and `SensitiveQuery`.
+
 - `logging`: error entries are wrapped in red when the sink is a terminal.
   Files, pipes, `NO_COLOR` and Windows stay plain, so log files never contain
   ANSI escapes.
@@ -74,6 +104,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Unmatched paths now return the JSON envelope (`code 40400`) instead of gin's
+  plain-text `404 page not found`, and unsupported methods return `40500`
+  instead of `40400`.
 - `stop` and `restart` now ask `你确定 [停止|重启] 应用【X】? (yes or no)` and
   only proceed on `yes`; `--force=1` skips the prompt. Non-interactive callers
   must pass `--force=1`, since EOF is treated as a refusal.
