@@ -2,9 +2,9 @@
 
 > 状态：**已锁定**（2026-11-03）
 >
-> 关联文档：[架构与设计评审](./architecture-review.md)、[gofy-library 设计](./gofy-library-design.md)、[gofy-interface-service 设计](./gofy-interface-service-design.md)
+> 关联文档：[架构与设计评审](./architecture-review.md)、[gofy-interface-service 设计](./gofy-interface-service-design.md)
 >
-> 生态中有三个仓库：本仓库 `gofy`（框架）、`gofy-library`（可选组件库，零依赖 gofy）、`gofy-interface-service`（契约仓库）。三者互不反向依赖，业务服务按需组合。
+> 生态中有两个仓库：本仓库 `gofy`（框架）与 `gofy-interface-service`（契约仓库）。gofy 不依赖契约仓库，业务服务按需组合。
 >
 > 本文的结论只有一个：**gofy 是一个 Go library / package，业务项目是独立的 Go module，通过 `go get github.com/bingcool/gofy` 依赖它。** 本文不再讨论"项目模板"与"library"的取舍，只描述 library 形态下每一个包、每一个导出符号、每一条运行时语义应该如何设计。
 >
@@ -59,7 +59,6 @@
 | D12 | 守护进程 | v1 不内置 daemon；推荐 systemd / 容器编排；`start/stop` 只做前台进程 + pid |
 | D13 | 代码生成 | 不在 gofy 内实现；DAO 由业务使用 `bingcool/gen` 等工具生成 |
 | D14 | 兼容目标 | v1 提供稳定公共 API；内部实现可自由重构 |
-| D15 | 可选组件库 | Redis、对象存储、短信、队列等不进 gofy 核心，统一放 `gofy-library`；gofy 不依赖它 |
 
 ### 1.2 目标
 

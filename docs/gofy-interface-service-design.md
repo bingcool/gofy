@@ -52,7 +52,6 @@
 | D12 | 版本 | Go module 语义化版本；业务契约集中在 `appinterface/{domain}service`，目录不带 `vN`；破坏性变更提升 module 主版本 |
 | D13 | 不在本期范围 | cron、worker/process 管理、process pool、Swoole 协程运行时、daemon 管理 |
 | D14 | 首个落地服务 | `examples/demo-service`，用它验证契约、Client、OpenAPI 和迁移路径 |
-| D15 | 与 `gofy-library` 的边界 | 契约仓库不依赖组件库；DTO 不引用 Redis、对象存储等运行时类型；组件库单独设计，见 [gofy-library 设计](./gofy-library-design.md) |
 
 ### 1.2 目标
 
@@ -207,7 +206,7 @@ gofy/
 
 本仓库会被新项目作为依赖下载使用。下载后只有 `appinterface/**` 允许增改；`contracts/**`、`client/**`、`adapter/**`、`docgen/**`、`docsui/**`、`cmd/**`、`openapi/**` 属于共享实现，保持只读，随 module 版本升级。新增服务时在 `appinterface/` 下建目录（如 `demoservice`、`productservice`），在该目录内定义 DTO、枚举、常量、请求、响应、路由和 Service 接口，并在 `{domain}serviceclient/` 子包内定义强类型客户端。
 
-与 `gofy-library` 的关系：两者平级、互不依赖。契约仓库只描述线上协议；Redis、锁、对象存储、短信等实现能力由 `gofy-library` 提供，业务在 service 层把组件结果映射为契约 DTO。禁止为了让 DTO 复用某个组件类型而把运行时依赖引入契约仓库。
+契约仓库只描述线上协议；Redis、锁、对象存储、短信等运行时能力不属于契约层，业务在 service 层使用自己的实现并把结果映射为契约 DTO。禁止为了让 DTO 复用某个运行时类型而把这类依赖引入契约仓库。
 
 可选模式（不推荐作为 v1）：
 
