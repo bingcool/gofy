@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core"
+	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/transport"
 	"github.com/yourorg/demo-service/app/config"
@@ -35,7 +37,7 @@ var (
 // 简单项目只维护本地 config.yaml 时设为 false；不创建 nacos.yaml 且不设置
 // NACOS_* 环境变量时，配置本身也是禁用的，效果相同。
 // 该开关只影响配置同步，不影响 nacos.yaml 中显式开启的服务注册。
-const enableNacosSyncConfig = true
+const enableNacosSyncConfig = false
 
 func main() {
 	ctx, stop := gofy.SignalContext(context.Background())
@@ -43,7 +45,7 @@ func main() {
 
 	nacosCfg, err := loadNacosConfig()
 	if err != nil {
-		log.Fatalf("load nacos config: %v", err)
+		fatalf("load nacos config: %v", err)
 	}
 	if strings.TrimSpace(os.Getenv("NACOS_FILE")) == "" {
 		nacosCfg.File = configPath()
@@ -52,24 +54,33 @@ func main() {
 	pullConfig := enableNacosSyncConfig && nacosCfg.Enabled && isStartInvocation(os.Args[1:])
 	if pullConfig {
 		if _, err := nacos.Sync(ctx, nacosCfg); err != nil {
-			log.Fatalf("sync nacos config: %v", err)
+			fatalf("sync nacos config: %v", err)
 		}
 	}
 
 	cfg, err := config.Load(ctx, configPath())
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		fatalf("load config: %v", err)
+	}
+	// 进程显式设置了 GOFY_ENV 时以它为准；否则回落到 config.yaml 的 env，
+	// 让 systemenv 与 Runtime.Env 读到的环境保持一致。
+	envFromProcess := strings.TrimSpace(os.Getenv("GOFY_ENV")) != ""
+	if !envFromProcess {
+		if err := os.Setenv("GOFY_ENV", cfg.Env); err != nil {
+			fatalf("set GOFY_ENV: %v", err)
+		}
 	}
 
 	reload := &reloader{
-		nacosCfg: nacosCfg,
-		watch:    pullConfig && nacosCfg.Watch,
-		httpCfg:  cfg.HTTP,
+		nacosCfg:       nacosCfg,
+		watch:          pullConfig && nacosCfg.Watch,
+		httpCfg:        cfg.HTTP,
+		envFromProcess: envFromProcess,
 	}
 
 	opts := []gofy.Option{
 		gofy.WithName("demo-service"),
-		gofy.WithEnv(cfg.Env),
+		gofy.WithEnv(systemenv.GetEnv()),
 		gofy.WithLogConfig(cfg.Log),
 		gofy.WithHTTP(cfg.HTTP),
 		gofy.WithAPIPrefix("/api/v1"),
@@ -89,7 +100,7 @@ func main() {
 
 	app, err := gofy.New(opts...)
 	if err != nil {
-		log.Fatalf("init application: %v", err)
+		fatalf("init application: %v", err)
 	}
 	// Publish the app before Execute starts the watcher: a config change may
 	// arrive as soon as the watcher polls, and the callback needs to find it.
@@ -99,6 +110,25 @@ func main() {
 		app.Logger().Error("demo-service exit", zap.Error(err))
 		os.Exit(gofy.ExitCode(err))
 	}
+}
+
+// fatalf 保留 log 的时间戳，把启动阶段的致命错误以红色写到 stderr 后退出。
+// 输出不是终端、设置了 NO_COLOR 或在 Windows 上时保持无色。
+func fatalf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if stderrColor() {
+		msg = "\x1b[31m" + msg + "\x1b[0m"
+	}
+	log.Print(msg)
+	os.Exit(1)
+}
+
+func stderrColor() bool {
+	if os.Getenv("NO_COLOR") != "" || runtime.GOOS == "windows" {
+		return false
+	}
+	info, err := os.Stderr.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func configPath() string {
@@ -144,6 +174,9 @@ type reloader struct {
 	watch bool
 	// httpCfg is the address the listener was bound to; Reload cannot move it.
 	httpCfg gofy.HTTPConfig
+	// envFromProcess 记录 GOFY_ENV 是否由进程显式设置。未显式设置时，
+	// 热更新会让该变量跟随 config.yaml，保持 systemenv 与 Runtime.Env 一致。
+	envFromProcess bool
 	// app is stored after New and before Execute so the watcher callback can
 	// reach the running application.
 	app atomic.Pointer[gofy.App]
@@ -189,8 +222,15 @@ func (r *reloader) reload(ctx context.Context) error {
 			zap.String("requested", net.JoinHostPort(cfg.HTTP.Host, strconv.Itoa(cfg.HTTP.Port))),
 		)
 	}
+	env := cfg.Env
+	if !r.envFromProcess {
+		if err := os.Setenv("GOFY_ENV", cfg.Env); err != nil {
+			return fmt.Errorf("set GOFY_ENV: %w", err)
+		}
+		env = systemenv.GetEnv()
+	}
 	return app.Reload(ctx, gofy.ReloadSpec{
-		Env:             cfg.Env,
+		Env:             env,
 		Log:             &cfg.Log,
 		Database:        &cfg.DB,
 		ModuleFactories: r.factories(cfg),

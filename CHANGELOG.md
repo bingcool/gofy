@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `logging`: error entries are wrapped in red when the sink is a terminal.
+  Files, pipes, `NO_COLOR` and Windows stay plain, so log files never contain
+  ANSI escapes.
+- `core/systemenv`: read-only helpers for the `GOFY_ENV` environment
+  (`GetEnv`, `IsDev`, `IsTest`, `IsGrad`, `IsProd`), OS detection and
+  `GetGoroutineID`. The package keeps no state and adds no `init()`.
 - `start --daemon=1`: re-executes the service in a detached session and exits
   the parent process. `stop` and `restart` still work through the pid file.
   Windows is unsupported and panics with an explicit message.

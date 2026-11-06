@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -63,7 +65,6 @@ func New(cfg Config) (*zap.Logger, error) {
 		return nil, err
 	}
 	level, _ := parseLevel(cfg.Level)
-	encoder := newEncoder(cfg)
 
 	outputs := cfg.Outputs
 	if len(outputs) == 0 {
@@ -72,18 +73,18 @@ func New(cfg Config) (*zap.Logger, error) {
 
 	cores := make([]zapcore.Core, 0, len(outputs)+len(cfg.ErrorOutputs))
 	for _, out := range outputs {
-		sink, err := openSink(out, cfg.Rotation, os.Stdout)
+		sink, file, err := openSink(out, cfg.Rotation, os.Stdout)
 		if err != nil {
 			return nil, err
 		}
-		cores = append(cores, zapcore.NewCore(encoder, sink, level))
+		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, level))
 	}
 	for _, out := range cfg.ErrorOutputs {
-		sink, err := openSink(out, cfg.Rotation, os.Stderr)
+		sink, file, err := openSink(out, cfg.Rotation, os.Stderr)
 		if err != nil {
 			return nil, err
 		}
-		cores = append(cores, zapcore.NewCore(encoder, sink, zap.ErrorLevel))
+		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, zap.ErrorLevel))
 	}
 
 	opts := []zap.Option{
@@ -162,14 +163,62 @@ func newEncoder(cfg Config) zapcore.Encoder {
 	return zapcore.NewJSONEncoder(encCfg)
 }
 
-func openSink(target string, rotation RotationConfig, fallback *os.File) (zapcore.WriteSyncer, error) {
+// newSinkEncoder builds the encoder for one output. Terminal sinks also color
+// error entries red, which the encoder owns so files stay free of ANSI codes
+// even when the same process writes to both.
+func newSinkEncoder(cfg Config, file *os.File) zapcore.Encoder {
+	encoder := newEncoder(cfg)
+	if colorEnabled(file) {
+		return newColorErrorEncoder(encoder)
+	}
+	return encoder
+}
+
+func colorEnabled(f *os.File) bool {
+	if f == nil || os.Getenv("NO_COLOR") != "" || runtime.GOOS == "windows" {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// colorErrorEncoder wraps error entries (and above) in red.
+type colorErrorEncoder struct {
+	zapcore.Encoder
+	// pool backs the colored buffer; zap frees whatever EncodeEntry returns,
+	// and a zero-value Buffer cannot be freed.
+	pool buffer.Pool
+}
+
+func newColorErrorEncoder(enc zapcore.Encoder) colorErrorEncoder {
+	return colorErrorEncoder{Encoder: enc, pool: buffer.NewPool()}
+}
+
+func (e colorErrorEncoder) Clone() zapcore.Encoder {
+	return colorErrorEncoder{Encoder: e.Encoder.Clone(), pool: e.pool}
+}
+
+func (e colorErrorEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (*buffer.Buffer, error) {
+	buf, err := e.Encoder.EncodeEntry(ent, fields)
+	if err != nil || ent.Level < zapcore.ErrorLevel {
+		return buf, err
+	}
+	colored := e.pool.Get()
+	colored.AppendString("\x1b[31m")
+	colored.AppendBytes(buf.Bytes())
+	colored.AppendString("\x1b[0m")
+	buf.Free()
+	return colored, nil
+}
+
+func openSink(target string, rotation RotationConfig, fallback *os.File) (zapcore.WriteSyncer, *os.File, error) {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "stdout":
-		return zapcore.AddSync(os.Stdout), nil
+		return zapcore.AddSync(os.Stdout), os.Stdout, nil
 	case "stderr":
-		return zapcore.AddSync(os.Stderr), nil
+		return zapcore.AddSync(os.Stderr), os.Stderr, nil
 	case "":
-		return zapcore.AddSync(fallback), nil
+		return zapcore.AddSync(fallback), fallback, nil
 	}
 	if rotation.Enabled {
 		return zapcore.AddSync(&lumberjack.Logger{
@@ -179,13 +228,13 @@ func openSink(target string, rotation RotationConfig, fallback *os.File) (zapcor
 			MaxBackups: rotation.MaxBackups,
 			Compress:   rotation.Compress,
 			LocalTime:  rotation.LocalTime,
-		}), nil
+		}), nil, nil
 	}
 	f, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("logging: open %s: %w", target, err)
+		return nil, nil, fmt.Errorf("logging: open %s: %w", target, err)
 	}
-	return zapcore.AddSync(f), nil
+	return zapcore.AddSync(f), f, nil
 }
 
 func baseFields(fields map[string]string) []zap.Field {

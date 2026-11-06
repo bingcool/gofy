@@ -421,6 +421,7 @@ apperr/        业务错误模型
 core/          共享 Runtime（叶子包）
 transport/     Router、类型化 handler、Responder、中间件
 logging/       zap 日志构建与 GORM 适配
+core/systemenv/ 环境、系统与 goroutine 判定
 support/mysql/ GORM MySQL 连接管理
 support/nacos/ Nacos 配置拉取、本地生成与变更监听
 script/        维护脚本描述
