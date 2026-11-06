@@ -45,11 +45,11 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	a.cancel = cancel
 	a.setState(stateRunning)
 
-	lg, own, err := a.buildLogger()
+	lg, system, own, err := a.buildLoggers()
 	if err != nil {
 		return nil, a.abort(err)
 	}
-	a.setLogger(lg, own)
+	a.setLogger(lg, system, own)
 
 	db, ownDB, err := a.buildDB(runCtx, lg)
 	if err != nil {
@@ -68,7 +68,7 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	})
 	a.rt = rt
 
-	engine, modules, err := a.buildHTTP(rt, lg)
+	engine, modules, err := a.buildHTTP(rt, lg, system)
 	if err != nil {
 		return nil, a.abort(err)
 	}
@@ -84,11 +84,11 @@ func (a *App) run(parent context.Context) error {
 	ctx, cancel := context.WithCancelCause(parent)
 	a.cancel = cancel
 
-	lg, own, err := a.buildLogger()
+	lg, system, own, err := a.buildLoggers()
 	if err != nil {
 		return a.abort(err)
 	}
-	a.setLogger(lg, own)
+	a.setLogger(lg, system, own)
 
 	db, ownDB, err := a.buildDB(ctx, lg)
 	if err != nil {
@@ -107,7 +107,7 @@ func (a *App) run(parent context.Context) error {
 	})
 	a.rt = rt
 
-	engine, modules, err := a.buildHTTP(rt, lg)
+	engine, modules, err := a.buildHTTP(rt, lg, system)
 	if err != nil {
 		return a.abort(err)
 	}
@@ -203,11 +203,11 @@ func (a *App) run(parent context.Context) error {
 	return reason
 }
 
-func (a *App) buildHTTP(rt *core.Runtime, lg *zap.Logger) (*gin.Engine, []transport.Module, error) {
-	return a.buildHTTPWith(rt, lg, a.opts.moduleFactories, a.opts.modules)
+func (a *App) buildHTTP(rt *core.Runtime, lg, system *zap.Logger) (*gin.Engine, []transport.Module, error) {
+	return a.buildHTTPWith(rt, lg, system, a.opts.moduleFactories, a.opts.modules)
 }
 
-func (a *App) buildHTTPWith(rt *core.Runtime, lg *zap.Logger, factories []transport.ModuleFactory, injected []transport.Module) (*gin.Engine, []transport.Module, error) {
+func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories []transport.ModuleFactory, injected []transport.Module) (*gin.Engine, []transport.Module, error) {
 	gin.SetMode(ginMode(a.opts.http.Mode))
 	engine := gin.New()
 	if len(a.opts.trusted) > 0 {
@@ -235,7 +235,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg *zap.Logger, factories []transp
 		}
 	}
 	if a.opts.recovery {
-		engine.Use(middleware.Recovery(lg, a.opts.responder))
+		engine.Use(middleware.Recovery(system, a.opts.responder))
 	}
 	engine.Use(middleware.BodyLimit(a.opts.maxBody))
 	if len(a.opts.middleware) > 0 {
@@ -580,6 +580,9 @@ func (a *App) cleanup() error {
 		}
 		if a.ownLogger {
 			_ = logging.Sync(a.logger)
+			if a.systemLogger != nil && a.systemLogger != a.logger {
+				_ = logging.Sync(a.systemLogger)
+			}
 		}
 
 		a.cleanupErr = errors.Join(errs...)

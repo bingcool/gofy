@@ -6,35 +6,48 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // Config describes a zap logger.
 type Config struct {
-	Level        string            `yaml:"level" default:"info"`    // debug|info|warn|error
-	Encoding     string            `yaml:"encoding" default:"json"` // json|console
-	Outputs      []string          `yaml:"outputs"`                 // stdout|stderr|file path
-	ErrorOutputs []string          `yaml:"error_outputs"`           // error level and above only
-	TimeLayout   string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
-	Rotation     RotationConfig    `yaml:"rotation"`
-	BaseFields   map[string]string `yaml:"base_fields"`
+	Level              string            `yaml:"level" default:"info"`    // debug|info|warn|error
+	Encoding           string            `yaml:"encoding" default:"json"` // json|console
+	Outputs            []string          `yaml:"outputs"`                 // stdout|stderr|file path
+	ErrorOutputs       []string          `yaml:"error_outputs"`           // error level and above only
+	SystemErrorOutputs []string          `yaml:"system_error_outputs"`    // framework errors only
+	TimeLayout         string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
+	Rotation           RotationConfig    `yaml:"rotation"`
+	BaseFields         map[string]string `yaml:"base_fields"`
 }
 
-// RotationConfig controls file rotation handled by lumberjack.
+// RotationConfig controls file rotation.
 type RotationConfig struct {
-	Enabled    bool `yaml:"enabled"`
-	MaxSizeMB  int  `yaml:"max_size_mb" default:"100"`
-	MaxAgeDays int  `yaml:"max_age_days" default:"30"`
-	MaxBackups int  `yaml:"max_backups" default:"7"`
-	Compress   bool `yaml:"compress" default:"true"`
-	LocalTime  bool `yaml:"local_time" default:"true"`
+	Enabled bool `yaml:"enabled"`
+	// Mode selects how Outputs files roll: "size" (default, lumberjack) or
+	// "hourly" (info-h0.log ... info-h23.log). ErrorOutputs and
+	// SystemErrorOutputs always use size rotation to avoid hourly fragments.
+	Mode string `yaml:"mode" default:"size"`
+	// DateDir writes each file under a date subdirectory such as 20261106.
+	DateDir    bool   `yaml:"date_dir"`
+	DateLayout string `yaml:"date_layout" default:"20060102"`
+	// DateDirMaxAgeDays keeps date directories for this many days. When a
+	// directory expires the whole YYYYMMDD tree is removed. Zero means the
+	// default of 7 days.
+	DateDirMaxAgeDays int  `yaml:"date_dir_max_age_days" default:"7"`
+	MaxSizeMB         int  `yaml:"max_size_mb" default:"100"`
+	MaxAgeDays        int  `yaml:"max_age_days" default:"30"`
+	MaxBackups        int  `yaml:"max_backups" default:"7"`
+	Compress          bool `yaml:"compress" default:"true"`
+	LocalTime         bool `yaml:"local_time" default:"true"`
 }
 
 // Validate checks the configuration without touching the filesystem.
@@ -47,10 +60,16 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("logging: invalid encoding %q (want json or console)", c.Encoding)
 	}
-	if c.Rotation.MaxSizeMB < 0 || c.Rotation.MaxAgeDays < 0 || c.Rotation.MaxBackups < 0 {
+	if c.Rotation.MaxSizeMB < 0 || c.Rotation.MaxAgeDays < 0 || c.Rotation.MaxBackups < 0 || c.Rotation.DateDirMaxAgeDays < 0 {
 		return errors.New("logging: rotation values must not be negative")
 	}
-	for _, out := range append(append([]string{}, c.Outputs...), c.ErrorOutputs...) {
+	if mode := normalizeRotationMode(c.Rotation.Mode); mode != rotationModeSize && mode != rotationModeHourly {
+		return fmt.Errorf("logging: invalid rotation mode %q (want size or hourly)", c.Rotation.Mode)
+	}
+	if strings.ContainsAny(c.Rotation.DateLayout, `/\`) {
+		return fmt.Errorf("logging: invalid date_layout %q (must not contain path separators)", c.Rotation.DateLayout)
+	}
+	for _, out := range append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...) {
 		if strings.TrimSpace(out) == "" {
 			return errors.New("logging: output path must not be empty")
 		}
@@ -73,20 +92,45 @@ func New(cfg Config) (*zap.Logger, error) {
 
 	cores := make([]zapcore.Core, 0, len(outputs)+len(cfg.ErrorOutputs))
 	for _, out := range outputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stdout)
+		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
 		if err != nil {
 			return nil, err
 		}
 		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, level))
 	}
 	for _, out := range cfg.ErrorOutputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stderr)
+		sink, file, err := openSink(out, cfg.Rotation, os.Stderr, rotationModeSize)
 		if err != nil {
 			return nil, err
 		}
 		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, zap.ErrorLevel))
 	}
 
+	return zap.New(zapcore.NewTee(cores...), newOptions(cfg)...), nil
+}
+
+// NewSystem builds the logger for framework-level failures such as recovered
+// panics. It writes error entries to SystemErrorOutputs only and returns a nop
+// logger when the list is empty, so callers can always use the result.
+func NewSystem(cfg Config) (*zap.Logger, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if len(cfg.SystemErrorOutputs) == 0 {
+		return Nop(), nil
+	}
+	cores := make([]zapcore.Core, 0, len(cfg.SystemErrorOutputs))
+	for _, out := range cfg.SystemErrorOutputs {
+		sink, file, err := openSink(out, cfg.Rotation, os.Stderr, rotationModeSize)
+		if err != nil {
+			return nil, err
+		}
+		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, zap.ErrorLevel))
+	}
+	return zap.New(zapcore.NewTee(cores...), newOptions(cfg)...), nil
+}
+
+func newOptions(cfg Config) []zap.Option {
 	opts := []zap.Option{
 		zap.AddCaller(),
 		zap.AddStacktrace(zap.ErrorLevel),
@@ -94,7 +138,7 @@ func New(cfg Config) (*zap.Logger, error) {
 	if len(cfg.BaseFields) > 0 {
 		opts = append(opts, zap.Fields(baseFields(cfg.BaseFields)...))
 	}
-	return zap.New(zapcore.NewTee(cores...), opts...), nil
+	return opts
 }
 
 // Nop returns a logger that discards everything.
@@ -211,7 +255,9 @@ func (e colorErrorEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field
 	return colored, nil
 }
 
-func openSink(target string, rotation RotationConfig, fallback *os.File) (zapcore.WriteSyncer, *os.File, error) {
+// openSink builds one output. mode is "" for info outputs (they follow
+// Rotation.Mode) and "size" for error streams.
+func openSink(target string, rotation RotationConfig, fallback *os.File, mode string) (zapcore.WriteSyncer, *os.File, error) {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "stdout":
 		return zapcore.AddSync(os.Stdout), os.Stdout, nil
@@ -221,14 +267,14 @@ func openSink(target string, rotation RotationConfig, fallback *os.File) (zapcor
 		return zapcore.AddSync(fallback), fallback, nil
 	}
 	if rotation.Enabled {
-		return zapcore.AddSync(&lumberjack.Logger{
-			Filename:   target,
-			MaxSize:    rotation.MaxSizeMB,
-			MaxAge:     rotation.MaxAgeDays,
-			MaxBackups: rotation.MaxBackups,
-			Compress:   rotation.Compress,
-			LocalTime:  rotation.LocalTime,
-		}), nil, nil
+		return zapcore.AddSync(newRotatingFileSink(target, rotation, mode)), nil, nil
+	}
+	// 关闭滚动时 {date} 只在打开文件时展开一次，避免把字面量写进文件名。
+	target = expandDateToken(target, rotation, time.Now())
+	// 按启动模式分目录时，storage/log/http 等目录可能还不存在；lumberjack
+	// 会自己建目录，这里补齐直接写文件的分支。
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return nil, nil, fmt.Errorf("logging: create dir for %s: %w", target, err)
 	}
 	f, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

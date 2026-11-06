@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/yourorg/demo-service/app/module/order/model"
+	"go.uber.org/zap"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gorm.io/gorm"
 )
@@ -28,18 +29,28 @@ var ErrNotFound = errors.New("order not found")
 
 // OrderRepository persists orders with GORM.
 type OrderRepository struct {
-	db *gorm.DB
+	db     *gorm.DB
+	logger *zap.Logger
 }
 
 var _ OrderRepositoryInterface = (*OrderRepository)(nil)
 
-// New builds a GORM-backed order repository.
-func New(db *gorm.DB) *OrderRepository {
-	return &OrderRepository{db: db}
+// New builds a GORM-backed order repository. A nil logger disables logs.
+// Persistence errors are wrapped and returned, never logged here: the service
+// or controller owns the single error log so one failure is not recorded twice.
+func New(db *gorm.DB, logger *zap.Logger) *OrderRepository {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &OrderRepository{
+		db:     db,
+		logger: logger.With(zap.String("component", "order.repository")),
+	}
 }
 
 // FindByID returns one order or ErrNotFound.
 func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order, error) {
+	r.logger.Debug("find order", zap.Uint64("order_id", id))
 	var o model.Order
 	err := r.db.WithContext(ctx).First(&o, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -53,9 +64,11 @@ func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order
 
 // Create inserts o and fills its generated ID.
 func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Order, error) {
+	r.logger.Debug("insert order", zap.Uint64("user_id", o.UserID))
 	if err := r.db.WithContext(ctx).Create(o).Error; err != nil {
 		return nil, fmt.Errorf("create order: %w", err)
 	}
+	r.logger.Debug("order inserted", zap.Uint64("order_id", o.ID))
 	return o, nil
 }
 
@@ -74,6 +87,13 @@ func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset,
 	if err := q().Order("id DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
 		return nil, 0, fmt.Errorf("list orders: %w", err)
 	}
+	r.logger.Debug("list orders",
+		zap.Uint64("user_id", userID),
+		zap.Int("offset", offset),
+		zap.Int("limit", limit),
+		zap.Int("rows", len(items)),
+		zap.Int64("total", total),
+	)
 	return items, total, nil
 }
 
@@ -86,6 +106,7 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status st
 	if res.RowsAffected == 0 {
 		return ErrNotFound
 	}
+	r.logger.Debug("order status updated", zap.Uint64("order_id", id), zap.String("status", status))
 	return nil
 }
 
@@ -98,5 +119,6 @@ func (r *OrderRepository) CancelPending(ctx context.Context, id uint64) (int64, 
 	if res.Error != nil {
 		return 0, fmt.Errorf("cancel pending order %d: %w", id, res.Error)
 	}
+	r.logger.Debug("cancel pending order", zap.Uint64("order_id", id), zap.Int64("rows", res.RowsAffected))
 	return res.RowsAffected, nil
 }

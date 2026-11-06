@@ -178,6 +178,28 @@ func TestRestartDefaults(t *testing.T) {
 	}
 }
 
+func TestScriptListPrintsHeader(t *testing.T) {
+	var out bytes.Buffer
+	d := commandline.Deps{
+		Name: "app",
+		Out:  &out,
+		Scripts: []commandline.Script{
+			{Name: "fix-order", Short: "fix inconsistent order data"},
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"script", "--list"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("script --list: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"NAME", "DESCRIPTION", "fix-order", "fix inconsistent order data"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRestartRejectsArguments(t *testing.T) {
 	d := commandline.Deps{
 		Name:    "app",

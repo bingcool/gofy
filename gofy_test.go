@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,8 +19,11 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/gofytest"
+	"github.com/bingcool/gofy/logging"
+	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/transport"
 	"github.com/gin-gonic/gin"
+	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 )
 
@@ -185,6 +189,71 @@ func TestHandlerServesTypedRoutes(t *testing.T) {
 
 	rr = app.GET("/healthz")
 	gofytest.Status(t, rr, http.StatusOK)
+}
+
+func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "info.log")
+	errorPath := filepath.Join(dir, "error.log")
+	systemPath := filepath.Join(dir, "system_error.log")
+
+	module := &testModule{
+		name: "panic",
+		reg: func(r *transport.Router) error {
+			transport.GET(r, "/boom", func(context.Context, *struct{}) (*orderResponse, error) {
+				panic("boom: secret")
+			})
+			return nil
+		},
+	}
+	app, err := gofy.New(
+		gofy.WithName("log-test"),
+		gofy.WithPIDFile(""),
+		gofy.WithAccessLog(false),
+		gofy.WithRecovery(true),
+		gofy.WithLogConfig(logging.Config{
+			Outputs:            []string{infoPath},
+			ErrorOutputs:       []string{errorPath},
+			SystemErrorOutputs: []string{systemPath},
+		}),
+		gofy.WithModules(module),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := app.Handler(context.Background())
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/panic/boom", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	systemLog := string(mustReadFile(t, systemPath))
+	if !strings.Contains(systemLog, "panic recovered") || !strings.Contains(systemLog, "boom: secret") {
+		t.Fatalf("system log = %q", systemLog)
+	}
+	if strings.Contains(string(mustReadFile(t, infoPath)), "panic recovered") {
+		t.Fatal("panic was written to info.log")
+	}
+	if strings.Contains(string(mustReadFile(t, errorPath)), "panic recovered") {
+		t.Fatal("panic was written to error.log")
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
 }
 
 func TestModulesStartInOrderAndStopInReverse(t *testing.T) {
@@ -407,6 +476,48 @@ func TestExecuteUnknownCommandUsesUsageExitCode(t *testing.T) {
 	}
 	if code := gofy.ExitCode(err); code != gofy.ExitUsage {
 		t.Fatalf("exit code = %d, want %d", code, gofy.ExitUsage)
+	}
+}
+
+func TestExecuteScriptFlagWithoutDashesIsUsageError(t *testing.T) {
+	app, err := gofy.New(
+		gofy.WithName("cli-test"),
+		gofy.WithScripts(gofyscript.Script{
+			Name: "demo",
+			Flags: func(fs *pflag.FlagSet) {
+				fs.Uint64("order-id", 0, "order id")
+			},
+			Run: func(context.Context, *gofyscript.Runtime, *pflag.FlagSet) error { return nil },
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	oldArgs, oldStderr := os.Args, os.Stderr
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		os.Stderr = oldStderr
+	})
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Args = []string{"cli-test", "script", "demo", "order-id=1222"}
+	os.Stderr = w
+	execErr := app.Execute(context.Background())
+	os.Stderr = oldStderr
+	_ = w.Close()
+
+	if !errors.Is(execErr, gofy.ErrUsage) {
+		t.Fatalf("Execute error = %v, want ErrUsage", execErr)
+	}
+	if code := gofy.ExitCode(execErr); code != gofy.ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, gofy.ExitUsage)
+	}
+	output, _ := io.ReadAll(r)
+	if got := string(output); !strings.Contains(got, "leading --") || !strings.Contains(got, "--order-id=1222") {
+		t.Fatalf("stderr = %q, want a leading -- hint", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,10 +15,13 @@ import (
 
 func TestValidateRejectsInvalidConfig(t *testing.T) {
 	cases := map[string]logging.Config{
-		"bad level":         {Level: "verbose"},
-		"bad encoding":      {Encoding: "xml"},
-		"negative rotation": {Rotation: logging.RotationConfig{MaxSizeMB: -1}},
-		"empty output":      {Outputs: []string{" "}},
+		"bad level":             {Level: "verbose"},
+		"bad encoding":          {Encoding: "xml"},
+		"negative rotation":     {Rotation: logging.RotationConfig{MaxSizeMB: -1}},
+		"bad rotation mode":     {Rotation: logging.RotationConfig{Mode: "weekly"}},
+		"bad date layout":       {Rotation: logging.RotationConfig{DateLayout: "2006/01/02"}},
+		"negative date dir age": {Rotation: logging.RotationConfig{DateDirMaxAgeDays: -1}},
+		"empty output":          {Outputs: []string{" "}},
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -122,6 +126,143 @@ func TestRotationWritesThroughLumberjack(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("rotated log entry was not written")
+}
+
+func TestHourlyInfoAndSizeErrorOutputsUseDateDir(t *testing.T) {
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "http", "info.log")
+	errorPath := filepath.Join(dir, "http", "error.log")
+	logger, err := logging.New(logging.Config{
+		Level:        "info",
+		Encoding:     "json",
+		Outputs:      []string{infoPath},
+		ErrorOutputs: []string{errorPath},
+		Rotation: logging.RotationConfig{
+			Enabled:    true,
+			Mode:       "hourly",
+			DateDir:    true,
+			DateLayout: "20060102",
+			MaxAgeDays: 30,
+			MaxSizeMB:  1,
+			MaxBackups: 7,
+			Compress:   true,
+			LocalTime:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info("business info")
+	logger.Error("business error")
+	if err := logging.Sync(logger); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	now := time.Now()
+	infoFile := filepath.Join(dir, "http", now.Format("20060102"), "info-h"+strconv.Itoa(now.Hour())+".log")
+	if got := readFile(t, infoFile); !strings.Contains(got, "business info") {
+		t.Fatalf("hourly info log = %q", got)
+	}
+	errorFile := filepath.Join(dir, "http", now.Format("20060102"), "error.log")
+	if got := readFile(t, errorFile); !strings.Contains(got, "business error") {
+		t.Fatalf("size error log = %q", got)
+	}
+}
+
+func TestDateTokenExpandsWithoutRotation(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "script", "{date}", "info", "fix-order.log")
+	logger, err := logging.New(logging.Config{
+		Level:    "info",
+		Encoding: "json",
+		Outputs:  []string{target},
+		Rotation: logging.RotationConfig{LocalTime: true},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info("script info")
+	if err := logging.Sync(logger); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	path := filepath.Join(dir, "script", time.Now().Format("20060102"), "info", "fix-order.log")
+	if got := readFile(t, path); !strings.Contains(got, "script info") {
+		t.Fatalf("log = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "script", "{date}")); !os.IsNotExist(err) {
+		t.Fatalf("{date} should not stay literal in the path, stat err = %v", err)
+	}
+}
+
+func TestNewSystemWritesOnlyFrameworkErrors(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "info.log")
+	errorPath := filepath.Join(dir, "error.log")
+	systemPath := filepath.Join(dir, "system", "system_error.log")
+
+	cfg := logging.Config{
+		Level:              "info",
+		Outputs:            []string{mainPath},
+		ErrorOutputs:       []string{errorPath},
+		SystemErrorOutputs: []string{systemPath},
+	}
+	main, err := logging.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	system, err := logging.NewSystem(cfg)
+	if err != nil {
+		t.Fatalf("NewSystem: %v", err)
+	}
+
+	main.Info("business info")
+	main.Error("business error")
+	system.Error("panic recovered")
+	if err := logging.Sync(main); err != nil {
+		t.Fatalf("Sync main: %v", err)
+	}
+	if err := logging.Sync(system); err != nil {
+		t.Fatalf("Sync system: %v", err)
+	}
+
+	mainLog := readFile(t, mainPath)
+	if !strings.Contains(mainLog, "business info") || !strings.Contains(mainLog, "business error") {
+		t.Fatalf("main log = %q", mainLog)
+	}
+	if strings.Contains(mainLog, "panic recovered") {
+		t.Fatalf("main log captured a framework error: %q", mainLog)
+	}
+
+	errorLog := readFile(t, errorPath)
+	if !strings.Contains(errorLog, "business error") || strings.Contains(errorLog, "panic recovered") {
+		t.Fatalf("error log = %q", errorLog)
+	}
+
+	systemLog := readFile(t, systemPath)
+	if !strings.Contains(systemLog, "panic recovered") || strings.Contains(systemLog, "business") {
+		t.Fatalf("system log = %q", systemLog)
+	}
+}
+
+func TestNewSystemWithoutOutputsIsNop(t *testing.T) {
+	logger, err := logging.NewSystem(logging.Config{})
+	if err != nil {
+		t.Fatalf("NewSystem: %v", err)
+	}
+	if logger == nil {
+		t.Fatal("NewSystem returned nil")
+	}
+	logger.Error("discarded")
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }
 
 func TestNopAndSync(t *testing.T) {

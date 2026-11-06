@@ -3,6 +3,7 @@ package gofy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/bingcool/gofy/command"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/commandline"
+	"github.com/bingcool/gofy/internal/console"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support/mysql"
@@ -19,7 +21,17 @@ import (
 // Execute parses os.Args[1:] and dispatches start, stop, script, version or a
 // custom command. It never calls os.Exit.
 func (a *App) Execute(ctx context.Context) error {
-	return a.ExecuteArgs(ctx, os.Args[1:])
+	err := a.ExecuteArgs(ctx, os.Args[1:])
+	// 参数错误发生在 logger 构建之前，main 里的 app.Logger() 还是 Nop。
+	// 没有注入 logger 时直接写 stderr，避免用户只看到 go run 的退出码。
+	if err != nil && a.opts.logger == nil && isCLIError(err) {
+		console.New(os.Stderr, os.Stderr).Error("%v", err)
+	}
+	return err
+}
+
+func isCLIError(err error) bool {
+	return errors.Is(err, ErrUsage) || errors.Is(err, ErrUnknownCommand)
 }
 
 // ExecuteArgs is Execute with explicit arguments, which makes it testable.
@@ -103,7 +115,11 @@ func (a *App) runScript(ctx context.Context, name string, args []string) error {
 		return fmt.Errorf("%w: %v", ErrUsage, err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("%w: unexpected arguments: %v", ErrUsage, fs.Args())
+		args := fs.Args()
+		if strings.Contains(args[0], "=") {
+			return fmt.Errorf("%w: unexpected arguments: %v (script flags need a leading --, e.g. --%s)", ErrUsage, args, args[0])
+		}
+		return fmt.Errorf("%w: unexpected arguments: %v (script flags need a leading --)", ErrUsage, args)
 	}
 	return a.withRuntime(ctx, spec.WithoutDatabase, func(rt *Runtime) error {
 		return spec.Run(ctx, rt, fs)
@@ -116,12 +132,19 @@ func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Ru
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lg, ownLogger, err := a.buildLogger()
+	lg, system, ownLogger, err := a.buildLoggers()
 	if err != nil {
 		return err
 	}
+	// 暴露给 app.Logger()，让 main 在 Execute 返回后仍能记录脚本错误。
+	a.setLogger(lg, system, ownLogger)
 	if ownLogger {
-		defer func() { _ = logging.Sync(lg) }()
+		defer func() {
+			_ = logging.Sync(lg)
+			if system != lg {
+				_ = logging.Sync(system)
+			}
+		}()
 	}
 
 	runCtx, cancel := context.WithCancelCause(ctx)

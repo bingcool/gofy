@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/yourorg/demo-service/app/module/order/model"
@@ -49,12 +50,12 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, 
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Debug("get order", zap.Uint64("order_id", id))
 	return toDTO(o), nil
 }
 
 // Create persists a pending order and returns it as a DTO.
 func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*orderdto.OrderDTO, error) {
-	s.logger.Debug("create order", zap.Uint64("user_id", userID), zap.Int64("amount", amount))
 	o, err := s.repo.Create(ctx, &model.Order{
 		UserID: userID,
 		Amount: amount,
@@ -63,6 +64,11 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) 
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Info("order created",
+		zap.Uint64("order_id", o.ID),
+		zap.Uint64("user_id", userID),
+		zap.Int64("amount", amount),
+	)
 	return toDTO(o), nil
 }
 
@@ -76,12 +82,26 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 	for i := range items {
 		list = append(list, *toDTO(&items[i]))
 	}
+	s.logger.Debug("list orders",
+		zap.Uint64("user_id", userID),
+		zap.Int("page", page),
+		zap.Int("page_size", size),
+		zap.Int64("total", total),
+	)
 	return list, total, nil
 }
 
 // Cancel marks an order as cancelled.
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-	return s.repo.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
+	if err := s.repo.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled)); err != nil {
+		if errors.Is(err, ErrOrderNotFound) {
+			// 预期内的业务结果，HTTP 层会映射为 404，不按错误级别记录。
+			s.logger.Debug("cancel order: not found", zap.Uint64("order_id", id))
+		}
+		return err
+	}
+	s.logger.Info("order cancelled", zap.Uint64("order_id", id))
+	return nil
 }
 
 // toDTO converts the persistence model at the service boundary.

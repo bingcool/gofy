@@ -1,6 +1,7 @@
 package systemenv_test
 
 import (
+	"os"
 	"runtime"
 	"testing"
 
@@ -61,6 +62,66 @@ func TestOSPredicates(t *testing.T) {
 		if got := check(); got != want {
 			t.Fatalf("predicate for %s on %s = %v, want %v", goos, runtime.GOOS, got, want)
 		}
+	}
+}
+
+func TestServiceMode(t *testing.T) {
+	original := os.Args
+	defer func() { os.Args = original }()
+
+	cases := []struct {
+		name       string
+		args       []string
+		wantHTTP   bool
+		wantScript bool
+	}{
+		{"no subcommand", nil, true, false},
+		{"start", []string{"start"}, true, false},
+		{"start with flags", []string{"start", "--daemon=1"}, true, false},
+		{"restart", []string{"restart"}, true, false},
+		{"script", []string{"script", "fix-order", "--order-id=1"}, false, true},
+		{"script help", []string{"script", "--help"}, false, true},
+		{"stop", []string{"stop"}, true, false},
+		{"version", []string{"version"}, false, false},
+		{"help flag", []string{"--help"}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = append([]string{"demo-service"}, tc.args...)
+			if got := systemenv.IsHTTPService(); got != tc.wantHTTP {
+				t.Fatalf("IsHTTPService() = %v, want %v", got, tc.wantHTTP)
+			}
+			if got := systemenv.IsScriptService(); got != tc.wantScript {
+				t.Fatalf("IsScriptService() = %v, want %v", got, tc.wantScript)
+			}
+		})
+	}
+}
+
+func TestScriptName(t *testing.T) {
+	original := os.Args
+	defer func() { os.Args = original }()
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"script", []string{"script", "fix-order", "--order-id=1"}, "fix-order"},
+		{"spaces removed", []string{"script", "Fix Order"}, "FixOrder"},
+		{"path characters removed", []string{"script", "../../etc/passwd"}, "etcpasswd"},
+		{"list", []string{"script", "--list"}, ""},
+		{"help", []string{"script", "--help"}, ""},
+		{"http", []string{"start"}, ""},
+		{"none", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = append([]string{"demo-service"}, tc.args...)
+			if got := systemenv.ScriptName(); got != tc.want {
+				t.Fatalf("ScriptName() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

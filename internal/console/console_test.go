@@ -19,6 +19,24 @@ func TestConfirmColorsPrompt(t *testing.T) {
 	}
 }
 
+func TestTableDrawsRowDividers(t *testing.T) {
+	var out bytes.Buffer
+	c := &Console{Out: &out, Err: &out}
+	c.Table([][]string{
+		{"NAME", "DESCRIPTION"},
+		{"fix-order", "fix inconsistent order data"},
+	})
+	got := out.String()
+	for _, want := range []string{"├", "┼", "┤", "NAME", "fix-order"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("table missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "├") != 1 {
+		t.Fatalf("table dividers = %d, want 1:\n%s", strings.Count(got, "├"), got)
+	}
+}
+
 func TestConfirmPlainWhenColorDisabled(t *testing.T) {
 	var out bytes.Buffer
 	c := &Console{Out: &out, Err: &out}

@@ -50,6 +50,40 @@ GOFY_ENV=prod ./demo-service start
 | `IsLinux()` | `runtime.GOOS == "linux"` |
 | `IsMacos()` | `runtime.GOOS == "darwin"` |
 
+## 服务类型判定
+
+入口子命令决定当前进程的服务类型。两个方法读取 `os.Args[1:]` 的第一个非 flag
+参数，不缓存结果：
+
+| 启动方式 | `IsHTTPService()` | `IsScriptService()` |
+| --- | --- | --- |
+| `demo-service`（无子命令） | `true` | `false` |
+| `demo-service start` | `true` | `false` |
+| `demo-service stop` | `true` | `false` |
+| `demo-service restart` | `true` | `false` |
+| `demo-service script fix-order` | `false` | `true` |
+| `version` / `--help` | `false` | `false` |
+
+`start`、`stop`、`restart` 和默认启动都作用于 HTTP 服务：`restart` 会先停旧实例
+再就地启动，`stop` 通过 pid 文件停止 HTTP 实例。`version`、`help` 等命令两者
+都不成立。判定基于进程真实的启动参数：用 `App.ExecuteArgs` 在测试里传入自定义
+参数，不会改变这里的结果。
+
+### ScriptName
+
+`ScriptName()` 返回 `script` 子命令后面的脚本名，供按脚本拆分日志等场景使用：
+
+| 启动参数 | 返回值 |
+| --- | --- |
+| `demo-service script fix-order --order-id=1` | `fix-order` |
+| `demo-service script "Fix Order"` | `FixOrder` |
+| `demo-service script ../../etc/passwd` | `etcpasswd` |
+| `demo-service script --list` / `script --help` | `""` |
+| `demo-service start` / 无子命令 | `""` |
+
+返回值会去掉空白，只保留字母、数字、`-` 和 `_`。日志文件名会直接使用它，
+因此过滤路径分隔符和 `..`，避免命令行参数把日志写到其他目录。
+
 ## GetGoroutineID
 
 `runtime` 没有公开 goroutine ID，本包解析 `runtime.Stack` 输出的第一行

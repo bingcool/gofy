@@ -117,7 +117,7 @@ func (c *Console) Table(rows [][]string) {
 	}
 
 	c.border(widths, "┌", "┬", "┐")
-	for _, row := range rows {
+	for i, row := range rows {
 		var b strings.Builder
 		b.WriteString(c.paint(cyan, "│"))
 		for i, width := range widths {
@@ -132,6 +132,9 @@ func (c *Console) Table(rows [][]string) {
 			b.WriteString(c.paint(cyan, "│"))
 		}
 		fmt.Fprintln(c.Out, b.String())
+		if i < len(rows)-1 {
+			c.border(widths, "├", "┼", "┤")
+		}
 	}
 	c.border(widths, "└", "┴", "┘")
 }

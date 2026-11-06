@@ -912,25 +912,31 @@ return nil, apperr.Internal("get order failed").WithCause(err)
 package logging
 
 type Config struct {
-    Level        string            `yaml:"level" default:"info"`        // debug|info|warn|error
-    Encoding     string            `yaml:"encoding" default:"json"`     // json|console
-    Outputs      []string          `yaml:"outputs"`                     // stdout|stderr|文件路径
-    ErrorOutputs []string          `yaml:"error_outputs"`               // 仅 error 及以上
-    TimeLayout   string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
-    Rotation     RotationConfig    `yaml:"rotation"`
-    BaseFields   map[string]string `yaml:"base_fields"`
+    Level              string            `yaml:"level" default:"info"`        // debug|info|warn|error
+    Encoding           string            `yaml:"encoding" default:"json"`     // json|console
+    Outputs            []string          `yaml:"outputs"`                     // stdout|stderr|文件路径
+    ErrorOutputs       []string          `yaml:"error_outputs"`               // 仅 error 及以上
+    SystemErrorOutputs []string          `yaml:"system_error_outputs"`        // 仅框架捕获的系统错误
+    TimeLayout         string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
+    Rotation           RotationConfig    `yaml:"rotation"`
+    BaseFields         map[string]string `yaml:"base_fields"`
 }
 
 type RotationConfig struct {
-    Enabled   bool `yaml:"enabled"`
-    MaxSizeMB int  `yaml:"max_size_mb" default:"100"`
-    MaxAgeDays int `yaml:"max_age_days" default:"30"`
-    MaxBackups int `yaml:"max_backups" default:"7"`
-    Compress   bool `yaml:"compress" default:"true"`
-    LocalTime  bool `yaml:"local_time" default:"true"`
+    Enabled           bool   `yaml:"enabled"`
+    Mode              string `yaml:"mode" default:"size"`  // size|hourly，仅作用于 Outputs
+    DateDir           bool   `yaml:"date_dir"`             // 按 20261106 这样的日期子目录存放
+    DateLayout        string `yaml:"date_layout" default:"20060102"`
+    DateDirMaxAgeDays int    `yaml:"date_dir_max_age_days" default:"7"` // 整个日期目录保留天数
+    MaxSizeMB         int    `yaml:"max_size_mb" default:"100"`
+    MaxAgeDays        int    `yaml:"max_age_days" default:"30"`         // 文件备份保留天数
+    MaxBackups        int    `yaml:"max_backups" default:"7"`
+    Compress   bool   `yaml:"compress" default:"true"`
+    LocalTime  bool   `yaml:"local_time" default:"true"`
 }
 
 func New(cfg Config) (*zap.Logger, error)
+func NewSystem(cfg Config) (*zap.Logger, error)
 func Nop() *zap.Logger
 func Sync(l *zap.Logger) error
 func (c Config) Validate() error
@@ -939,10 +945,30 @@ func (c Config) Validate() error
 行为：
 
 - 不修改 `time.Local`；时间编码使用 `TimeLayout`。
-- 不创建"按天目录"（当前 `ParseDayLogPath` 的行为被移除）；按大小/天数轮转由 lumberjack 负责。
 - `Outputs` 为空时默认 `["stdout"]`。
-- 文件输出且 `Rotation.Enabled == true` 时使用 lumberjack；否则直接 `os.OpenFile` 追加。
+- `Rotation.Enabled == false` 时直接 `os.OpenFile` 追加，不做任何切割。
+- `Rotation.Enabled == true` 且 `DateDir == true` 时，每个文件先落到日期子目录，
+  例如 `storage/log/http/20261106/info.log`；进程跨天时自动切换到新目录，无需重启。
+- 路径中的 `{date}` 占位符会替换为 `DateLayout` 格式的日期。当日期目录需要排在
+  其他子目录之前时使用它，例如 `storage/log/script/{date}/info/fix-order.log`
+  得到 `storage/log/script/20261106/info/fix-order.log`；没有占位符时日期目录
+  追加在最后一层（`storage/log/script/info/20261106/fix-order.log`）。关闭
+  `Rotation.Enabled` 时占位符在打开文件时展开一次。
+- `Mode` 只作用于 `Outputs`（info 流）：
+  - `size`：在当天目录内由 lumberjack 按 `MaxSizeMB` 切割，`MaxBackups`/`Compress` 生效；
+  - `hourly`：按小时切换为 `info-h0.log` ... `info-h23.log`，不产生 lumberjack 备份。
+- `ErrorOutputs` / `SystemErrorOutputs` 始终按 `size` 模式滚动，避免 error 日志
+  每小时碎片化；它们同样受 `DateDir` 控制。
+- `DateDir == true` 或路径含 `{date}` 时，启动和跨天时会删除超过
+  `DateDirMaxAgeDays`（默认 7 天，配置为 0 也取默认值）的整个日期目录；只处理
+  能用 `DateLayout` 解析的目录名，其他目录不动。`{date}` 位于整个路径段时，
+  扫描它前面的目录（如 `storage/log/script/`）；否则回落到目标文件所在目录。
+  `MaxAgeDays` 只用于 lumberjack 在当前日期目录内的备份文件清理。
+- `DateLayout` 不能包含路径分隔符，避免目录逃逸。
 - `ErrorOutputs` 非空时，error 级别同时写入 `Outputs` 与 `ErrorOutputs`。
+- `SystemErrorOutputs` 非空时，`NewSystem` 返回只接收 `error` 及以上、只写这些目标的 logger；
+  App 把它用于 HTTP recovery，panic 不会进入主 logger。为空时回落到主 logger，
+  panic 仍写入 `ErrorOutputs`，保持旧行为。
 - `BaseFields` 会作为固定字段附加到每条日志（如 `service`、`env`、`version`）。
 - 返回的 logger 由调用方负责 `Sync`；App 内建的 logger 由 App 在关闭时 `Sync`。
 - 无 `init()`、无包级 logger、无后台切日 goroutine。
@@ -1206,6 +1232,11 @@ func RawJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any
 ### 4.2 参数解析规则
 
 - `ExecuteArgs(ctx, args)` 只解析传入的 `args`，不读 `os.Args`；`Execute` 等价于 `ExecuteArgs(ctx, os.Args[1:])`。
+- `Execute` 在返回未知命令或参数错误前，会把错误写到 stderr（终端下为红色
+  `[FAIL]`）。参数解析失败时应用 logger 仍未构建，不能只依赖 `main` 里的
+  `app.Logger()`；`ExecuteArgs` 只返回错误，不产生输出。
+- 脚本 flag 必须带 `--`。漏写时（如 `order-id=1222`）会作为位置参数被拒绝，
+  错误信息提示正确写法（`--order-id=1222`）。
 - `args` 为空时默认 `start`。
 - 未知命令返回 `ErrUnknownCommand`（包装为 usage 错误），**不 panic**。
 - `--help` 返回 `nil`。
@@ -1488,12 +1519,19 @@ log:
     - /var/log/demo-service/app.log
   error_outputs:
     - /var/log/demo-service/error.log
+  system_error_outputs:
+    - /var/log/demo-service/system_error.log
   rotation:
     enabled: true
+    mode: hourly          # info.log 按小时；error/system_error 固定按大小
+    date_dir: true        # /var/log/demo-service/20261106/info-h14.log
+    date_layout: "20060102"
+    date_dir_max_age_days: 7  # 超过 7 天删除整个日期目录
     max_size_mb: 100
     max_age_days: 30
     max_backups: 7
     compress: true
+    local_time: true
   base_fields:
     service: demo-service
     env: prod

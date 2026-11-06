@@ -13,14 +13,24 @@ http:
 log:
   level: info
   encoding: json
+  # 日志文件由 app/config 按启动模式追加：HTTP 写 storage/log/http/<date>/，
+  # 脚本写 storage/log/script/<date>/info/ 和 error/，文件名取自脚本名
+  # （fix-order-h<H>.log、fix-order.log）；这里保留 stdout 方便本地查看。
   outputs:
     - stdout
   rotation:
-    enabled: false
+    enabled: true
+    # info.log 按小时切分（info-h0.log ... info-h23.log）；error.log 和
+    # system_error.log 固定按大小切分，避免每小时产生碎片文件。
+    mode: hourly
+    date_dir: true
+    date_layout: "20060102"
+    date_dir_max_age_days: 7   # 超过 7 天删除整个日期目录
     max_size_mb: 100
     max_age_days: 30
     max_backups: 7
     compress: true
+    local_time: true
   base_fields:
     service: demo-service
 

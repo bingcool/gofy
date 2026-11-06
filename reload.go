@@ -108,6 +108,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	}
 	env := a.opts.env
 	lg, ownLogger := a.logger, a.ownLogger
+	systemLogger := a.systemLogger
 	db, ownDB := a.db, a.ownDB
 	startedAt := a.rt.StartedAt
 	runCtx := a.rt.Context()
@@ -149,19 +150,27 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		if err != nil {
 			return fmt.Errorf("gofy: reload logger: %w", err)
 		}
-		lg, ownLogger, rebuiltLogger = newLogger, true, true
+		newSystem, err := logging.NewSystem(*spec.Log)
+		if err != nil {
+			_ = logging.Sync(newLogger)
+			return fmt.Errorf("gofy: reload system logger: %w", err)
+		}
+		if len(spec.Log.SystemErrorOutputs) == 0 {
+			newSystem = newLogger
+		}
+		lg, systemLogger, ownLogger, rebuiltLogger = newLogger, newSystem, true, true
 	}
 
 	rebuiltDB := false
 	if spec.Database != nil {
 		newDB, err := mysql.New(ctx, *spec.Database, lg)
 		if err != nil {
-			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg)
+			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger)
 			return fmt.Errorf("gofy: reload database: %w", err)
 		}
 		db, ownDB, rebuiltDB = newDB, true, true
 	}
-	discard := func() { discardReloadResources(rebuiltDB, rebuiltLogger, db, lg) }
+	discard := func() { discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger) }
 
 	rt := core.NewRuntime(core.RuntimeConfig{
 		Name:      a.opts.name,
@@ -173,7 +182,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		Ctx:       runCtx,
 		Fail:      func(err error) { a.cancel(err) },
 	})
-	engine, modules, err := a.buildHTTPWith(rt, lg, factories, injected)
+	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, factories, injected)
 	if err != nil {
 		discard()
 		return err
@@ -212,6 +221,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		return fmt.Errorf("%w: reload requires a running server", ErrNotRunning)
 	}
 	oldLogger, oldOwnLogger := a.logger, a.ownLogger
+	oldSystemLogger := a.systemLogger
 	oldDB, oldOwnDB := a.db, a.ownDB
 	a.opts.env = env
 	if spec.Log != nil {
@@ -225,6 +235,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		a.opts.moduleFactories = append([]transport.ModuleFactory(nil), spec.ModuleFactories...)
 	}
 	a.logger, a.ownLogger = lg, ownLogger
+	a.systemLogger = systemLogger
 	a.db, a.ownDB = db, ownDB
 	a.rt = rt
 	a.modules = modules
@@ -252,6 +263,9 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	}
 	if oldOwnLogger && oldLogger != lg {
 		_ = logging.Sync(oldLogger)
+		if oldSystemLogger != nil && oldSystemLogger != oldLogger {
+			_ = logging.Sync(oldSystemLogger)
+		}
 	}
 
 	lg.Info("application reloaded",
@@ -265,12 +279,15 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 
 // discardReloadResources releases only resources this Reload built, so a
 // rejected reload never closes the live database or syncs the live logger.
-func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg *zap.Logger) {
+func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, system *zap.Logger) {
 	if rebuiltDB && db != nil {
 		_ = mysql.Close(db)
 	}
 	if rebuiltLogger {
 		_ = logging.Sync(lg)
+		if system != nil && system != lg {
+			_ = logging.Sync(system)
+		}
 	}
 }
 

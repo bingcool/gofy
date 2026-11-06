@@ -40,8 +40,9 @@ type App struct {
 	opts    options
 	version core.VersionInfo
 
-	logger    *zap.Logger
-	ownLogger bool
+	logger       *zap.Logger
+	systemLogger *zap.Logger
+	ownLogger    bool
 
 	mu          sync.Mutex
 	state       appState
@@ -118,6 +119,9 @@ func New(opts ...Option) (*App, error) {
 	if a.logger == nil {
 		a.logger = logging.Nop()
 	}
+	// 未单独配置 system_error_outputs 时，框架错误沿用主 logger，保持
+	// panic 仍然写入 error_outputs 的既有行为。
+	a.systemLogger = a.logger
 	return a, nil
 }
 
@@ -177,9 +181,10 @@ func (a *App) getState() appState {
 	return a.state
 }
 
-func (a *App) setLogger(l *zap.Logger, own bool) {
+func (a *App) setLogger(l, system *zap.Logger, own bool) {
 	a.mu.Lock()
 	a.logger = l
+	a.systemLogger = system
 	a.ownLogger = own
 	a.mu.Unlock()
 }
@@ -220,15 +225,26 @@ func (a *App) resolveWorkDir() (string, error) {
 	return dir, nil
 }
 
-func (a *App) buildLogger() (*zap.Logger, bool, error) {
+// buildLoggers builds the application logger and the logger for framework-level
+// failures. The system logger falls back to the application logger when
+// system_error_outputs is empty, so panics keep reaching error_outputs.
+func (a *App) buildLoggers() (lg, system *zap.Logger, own bool, err error) {
 	if a.opts.logger != nil {
-		return a.opts.logger, false, nil
+		return a.opts.logger, a.opts.logger, false, nil
 	}
-	lg, err := logging.New(a.opts.logConfig)
+	lg, err = logging.New(a.opts.logConfig)
 	if err != nil {
-		return nil, false, fmt.Errorf("gofy: build logger: %w", err)
+		return nil, nil, false, fmt.Errorf("gofy: build logger: %w", err)
 	}
-	return lg, true, nil
+	system, err = logging.NewSystem(a.opts.logConfig)
+	if err != nil {
+		_ = logging.Sync(lg)
+		return nil, nil, false, fmt.Errorf("gofy: build system logger: %w", err)
+	}
+	if len(a.opts.logConfig.SystemErrorOutputs) == 0 {
+		system = lg
+	}
+	return lg, system, true, nil
 }
 
 func (a *App) buildDB(ctx context.Context, logger *zap.Logger) (*gorm.DB, bool, error) {

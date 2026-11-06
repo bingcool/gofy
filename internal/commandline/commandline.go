@@ -217,11 +217,13 @@ func listScripts(d Deps) error {
 		_, err := fmt.Fprintln(d.Out, "no scripts registered")
 		return err
 	}
+	// 表头让列含义一目了然；Table 会按内容对齐，非终端输出不含颜色。
+	rows := make([][]string, 0, len(d.Scripts)+1)
+	rows = append(rows, []string{"NAME", "DESCRIPTION"})
 	for _, s := range d.Scripts {
-		if _, err := fmt.Fprintf(d.Out, "%-24s %s\n", s.Name, s.Short); err != nil {
-			return err
-		}
+		rows = append(rows, []string{s.Name, s.Short})
 	}
+	console.New(d.Out, d.ErrOut).Table(rows)
 	return nil
 }
 

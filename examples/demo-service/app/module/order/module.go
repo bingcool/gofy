@@ -17,6 +17,7 @@ import (
 	"github.com/yourorg/demo-service/app/module/order/controller"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	"go.uber.org/zap"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
 	"gofy/gofy-interface-service/appinterface/demoservice"
 )
@@ -31,8 +32,9 @@ type Config struct {
 
 // Module wires the order HTTP routes.
 type Module struct {
-	svc  *service.OrderService
-	auth transport.Middleware
+	svc    *service.OrderService
+	auth   transport.Middleware
+	logger *zap.Logger
 }
 
 // NewModuleFactory builds the module from the application runtime.
@@ -41,15 +43,18 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
-		repo := repository.New(rt.DB)
+		repo := repository.New(rt.DB, rt.Logger)
 		svc := service.New(repo, rt.Logger, service.Config{PaymentTimeout: cfg.PaymentTimeout})
-		return NewModule(cfg, svc), nil
+		return NewModule(cfg, svc, rt.Logger), nil
 	}
 }
 
 // NewModule builds a module around an existing service. It is used by tests
-// and by callers that provide their own repository.
-func NewModule(cfg Config, svc *service.OrderService) *Module {
+// and by callers that provide their own repository. A nil logger disables logs.
+func NewModule(cfg Config, svc *service.OrderService, logger *zap.Logger) *Module {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	verify := func(string) error { return nil }
 	if cfg.AuthToken != "" {
 		verify = func(token string) error {
@@ -59,7 +64,7 @@ func NewModule(cfg Config, svc *service.OrderService) *Module {
 			return nil
 		}
 	}
-	return &Module{svc: svc, auth: middleware.Auth(verify)}
+	return &Module{svc: svc, auth: middleware.Auth(verify), logger: logger}
 }
 
 // Name returns the route prefix of the module.
@@ -67,7 +72,7 @@ func (m *Module) Name() string { return "order" }
 
 // Register binds every demoservice contract route to the handler.
 func (m *Module) Register(r *transport.Router) error {
-	h := controller.New(m.svc)
+	h := controller.New(m.svc, m.logger)
 	return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
 		Auth: m.auth,
 	})

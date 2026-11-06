@@ -101,7 +101,7 @@ func newTestAppWithConfig(t *testing.T, cfg order.Config) *gofytest.App {
 	svc := service.New(newFakeRepository(), zap.NewNop(), service.Config{
 		PaymentTimeout: time.Second,
 	})
-	module := order.NewModule(cfg, svc)
+	module := order.NewModule(cfg, svc, zap.NewNop())
 	return gofytest.New(t,
 		gofy.WithName("demo-service-test"),
 		gofy.WithModules(module),

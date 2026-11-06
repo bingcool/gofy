@@ -11,9 +11,33 @@ All notable changes to this project are documented here. The format follows
 - `logging`: error entries are wrapped in red when the sink is a terminal.
   Files, pipes, `NO_COLOR` and Windows stay plain, so log files never contain
   ANSI escapes.
+- `logging`: `system_error_outputs` and `NewSystem` route framework-caught
+  panics to a dedicated file. HTTP recovery uses that logger; when the list is
+  empty panics keep going to `error_outputs`. Plain file sinks now create their
+  parent directory so per-mode log directories work without setup.
+- `logging`: `rotation.date_dir` writes files under date directories such as
+  `20261106`, and `rotation.mode: hourly` rolls info outputs into
+  `info-h0.log` ... `info-h23.log`; `mode: size` keeps lumberjack rotation
+  inside the day directory. Error and system-error outputs always use size
+  rotation. `date_dir_max_age_days` (default 7, zero also means 7) removes the
+  whole expired date directory; `max_age_days` only prunes backups inside the
+  current date directory. A `{date}` placeholder in an output path pins the
+  date directory before other subdirectories, e.g.
+  `storage/log/script/{date}/info/fix-order.log`.
+- `examples/demo-service`: logs land in `storage/log/{http,script}/<YYYYMMDD>`
+  with hourly `info-h<H>.log`, size-rotated `error.log` and
+  `system_error.log`, chosen by `systemenv.IsScriptService()`. Script mode adds
+  `info/` and `error/` directories and names files after the script
+  (`info/fix-order-h16.log`, `error/fix-order.log`,
+  `error/fix-order-system_error.log`) so each script has its own log set.
+- `core/systemenv`: `ScriptName` returns the sanitized name after the `script`
+  subcommand (whitespace removed, only letters, digits, `-` and `_` kept).
 - `core/systemenv`: read-only helpers for the `GOFY_ENV` environment
   (`GetEnv`, `IsDev`, `IsTest`, `IsGrad`, `IsProd`), OS detection and
   `GetGoroutineID`. The package keeps no state and adds no `init()`.
+- `core/systemenv`: `IsHTTPService` and `IsScriptService` classify the process
+  from its entry subcommand (`start`/`stop`/`restart`/no args vs `script`)
+  without caching or package state.
 - `start --daemon=1`: re-executes the service in a detached session and exits
   the parent process. `stop` and `restart` still work through the pid file.
   Windows is unsupported and panics with an explicit message.
@@ -61,6 +85,14 @@ All notable changes to this project are documented here. The format follows
 - `examples/demo-service` now binds its routes to the `gofy-interface-service`
   `demoservice` contract; the local `app/module/order/dto` package is gone and
   responses use the contract envelope shapes (`order`, `paging.ListData`).
+
+### Fixed
+
+- `Execute` prints usage errors (unknown command, unexpected arguments) to
+  stderr before returning, so a flag missing its leading `--` no longer fails
+  silently with exit code 2. Script flags report the corrected form
+  (`--order-id=1222`), and script `Run` errors reach `App.Logger()` because the
+  runtime logger is now exposed on the app.
 
 ## [1.0.0] - 2026-11-03
 

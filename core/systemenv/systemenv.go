@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // 环境常量，与 GOFY_ENV 的取值一一对应。
@@ -55,6 +56,94 @@ func IsLinux() bool { return runtime.GOOS == "linux" }
 
 // IsMacos 报告当前运行系统是否是 macOS。
 func IsMacos() bool { return runtime.GOOS == "darwin" }
+
+// IsHTTPService 报告当前进程是否在操作 HTTP 服务。
+//
+// 成立条件是入口参数的第一个非 flag 值为 start、stop、restart，或者没有子命令
+// （gofy 默认启动 HTTP 服务）：restart 会先停旧实例再就地启动，stop 通过 pid
+// 文件停止 HTTP 实例。version、help 等命令既不是 HTTP 服务，也不是脚本模式，
+// 两个 Is*Service 都返回 false。
+func IsHTTPService() bool {
+	name, ok := subcommand(os.Args[1:])
+	if !ok {
+		return false
+	}
+	switch name {
+	case "", "start", "stop", "restart":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsScriptService 报告当前进程是否通过 script 子命令运行维护脚本，
+// 例如 `demo-service script fix-order --order-id=1`。
+func IsScriptService() bool {
+	name, ok := subcommand(os.Args[1:])
+	return ok && name == "script"
+}
+
+// ScriptName 返回 script 子命令后面的脚本名，用于按脚本区分日志文件。
+//
+// 例如 `demo-service script fix-order --order-id=1` 返回 "fix-order"。
+// 返回值会去掉空白字符，只保留字母、数字、'-' 和 '_'，避免把命令行参数
+// 直接拼进文件路径；没有任何脚本参数（如 script --list、script --help）
+// 时返回空字符串。该函数与包内其他函数一样无状态。
+func ScriptName() string {
+	args := os.Args[1:]
+	index := -1
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			if arg == "-h" || arg == "--help" {
+				return ""
+			}
+			continue
+		}
+		if arg != "script" {
+			return ""
+		}
+		index = i
+		break
+	}
+	if index < 0 {
+		return ""
+	}
+	for _, arg := range args[index+1:] {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return sanitizeScriptName(arg)
+	}
+	return ""
+}
+
+func sanitizeScriptName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case unicode.IsSpace(r):
+			// 去掉空白，保证日志文件名不包含空格。
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// subcommand 返回第一个非 flag 参数。没有子命令时返回 ("", true)，表示走根命令
+// 的默认启动；只带 -h/--help 时返回 false，避免把帮助调用误判为 HTTP 启动。
+func subcommand(args []string) (string, bool) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			if arg == "-h" || arg == "--help" {
+				return "", false
+			}
+			continue
+		}
+		return arg, true
+	}
+	return "", true
+}
 
 // GetGoroutineID 返回当前 goroutine 的 ID。
 //

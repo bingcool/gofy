@@ -18,7 +18,7 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 		Short: "fix inconsistent order data",
 		Flags: func(fs *pflag.FlagSet) {
 			fs.Uint64("order-id", 0, "order id")
-			fs.Bool("dry-run", true, "only print what would be changed")
+			fs.Bool("dry-run", false, "only print what would be changed")
 		},
 		Run: func(ctx context.Context, rt *gofyscript.Runtime, fs *pflag.FlagSet) error {
 			id, _ := fs.GetUint64("order-id")
@@ -32,12 +32,14 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 				zap.Duration("payment_timeout", cfg.Order.PaymentTimeout),
 			)
 			if dryRun {
+				rt.Logger.Info("fix order dry-run, no data changed", zap.Uint64("order_id", id))
 				return nil
 			}
+
 			if rt.DB == nil {
 				return apperr.Internal("database is not configured")
 			}
-			rows, err := repository.New(rt.DB).CancelPending(ctx, id)
+			rows, err := repository.New(rt.DB, rt.Logger).CancelPending(ctx, id)
 			if err != nil {
 				return apperr.Internal("fix order failed").WithCause(err)
 			}
