@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"slices"
 	"strings"
 	"time"
 )
@@ -258,10 +259,5 @@ func numericDate(v any) (time.Time, bool) {
 }
 
 func contains(values []string, want string) bool {
-	for _, v := range values {
-		if v == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
