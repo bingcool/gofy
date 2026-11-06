@@ -76,13 +76,13 @@ func (c *Console) Error(format string, args ...any) { c.line(red, "[FAIL]", form
 // Note prints a plain line.
 func (c *Console) Note(format string, args ...any) { c.line("", "", format, args...) }
 
-// Confirm writes the prompt and reports whether the next input line is "yes".
-// EOF and any other answer count as a refusal.
+// Confirm writes a yellow prompt and reports whether the next input line is
+// "yes". EOF and any other answer count as a refusal.
 func (c *Console) Confirm(r io.Reader, format string, args ...any) (bool, error) {
 	if r == nil {
 		return false, nil
 	}
-	fmt.Fprint(c.Out, c.paint(bold, fmt.Sprintf(format, args...)))
+	fmt.Fprint(c.Out, c.paint(yellow+bold, fmt.Sprintf(format, args...)))
 	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {

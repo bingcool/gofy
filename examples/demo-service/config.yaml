@@ -38,5 +38,5 @@ db:
 pid_file: app/demo-service.pid
 
 order:
-  payment_timeout: 3s
+  payment_timeout: 6s
   # auth_token: set to require a bearer token on every contract route
