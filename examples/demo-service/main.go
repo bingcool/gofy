@@ -89,6 +89,9 @@ func main() {
 		gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
 		gofy.WithNacosRegistration(nacosCfg),
 		gofy.WithHealthEndpoints(true),
+		// 把入口请求的白名单 Header 注入上下文，供 demoserviceclient 转发到下游；
+		// 身份头只有在 WithTrustedProxies 命中的代理转发时才采信。
+		gofy.WithHeaderPropagation(true),
 		gofy.WithModuleFactories(reload.factories(cfg)...),
 		gofy.WithScripts(appscript.Register(cfg)...),
 		gofy.WithVersionInfo(gofy.VersionInfo{

@@ -223,6 +223,11 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	}
 
 	engine.Use(middleware.RequestID(transport.DefaultRequestIDHeader))
+	if a.opts.headerPropagation {
+		// 紧贴 RequestID 安装：用 req_id 兜底 X-Trace-Id，
+		// 并保证后续业务中间件和 handler 都能从 context 读到透传头。
+		engine.Use(middleware.HeaderPropagation(a.opts.trusted))
+	}
 	if a.opts.securityHeaders != nil {
 		mw, err := middleware.SecurityHeaders(*a.opts.securityHeaders)
 		if err != nil {

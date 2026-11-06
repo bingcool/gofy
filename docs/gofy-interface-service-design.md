@@ -205,7 +205,7 @@ gofy/
 
 **公共层与业务层的修改边界：**
 
-本仓库会被新项目作为依赖下载使用。下载后只有 `appinterface/**` 允许增改；`contracts/**`、`client/**`、`adapter/**`、`docgen/**`、`docsui/**`、`cmd/**`、`openapi/**` 属于共享实现，保持只读，随 module 版本升级。新增服务时在 `appinterface/` 下建目录（如 `demoservice`、`productservice`），在该目录内定义 DTO、枚举、请求、响应、路由和 Service 接口，并在 `{domain}serviceclient/` 子包内定义强类型客户端。
+本仓库会被新项目作为依赖下载使用。下载后只有 `appinterface/**` 允许增改；`contracts/**`、`client/**`、`adapter/**`、`docgen/**`、`docsui/**`、`cmd/**`、`openapi/**` 属于共享实现，保持只读，随 module 版本升级。新增服务时在 `appinterface/` 下建目录（如 `demoservice`、`productservice`），在该目录内定义 DTO、枚举、常量、请求、响应、路由和 Service 接口，并在 `{domain}serviceclient/` 子包内定义强类型客户端。
 
 与 `gofy-library` 的关系：两者平级、互不依赖。契约仓库只描述线上协议；Redis、锁、对象存储、短信等实现能力由 `gofy-library` 提供，业务在 service 层把组件结果映射为契约 DTO。禁止为了让 DTO 复用某个组件类型而把运行时依赖引入契约仓库。
 
@@ -251,7 +251,6 @@ gofy-interface-service/
 │       │   ├── client.go           # Client 类型与三种寻址方式
 │       │   ├── order_client.go     # order_route.go 的方法
 │       │   └── config_client.go    # config_route.go 的方法
-│       ├── const.go                # 订单业务常量
 │       ├── nacos.go                # ServiceName（Nacos 注册服务名）
 │       ├── base_url.go             # BaseURL（固定地址模式的本地默认地址）
 │       ├── errors.go               # 转发 ordererror，保持 demoservice 对外 API
@@ -262,6 +261,8 @@ gofy-interface-service/
 │       │   └── routes.go           # Routes() 聚合
 │       ├── ordererror/             # package ordererror
 │       │   └── error.go            # 订单错误码与 Fault（叶子包，避免循环依赖）
+│       ├── orderconst/             # package orderconst
+│       │   └── const.go            # 订单业务常量（MaxOrderItems、OrderNoPrefix）
 │       ├── orderdto/               # package orderdto
 │       │   └── dto.go              # OrderDTO、OrderItemDTO
 │       ├── orderenum/              # package orderenum
@@ -429,7 +430,7 @@ require (
 | 公共契约层 | `contracts/**`，随 module 版本升级，业务方不得修改 |
 | 业务契约层 | `appinterface/{domain}service/**`，唯一可扩展目录，如 `appinterface/demoservice` |
 | Go 包名 | `{domain}service`，如 `demoservice` |
-| 载荷子包 | `appinterface/{domain}service/{domain}dto`、`{domain}enum`、`{domain}request`、`{domain}response`，包名带领域前缀（如 `orderdto`），禁止使用 `dto`、`request` 等通用包名 |
+| 载荷子包 | `appinterface/{domain}service/{domain}dto`、`{domain}enum`、`{domain}request`、`{domain}response`、`{domain}const`，包名带领域前缀（如 `orderdto`），禁止使用 `dto`、`request`、`const` 等通用包名 |
 | 路由子包 | `appinterface/{domain}service/{domain}route`（如 `orderroute`），按业务路由拆文件，`{domain}service.Routes()` 只做聚合 |
 | 错误子包 | `appinterface/{domain}service/{domain}error`（如 `ordererror`），叶子包存放错误码与 Fault，供路由和 `{domain}service` 共用 |
 | 嵌套 | 载荷子包不得 import 上层 `{domain}service`；`demoservice` 引用子包，子包之间按 `enum <- dto <- response` 单向依赖；`orderroute` 只依赖载荷子包与 `ordererror` |
@@ -442,6 +443,7 @@ require (
 
 - 一个文件里同时引入 `demoservice` 和 `productservice` 时，若子包都叫 `dto`/`request`，就必须起 import 别名；带领域前缀的 `orderdto`/`productdto` 不会冲突，调用处也不需要别名。
 - 子包主要承载载荷类型；路由描述符放在 `{domain}route` 子包（如 `orderroute`），每新增一组业务路由就新增一个文件，并在该子包的 `Routes()` 中登记。
+- 业务常量放在 `{domain}const` 子包（如 `orderconst`），不要留在 `{domain}service` 顶层，避免多个服务的 `const.go` 语义混乱。
 - `{domain}service` 保留 `Service` 接口和聚合用的 `Routes()`，因此 `demoservice.Service`、`demoservice.Routes()` 仍是服务端唯一入口；强类型客户端单独放在 `{domain}serviceclient`，见 `demoserviceclient.New()`。
 - 错误码与 Fault 放在 `{domain}error` 叶子包（如 `ordererror`），避免 `{domain}route` 反向依赖 `{domain}service`；`demoservice/errors.go` 转发这些值，对外 API 不变。
 - docgen 以 `appinterface/<service>/` 为锚点生成组件名，嵌套子包不改变对外 schema 名：`orderdto.OrderDTO` 仍然是 `DemoserviceOrderDTO`。
@@ -702,11 +704,11 @@ type CancelOrderRequest struct {
 | 类型 | 位置 | 示例 |
 | --- | --- | --- |
 | 协议/框架常量 | `contracts/common` | 分页默认值、请求头名 |
-| 业务常量 | `appinterface/{domain}service/const.go` | 最大订单明细数、订单号前缀 |
+| 业务常量 | `appinterface/{domain}service/{domain}const/const.go` | 最大订单明细数、订单号前缀 |
 | 错误码 | `contracts/common/errcode` + 业务码段 | `ErrOrderNotFound` |
 
 ```go
-package demoservice
+package orderconst
 
 const (
 	// MaxOrderItems 单笔订单最大明细数。
@@ -1179,10 +1181,10 @@ type CreateOrderResponse struct {
 }
 ```
 
-**const.go：**
+**orderconst/const.go：**
 
 ```go
-package demoservice
+package orderconst
 
 const (
 	// MaxOrderItems 单笔订单最大明细数。
@@ -1651,6 +1653,26 @@ func WithQuery(key, value string) CallOption
 func WithTimeout(d time.Duration) CallOption
 func WithConnectTimeout(d time.Duration) CallOption
 func WithHTTPClient(cl *http.Client) CallOption
+
+// 请求头透传：context key 与 gofy/support/headerpropagation 保持一致。
+const ContextKey = "gofy.header_propagation.headers"
+
+const (
+	HeaderTraceID  = "X-Trace-Id"
+	HeaderUserID   = "X-User-Id"
+	HeaderUserCode = "X-User-Code"
+	HeaderTenantID = "X-Tenant-Id"
+	HeaderUserName = "X-User-Name"
+	HeaderClientIP = "X-Client-Ip"
+	HeaderUserAgent = "X-User-Agent"
+
+	DefaultPropagatedUserAgent = "gofy-api-sdk"
+)
+
+func ContextWithHeaders(ctx context.Context, headers http.Header) context.Context
+func ContextWithHeader(ctx context.Context, name, value string) context.Context
+func HeadersFromContext(ctx context.Context) http.Header
+func HeaderFromContext(ctx context.Context, name string) string
 ```
 
 **强类型 Client：**
@@ -1711,11 +1733,13 @@ func (c *Client) GetConfig(ctx context.Context, req *orderrequest.GetConfigReque
 | Multipart | `Spec.RequestContentType == multipart/form-data` 时，`*multipart.FileHeader`/`upload.File` 字段写文件 part，其他字段写表单 |
 | Header | `header` tag；`CallOption` 覆盖 |
 | Cookie | `cookie` tag；以 `Cookie` 头发送 |
+| 透传头 | 从 ctx 的 `gofy.header_propagation.headers` 读取白名单；在 Request `header` tag 和 `CallOption` 之前写入，后两者可覆盖 |
 | 认证 | `CallOption` > `Client.TokenSource` |
 | 请求 ID | `CallOption` > 从 ctx 读取 > 不发送（由服务端生成） |
 | Content-Type | 有 body 时设置；无 body 不设置 |
 | Accept | JSON 默认 `application/json`；SSE `text/event-stream`；下载 `*/*` |
 | User-Agent | 默认 `gofy-interface-service/<version>` |
+| X-User-Agent | 透传上下文有值时沿用，否则默认 `gofy-api-sdk` |
 
 **Path 参数示例：**
 
@@ -1726,6 +1750,26 @@ type GetOrderRequest struct {
 ```
 
 `/orders/{id}` -> `/orders/1234567890123456789`。
+
+**请求头透传：** gofy 服务端启用 `WithHeaderPropagation(true)` 后，会在入口把白名单头
+写入 request context（key `gofy.header_propagation.headers`，值为 `http.Header`）。
+客户端把 handler 的 `ctx` 原样传给 `Call` 即可，不需要额外参数：
+
+```go
+res, err := orders.GetOrder(ctx, &orderrequest.GetOrderRequest{ID: 42})
+```
+
+- 白名单：`X-Trace-Id`、`X-User-Id`、`X-User-Code`、`X-Tenant-Id`、
+  `X-User-Name`、`X-Client-Ip`、`X-User-Agent`；其余头（包括 `Authorization`、
+  `Cookie`）即使写入 context 也会被 `ContextWithHeaders` / `HeadersFromContext` 过滤；
+- 身份头是否可信由服务端决定：只有 `WithTrustedProxies` 命中的代理传来的
+  `X-User-*` / `X-Tenant-Id` 才会进入 context，客户端只负责转发；
+- 合并顺序保证可覆盖：单次调用用 `client.WithHeader` 可以改掉透传值；
+- 人工补充身份头：`ctx = client.ContextWithHeader(ctx, client.HeaderUserID, id)`；
+- 网关应用用 `JWTAuth` 校验后，gofy 的 `support/frameworkcontext` 会把本地身份
+  回写到同一组透传头，下游客户端无需感知认证方式；
+- 客户端不 import gofy，服务端也不 import 本仓库，唯一的耦合是固定字符串 key，
+  修改时必须两个仓库同时发布。
 
 ### 6.4 响应解析与错误
 

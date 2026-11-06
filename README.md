@@ -107,7 +107,8 @@ app, err := gofy.New(
 ```
 
 - **JWT**：失败固定返回 `401 / 40100`，成功后可 `transport.JWTClaims(c)` 读取 claims；
-  `Optional: true` 时无 token 也放行，由业务自己判断。
+  校验后的身份同时写入 `frameworkcontext`，Service 层用
+  `frameworkcontext.UserID(ctx)` 读取；`Optional: true` 时无 token 也放行，由业务自己判断。
 - **限流**：滑动窗口，按 `客户端 IP + 方法 + 路由` 分桶；响应带 `X-RateLimit-*`，
   超限返回 `429 / 42900` 和 `Retry-After`。单进程用
   `ratelimit.NewMemoryStore()`；多实例用 `support/redis` +
@@ -121,6 +122,105 @@ app, err := gofy.New(
   `api_key`、`signature` 等值替换为 `***`；无法解析的 query 整体记为 `***`。
 
 JWT 只做校验，不签发 token；签发由业务或独立认证服务完成。
+
+## 服务间请求头透传
+
+A → B → C 的调用链中，gofy 在入口把白名单请求头写入 request context，
+`gofy-interface-service` 的客户端发起下游调用时从同一个 context 读取并注入，业务代码不需要手工搬运。
+
+```go
+app, err := gofy.New(
+	gofy.WithHeaderPropagation(true),
+	// 只有来自这些代理的地址才采信身份头；公网直连一律丢弃。
+	gofy.WithTrustedProxies("10.0.0.0/8"),
+	// ...
+)
+```
+
+白名单（大小写不敏感）：
+
+| Header | 含义 |
+| --- | --- |
+| `X-Trace-Id` | 分布式 trace id；缺失时用 RequestID 生成的 UUID 补齐 |
+| `X-User-Id` | 已认证用户 ID |
+| `X-User-Code` | 业务用户编号 |
+| `X-Tenant-Id` | 租户 ID |
+| `X-User-Name` | 用户名 |
+| `X-Client-Ip` | 原始客户端地址 |
+| `X-User-Agent` | 发起调用的 SDK / 网关标识 |
+
+规则：
+
+- `X-User-Id`、`X-User-Code`、`X-Tenant-Id`、`X-User-Name` 只在对端地址命中
+  `WithTrustedProxies`（IP 或 CIDR）时保留；公网直连携带的同名头会被丢弃，
+  并把 `X-Client-Ip` 覆盖为直连地址，避免客户端冒充其他用户或租户；
+- `Authorization`、`Cookie` 等不在白名单内的头永远不会下发到下游；
+- 网关转发的身份头应覆盖而不是追加，否则伪造值仍可能被下游采信；
+- 本地认证身份优先：`JWTAuth` 校验成功后会把 token 身份写入统一身份上下文，
+  并回写身份头，下游没有本地认证时才回落到透传头。
+
+### 统一身份 FrameworkContext
+
+网关应用在 JWT 中间件解析身份，下游应用从可信上游接收身份头，两者最终都进入
+`support/frameworkcontext`。Service、Repository 等只拿到 `context.Context` 的层
+用同一个入口读取，不需要感知身份来自哪里：
+
+```go
+import "github.com/bingcool/gofy/support/frameworkcontext"
+
+userID := frameworkcontext.UserID(ctx)     // 本地认证优先，其次可信上游透传
+tenant := frameworkcontext.TenantID(ctx)
+traceID := frameworkcontext.TraceID(ctx)
+
+user, ok := frameworkcontext.UserFromContext(ctx) // 只返回本地认证身份
+```
+
+优先级与写回规则：
+
+- `UserID`、`TenantID`、`UserCode`、`UserName` 先读本地认证快照，没有时才读
+  `X-User-Id` 等可信透传头；
+- `WithUser` 会清掉 context 中残留的四个身份头，再写回本地非空字段，因此 token
+  没有租户时不会把上游租户继续带给下游；trace、客户端地址等非身份头保持不变；
+- `JWTAuth` 已自动接入，业务 handler 通常无需额外代码。
+
+自定义认证（session、API Key 等）在认证中间件里显式写入：
+
+```go
+ctx = frameworkcontext.WithUser(ctx, frameworkcontext.User{
+	ID:       "1001",
+	TenantID: "tenant-a",
+})
+```
+
+只需要原始透传头时，也可以直接读取：
+
+```go
+import "github.com/bingcool/gofy/support/headerpropagation"
+
+headers := headerpropagation.HeadersFromContext(ctx) // 返回副本，可安全修改
+```
+
+经过 HTTP 入口的调用把 handler 的 `ctx` 交给强类型客户端即可自动透传：
+
+```go
+res, err := orders.GetOrder(ctx, &orderrequest.GetOrderRequest{ID: 42})
+```
+
+客户端的合并顺序是「context 透传头 < Request 结构体的 `header` tag < `CallOption`」，
+因此单个接口仍可用 `client.WithHeader` 覆盖；SSE、下载和分块请求同样生效。
+`X-User-Agent` 没有透传值时默认写 `gofy-api-sdk`。
+
+> 两个仓库通过固定的 context key `gofy.header_propagation.headers` 对接：
+> 服务端用 `support/headerpropagation`，客户端用 `client.ContextWithHeaders` /
+> `client.HeadersFromContext`，双方都不需要 import 对方模块。
+
+不在 App 上启用中间件时，也可以手动构造：
+
+```go
+ctx = headerpropagation.ContextWithHeaders(ctx, http.Header{
+	headerpropagation.HeaderTenantID: {"tenant-a"},
+})
+```
 
 ## 热更新
 
@@ -474,6 +574,8 @@ support/mysql/ GORM MySQL 连接管理
 support/redis/ Redis 客户端（go-redis）
 support/nacos/ Nacos 配置拉取、本地生成与变更监听
 support/jwtauth/ HMAC JWT 校验
+support/headerpropagation/ 入口请求头白名单与服务间透传上下文
+support/frameworkcontext/ 统一身份读取（本地认证优先，透传头兜底）
 transport/ratelimit/redisstore/  Redis 共享限流存储
 script/        维护脚本描述
 command/       自定义 CLI 命令描述

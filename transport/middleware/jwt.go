@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/bingcool/gofy/apperr"
+	"github.com/bingcool/gofy/support/frameworkcontext"
 	"github.com/bingcool/gofy/support/jwtauth"
 	"github.com/bingcool/gofy/transport"
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,11 @@ func JWTAuth(cfg transport.JWTAuthConfig, responder transport.Responder) (gin.Ha
 			claims, err := cfg.Parser.Parse(token)
 			if err == nil {
 				c.Set(contextKey, claims)
+				// 本地认证身份优先于透传头；WithUser 会把身份回写到 context，
+				// 保证下游调用携带同一个用户和租户。
+				c.Request = c.Request.WithContext(
+					frameworkcontext.WithUser(c.Request.Context(), frameworkcontext.UserFromClaims(claims)),
+				)
 				c.Next()
 				return
 			}

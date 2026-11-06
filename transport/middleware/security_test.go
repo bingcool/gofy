@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bingcool/gofy/support/frameworkcontext"
+	"github.com/bingcool/gofy/support/headerpropagation"
 	"github.com/bingcool/gofy/support/jwtauth"
 	"github.com/bingcool/gofy/transport"
 	"github.com/bingcool/gofy/transport/middleware"
@@ -110,6 +112,99 @@ func TestJWTAuthStoresClaims(t *testing.T) {
 	engine.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK || rr.Body.String() != "user-1" {
 		t.Fatalf("status = %d body = %q", rr.Code, rr.Body.String())
+	}
+}
+
+// JWT 校验成功后写入 FrameworkContext，并把身份回写为透传头供下游使用。
+func TestJWTAuthPopulatesFrameworkContext(t *testing.T) {
+	engine := newGin()
+	mw, err := middleware.JWTAuth(transport.JWTAuthConfig{Parser: testParser(t)}, nil)
+	if err != nil {
+		t.Fatalf("JWTAuth: %v", err)
+	}
+	engine.Use(mw)
+
+	var identity frameworkcontext.User
+	var headers http.Header
+	engine.GET("/private", func(c *gin.Context) {
+		ctx := c.Request.Context()
+		identity, _ = frameworkcontext.UserFromContext(ctx)
+		headers = frameworkcontext.Headers(ctx)
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenFor(t, map[string]any{
+		"user_id":   "1001",
+		"tenant_id": "t-9",
+		"user_code": "alice",
+		"user_name": "Alice",
+		"sub":       "sub-1",
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}))
+	// 上游捕获的身份不能覆盖本地校验结果；非身份头必须原样保留。
+	ctx := headerpropagation.ContextWithHeader(context.Background(),
+		headerpropagation.HeaderUserID, "9999")
+	ctx = headerpropagation.ContextWithHeader(ctx, headerpropagation.HeaderTenantID, "stale-tenant")
+	ctx = headerpropagation.ContextWithHeader(ctx, headerpropagation.HeaderTraceID, "trace-1")
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if identity.ID != "1001" || identity.TenantID != "t-9" || identity.Code != "alice" || identity.Name != "Alice" {
+		t.Fatalf("identity = %+v", identity)
+	}
+	if identity.Via != "jwt" {
+		t.Fatalf("via = %q, want jwt", identity.Via)
+	}
+	// 中间件替换的是 gin 的 Request，不应修改调用方传入的 request context。
+	if got := frameworkcontext.UserID(req.Context()); got != "9999" {
+		t.Fatalf("the original request context was mutated: user id = %q", got)
+	}
+	want := map[string]string{
+		headerpropagation.HeaderUserID:   "1001",
+		headerpropagation.HeaderTenantID: "t-9",
+		headerpropagation.HeaderUserCode: "alice",
+		headerpropagation.HeaderUserName: "Alice",
+		headerpropagation.HeaderTraceID:  "trace-1",
+	}
+	for name, value := range want {
+		if got := headers.Get(name); got != value {
+			t.Fatalf("%s = %q, want %q", name, got, value)
+		}
+	}
+}
+
+// token 中没有租户时，不能把上游残留的租户继续下发给下游。
+func TestJWTAuthClearsPropagatedIdentityAbsentFromToken(t *testing.T) {
+	engine := newGin()
+	mw, err := middleware.JWTAuth(transport.JWTAuthConfig{Parser: testParser(t)}, nil)
+	if err != nil {
+		t.Fatalf("JWTAuth: %v", err)
+	}
+	engine.Use(mw)
+
+	var tenant, tenantHeader string
+	engine.GET("/private", func(c *gin.Context) {
+		tenant = frameworkcontext.TenantID(c.Request.Context())
+		tenantHeader = frameworkcontext.Header(c.Request.Context(), headerpropagation.HeaderTenantID)
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenFor(t, map[string]any{
+		"uid": "2002",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}))
+	req = req.WithContext(headerpropagation.ContextWithHeader(context.Background(),
+		headerpropagation.HeaderTenantID, "stale-tenant"))
+
+	engine.ServeHTTP(httptest.NewRecorder(), req)
+	if tenant != "" || tenantHeader != "" {
+		t.Fatalf("stale tenant leaked: getter=%q header=%q", tenant, tenantHeader)
 	}
 }
 

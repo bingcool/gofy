@@ -133,6 +133,9 @@ github.com/bingcool/gofy/
 │   ├── logging.go               # Config、New、Nop、Sync
 │   └── gorm.go                  # GORM logger 适配（可选使用）
 ├── support/
+│   ├── headerpropagation/       # 入口请求头白名单与透传上下文
+│   ├── frameworkcontext/        # 统一身份读取（本地认证优先，透传头兜底）
+│   ├── jwtauth/                 # HMAC JWT 校验
 │   └── mysql/
 │       └── mysql.go             # Config、New、Close
 ├── script/
@@ -164,7 +167,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`transport`、`logging`、`support/mysql`、`support/redis`、`support/jwtauth`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`transport`、`logging`、`support/mysql`、`support/redis`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -176,6 +179,7 @@ gofy (root)
  ├── core
  ├── transport ──> apperr, core
  ├── transport/jwtauth ──> support/jwtauth
+ ├── transport/middleware ──> support/headerpropagation, support/frameworkcontext
  ├── transport/ratelimit/redisstore ──> transport/ratelimit, support/redis
  ├── script ─────> core
  ├── command ────> core
@@ -183,6 +187,8 @@ gofy (root)
  ├── support/mysql
  ├── support/redis ──> go-redis
  ├── support/jwtauth
+ ├── support/headerpropagation
+ ├── support/frameworkcontext ──> support/headerpropagation, support/jwtauth
  └── config
 
 gofytest ──> gofy, transport
@@ -396,6 +402,7 @@ type Option func(*options) error
 | `WithResponder(transport.Responder)` | `transport.NewResponder(transport.ResponderConfig{})` | 统一响应格式 | 非 nil |
 | `WithRecovery(bool)` | `true` | 是否安装 panic 恢复中间件 | — |
 | `WithAccessLog(bool)` | `true` | 是否安装访问日志 | — |
+| `WithHeaderPropagation(bool)` | `false` | 入口白名单请求头写入 request context，供下游客户端透传 | — |
 | `WithCORS(CORSConfig)` | 关闭 | 跨域配置 | credentials + wildcard 冲突时报错 |
 | `WithJWTAuth(JWTAuthConfig)` | 关闭 | 模块路由的 Bearer Token 校验 | `Parser` 非 nil |
 | `WithRateLimit(RateLimitConfig)` | 关闭 | 模块路由的滑动窗口限流 | Store 非 nil、Limit/Window > 0 |
@@ -764,6 +771,7 @@ func NewResponder(cfg ResponderConfig) Responder
 
 ```go
 func RequestID(header string) gin.HandlerFunc
+func HeaderPropagation(trustedProxies []string) gin.HandlerFunc
 func AccessLog(logger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc
 func Recovery(logger *zap.Logger, responder transport.Responder) gin.HandlerFunc
 func CORS(cfg transport.CORSConfig) (gin.HandlerFunc, error)
@@ -777,21 +785,24 @@ func JWTAuth(cfg transport.JWTAuthConfig, responder transport.Responder) (gin.Ha
 
 ```text
 1. RequestID
-2. SecurityHeaders（可选）
-3. AccessLog
-4. CORS（可选）
-5. Recovery
-6. BodyLimit
-7. 业务全局中间件（WithMiddleware）
-8. 模块/路由中间件
-9. RateLimit（可选，WithRateLimit）
-10. JWTAuth（可选，WithJWTAuth）
-11. 业务 handler
+2. HeaderPropagation（可选，WithHeaderPropagation）
+3. SecurityHeaders（可选）
+4. AccessLog
+5. CORS（可选）
+6. Recovery
+7. BodyLimit
+8. 业务全局中间件（WithMiddleware）
+9. 模块/路由中间件
+10. RateLimit（可选，WithRateLimit）
+11. JWTAuth（可选，WithJWTAuth）
+12. 业务 handler
 ```
 
 顺序理由：
 
 - `RequestID` 最外层，后续所有日志都能拿到 `req_id`；
+- `HeaderPropagation` 紧跟 `RequestID`，用 `req_id` 作为 `X-Trace-Id` 的兜底值，
+  同时保证业务中间件和 handler 都能从 context 读到透传头；
 - `SecurityHeaders` 在 `AccessLog` 外层，404/405 和 panic 后的错误响应也带安全头；
 - `AccessLog` 必须在 `Recovery` 外层，它的 `defer` 才能记录到 panic 后的 `500`；
 - `CORS` 在 `Recovery` 外层，保证 panic 响应也带跨域头；
@@ -855,6 +866,23 @@ signature 等，大小写不敏感），匹配到的值替换为 `***` 后重新
 - 只接受 `^[A-Za-z0-9._-]{1,128}$`，否则重新生成；
 - 生成 UUID v4；
 - 写回响应头，并放入 `gin.Context`，key 为 `gofy.request_id`。
+
+`HeaderPropagation` 规则（`WithHeaderPropagation(true)` 时安装）：
+
+- 白名单：`X-Trace-Id`、`X-User-Id`、`X-User-Code`、`X-Tenant-Id`、
+  `X-User-Name`、`X-Client-Ip`、`X-User-Agent`；`Authorization`、`Cookie`
+  等用户凭证永远不进入透传上下文；
+- 身份头（`X-User-Id`、`X-User-Code`、`X-Tenant-Id`、`X-User-Name`）只在
+  `RemoteAddr` 命中 `WithTrustedProxies` 的 IP/CIDR 时采信；否则丢弃，
+  并把 `X-Client-Ip` 覆盖为直连地址，防止公网客户端冒充租户；
+- `X-Trace-Id` 缺失时用 `RequestID` 的 `req_id` 补齐，保证下游始终有 trace；
+- 结果写入 request context，key 为 `gofy.header_propagation.headers`，
+  handler 用 `support/headerpropagation.HeadersFromContext(ctx)` 读取；
+- `gofy-interface-service/client` 用同一个字符串 key 读取并注入下游请求，
+  两个模块互不 import。合并顺序为「透传头 < Request `header` tag < `CallOption`」，
+  单次调用可以覆盖；`X-User-Agent` 无透传值时默认 `gofy-api-sdk`；
+- 认证中间件在 handler 前解析出用户后，应通过 `frameworkcontext.WithUser`
+  写入本地身份（见 §3.4.10）；它会把身份头对齐后写回 context，下游客户端自动携带。
 
 #### 3.4.7 CORS
 
@@ -944,11 +972,65 @@ type JWTAuthConfig struct {
 - 失败固定返回 401 / 40100 / `"unauthorized"`，不返回 token 解析细节；
 - 响应头 `WWW-Authenticate: Bearer realm="api"`；
 - 成功时 claims 存入 gin.Context，`transport.JWTClaims(c)` 或
-  `middleware.Claims(c, key)` 读取；
+  `middleware.Claims(c, key)` 读取；同时写入 `frameworkcontext`（§3.4.10），
+  Service 等非 gin 层用 `frameworkcontext.UserID(ctx)` 读取；
 - `WithJWTAuth` 只作用于模块路由，`/healthz`、`/readyz`、静态资源和未匹配路径不受影响；
 - 需要按角色/租户授权时，在业务中间件里读取 claims 后返回 `apperr.Forbidden`。
 
-#### 3.4.10 限流
+#### 3.4.10 统一身份 FrameworkContext
+
+`support/frameworkcontext` 把两类身份来源合并为一个读取入口，Service、Repository 等
+只拿到 `context.Context` 的层不再关心身份来自本地 JWT 还是上游透传：
+
+| 来源 | 写入方 | 读取方式 |
+| --- | --- | --- |
+| 本地认证（JWT / 自定义） | `JWTAuth` 中间件，或业务调用 `WithUser` | `UserFromContext`、`UserID` 等 |
+| 上游透传头 | `HeaderPropagation` 中间件（仅可信代理） | 同名 getter 的兜底值 |
+
+```go
+type User struct {
+    ID       string         // 用户主键；空值不写入 context
+    TenantID string
+    Code     string
+    Name     string
+    Via      string         // 凭证通道，JWT 为 "jwt"
+    Claims   map[string]any // 已校验的原始 claim
+}
+
+func WithUser(ctx context.Context, user User) context.Context
+func UserFromContext(ctx context.Context) (User, bool) // 只返回本地认证身份
+func UserFromClaims(claims *jwtauth.Claims) User
+
+func UserID(ctx context.Context) string   // 本地身份优先，其次透传头
+func TenantID(ctx context.Context) string
+func UserCode(ctx context.Context) string
+func UserName(ctx context.Context) string
+func TraceID(ctx context.Context) string
+func ClientIP(ctx context.Context) string
+func UserAgent(ctx context.Context) string
+func Header(ctx context.Context, name string) string
+func Headers(ctx context.Context) http.Header
+```
+
+规则：
+
+- **本地优先**：`UserID`/`TenantID`/`UserCode`/`UserName` 先读 `WithUser` 写入的快照，
+  没有本地身份时才回落到可信上游写入的 `X-User-Id` 等头，与 swoolefy
+  `FrameworkContext` 的 `AuthUser` 优先语义一致；
+- **写回对齐**：`WithUser` 先清空 context 中的四个身份头，再按 `User` 写回非空字段。
+  token 没有租户时不会把上游残留的 `X-Tenant-Id` 继续下发给下游；`X-Trace-Id`、
+  `X-Client-Ip`、`X-User-Agent` 保持不变；
+- **自动接入**：`JWTAuth` 校验成功后自动执行
+  `WithUser(ctx, UserFromClaims(claims))`，业务无需额外代码；
+- **claim 映射**：`ID` 依次取 `user_id`、`uid`、`sub`；租户、编号、名称分别取
+  `tenant_id`、`user_code`、`user_name`（`name` 兜底），字符串和数字类型的 claim
+  都支持，其余声明通过 `Claims` 读取；
+- **只读快照**：`WithUser` 深拷贝 `Claims`，`UserFromContext` 返回副本，调用方修改不会
+  影响同一请求中的其他读取方；
+- 自定义认证（session、API Key 等）在认证中间件里构造 `User` 后调用 `WithUser`，
+  下游调用自动携带对齐后的身份头。
+
+#### 3.4.11 限流
 
 `transport/ratelimit` 定义存储接口，内存实现使用滑动窗口日志：
 
@@ -990,7 +1072,7 @@ type RateLimitConfig struct {
 - 只作用于模块路由，健康检查不受影响；
 - `FailOpen` 只建议在限流器不可用不影响安全性的场景开启。
 
-#### 3.4.11 安全响应头
+#### 3.4.12 安全响应头
 
 ```go
 type SecurityHeadersConfig struct {
@@ -2736,7 +2818,7 @@ next steps:
 | --- | --- |
 | 单元测试 | `Option` 校验、配置校验、`apperr` 拷贝语义、`pidfile` 原子写 |
 | handler 测试 | 绑定、默认值、校验文案、错误映射、`NoContent` |
-| 中间件测试 | RequestID 透传/生成、AccessLog 字段、Recovery 不泄漏堆栈、CORS 校验 |
+| 中间件测试 | RequestID 透传/生成、HeaderPropagation 白名单与代理信任、AccessLog 字段、Recovery 不泄漏堆栈、CORS 校验 |
 | 生命周期测试 | 启动顺序、Stop 逆序、Shutdown 幂等、端口占用错误 |
 | 进程测试 | pid 写入/读取/stale 处理、`stop` 超时（用子进程） |
 | 依赖测试 | 公共包 import 方向、公共包无 `init()` |
@@ -3195,6 +3277,7 @@ func WithShutdownTimeout(time.Duration) Option
 func WithResponder(Responder) Option
 func WithRecovery(bool) Option
 func WithAccessLog(bool) Option
+func WithHeaderPropagation(bool) Option
 func WithCORS(CORSConfig) Option
 func WithHealthEndpoints(bool) Option
 func WithMaxBodyBytes(int64) Option
@@ -3272,6 +3355,7 @@ func NewResponder(ResponderConfig) Responder
 
 ```text
 func RequestID(string) gin.HandlerFunc
+func HeaderPropagation([]string) gin.HandlerFunc
 func AccessLog(*zap.Logger, AccessLogOptions) gin.HandlerFunc
 func Recovery(*zap.Logger, transport.Responder) gin.HandlerFunc
 func CORS(transport.CORSConfig) (gin.HandlerFunc, error)
@@ -3313,7 +3397,56 @@ func GormLogger(*zap.Logger, GormLoggerConfig) gormlogger.Interface
 type GormLoggerConfig
 ```
 
-### A.7 `support/mysql`
+### A.7 `support/headerpropagation`
+
+```text
+const HeaderTraceID, HeaderUserID, HeaderUserCode, HeaderTenantID,
+      HeaderUserName, HeaderClientIP, HeaderUserAgent
+const ContextKey
+func CaptureIncoming(http.Header, traceID string, trustedProxies []string, remoteAddr string) http.Header
+func IsTrustedProxy(remoteAddr string, trustedProxies []string) bool
+func ContextWithHeaders(context.Context, http.Header) context.Context
+func ContextWithHeader(context.Context, string, string) context.Context
+func ContextWithoutHeader(context.Context, string) context.Context
+func HeadersFromContext(context.Context) http.Header
+func HeaderFromContext(context.Context, string) string
+```
+
+### A.8 `support/frameworkcontext`
+
+```text
+type User
+func (User) Claim(string) (any, bool)
+func (User) StringClaim(string) string
+func WithUser(context.Context, User) context.Context
+func UserFromContext(context.Context) (User, bool)
+func UserFromClaims(*jwtauth.Claims) User
+func UserID(context.Context) string
+func TenantID(context.Context) string
+func UserCode(context.Context) string
+func UserName(context.Context) string
+func TraceID(context.Context) string
+func ClientIP(context.Context) string
+func UserAgent(context.Context) string
+func Header(context.Context, string) string
+func Headers(context.Context) http.Header
+```
+
+### A.9 `support/jwtauth`
+
+```text
+type Config
+type Claims
+func (*Claims) Get(string) (any, bool)
+func (*Claims) String(string) string
+type Parser
+func NewParser(Config) (*Parser, error)
+func (*Parser) Parse(string) (*Claims, error)
+var ErrMalformed, ErrUnsupportedAlgorithm, ErrSignature, ErrExpired,
+    ErrNotYetValid, ErrIssuer, ErrAudience, ErrMissingExpiry
+```
+
+### A.10 `support/mysql`
 
 ```text
 type Config
@@ -3323,7 +3456,7 @@ func Close(*gorm.DB) error
 var ErrDSNRequired
 ```
 
-### A.8 `script`
+### A.11 `script`
 
 ```text
 type Runtime = core.Runtime
@@ -3332,7 +3465,7 @@ func Validate([]Script) error
 func Find([]Script, string) (Script, bool)
 ```
 
-### A.9 `command`
+### A.12 `command`
 
 ```text
 type Runtime = core.Runtime
@@ -3340,7 +3473,7 @@ type Command
 func Validate([]Command, ...string) error
 ```
 
-### A.10 `config`
+### A.13 `config`
 
 ```text
 type Option
@@ -3352,7 +3485,7 @@ func WithApplyDefaults(bool) Option
 func WithValidate(bool) Option
 ```
 
-### A.11 `gofytest`
+### A.14 `gofytest`
 
 ```text
 type App

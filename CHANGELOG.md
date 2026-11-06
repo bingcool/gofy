@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/headerpropagation`: captures a whitelist of request headers
+  (`X-Trace-Id`, `X-User-*`, `X-Tenant-Id`, `X-Client-Ip`, `X-User-Agent`) and
+  carries them in the request context. Identity headers are trusted only when
+  the direct peer matches the configured proxies; plain clients cannot spoof a
+  tenant, and credentials such as `Authorization` never propagate.
+- `WithHeaderPropagation` and `transport/middleware.HeaderPropagation`: install
+  that capture in front of the business middleware. The trace id falls back to
+  the generated request id. The context key is shared with
+  `gofy-interface-service/client`, which forwards the headers on downstream
+  calls without either module importing the other.
+- `support/frameworkcontext`: one identity entry point for handlers, service
+  layers and repositories. It snapshots a locally verified user and falls back
+  to trusted propagated headers, so `UserID(ctx)` works both in the gateway
+  and in downstream services. `WithUser` clears stale identity headers and
+  writes the local user and tenant back for downstream calls, and
+  `UserFromClaims` maps `user_id`/`uid`/`sub`, `tenant_id`, `user_code` and
+  `user_name`. `JWTAuth` populates it automatically after verification.
+- `support/headerpropagation`: `ContextWithoutHeader` removes one whitelisted
+  header, used when a local identity replaces one captured from upstream.
 - `support/jwtauth`: HMAC JWT verification for HS256/HS384/HS512. It validates
   signature, `exp`/`nbf` with optional leeway, `iss` and `aud`, rejects
   `alg: none`, and returns sentinel errors so callers can log the reason

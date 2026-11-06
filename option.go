@@ -59,16 +59,17 @@ type options struct {
 
 	shutdownTimeout time.Duration
 
-	responder    transport.Responder
-	responderSet bool
-	recovery     bool
-	accessLog    bool
-	cors         *transport.CORSConfig
-	health       bool
-	maxBody      int64
-	trusted      []string
-	alwaysOK     bool
-	serverConf   func(*http.Server) error
+	responder         transport.Responder
+	responderSet      bool
+	recovery          bool
+	accessLog         bool
+	headerPropagation bool
+	cors              *transport.CORSConfig
+	health            bool
+	maxBody           int64
+	trusted           []string
+	alwaysOK          bool
+	serverConf        func(*http.Server) error
 
 	jwt             *transport.JWTAuthConfig
 	rateLimit       *transport.RateLimitConfig
@@ -339,6 +340,13 @@ func WithAccessLog(enabled bool) Option {
 	return func(o *options) error { o.accessLog = enabled; return nil }
 }
 
+// WithHeaderPropagation 把入口白名单请求头写入 request context，
+// 供 interface-service 客户端把调用方身份和 trace id 转发到下游服务。
+// 身份头只采信通过 WithTrustedProxies 登记的代理。
+func WithHeaderPropagation(enabled bool) Option {
+	return func(o *options) error { o.headerPropagation = enabled; return nil }
+}
+
 // WithCORS enables CORS with the given policy.
 func WithCORS(cfg transport.CORSConfig) Option {
 	return func(o *options) error {
@@ -408,8 +416,8 @@ func WithMaxBodyBytes(n int64) Option {
 	}
 }
 
-// WithTrustedProxies sets gin's trusted proxy list. By default no proxy is
-// trusted.
+// WithTrustedProxies 设置 gin 的可信代理列表，默认不信任任何代理。
+// WithHeaderPropagation 使用同一个列表判断转发来的身份头是否可信。
 func WithTrustedProxies(proxies ...string) Option {
 	return func(o *options) error {
 		for _, p := range proxies {

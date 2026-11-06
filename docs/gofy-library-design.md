@@ -2785,7 +2785,7 @@ func (a healthAdapter) Check(ctx context.Context) error {
 ### 10.5 与 gofy 限流中间件对接
 
 gofy 已内置 `transport/ratelimit.Store`、`middleware.RateLimit` 和 Redis 实现
-`transport/ratelimit/redisstore`（见 `docs/library-design.md` §3.4.10）。
+`transport/ratelimit/redisstore`（见 `docs/library-design.md` §3.4.11）。
 使用 Redis 时组件库不需要再写适配代码：
 
 ```go
