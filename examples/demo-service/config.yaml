@@ -35,15 +35,52 @@ log:
     service: demo-service
 
 db:
-  dsn: swoolefy:swoolefy123@tcp(192.168.10.187:3306)/gofy?charset=utf8mb4&parseTime=True&loc=Local
-  max_idle_conns: 10
-  max_open_conns: 50
-  conn_max_lifetime: 1h
-  conn_max_idle_time: 10m
-  ping_timeout: 5s
-  slow_threshold: 200ms
-  log_level: warn
-  prepare_stmt: false
+  default:
+    dsn: &demo_dsn swoolefy:swoolefy123@tcp(192.168.10.187:3306)/gofy?charset=utf8mb4&parseTime=True&loc=Local
+    max_idle_conns: 10
+    max_open_conns: 50
+    conn_max_lifetime: 1h
+    conn_max_idle_time: 10m
+    ping_timeout: 5s
+    slow_threshold: 200ms
+    log_level: warn
+    prepare_stmt: false
+  # 演示多实例：order/product 复用同一套 dev 库（YAML 锚点），实际项目换成
+  # 各自的 DSN；业务侧句柄见 app/io/mysql 的 OrderDb、ProductDb。
+  order:
+    dsn: *demo_dsn
+    max_idle_conns: 2
+    max_open_conns: 5
+  product:
+    dsn: *demo_dsn
+    max_idle_conns: 2
+    max_open_conns: 5
+
+# 多实例 Redis：按名字分组，由 app/io 包在启动时建连、关停时关闭；
+# 业务句柄见 app/io/redis 的 Cache、Session、RateLimit。enabled 为 false
+# 时不建连，因此本地没有 Redis 也能启动；dev-redis 启用了密码认证，
+# 三个实例都带 password: redis123，换成免密 Redis 时删掉该行即可。
+# 密码建议通过环境变量注入，不要提交到仓库。
+redis:
+  cache:
+    enabled: false
+    addr: 192.168.10.187:6379
+    password: redis123
+    db: 0
+    pool_size: 10
+  session:
+    enabled: false
+    addr: 192.168.10.187:6379
+    password: redis123
+    db: 1
+    pool_size: 5
+  # 限流专用实例，默认启用。
+  ratelimit:
+    enabled: true
+    addr: 192.168.10.187:6379
+    password: redis123
+    db: 2
+    pool_size: 5
 
 pid_file: app/demo-service.pid
 

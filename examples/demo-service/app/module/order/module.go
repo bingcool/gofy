@@ -43,7 +43,7 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
-		repo := repository.New(rt.DB, rt.Logger)
+		repo := repository.NewFromHandle(rt.Logger)
 		svc := service.New(repo, rt.Logger, service.Config{PaymentTimeout: cfg.PaymentTimeout})
 		return NewModule(cfg, svc, rt.Logger), nil
 	}
@@ -72,7 +72,7 @@ func (m *Module) Name() string { return "order" }
 
 // Register binds every demoservice contract route to the handler.
 func (m *Module) Register(r *transport.Router) error {
-	h := controller.New(m.svc, m.logger)
+	h := controller.NewOrderController(m.svc, m.logger)
 	return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
 		Auth: m.auth,
 	})

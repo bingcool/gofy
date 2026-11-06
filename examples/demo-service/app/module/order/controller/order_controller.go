@@ -23,10 +23,11 @@ type OrderController struct {
 	logger       *zap.Logger
 }
 
-// New builds a controller around the domain service. A nil logger disables logs.
-// Successful requests are left to the access log; the controller logs only the
-// unexpected errors it turns into 500 responses, including the wrapped cause.
-func New(svc *service.OrderService, logger *zap.Logger) *OrderController {
+// NewOrderController builds a controller around the domain service. A nil
+// logger disables logs. Successful requests are left to the access log; the
+// controller logs only the unexpected errors it turns into 500 responses,
+// including the wrapped cause.
+func NewOrderController(svc *service.OrderService, logger *zap.Logger) *OrderController {
 	if logger == nil {
 		logger = zap.NewNop()
 	}

@@ -135,6 +135,17 @@ func TestGetOrderContract(t *testing.T) {
 	}
 }
 
+func TestGetConfigContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/config")
+	gofytest.Status(t, rr, http.StatusOK)
+
+	resp := gofytest.JSON[orderresponse.GetConfigResponse](t, rr)
+	if resp.PaymentTimeout != "3s" || resp.AuthRequired {
+		t.Fatalf("config = %+v", resp)
+	}
+}
+
 func TestGetOrderRequestIDIsPropagated(t *testing.T) {
 	app := newTestApp(t)
 	rr := app.GET("/api/v1/order/orders/1", "X-Request-ID", "client-request-id")

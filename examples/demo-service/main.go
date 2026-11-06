@@ -23,6 +23,7 @@ import (
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/transport"
 	"github.com/yourorg/demo-service/app/config"
+	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/module/order"
 	appscript "github.com/yourorg/demo-service/script"
 )
@@ -85,7 +86,7 @@ func main() {
 		gofy.WithHTTP(cfg.HTTP),
 		gofy.WithAPIPrefix("/api/v1"),
 		gofy.WithPIDFile(cfg.PIDFile),
-		gofy.WithDatabase(cfg.DB),
+		gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
 		gofy.WithNacosRegistration(nacosCfg),
 		gofy.WithHealthEndpoints(true),
 		gofy.WithModuleFactories(reload.factories(cfg)...),
@@ -189,7 +190,10 @@ type reloader struct {
 // Reload starts this set before stopping the previous one, so a change briefly
 // runs two watchers; the old watcher is cancelled once the swap completes.
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
-	factories := []gofy.ModuleFactory{order.NewModuleFactory(cfg.Order)}
+	factories := []gofy.ModuleFactory{
+		appio.NewModuleFactory(cfg.DB, cfg.Redis),
+		order.NewModuleFactory(cfg.Order),
+	}
 	if r.watch {
 		factories = append(factories, func(rt *core.Runtime) (transport.Module, error) {
 			return &nacosWatchModule{
@@ -229,10 +233,11 @@ func (r *reloader) reload(ctx context.Context) error {
 		}
 		env = systemenv.GetEnv()
 	}
+	dbCfg := cfg.Database(config.DefaultDatabase)
 	return app.Reload(ctx, gofy.ReloadSpec{
 		Env:             env,
 		Log:             &cfg.Log,
-		Database:        &cfg.DB,
+		Database:        &dbCfg,
 		ModuleFactories: r.factories(cfg),
 	})
 }

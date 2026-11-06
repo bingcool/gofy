@@ -40,6 +40,7 @@ order/
 | `GET` | `/api/v1/order/orders` | `ListOrders` | 按用户分页查询 | `200` + `paging.ListData[OrderDTO]` |
 | `POST` | `/api/v1/order/orders` | `CreateOrder` | 创建订单 | `200` + `CreateOrderResponse` |
 | `DELETE` | `/api/v1/order/orders/{id}` | `CancelOrder` | 取消订单 | `204`，无响应体 |
+| `GET` | `/api/v1/order/config` | `GetConfig` | 查询订单模块配置 | `200` + `GetConfigResponse` |
 
 路由描述符定义在 `gofy-interface-service` 的
 `appinterface/demoservice/orderroute`，本模块通过
@@ -99,9 +100,13 @@ gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
 `NewModuleFactory` 在 `Runtime` 就绪后执行：
 
 1. 检查 `rt.DB`，为空直接返回 `order module requires database`；
-2. 用 `repository.New(rt.DB, rt.Logger)` 创建 GORM 仓库；
+2. 用 `repository.NewFromHandle(rt.Logger)` 创建 GORM 仓库，查询时从 `mysql.Db` 取连接；
 3. 用 `service.New(repo, rt.Logger, ...)` 创建服务；
 4. 调用 `NewModule(cfg, svc, rt.Logger)` 包装出模块。
+
+工厂执行时 `app/io` 还没 `Start`，`mysql.Db` 仍是 nil，所以 `NewFromHandle`
+把句柄解析推迟到每次查询；`Start` 安装新连接后仓库自动使用新句柄。脚本模式不经过
+模块生命周期，直接用 `repository.New(rt.DB, rt.Logger)` 传显式连接。
 
 `NewModule` 负责鉴权：`auth_token` 非空时校验 Bearer Token，为空时放行。
 `Register` 创建 controller（同时传入 logger），并用 `gofyadapter.BindAll`
@@ -122,9 +127,9 @@ module := order.NewModule(order.Config{}, myService, zap.NewNop())
 便于按层过滤。
 
 ```go
-repo := repository.New(rt.DB, rt.Logger)
+repo := repository.NewFromHandle(rt.Logger) // HTTP 模块：查询时取 mysql.Db
 svc := service.New(repo, rt.Logger, service.Config{...})
-h := controller.New(svc, rt.Logger)
+h := controller.NewOrderController(svc, rt.Logger)
 ```
 
 分层记录约定是“一个事件只在一个层记录一次”：

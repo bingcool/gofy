@@ -124,8 +124,8 @@ func Register(cfg *config.Config) []gofyscript.Script {
 | `Context()` | 脚本运行上下文，收到信号时取消 |
 | `Fail(err)` | 脚本模式下是空操作，失败请直接 `return err` |
 
-脚本的数据库连接是临时的：没有用 `WithDB` 注入连接时，框架按 `cfg.DB` 建连，
-`Run` 返回后关闭，不会影响其他进程或长时间占用连接池。
+脚本的数据库连接是临时的：没有用 `WithDB` 注入连接时，框架按
+`db.default` 建连，`Run` 返回后关闭，不会影响其他进程或长时间占用连接池。
 
 ## 配置与环境
 
