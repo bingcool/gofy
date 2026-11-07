@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/phpoffice`: Excel .xlsx export and import ported from the swoolefy
+  PHP `PhpOffice\Excel` module, built on the pure-Go `xuri/excelize/v2` instead
+  of the xlswriter extension. `Export` validates headers, sheet and file names,
+  reserves the target with `O_EXCL` (never overwrites), writes typed rows
+  (nil/bool/numbers/text/`time.Time`/`Stringer`), and exposes hooks for sheet
+  setup, header style, custom headers, rows finished, filter range and
+  pre-save. `ExportStream` writes large exports through excelize's
+  `StreamWriter`, keeping memory flat with row count (single header row, no
+  hooks or auto filter). `Read` loads every row while `Import` streams through
+  the row iterator; both validate the file, sheet, header, row width and cell
+  types (`CellString`/`CellInt`/`CellFloat`/`CellTime`), skip empty rows, and
+  support row normalization. Exports clean up partial files on failure, and
+  every failure wraps a sentinel error for `errors.Is`. The README calls out
+  the regular-vs-streaming choice and the Go version required by excelize.
 - `support/uuidint`: distributed, trend-increasing `int64` IDs on Redis,
   ported from the swoolefy PHP Uuid library. One Lua script combines a
   millisecond prefix from Redis `TIME` with a segment counter (capped at

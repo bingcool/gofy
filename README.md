@@ -420,6 +420,13 @@ id, err := gen.Get(ctx)
 ids, err := gen.GetBatch(ctx, 10)
 ```
 
+Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\Excel`，
+底层换成纯 Go 的 excelize（无扩展、无 cgo）。`Export` 支持声明式表头/列宽/
+冻结/筛选与生命周期钩子，`ExportStream` 用 StreamWriter 流式写大数据；
+`Read` 全量读取、`Import` 流式逐行处理。小数据用常规 API，大数据必须用流式
+接口，注意内存占用与 excelize 要求的 Go 版本。导出文件名安全校验且绝不覆盖
+已有文件。见 [support/phpoffice/README.md](support/phpoffice/README.md)。
+
 ## Nacos 配置中心
 
 `support/nacos` 直接调用 Nacos Open API（不引入 SDK）：启动时把远端配置写成
@@ -735,6 +742,7 @@ support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRP
 support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
 support/uuidint/  基于 Redis 的分布式自增 int64 ID（与 PHP Uuid 布局互通）
+support/phpoffice/ Excel .xlsx 导出/导入（excelize，纯 Go）
 script/        维护脚本描述
 command/       自定义 CLI 命令描述
 config/        可选 YAML 加载器

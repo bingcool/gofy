@@ -145,6 +145,7 @@ github.com/bingcool/gofy/
 │   ├── pg/                      # PostgreSQL 连接（gorm.io/driver/postgres + pgx/v5）
 │   ├── sqlite/                  # SQLite 连接（glebarez/sqlite，纯 Go 无 cgo）
 │   ├── uuidint/                 # 基于 Redis 的分布式自增 int64 ID
+│   ├── phpoffice/               # Excel .xlsx 导出/导入（excelize，纯 Go）
 │   └── redis/
 │       └── redis.go             # Config、New、Ping、Close
 ├── logging/
@@ -179,7 +180,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -204,6 +205,7 @@ gofy (root)
  ├── support/pg ──> gorm.io/driver/postgres (jackc/pgx/v5)
  ├── support/sqlite ──> glebarez/sqlite (modernc, 无 cgo)
  ├── support/uuidint ──> support/redis, go-redis
+ ├── support/phpoffice ──> xuri/excelize/v2
  ├── support/redis ──> go-redis
  ├── support/jwtauth
  ├── support/headerpropagation
@@ -218,7 +220,7 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
@@ -227,6 +229,7 @@ internal/* ──> core
 | `support/sqlite` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
 | 全仓库禁止 cgo：`CGO_ENABLED=0` 必须可构建，依赖图不得含 `CgoFiles` | 交叉编译与静态镜像无需 C 工具链；SQLite 用 `glebarez/sqlite`（modernc 纯 Go），`make cgo-free` 和 CI guards 校验 |
 | `support/uuidint` 不依赖 `logging` | 错误通过返回值、`WithErrorHandler` 回调和 `ctx` 交给调用方 |
+| `support/phpoffice` 不依赖 `logging` | 错误通过哨兵错误返回，日志由业务决定 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
@@ -1445,6 +1448,36 @@ SQLite 连接包，API 与 `support/db`、`support/pg` 对齐（`Config` 字段�
   预热（一次 `GetBatch` 一次 Redis 往返），由业务自行决定是否缓存批号。
 - demo 通过 `app/io/uuidint` 在启动时发布 `uuidint.Default`（实例别名来自
   `uuidint.redis_instance_name`），脚本模式用 `script gen-uuid` 按同一配置验证。
+
+### 3.7.6 `support/phpoffice`
+
+Excel（.xlsx）导出/导入，移植自 swoolefy PHP `PhpOffice\Excel`，底层由
+`ext-xlswriter` 换成纯 Go 的 `github.com/xuri/excelize/v2`（无扩展、无 cgo）。
+
+- `Export(ctx, dir, ExportSpec)`：文件名只接受 basename、自动补 `.xlsx`、
+  用 `O_CREATE|O_EXCL` 排他预留且绝不覆盖；校验表头/sheet 名/列宽（`A` 或
+  `B:D`，0.1~255）/冻结行数；逐行归一化 `nil`、布尔、整数/浮点、字符串、
+  `time.Time`（按 `DateLayout`）和 `fmt.Stringer`；支持表头样式、多行表头、
+  合计行、自定义筛选和保存前钩子；失败删除预留/半成品文件。
+- 内存策略：小数据用常规 `Export`（工作簿在 `SaveAs` 前驻留内存）；大数据
+  **必须**用 `ExportStream`（excelize `StreamWriter` 逐行写盘，内存与行数无关，
+  固定单行表头、无钩子与自动筛选）；导入小文件用 `Read`，大数据用 `Import`
+  （`excelize.Rows` 流式迭代）。依赖 excelize v2.11.1 要求 Go 1.26，升级前须
+  核对 `go.mod` 的最低版本。
+- `Read(ctx, path, ImportSpec)` 全量读取；`Import(ctx, path, ImportSpec)` 用
+  `excelize.Rows` 流式逐行交给 `HandleRow`。两者共用同一套校验：文件、sheet、
+  表头（trim、非空、去重、`ExpectedHeaders` 严格比较）、行宽（短行补空、多余
+  非空列报错）、空行跳过、`NormalizeCells` 归一化。
+- `CellTypes` 按 0 基列覆盖读取类型：`CellString`（默认，保留前导零）、
+  `CellInt`、`CellFloat`、`CellTime`（Excel 日期序列号 → `time.Time`）。
+- 行对象 `Row` 提供 `RowNumber`、`Cells`、`Values`、`Cell`/`Value` 默认值和
+  `IsEmpty`。
+- 哨兵错误：`ErrInvalidExport`、`ErrInvalidRow`、`ErrExportFailed`、
+  `ErrInvalidImport`、`ErrInvalidImportRow`、`ErrImportFailed`，统一用
+  `errors.Is` 判断；`ctx` 取消原样返回。
+- 与 PHP 版的差异：excelize 在 `SaveAs` 前把工作簿保存在内存中（无 constMemory
+  开关与 batchSize）；导出/导入是无状态函数，不强制单实例一次性；钩子用函数
+  字段代替继承覆写。
 
 ### 3.8 `script`
 
@@ -3118,6 +3151,7 @@ gorm.io/gorm
 gorm.io/driver/mysql
 gorm.io/driver/postgres
 github.com/glebarez/sqlite
+github.com/xuri/excelize/v2
 github.com/google/uuid
 ```
 
@@ -3328,6 +3362,7 @@ gofy/
 ├── support/pg/
 ├── support/sqlite/
 ├── support/uuidint/
+├── support/phpoffice/
 ├── script/
 ├── command/
 ├── config/
@@ -4243,6 +4278,43 @@ var ErrKeyRequired, ErrUnavailable
 - 语义与 PHP `Uuid` 一致（§3.7.5）：与 PHP 共用 Lua 与 ID 布局，命名实例
   经 `support/redis.NewIO` 懒解析；重试 + 备用连接降级，失败返回
   `ErrUnavailable`；`WithPool` 提供可选的每实例预取池。
+
+### A.25 `support/phpoffice`
+
+```text
+const (
+    MaxColumns, MaxRows, MaxDataRows, MaxHeaderRows, MaxCellLength, MaxFileNameLength
+)
+
+type ExportSpec
+type StreamExportSpec
+type ExportHooks
+type ExportContext
+func (ExportContext) NextRowNumber() int
+func (ExportContext) DefaultAutoFilterRange() string
+type ExportResult
+func Export(context.Context, string, ExportSpec) (*ExportResult, error)
+func ExportStream(context.Context, string, StreamExportSpec) (*ExportResult, error)
+
+type CellType
+const CellString, CellInt, CellFloat, CellTime
+type ImportSpec
+type Row
+func (Row) Cell(int, any) any
+func (Row) Value(string, any) any
+func (Row) IsEmpty() bool
+type ReadResult
+type ImportResult
+func Read(context.Context, string, ImportSpec) (*ReadResult, error)
+func Import(context.Context, string, ImportSpec) (*ImportResult, error)
+
+var ErrInvalidExport, ErrInvalidRow, ErrExportFailed,
+    ErrInvalidImport, ErrInvalidImportRow, ErrImportFailed
+```
+
+- 基于 `xuri/excelize/v2` 的纯 Go 实现（§3.7.6）：导出排他预留、类型归一化与
+  钩子；大数据用 `ExportStream`（StreamWriter）保持内存平坦；导入支持全量
+  `Read` 与流式 `Import`，按列覆盖读取类型。
 
 ---
 
