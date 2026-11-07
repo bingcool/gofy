@@ -67,11 +67,11 @@ func (m *Module) Start(ctx context.Context) error {
 	if m.rt == nil {
 		return errors.New("io: runtime is required")
 	}
-	mysqlSet, err := appmysql.Open(ctx, m.rt.DB, m.dbCfg, m.rt.Logger)
+	mysqlSet, err := appmysql.Open(ctx, m.rt.DB, m.dbCfg, m.rt)
 	if err != nil {
 		return err
 	}
-	redisSet, err := appredis.Open(ctx, m.redisCfg, m.rt.Logger)
+	redisSet, err := appredis.Open(ctx, m.redisCfg, m.rt)
 	if err != nil {
 		_ = mysqlSet.Close()
 		return err

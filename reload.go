@@ -39,7 +39,9 @@ func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // value.
 //
 // The listener is never rebound: HTTP host, port and server timeouts keep
-// their startup values, so changing them requires a restart.
+// their startup values, so changing them requires a restart. The same applies
+// to OpenTelemetry: the tracer provider and its exporter stay alive across
+// reloads, and a new telemetry configuration requires a process restart.
 type ReloadSpec struct {
 	// Env replaces the environment reported by the Runtime and the App.
 	Env string
@@ -173,14 +175,17 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	discard := func() { discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger) }
 
 	rt := core.NewRuntime(core.RuntimeConfig{
-		Name:      a.opts.name,
-		Env:       env,
-		Logger:    lg,
-		DB:        db,
-		Version:   a.version,
-		StartedAt: startedAt,
-		Ctx:       runCtx,
-		Fail:      func(err error) { a.cancel(err) },
+		Name:           a.opts.name,
+		Env:            env,
+		Logger:         lg,
+		DB:             db,
+		Version:        a.version,
+		StartedAt:      startedAt,
+		Ctx:            runCtx,
+		Fail:           func(err error) { a.cancel(err) },
+		TracerProvider: a.telemetry.TracerProvider(),
+		Propagator:     a.telemetry.Propagator(),
+		Tracing:        a.telemetry.Enabled(),
 	})
 	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, factories, injected)
 	if err != nil {

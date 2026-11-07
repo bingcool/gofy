@@ -34,6 +34,29 @@ log:
   base_fields:
     service: demo-service
 
+# OpenTelemetry tracing：span 通过 OTLP 发送到 collector（Jaeger/Tempo/厂商后端）。
+# enabled=false 时不安装中间件、不建 exporter，本地开发默认关闭。
+# 协议 grpc 对应 OTLP gRPC（4317），http 对应 OTLP HTTP（4318）。
+# service_name/version/environment 留空时分别取 App 名称、构建版本和上面的 env。
+# global 保持 false：一个进程可能运行多个 App，避免互相覆盖全局 provider。
+# collector 需要鉴权时用 headers 传 Authorization，值建议由环境变量注入。
+otel:
+  enabled: false
+  endpoint: 127.0.0.1:4317
+  protocol: grpc
+  insecure: true          # 内网明文 collector；公网部署改为 false 并配置 tls
+  compression: gzip
+  timeout: 10s
+  sampler: parentbased_traceidratio
+  sample_ratio: 1.0
+  service_name: demo-service
+  shutdown_timeout: 5s
+  batch:
+    timeout: 5s
+    max_queue_size: 2048
+    max_export_batch_size: 512
+    export_timeout: 30s
+
 db:
   default:
     dsn: &demo_dsn swoolefy:swoolefy123@tcp(192.168.10.187:3306)/gofy?charset=utf8mb4&parseTime=True&loc=Local

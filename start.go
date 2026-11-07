@@ -20,6 +20,7 @@ import (
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
+	"github.com/bingcool/gofy/support/otel"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -52,20 +53,32 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	}
 	a.setLogger(lg, system, own)
 
+	telemetry, err := a.buildTelemetry(runCtx, lg)
+	if err != nil {
+		return nil, a.abort(err)
+	}
+	a.telemetry = telemetry
+
 	db, ownDB, err := a.buildDB(runCtx, lg)
 	if err != nil {
+		return nil, a.abort(err)
+	}
+	if err := a.instrumentDB(db, ownDB); err != nil {
 		return nil, a.abort(err)
 	}
 	a.db, a.ownDB = db, ownDB
 
 	rt := core.NewRuntime(core.RuntimeConfig{
-		Name:    a.opts.name,
-		Env:     a.opts.env,
-		Logger:  lg,
-		DB:      db,
-		Version: a.version,
-		Ctx:     runCtx,
-		Fail:    func(err error) { cancel(err) },
+		Name:           a.opts.name,
+		Env:            a.opts.env,
+		Logger:         lg,
+		DB:             db,
+		Version:        a.version,
+		Ctx:            runCtx,
+		Fail:           func(err error) { cancel(err) },
+		TracerProvider: telemetry.TracerProvider(),
+		Propagator:     telemetry.Propagator(),
+		Tracing:        telemetry.Enabled(),
 	})
 	a.rt = rt
 
@@ -91,20 +104,32 @@ func (a *App) run(parent context.Context) error {
 	}
 	a.setLogger(lg, system, own)
 
+	telemetry, err := a.buildTelemetry(ctx, lg)
+	if err != nil {
+		return a.abort(err)
+	}
+	a.telemetry = telemetry
+
 	db, ownDB, err := a.buildDB(ctx, lg)
 	if err != nil {
+		return a.abort(err)
+	}
+	if err := a.instrumentDB(db, ownDB); err != nil {
 		return a.abort(err)
 	}
 	a.db, a.ownDB = db, ownDB
 
 	rt := core.NewRuntime(core.RuntimeConfig{
-		Name:    a.opts.name,
-		Env:     a.opts.env,
-		Logger:  lg,
-		DB:      db,
-		Version: a.version,
-		Ctx:     ctx,
-		Fail:    func(err error) { cancel(err) },
+		Name:           a.opts.name,
+		Env:            a.opts.env,
+		Logger:         lg,
+		DB:             db,
+		Version:        a.version,
+		Ctx:            ctx,
+		Fail:           func(err error) { cancel(err) },
+		TracerProvider: telemetry.TracerProvider(),
+		Propagator:     telemetry.Propagator(),
+		Tracing:        telemetry.Enabled(),
 	})
 	a.rt = rt
 
@@ -171,6 +196,7 @@ func (a *App) run(parent context.Context) error {
 		zap.String("env", a.opts.env),
 		zap.String("addr", addr),
 		zap.String("version", a.version.Version),
+		zap.Bool("telemetry", a.telemetry.Enabled()),
 	)
 	a.printStartup(addr)
 	a.markReady()
@@ -223,8 +249,13 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	}
 
 	engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))
+	// Trace 中间件紧跟 RequestID：先建立 span，后续 HeaderPropagation 才能用
+	// trace id 兜底 X-Trace-Id；探针请求不进入 trace。
+	if traceMW := a.telemetry.GinMiddleware(otel.SkipPaths("/healthz", "/readyz")); traceMW != nil {
+		engine.Use(traceMW)
+	}
 	if a.opts.headerPropagation {
-		// 紧贴 RequestID 安装：用 req_id 兜底 X-Trace-Id，
+		// 紧贴 RequestID 安装：用 req_id 或 OTel trace id 兜底 X-Trace-Id，
 		// 并保证后续业务中间件和 handler 都能从 context 读到透传头。
 		engine.Use(middleware.HeaderPropagation(a.opts.trusted))
 	}
@@ -607,6 +638,10 @@ func (a *App) cleanup() error {
 				errs = append(errs, err)
 			}
 		}
+
+		// 模块停机和数据库关闭产生的 span 也在缓冲区内，最后统一 flush。
+		// 导出失败只记录日志，不把采集器不可用升级成停机错误。
+		_ = a.telemetry.Shutdown(ctx)
 
 		if a.cancel != nil {
 			a.cancel(nil)

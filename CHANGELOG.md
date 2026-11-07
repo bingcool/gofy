@@ -8,6 +8,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/encryption`: symmetric encryption aligned with the swoolefy PHP
+  Encrypter. AES-128/256-CBC adds an HMAC-SHA256 MAC, AES-128/256-GCM uses the
+  AEAD tag, and the base64(JSON{iv, value, mac, tag}) payload is byte-compatible
+  with PHP, so `EncryptString`/`DecryptString` interoperate across languages
+  (verified with fixtures in both directions). `NewEncrypter` validates the
+  raw-byte key length and defaults to aes-256-gcm; `Encrypt`/`Decrypt` add JSON
+  serialization for values. CBC verifies the MAC before decrypting, and keys
+  are copied at construction and never exposed.
+- `support/otel`: production OpenTelemetry tracing with a validated `Config`,
+  OTLP gRPC/HTTP exporters, batch span processing, TLS or explicit insecure
+  transport, gzip compression, parent-based ratio sampling and W3C
+  TraceContext + Baggage propagation. Export errors go to the zap logger and
+  are rate-limited, and shutdown flushes within `ShutdownTimeout` without
+  failing the process when the collector is unreachable.
+- `support/otel` instrumentation helpers: `GinMiddleware` (extracts
+  `traceparent`, skips probe paths), `HTTPTransport`/`HTTPClient` (injects
+  `traceparent` on outbound calls), `GORMPlugin` (SQL template and rows
+  affected, never bound values), `InstrumentRedis` (no command arguments) and
+  `Logger`/`TraceFields` for trace-correlated logs.
+- `gofy.WithTelemetry` and `gofy.TelemetryConfig`: enable tracing from the App
+  lifecycle. The App installs the Gin server span middleware, instruments the
+  MySQL pool it owns, exposes `Runtime.TracerProvider`, `Runtime.Propagator`
+  and `Runtime.Tracing`, and shuts the exporter down during cleanup. Service
+  name, version and environment default to the App name, build version and
+  environment.
+- Access and recovery logs now include `trace_id` and `span_id`, and
+  `X-Trace-Id` uses the OTel trace id when tracing is enabled, falling back to
+  the request id otherwise.
 - `support/headerpropagation`: captures a whitelist of request headers
   (`X-Trace-Id`, `X-User-*`, `X-Tenant-Id`, `X-Client-Ip`, `X-User-Agent`) and
   carries them in the request context. Identity headers are trusted only when
@@ -178,6 +206,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `App.Reload` keeps the OpenTelemetry provider and exporter built at startup;
+  changing telemetry settings requires a process restart.
 - **Breaking:** the `transport` package is now `support`. `Router`, typed
   handlers, binding, `Responder` and the CORS/JWT/rate-limit/security-header
   configs live in the `support` package; middleware moved to

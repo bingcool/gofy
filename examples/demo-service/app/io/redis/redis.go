@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bingcool/gofy"
+	gofyotel "github.com/bingcool/gofy/support/otel"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -55,9 +57,11 @@ type Set struct {
 // Open connects every enabled instance. Unknown names are rejected so a typo
 // does not silently leave a handle nil. The connections themselves come from
 // support/redis NewIO, which caches one client per alias for this generation.
-func Open(ctx context.Context, cfg Config, logger *zap.Logger) (*Set, error) {
-	if logger == nil {
-		logger = zap.NewNop()
+// When rt enables tracing, each client gets command-level client spans.
+func Open(ctx context.Context, cfg Config, rt *gofy.Runtime) (*Set, error) {
+	logger := zap.NewNop()
+	if rt != nil && rt.Logger != nil {
+		logger = rt.Logger
 	}
 	names := make([]string, 0, len(cfg))
 	confs := make(map[string]gofyredis.Config, len(cfg))
@@ -87,6 +91,12 @@ func Open(ctx context.Context, cfg Config, logger *zap.Logger) (*Set, error) {
 		if err != nil {
 			_ = registry.Close()
 			return nil, fmt.Errorf("redis instance %q: %w", name, err)
+		}
+		if rt != nil && rt.Tracing {
+			if err := gofyotel.InstrumentRedisWith(client, rt.TracerProvider); err != nil {
+				_ = registry.Close()
+				return nil, fmt.Errorf("redis instance %q tracing: %w", name, err)
+			}
 		}
 		set.clients[name] = client
 		logger.Info("redis instance connected",

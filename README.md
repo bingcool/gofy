@@ -222,6 +222,41 @@ ctx = headerpropagation.ContextWithHeaders(ctx, http.Header{
 })
 ```
 
+## OpenTelemetry 追踪
+
+`WithTelemetry` 接入 OTLP 追踪，默认关闭；完整配置、采样策略和独立使用方式见
+[support/otel/README.md](support/otel/README.md)。
+
+```go
+app, err := gofy.New(
+	gofy.WithName("order-service"),
+	gofy.WithTelemetry(gofy.TelemetryConfig{
+		Enabled:     true,
+		Endpoint:    "otel-collector:4317",
+		Protocol:    "grpc",
+		Compression: "gzip",
+		SampleRatio: 0.1,          // 根 trace 采样 10%，上游已采样的继续采样
+		Timeout:     10 * time.Second,
+	}),
+	// ...
+)
+```
+
+启用后框架负责：
+
+- 安装 Gin 服务端 span 中间件，提取上游 W3C `traceparent`，`/healthz`、`/readyz`
+  不采样；
+- 为 `WithDatabase` 托管的连接池安装 GORM 插件，记录 SQL 模板、表名和影响行数，
+  不记录绑定参数；
+- 通过 `Runtime.TracerProvider`、`Runtime.Propagator`、`Runtime.Tracing` 暴露
+  追踪器，供 Redis、出站 HTTP 客户端等自行埋点；
+- 关停时 flush 并关闭导出器；collector 不可达只记录限流后的日志，不影响退出。
+
+默认使用 TLS（`insecure: false`），`endpoint` 默认 `localhost:4317`（gRPC）或
+`localhost:4318`（HTTP）。访问日志和 panic 恢复日志自动带 `trace_id`、`span_id`；
+启用 OTel 时 `X-Trace-Id` 优先使用 OTel trace id。追踪配置在启动时固定，
+修改后需要重启进程。
+
 ## 热更新
 
 `App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
@@ -240,6 +275,8 @@ err := app.Reload(ctx, gofy.ReloadSpec{
 `Reload` 只能在服务已启动后调用，否则返回 `ErrNotRunning`；并发调用会串行化。
 
 HTTP 监听地址与超时、pid 文件不在 `ReloadSpec` 中，修改这些内容需要重启进程。
+OpenTelemetry 的 provider 和导出器也在启动时固定，`Reload` 复用同一个实例；
+修改 telemetry 配置需要重启。
 通过 `WithModules` 注入的实例不会被重建：它们继续运行，只在新路由上重新注册，
 因此仍持有创建时捕获的 `Runtime`；需要跟随配置变化的模块请改用 `WithModuleFactories`。
 中间件和 responder 由启动时的选项重新应用，同样不能在 `Reload` 中更换。
@@ -346,6 +383,16 @@ defer reg.Close()
 
 client, err := redis.NewIO(ctx, "default")
 ```
+
+追踪用 `support/otel`：`WithTelemetry` 是框架级接入，负责 Gin 中间件和 App
+托管连接池；Redis、出站 HTTP、额外 GORM 连接用包内的埋点助手接入。配置与
+隐私约定见 [support/otel/README.md](support/otel/README.md)。
+
+对称加解密用 `support/encryption`：AES-128/256-CBC（HMAC-SHA256）与
+AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼容，
+`EncryptString`/`DecryptString` 可跨语言互解。用于保护配置、Token、Cookie
+一类可逆数据，不用于密码哈希。见
+[support/encryption/README.md](support/encryption/README.md)。
 
 ## Nacos 配置中心
 
@@ -644,6 +691,8 @@ support/queues/ 基于注入 Redis 实例的即时队列与延迟队列
 support/amqp/   AMQP（RabbitMQ）连接、发布、消费与 TTL 延迟队列
 support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go）
 support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRPC 客户端）
+support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
+support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
 script/        维护脚本描述
 command/       自定义 CLI 命令描述
 config/        可选 YAML 加载器

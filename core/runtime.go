@@ -7,6 +7,9 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -29,6 +32,14 @@ type Runtime struct {
 	Version   VersionInfo
 	StartedAt time.Time
 
+	// TracerProvider 供业务代码创建 span；未启用 tracing 时是 no-op provider。
+	TracerProvider trace.TracerProvider
+	// Propagator 是入站和出站使用的 W3C TraceContext + Baggage 传播器。
+	Propagator propagation.TextMapPropagator
+	// Tracing 表示 App 已启用 OpenTelemetry 导出。业务据此决定是否安装
+	// GORM、Redis 等可选埋点，避免 no-op tracer 带来的额外开销。
+	Tracing bool
+
 	ctx  context.Context
 	fail func(error)
 }
@@ -44,6 +55,10 @@ type RuntimeConfig struct {
 	StartedAt time.Time
 	Ctx       context.Context
 	Fail      func(error)
+
+	TracerProvider trace.TracerProvider
+	Propagator     propagation.TextMapPropagator
+	Tracing        bool
 }
 
 // NewRuntime builds a Runtime from cfg, filling safe defaults for nil fields.
@@ -60,15 +75,27 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 	if cfg.StartedAt.IsZero() {
 		cfg.StartedAt = time.Now()
 	}
+	if cfg.TracerProvider == nil {
+		cfg.TracerProvider = noop.NewTracerProvider()
+	}
+	if cfg.Propagator == nil {
+		cfg.Propagator = propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		)
+	}
 	return &Runtime{
-		Name:      cfg.Name,
-		Env:       cfg.Env,
-		Logger:    cfg.Logger,
-		DB:        cfg.DB,
-		Version:   cfg.Version,
-		StartedAt: cfg.StartedAt,
-		ctx:       cfg.Ctx,
-		fail:      cfg.Fail,
+		Name:           cfg.Name,
+		Env:            cfg.Env,
+		Logger:         cfg.Logger,
+		DB:             cfg.DB,
+		Version:        cfg.Version,
+		StartedAt:      cfg.StartedAt,
+		TracerProvider: cfg.TracerProvider,
+		Propagator:     cfg.Propagator,
+		Tracing:        cfg.Tracing,
+		ctx:            cfg.Ctx,
+		fail:           cfg.Fail,
 	}
 }
 

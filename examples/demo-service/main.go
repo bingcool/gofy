@@ -83,6 +83,7 @@ func main() {
 		gofy.WithName("demo-service"),
 		gofy.WithEnv(systemenv.GetEnv()),
 		gofy.WithLogConfig(cfg.Log),
+		gofy.WithTelemetry(cfg.OTel),
 		gofy.WithHTTP(cfg.HTTP),
 		gofy.WithAPIPrefix("/api/v1"),
 		gofy.WithPIDFile(cfg.PIDFile),

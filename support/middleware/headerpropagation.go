@@ -4,6 +4,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/headerpropagation"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // HeaderPropagation 把白名单请求头写入 request context，
@@ -14,9 +15,15 @@ import (
 func HeaderPropagation(trustedProxies []string) gin.HandlerFunc {
 	proxies := append([]string(nil), trustedProxies...)
 	return func(c *gin.Context) {
+		// 启用 tracing 时优先用分布式 trace id，下游继续用同一个 trace；
+		// 未启用时退回 req_id，保持既有的 X-Trace-Id 行为。
+		traceID := c.GetString(support.RequestIDKey)
+		if sc := trace.SpanContextFromContext(c.Request.Context()); sc.IsValid() {
+			traceID = sc.TraceID().String()
+		}
 		headers := headerpropagation.CaptureIncoming(
 			c.Request.Header,
-			c.GetString(support.RequestIDKey),
+			traceID,
 			proxies,
 			c.Request.RemoteAddr,
 		)

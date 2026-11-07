@@ -20,6 +20,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
+	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -61,13 +62,16 @@ type App struct {
 	// runtime swap never races a shutdown or a second swap.
 	reloadMu sync.Mutex
 
-	cancel   context.CancelCauseFunc
-	rt       *core.Runtime
-	db       *gorm.DB
-	ownDB    bool
-	srv      *http.Server
-	listener net.Listener
-	serving  bool
+	cancel context.CancelCauseFunc
+	rt     *core.Runtime
+	db     *gorm.DB
+	ownDB  bool
+	// telemetry is built at startup and reused by every reload. It is nil when
+	// WithTelemetry was not used or tracing is disabled.
+	telemetry *otel.Provider
+	srv       *http.Server
+	listener  net.Listener
+	serving   bool
 	// handlerRef is the http.Handler given to the server. run installs a
 	// handlerSwap here so Reload can replace the route table without rebinding
 	// the listener; Handler mode has no server and leaves it nil.
@@ -259,4 +263,34 @@ func (a *App) buildDB(ctx context.Context, logger *zap.Logger) (*gorm.DB, bool, 
 		return nil, false, fmt.Errorf("gofy: connect database: %w", err)
 	}
 	return db, true, nil
+}
+
+// buildTelemetry builds the tracing pipeline. A nil telemetry config leaves
+// tracing off and returns a nil provider.
+func (a *App) buildTelemetry(ctx context.Context, logger *zap.Logger) (*otel.Provider, error) {
+	if a.opts.telemetry == nil {
+		return nil, nil
+	}
+	provider, err := otel.New(ctx, *a.opts.telemetry,
+		otel.WithLogger(logger),
+		otel.WithServiceName(a.opts.name),
+		otel.WithServiceVersion(a.version.Version),
+		otel.WithEnvironment(a.opts.env),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("gofy: telemetry: %w", err)
+	}
+	return provider, nil
+}
+
+// instrumentDB adds GORM spans to the pool the App owns. A connection injected
+// with WithDB is left untouched, so sharing it does not silently add callbacks.
+func (a *App) instrumentDB(db *gorm.DB, own bool) error {
+	if !own || db == nil {
+		return nil
+	}
+	if err := a.telemetry.InstrumentGORM(db); err != nil {
+		return fmt.Errorf("gofy: instrument database: %w", err)
+	}
+	return nil
 }

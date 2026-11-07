@@ -11,6 +11,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
+	"github.com/bingcool/gofy/support/otel"
 )
 
 // Runtime is the shared runtime passed to modules, scripts and commands.
@@ -40,6 +41,10 @@ type LogConfig = logging.Config
 // NacosConfig is the Nacos connection and service settings passed to
 // WithNacosRegistration.
 type NacosConfig = nacos.Config
+
+// TelemetryConfig is the OpenTelemetry tracing configuration passed to
+// WithTelemetry.
+type TelemetryConfig = otel.Config
 
 // HTTPConfig configures the HTTP server.
 type HTTPConfig struct {

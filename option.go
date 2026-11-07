@@ -16,6 +16,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
+	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -74,6 +75,8 @@ type options struct {
 	jwt             *support.JWTAuthConfig
 	rateLimit       *support.RateLimitConfig
 	securityHeaders *support.SecurityHeadersConfig
+
+	telemetry *otel.Config
 }
 
 func defaultOptions() options {
@@ -454,6 +457,24 @@ func WithVersionInfo(info core.VersionInfo) Option {
 	return func(o *options) error {
 		o.version = info
 		o.hasVer = true
+		return nil
+	}
+}
+
+// WithTelemetry enables OpenTelemetry tracing with the given pipeline.
+//
+// When cfg.Enabled is true the App installs the Gin server span middleware,
+// instrumentates the MySQL pool it owns, exports spans over OTLP and shuts the
+// exporter down during cleanup. Service name, version and environment default
+// to the App name, build version and environment. Tracing is fixed at startup:
+// changing it requires a restart.
+func WithTelemetry(cfg otel.Config) Option {
+	return func(o *options) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		c := cfg
+		o.telemetry = &c
 		return nil
 	}
 }

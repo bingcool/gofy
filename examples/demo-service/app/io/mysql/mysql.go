@@ -14,6 +14,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	gofymysql "github.com/bingcool/gofy/support/mysql"
+	gofyotel "github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -41,12 +42,16 @@ type Set struct {
 // db.default and is only published, not owned. Unknown instance names are
 // rejected so a typo cannot silently leave a handle nil. Extra connections come
 // from support/mysql NewIO for this generation.
-func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, logger *zap.Logger) (*Set, error) {
+//
+// When rt enables tracing, every extra pool also gets the GORM span plugin;
+// db.default is instrumented by the framework that owns it.
+func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, rt *gofy.Runtime) (*Set, error) {
 	if defaultDB == nil {
 		return nil, errors.New("mysql: default database is required")
 	}
-	if logger == nil {
-		logger = zap.NewNop()
+	logger := zap.NewNop()
+	if rt != nil && rt.Logger != nil {
+		logger = rt.Logger
 	}
 
 	extra := make(map[string]gofymysql.Config, 2)
@@ -75,6 +80,11 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 		db, err := registry.NewIO(ctx, name)
 		if err != nil {
 			return nil, fmt.Errorf("mysql instance %q: %w", name, err)
+		}
+		if rt != nil && rt.Tracing {
+			if err := db.Use(gofyotel.NewGORMPlugin(rt.TracerProvider)); err != nil {
+				return nil, fmt.Errorf("mysql instance %q tracing: %w", name, err)
+			}
 		}
 		logger.Info("mysql instance connected", zap.String("instance", name))
 		return db, nil

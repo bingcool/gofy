@@ -7,6 +7,7 @@ import (
 
 	"github.com/bingcool/gofy/support"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -117,6 +118,12 @@ func AccessLog(logger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc {
 			if id := c.GetString(support.RequestIDKey); id != "" {
 				fields = append(fields, zap.String("req_id", id))
 			}
+		}
+		if sc := trace.SpanContextFromContext(c.Request.Context()); sc.IsValid() {
+			fields = append(fields,
+				zap.String("trace_id", sc.TraceID().String()),
+				zap.String("span_id", sc.SpanID().String()),
+			)
 		}
 		if opts.LogClientIP {
 			fields = append(fields, zap.String("client_ip", c.ClientIP()))

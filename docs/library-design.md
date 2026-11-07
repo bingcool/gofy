@@ -134,6 +134,8 @@ github.com/bingcool/gofy/
 │   ├── amqp/                    # AMQP 连接、拓扑、发布、消费与 TTL 延迟队列
 │   ├── kafka/                   # Kafka 连接、同步生产与消费组消费
 │   ├── rocketmq/                # RocketMQ 连接、同步生产与拉取消费
+│   ├── otel/                    # OpenTelemetry 配置、OTLP 导出与埋点助手
+│   ├── encryption/              # AES-CBC/GCM 对称加解密，与 PHP 密文互通
 │   ├── headerpropagation/       # 入口请求头白名单与透传上下文
 │   ├── frameworkcontext/        # 统一身份读取（本地认证优先，透传头兜底）
 │   ├── jwtauth/                 # HMAC JWT 校验
@@ -174,7 +176,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/mysql`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/mysql`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -424,6 +426,7 @@ type Option func(*options) error
 | `WithAlwaysOK(bool)` | `false` | 兼容旧行为：所有响应 HTTP 200 | — |
 | `WithServerConfigurator(func(*http.Server) error)` | nil | HTTP Server 逃生口（TLS、ConnState 等） | 执行错误会中止启动 |
 | `WithVersionInfo(VersionInfo)` | 从 `debug.ReadBuildInfo` 推导 | 构建信息 | — |
+| `WithTelemetry(TelemetryConfig)` | 关闭 | OpenTelemetry 追踪；启用后安装 Gin 中间件、为自有 DB 埋点 | `Config.Validate()`；启动时固定，`Reload` 不重建 |
 
 多次调用 `WithModuleFactories`、`WithModules`、`WithScripts`、`WithCommands` 是**累加**的，不是覆盖。构建顺序固定为：
 
@@ -463,6 +466,8 @@ import (
     "context"
     "time"
 
+    "go.opentelemetry.io/otel/propagation"
+    "go.opentelemetry.io/otel/trace"
     "go.uber.org/zap"
     "gorm.io/gorm"
 )
@@ -484,6 +489,12 @@ type Runtime struct {
     Version   VersionInfo
     StartedAt time.Time
 
+    // 追踪器；未启用 OpenTelemetry 时 TracerProvider 为 no-op，
+    // Tracing 为 false，业务无需自行判空。
+    TracerProvider trace.TracerProvider
+    Propagator     propagation.TextMapPropagator
+    Tracing        bool
+
     ctx  context.Context
     fail func(error)
 }
@@ -498,6 +509,10 @@ type RuntimeConfig struct {
     StartedAt time.Time
     Ctx       context.Context
     Fail      func(error)
+
+    TracerProvider trace.TracerProvider
+    Propagator     propagation.TextMapPropagator
+    Tracing        bool
 }
 
 // NewRuntime 由 gofy 根包在启动阶段调用。
@@ -3393,6 +3408,7 @@ func WithTrustedProxies(...string) Option
 func WithAlwaysOK(bool) Option
 func WithServerConfigurator(func(*http.Server) error) Option
 func WithVersionInfo(VersionInfo) Option
+func WithTelemetry(TelemetryConfig) Option
 
 type HTTPConfig
 func (HTTPConfig) Validate() error
@@ -3404,6 +3420,7 @@ type Middleware = support.Middleware
 type Responder = support.Responder
 type DatabaseConfig = mysql.Config
 type LogConfig = logging.Config
+type TelemetryConfig = otel.Config
 ```
 
 ### A.2 `core`
@@ -3944,6 +3961,129 @@ func (*Registry) Close() error
   `Consume` 调用 `GracefulStop`。从未启动就 `Close` 是安全的。
 - 注册表只缓存 producer，按代关闭；消费者由业务用 `NewConsumer` 创建和关闭。
   与 Redis、AMQP、Kafka 一致，多实例由应用装配层负责；本包不保存全局句柄。
+
+### A.20 `support/otel`
+
+```text
+type Config
+type BatchConfig
+type TLSConfig
+func (Config) Validate() error
+func (BatchConfig) Validate() error
+
+const ProtocolGRPC, ProtocolHTTP
+const CompressionGzip, CompressionNone
+const SamplerParentBasedTraceIDRatio, SamplerParentBasedAlwaysOn,
+      SamplerParentBasedAlwaysOff, SamplerTraceIDRatio,
+      SamplerAlwaysOn, SamplerAlwaysOff
+
+var ErrEndpointRequired
+
+type Provider
+type Option
+func New(context.Context, Config, ...Option) (*Provider, error)
+func WithLogger(*zap.Logger) Option
+func WithServiceName(string) Option
+func WithServiceVersion(string) Option
+func WithEnvironment(string) Option
+func WithSpanExporter(sdktrace.SpanExporter) Option
+func (*Provider) Enabled() bool
+func (*Provider) ServiceName() string
+func (*Provider) TracerProvider() trace.TracerProvider
+func (*Provider) Propagator() propagation.TextMapPropagator
+func (*Provider) Tracer(string, ...trace.TracerOption) trace.Tracer
+func (*Provider) Config() Config
+func (*Provider) ForceFlush(context.Context) error
+func (*Provider) Shutdown(context.Context) error
+
+func (*Provider) GinMiddleware(func(*http.Request) bool) gin.HandlerFunc
+func SkipPaths(...string) func(*http.Request) bool
+
+func (*Provider) HTTPTransport(http.RoundTripper) http.RoundTripper
+func (*Provider) HTTPClient(*http.Client) *http.Client
+
+type GORMPlugin
+func NewGORMPlugin(trace.TracerProvider) *GORMPlugin
+func (*GORMPlugin) Name() string
+func (*GORMPlugin) Initialize(*gorm.DB) error
+func (*Provider) InstrumentGORM(*gorm.DB) error
+
+func (*Provider) InstrumentRedis(goredis.UniversalClient) error
+func InstrumentRedisWith(goredis.UniversalClient, trace.TracerProvider) error
+
+func TraceIDs(context.Context) (traceID, spanID string)
+func TraceFields(context.Context) []zap.Field
+func Logger(context.Context, *zap.Logger) *zap.Logger
+```
+
+- 配置在 `New` 时校验并补默认值：`grpc` + `localhost:4317`，`http` +
+  `localhost:4318`，`gzip`，`parentbased_traceidratio`，`SampleRatio` 缺省
+  `1.0`，导出超时 `10s`，批处理 `5s / 2048 / 512 / 30s`，关停上限 `5s`。
+  `SampleRatio: 0` 按默认值处理，关闭采样需显式选择 `always_off` 系列。
+- 安全默认值：`Insecure: false` 时走 TLS（最低 1.2），支持 `CAFile`、
+  双向 TLS、`ServerName`；`InsecureSkipVerify` 仅限开发。`Insecure` 与任何
+  TLS 字段互斥。header 值只随导出发送，不写日志、不进 span。
+- `New` 不连接 collector；导出失败由 SDK 后台重试，OTel 内部错误交给配置的
+  logger，并对相同错误做 1 分钟限流。`Shutdown` 幂等，在 `ShutdownTimeout`
+  内 flush，失败只记录日志，不影响进程退出。
+- `Config.Global` 为 true 时安装进程级 provider 和 propagator；`Shutdown`
+  不回滚全局安装。单进程只承载一个 App 时才应打开。
+- `Provider.TracerProvider()` 与 `Propagator()` 永不返回 nil：禁用时分别返回
+  no-op tracer 和 W3C TraceContext + Baggage 组合传播器，调用方无需分支。
+- `GORMPlugin` 为 create/query/update/delete/row/raw 建立 client span，
+  记录 `db.system`、`db.operation`、`db.sql.table`、截断到 4096 字符的
+  `db.statement`（SQL 模板）和 `db.rows_affected`；绑定参数不记录，
+  `ErrRecordNotFound` 不标记为错误。重复安装返回 GORM 的重复回调错误。
+- `InstrumentRedis` 使用 `redisotel`，命令参数与值不记录
+  （`WithDBStatement(false)`）。
+- App 集成：`WithTelemetry` 在 `New` 时校验配置。启用后 `start`/`Run` 在
+  `RequestID` 之后、`HeaderPropagation` 之前安装 Gin 中间件并跳过
+  `/healthz`、`/readyz`；`WithDatabase` 托管的连接池安装 GORM 插件，
+  `WithDB` 注入的连接不动；`Runtime.TracerProvider`、`Runtime.Propagator`、
+  `Runtime.Tracing` 暴露给业务。关停顺序为模块 → App 自有 DB → telemetry。
+- `Reload` 复用启动时构建的 provider 和导出器，新的 `Runtime` 携带相同值；
+  修改 telemetry 配置需要重启进程。
+- 访问日志与 panic 恢复日志输出 `trace_id`、`span_id`；启用 OTel 时
+  `headerpropagation` 的 `X-Trace-Id` 使用 OTel trace id，否则回落到
+  RequestID 生成的 UUID。
+
+### A.21 `support/encryption`
+
+```text
+const CipherAES128CBC, CipherAES256CBC, CipherAES128GCM, CipherAES256GCM
+
+func Supported([]byte, string) bool
+func GenerateKey(string) ([]byte, error)
+
+type Encrypter
+func NewEncrypter([]byte, string) (*Encrypter, error)
+func (*Encrypter) Cipher() string
+func (*Encrypter) Encrypt(any) (string, error)
+func (*Encrypter) Decrypt(string, any) error
+func (*Encrypter) EncryptString(string) (string, error)
+func (*Encrypter) DecryptString(string) (string, error)
+
+var ErrUnsupportedCipher, ErrEncrypt, ErrDecrypt, ErrPayload, ErrMAC, ErrTag
+```
+
+- 对齐 swoolefy PHP `Encryption`（Laravel 风格 Encrypter）：密文为
+  base64(JSON{iv, value, mac, tag})，iv/tag 是 base64，value 是 base64 密文，
+  mac 是 hex HMAC-SHA256（输入为 base64(iv)+base64(value) 两个字符串的拼接，
+  GCM 为空）。`EncryptString`/`DecryptString` 与 PHP 双向互通，测试含 PHP
+  生成的四种 cipher 固定密文。
+- 密钥是原始字节：aes-128-* 16 字节，aes-256-* 32 字节；cipher 不区分大小写，
+  空字符串默认 `aes-256-gcm`（与 PHP 默认 `aes-128-cbc` 的唯一差异，AEAD 是
+  更安全的生产默认值）。`NewEncrypter` 构造时复制密钥并预建 cipher，
+  之后不可变、可并发使用；不提供读取密钥的方法。
+- CBC 使用 PKCS7 填充（与 openssl 一致），先常量时间校验 MAC 再解密；
+  GCM nonce 12 字节、tag 16 字节，由 AEAD 校验完整性。每次加密重新生成
+  随机 IV。
+- `Encrypt`/`Decrypt` 在字符串入口之上加 JSON 序列化；PHP `encrypt()` 用
+  PHP serialize，值级入口不跨语言互通。
+- 错误用 `errors.Is` 判断：`ErrPayload`（载荷结构/IV 长度）、`ErrMAC`、
+  `ErrTag`、`ErrDecrypt`（密钥不符或认证失败）、`ErrEncrypt`、
+  `ErrUnsupportedCipher`。错误信息不含密钥和明文。
+- 用途是保护配置、Token、Cookie 等可逆数据；密码哈希不属于本包。
 
 ---
 
