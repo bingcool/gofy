@@ -52,4 +52,9 @@ if go list -deps ./support/sqlite | grep -q "$root_pkg/logging"; then
   fail "support/sqlite must not depend on logging"
 fi
 
+# support/uuidint must stay independent of the root package and logging.
+if go list -deps ./support/uuidint | grep -q "$root_pkg/logging"; then
+  fail "support/uuidint must not depend on logging"
+fi
+
 echo "import guards passed"

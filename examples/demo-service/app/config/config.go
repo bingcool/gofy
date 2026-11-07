@@ -15,6 +15,7 @@ import (
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	"github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
+	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
 	"github.com/yourorg/demo-service/app/module/order"
 )
 
@@ -32,6 +33,7 @@ type Config struct {
 	AMQP     appamqp.Config                 `yaml:"amqp"`
 	Kafka    appkafka.Config                `yaml:"kafka"`
 	RocketMQ approcketmq.Config             `yaml:"rocketmq"`
+	UUIDInt  appuuidint.Config              `yaml:"uuidint"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
 	Order    order.Config                   `yaml:"order"`
@@ -98,6 +100,9 @@ func Load(ctx context.Context, path string) (*Config, error) {
 		if err := inst.Config.Validate(); err != nil {
 			return nil, fmt.Errorf("config: rocketmq.%s: %w", name, err)
 		}
+	}
+	if err := cfg.UUIDInt.Validate(); err != nil {
+		return nil, fmt.Errorf("config: uuidint: %w", err)
 	}
 	if err := cfg.OTel.Validate(); err != nil {
 		return nil, fmt.Errorf("config: otel: %w", err)

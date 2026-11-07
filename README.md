@@ -406,6 +406,20 @@ AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼
 一类可逆数据，不用于密码哈希。见
 [support/encryption/README.md](support/encryption/README.md)。
 
+分布式自增 ID 用 `support/uuidint`：Lua 把 Redis `TIME` 的毫秒前缀与段内序号
+拼成 `int64`（趋势递增、同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套
+Lua 和 ID 布局。`New` 可通过 `WithInstance("cache")` 注入 `support/redis` 的
+命名实例（每次取号懒解析，热更新自动切换），也支持 `WithClient` 直接注入
+客户端、备用连接降级、批量取号，以及可选的本地预取池（`WithPool` 配合
+`StartPool`/`StopPool`，降低 Redis QPS）。见
+[support/uuidint/README.md](support/uuidint/README.md)。
+
+```go
+gen, err := uuidint.New("uuid-key", uuidint.WithInstance("cache"))
+id, err := gen.Get(ctx)
+ids, err := gen.GetBatch(ctx, 10)
+```
+
 ## Nacos 配置中心
 
 `support/nacos` 直接调用 Nacos Open API（不引入 SDK）：启动时把远端配置写成
@@ -720,6 +734,7 @@ support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go）
 support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRPC 客户端）
 support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
+support/uuidint/  基于 Redis 的分布式自增 int64 ID（与 PHP Uuid 布局互通）
 script/        维护脚本描述
 command/       自定义 CLI 命令描述
 config/        可选 YAML 加载器

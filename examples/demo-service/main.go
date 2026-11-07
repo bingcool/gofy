@@ -195,7 +195,7 @@ type reloader struct {
 // runs two watchers; the old watcher is cancelled once the swap completes.
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	factories := []gofy.ModuleFactory{
-		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ),
+		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt),
 		order.NewModuleFactory(cfg.Order),
 	}
 	if r.watch {

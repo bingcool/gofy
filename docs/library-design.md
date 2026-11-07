@@ -144,6 +144,7 @@ github.com/bingcool/gofy/
 │   │   └── db.go             # Config、New、Close
 │   ├── pg/                      # PostgreSQL 连接（gorm.io/driver/postgres + pgx/v5）
 │   ├── sqlite/                  # SQLite 连接（glebarez/sqlite，纯 Go 无 cgo）
+│   ├── uuidint/                 # 基于 Redis 的分布式自增 int64 ID
 │   └── redis/
 │       └── redis.go             # Config、New、Ping、Close
 ├── logging/
@@ -178,7 +179,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -202,6 +203,7 @@ gofy (root)
  ├── support/db
  ├── support/pg ──> gorm.io/driver/postgres (jackc/pgx/v5)
  ├── support/sqlite ──> glebarez/sqlite (modernc, 无 cgo)
+ ├── support/uuidint ──> support/redis, go-redis
  ├── support/redis ──> go-redis
  ├── support/jwtauth
  ├── support/headerpropagation
@@ -216,7 +218,7 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
@@ -224,6 +226,7 @@ internal/* ──> core
 | `support/pg` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
 | `support/sqlite` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
 | 全仓库禁止 cgo：`CGO_ENABLED=0` 必须可构建，依赖图不得含 `CgoFiles` | 交叉编译与静态镜像无需 C 工具链；SQLite 用 `glebarez/sqlite`（modernc 纯 Go），`make cgo-free` 和 CI guards 校验 |
+| `support/uuidint` 不依赖 `logging` | 错误通过返回值、`WithErrorHandler` 回调和 `ctx` 交给调用方 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
@@ -1413,6 +1416,35 @@ SQLite 连接包，API 与 `support/db`、`support/pg` 对齐（`Config` 字段�
 - 错误前缀为 `sqlite:`；哨兵错误与 db/pg 同名（`ErrDSNRequired`、
   `ErrNotConfigured`、`ErrUnknownInstance`）；
 - 嵌入式库，测试用 `t.TempDir()` 中的真实文件库，不需要外部服务。
+
+### 3.7.5 `support/uuidint`
+
+基于 Redis 的分布式自增 `int64`，移植自 swoolefy PHP `Uuid`：
+
+- Lua 与 PHP 完全一致：`INCRBY` 段内序号（上限 `MaxIncr=999990`），用 Redis
+  `TIME` 的秒 + 毫秒拼 19 位前缀（秒 + 毫秒 + 6 个 0），新段首次写入时比对
+  上一毫秒戳，同毫秒冲突返回空由 Go 重试；最终 `id = prefix + incr`。PHP 与
+  Go 可共享同一 Redis key 混合发号。
+- `New(key, opts...)` 通过 Option 注入连接：`WithInstance(name)` 使用
+  `support/redis` 命名实例（每次取号经 `redis.NewIO` 懒解析，热更新后自动用
+  新代，默认别名 `default`）；`WithClient` 直接注入 `*goredis.Client`，二者
+  互斥。另有 `WithFallbackClients`/`WithFallbackInstances`、`WithTTL`、
+  `WithRetry`、`WithErrorHandler`。
+- `Get(ctx)` 取单个；`GetBatch(ctx, n)` 返回闭区间 `[max-n+1, max]` 升序，
+  超过 `MaxIncr` 自动钳制。同段内严格 +1，跨毫秒前缀增加、序号重置，因此
+  只保证趋势递增。
+- `WithPool(size, interval)` 启用每 Generator 独立的本地预取池：
+  `StartPool` 同步预热一批后由 ticker 定时补货，`Get`/`GetBatch` 先消费池内
+  ID；池满跳过补货，连续 3 个周期无人消费清空旧池，`StopPool` 幂等并回落到
+  单次 Redis 取号。池内未使用的号会成为空洞，不影响唯一性（PHP 的 Channel
+  池是静态共享的，Go 版按实例隔离）。
+- 主连接最多尝试 `retryTimes` 次（默认 3、间隔 150ms）；耗尽后回调
+  `WithErrorHandler`，再依次尝试备用连接各一次；全部失败返回包裹
+  `ErrUnavailable` 的错误，`ctx` 取消时返回 `context.Canceled`。
+- 不依赖 `logging`，也不引入根包；与 PHP 版的差异是没有 Channel 池和定时
+  预热（一次 `GetBatch` 一次 Redis 往返），由业务自行决定是否缓存批号。
+- demo 通过 `app/io/uuidint` 在启动时发布 `uuidint.Default`（实例别名来自
+  `uuidint.redis_instance_name`），脚本模式用 `script gen-uuid` 按同一配置验证。
 
 ### 3.8 `script`
 
@@ -3295,6 +3327,7 @@ gofy/
 ├── support/db/
 ├── support/pg/
 ├── support/sqlite/
+├── support/uuidint/
 ├── script/
 ├── command/
 ├── config/
@@ -4182,6 +4215,34 @@ var ErrDSNRequired, ErrNotConfigured, ErrUnknownInstance
 - 与 `support/db`、`support/pg` 同一套语义（§3.7.4）：dialector 为
   `github.com/glebarez/sqlite`（纯 Go，无 cgo），默认单连接，WAL 与
   `busy_timeout` 通过 DSN 的 `_pragma` 参数开启。
+
+### A.24 `support/uuidint`
+
+```text
+const MaxIncr = 999990
+
+func New(string, ...Option) (*Generator, error)
+func WithClient(*goredis.Client) Option
+func WithInstance(string) Option
+func WithFallbackClients(...*goredis.Client) Option
+func WithFallbackInstances(...string) Option
+func WithTTL(time.Duration) Option
+func WithRetry(int, time.Duration) Option
+func WithErrorHandler(func(error)) Option
+func WithPool(int, time.Duration) Option
+
+type Generator
+func (*Generator) Get(context.Context) (int64, error)
+func (*Generator) GetBatch(context.Context, int) ([]int64, error)
+func (*Generator) StartPool(context.Context) error
+func (*Generator) StopPool()
+
+var ErrKeyRequired, ErrUnavailable
+```
+
+- 语义与 PHP `Uuid` 一致（§3.7.5）：与 PHP 共用 Lua 与 ID 布局，命名实例
+  经 `support/redis.NewIO` 懒解析；重试 + 备用连接降级，失败返回
+  `ErrUnavailable`；`WithPool` 提供可选的每实例预取池。
 
 ---
 

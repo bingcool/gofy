@@ -22,6 +22,7 @@ import (
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	appredis "github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
+	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
 	"gorm.io/gorm"
 )
 
@@ -32,7 +33,10 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 		"default": {DSN: "user:pass@tcp(127.0.0.1:3306)/main"},
 	}, appredis.Config{
 		appredis.InstanceRateLimit: {Enabled: true, Config: gofyredis.Config{Addr: mr.Addr()}},
-	}, nil, nil, nil)
+	}, nil, nil, nil, appuuidint.Config{
+		Enabled: true, RedisInstance: appredis.InstanceRateLimit, Key: "demo:uuid",
+		PoolSize: 5, PoolInterval: time.Hour,
+	})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
@@ -59,9 +63,32 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	if viaIO != appredis.RateLimit {
 		t.Fatal("redis.NewIO does not return the installed instance")
 	}
+	if appuuidint.Default == nil {
+		t.Fatal("uuidint.Default was not installed")
+	}
+	raw, err := mr.Get("demo:uuid")
+	if err != nil {
+		t.Fatalf("read uuid counter: %v", err)
+	}
+	if raw != "5" {
+		t.Fatalf("uuid pool warm fill = %q, want 5", raw)
+	}
+	id, err := appuuidint.Default.Get(ctx)
+	if err != nil {
+		t.Fatalf("uuidint.Get: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("uuidint id = %d, want > 0", id)
+	}
+	if raw, err := mr.Get("demo:uuid"); err != nil || raw != "5" {
+		t.Fatalf("uuidint.Get did not consume the pool: value=%q err=%v", raw, err)
+	}
 
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+	if appuuidint.Default != nil {
+		t.Fatal("uuidint.Default was not cleared")
 	}
 	if appredis.RateLimit != nil {
 		t.Fatal("redis.RateLimit was not cleared")
@@ -106,7 +133,7 @@ func TestStartInstallsAMQPInstance(t *testing.T) {
 				Vhost:    os.Getenv("GOFY_TEST_AMQP_VHOST"),
 			}},
 		}},
-	}, nil, nil)
+	}, nil, nil, appuuidint.Config{})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
@@ -159,7 +186,7 @@ func TestStartInstallsKafkaInstance(t *testing.T) {
 			ClientID:    "demo-service-test",
 			DialTimeout: 5 * time.Second,
 		}},
-	}, nil)
+	}, nil, appuuidint.Config{})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
@@ -205,7 +232,7 @@ func TestStartInstallsRocketMQInstance(t *testing.T) {
 			Endpoint:    endpoint,
 			SendTimeout: 5 * time.Second,
 		}},
-	})
+	}, appuuidint.Config{})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {

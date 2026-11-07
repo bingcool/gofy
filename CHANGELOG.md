@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/uuidint`: distributed, trend-increasing `int64` IDs on Redis,
+  ported from the swoolefy PHP Uuid library. One Lua script combines a
+  millisecond prefix from Redis `TIME` with a segment counter (capped at
+  999990), expires the counter keys, and rejects same-millisecond collisions
+  for the caller to retry. `New` accepts `WithInstance(name)` to inject a
+  `support/redis` named instance (resolved lazily through `NewIO`, so reloads
+  are picked up), or `WithClient` for an explicit client; fallback clients or
+  instances, TTL, retry count/delay and an error hook are configurable.
+  `Get` returns one ID and `GetBatch` a closed ascending range. Go and PHP can
+  share the same Redis key because the Lua and ID layout are identical.
+  `WithPool` adds an optional per-generator prefetch pool (`StartPool` warms one
+  batch synchronously, a ticker refills it, Get/GetBatch consume buffered IDs
+  first, and three idle intervals clear the buffer); IDs left in the buffer
+  become gaps but never affect uniqueness.
+  `examples/demo-service` wires it through `app/io/uuidint` (published as
+  `uuidint.Default`, alias and pool from `uuidint.*`) and ships a `gen-uuid`
+  script (`--pool --wait`) for running it without the HTTP modules.
 - `support/sqlite`: GORM SQLite connections on `github.com/glebarez/sqlite`
   (modernc, pure Go, no cgo; drop-in for `gorm.io/driver/sqlite`, which needs
   `mattn/go-sqlite3`). The API mirrors `support/db` and `support/pg`: validated

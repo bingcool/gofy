@@ -110,6 +110,22 @@ redis:
     db: 2
     pool_size: 5
 
+# 分布式自增 ID：由 app/io 用 support/uuidint 构建生成器，复用上面 redis 的
+# 命名实例（redis_instance_name 必须是已启用的 redis 实例）。generator 不持有
+# 连接，每次取号经 support/redis 的别名懒解析；enabled 为 false 时句柄为 nil。
+# 脚本模式不经过模块生命周期，可用 script gen-uuid 直接验证（见下方脚本）。
+uuidint:
+  enabled: true
+  redis_instance_name: ratelimit
+  key: demo:uuid
+  ttl: 15s
+  retry_times: 3
+  retry_interval: 150ms
+  # 本地预取池：启动时预热 pool_size 个号，之后每 pool_interval 补一批；
+  # 池满时跳过补货，连续 3 个周期无人消费会清空旧池。0 表示不用池。
+  pool_size: 200
+  pool_interval: 1s
+
 # 多实例 AMQP（RabbitMQ）：按名字分组，由 app/io 建连和关闭。
 # default 对应业务句柄 amqp.Default，其它实例用 amqp.Get("名字") 取用。
 # 本机 dev-rabbitmq 的凭据来自 dockerfiles/docker-compose.yml

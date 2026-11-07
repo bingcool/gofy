@@ -4,7 +4,7 @@
 // rebuilds them together with the module.
 //
 // 业务代码直接使用 app/io/db、app/io/redis、app/io/amqp、app/io/kafka、
-// app/io/rocketmq 的包级句柄，本包只负责生命周期。
+// app/io/rocketmq、app/io/uuidint 的包级句柄，本包只负责生命周期。
 package io
 
 import (
@@ -18,10 +18,11 @@ import (
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	appredis "github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
+	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
 )
 
-// Module publishes app/io/db, app/io/redis, app/io/amqp, app/io/kafka and
-// app/io/rocketmq handles during startup.
+// Module publishes app/io/db, app/io/redis, app/io/amqp, app/io/kafka,
+// app/io/rocketmq and app/io/uuidint handles during startup.
 type Module struct {
 	rt          *gofy.Runtime
 	dbCfg       map[string]gofy.DatabaseConfig
@@ -29,23 +30,25 @@ type Module struct {
 	amqpCfg     appamqp.Config
 	kafkaCfg    appkafka.Config
 	rocketmqCfg approcketmq.Config
+	uuidintCfg  appuuidint.Config
 
 	dbSet       *appdb.Set
 	redisSet    *appredis.Set
 	amqpSet     *appamqp.Set
 	kafkaSet    *appkafka.Set
 	rocketmqSet *approcketmq.Set
+	uuidintSet  *appuuidint.Set
 }
 
 // NewModuleFactory builds the module from the application runtime.
-func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config) gofy.ModuleFactory {
+func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config) gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
-		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg), nil
+		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg, uuidintCfg), nil
 	}
 }
 
 // NewModule builds a module around rt and the instance configuration.
-func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config) *Module {
+func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config) *Module {
 	return &Module{
 		rt:          rt,
 		dbCfg:       dbCfg,
@@ -53,6 +56,7 @@ func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg 
 		amqpCfg:     amqpCfg,
 		kafkaCfg:    kafkaCfg,
 		rocketmqCfg: rocketmqCfg,
+		uuidintCfg:  uuidintCfg,
 	}
 }
 
@@ -97,16 +101,36 @@ func (m *Module) Start(ctx context.Context) error {
 		_ = dbSet.Close()
 		return err
 	}
+	uuidintSet, err := appuuidint.Open(m.uuidintCfg, m.rt.Logger)
+	if err != nil {
+		_ = rocketmqSet.Close()
+		_ = kafkaSet.Close()
+		_ = amqpSet.Close()
+		_ = redisSet.Close()
+		_ = dbSet.Close()
+		return err
+	}
+	if err := uuidintSet.Start(ctx); err != nil {
+		_ = rocketmqSet.Close()
+		_ = kafkaSet.Close()
+		_ = amqpSet.Close()
+		_ = redisSet.Close()
+		_ = dbSet.Close()
+		return err
+	}
 	m.dbSet = dbSet
 	m.redisSet = redisSet
 	m.amqpSet = amqpSet
 	m.kafkaSet = kafkaSet
 	m.rocketmqSet = rocketmqSet
+	m.uuidintSet = uuidintSet
 	dbSet.Install()
 	redisSet.Install()
 	amqpSet.Install()
 	kafkaSet.Install()
 	rocketmqSet.Install()
+	// uuidint 依赖 redis 的命名实例，放在 redis 安装之后发布。
+	uuidintSet.Install()
 	return nil
 }
 
@@ -119,5 +143,6 @@ func (m *Module) Stop(context.Context) error {
 		m.amqpSet.Close(),
 		m.kafkaSet.Close(),
 		m.rocketmqSet.Close(),
+		m.uuidintSet.Close(),
 	)
 }
