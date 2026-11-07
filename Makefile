@@ -3,7 +3,7 @@ GOFLAGS ?=
 PKGS    := ./...
 EXAMPLE := examples/demo-service
 
-.PHONY: all fmt fmt-check vet test test-race example guards check build clean
+.PHONY: all fmt fmt-check vet test test-race example guards cgo-free check build clean
 
 all: fmt-check vet test
 
@@ -32,7 +32,15 @@ guards:
 		echo "public packages must not use init()"; exit 1; \
 	fi
 
-check: fmt-check vet test-race example guards
+# 全仓库禁止依赖 cgo：源码必须能在 CGO_ENABLED=0 下构建，依赖图里不能有
+# CgoFiles（SQLite 因此使用 glebarez/sqlite 的纯 Go 实现）。-race 需要 cgo，
+# 只在 test-race 里启用。
+cgo-free:
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) $(PKGS)
+	@cgo="$$($(GO) list -deps -test -f '{{if .CgoFiles}}{{.ImportPath}}{{end}}' $(PKGS) | grep -v '^$$' || true)"; \
+	if [ -n "$$cgo" ]; then echo "cgo is not allowed:"; echo "$$cgo"; exit 1; fi
+
+check: fmt-check vet test-race example guards cgo-free
 
 build:
 	$(GO) build $(GOFLAGS) $(PKGS)

@@ -9,7 +9,7 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/support"
-	"github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 )
@@ -32,8 +32,8 @@ type Responder = support.Responder
 // CORSConfig is the cross-origin policy passed to WithCORS.
 type CORSConfig = support.CORSConfig
 
-// DatabaseConfig is the MySQL configuration passed to WithDatabase.
-type DatabaseConfig = mysql.Config
+// DatabaseConfig is the MySQL-protocol configuration passed to WithDatabase.
+type DatabaseConfig = gofydb.Config
 
 // LogConfig is the logger configuration passed to WithLogConfig.
 type LogConfig = logging.Config

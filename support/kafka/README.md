@@ -3,7 +3,7 @@
 在 Kafka 之上提供连接、生产与消费，参考 swoolefy 的 `Swoolefy\Library\Kafka`
 （librdkafka 封装）。底层使用纯 Go 的
 [franz-go](https://github.com/twmb/franz-go)，不需要 cgo。与 `support/redis`、
-`support/mysql`、`support/amqp` 一样，本包默认不持有全局状态，也不替业务决定
+`support/db`、`support/amqp` 一样，本包默认不持有全局状态，也不替业务决定
 实例数量：
 
 - `New(ctx, Config)` 校验配置并发送一次 metadata 请求确认 broker 可达；

@@ -1,4 +1,4 @@
-package mysql
+package db
 
 import (
 	"context"
@@ -15,9 +15,9 @@ import (
 var (
 	// ErrNotConfigured is returned when Configure has not been called or the
 	// registry has already been closed.
-	ErrNotConfigured = errors.New("mysql: no instance is configured")
+	ErrNotConfigured = errors.New("db: no instance is configured")
 	// ErrUnknownInstance is returned when the requested name is not registered.
-	ErrUnknownInstance = errors.New("mysql: unknown instance")
+	ErrUnknownInstance = errors.New("db: unknown instance")
 )
 
 // Registry holds named configurations and opens their pools on first use.
@@ -62,10 +62,10 @@ func NewRegistry(configs map[string]Config, logger *zap.Logger) (*Registry, erro
 	for name, cfg := range configs {
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return nil, errors.New("mysql: instance name must not be empty")
+			return nil, errors.New("db: instance name must not be empty")
 		}
 		if err := cfg.Validate(); err != nil {
-			return nil, fmt.Errorf("mysql instance %q: %w", name, err)
+			return nil, fmt.Errorf("db instance %q: %w", name, err)
 		}
 		reg.configs[name] = cfg
 	}
@@ -129,7 +129,7 @@ func (r *Registry) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
 	}
 	db, err := New(ctx, cfg, r.logger)
 	if err != nil {
-		return nil, fmt.Errorf("mysql instance %q: %w", name, err)
+		return nil, fmt.Errorf("db instance %q: %w", name, err)
 	}
 	r.dbs[name] = db
 	return db, nil
@@ -157,7 +157,7 @@ func (r *Registry) Close() error {
 	var errs []error
 	for name, db := range dbs {
 		if err := Close(db); err != nil {
-			errs = append(errs, fmt.Errorf("mysql instance %q: %w", name, err))
+			errs = append(errs, fmt.Errorf("db instance %q: %w", name, err))
 		}
 	}
 	return errors.Join(errs...)

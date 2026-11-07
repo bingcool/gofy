@@ -1,5 +1,5 @@
 // Package kafka publishes and consumes Kafka records. Like support/redis,
-// support/mysql and support/amqp it keeps no global state: the caller passes a
+// support/db and support/amqp it keeps no global state: the caller passes a
 // context and a Config, owns the returned Client, and builds Producers and
 // Consumers on top of it.
 //

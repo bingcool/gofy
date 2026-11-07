@@ -18,8 +18,8 @@ import (
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 	appamqp "github.com/yourorg/demo-service/app/io/amqp"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
-	appmysql "github.com/yourorg/demo-service/app/io/mysql"
 	appredis "github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 	"gorm.io/gorm"
@@ -40,11 +40,11 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appmysql.Db, appmysql.OrderDb, appmysql.ProductDb = nil, nil, nil
+		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
 	})
 
-	if appmysql.Db != rt.DB {
-		t.Fatal("mysql.Db does not point at the runtime connection")
+	if appdb.Db != rt.DB {
+		t.Fatal("db.Db does not point at the runtime connection")
 	}
 	if appredis.RateLimit == nil {
 		t.Fatal("redis.RateLimit was not installed")
@@ -114,7 +114,7 @@ func TestStartInstallsAMQPInstance(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appmysql.Db, appmysql.OrderDb, appmysql.ProductDb = nil, nil, nil
+		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
 	})
 
 	if appamqp.Default == nil {
@@ -167,7 +167,7 @@ func TestStartInstallsKafkaInstance(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appmysql.Db, appmysql.OrderDb, appmysql.ProductDb = nil, nil, nil
+		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
 	})
 
 	if appkafka.Default == nil {
@@ -213,7 +213,7 @@ func TestStartInstallsRocketMQInstance(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appmysql.Db, appmysql.OrderDb, appmysql.ProductDb = nil, nil, nil
+		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
 	})
 
 	if approcketmq.Default == nil {

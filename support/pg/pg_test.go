@@ -1,4 +1,4 @@
-package mysql_test
+package pg_test
 
 import (
 	"context"
@@ -8,17 +8,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bingcool/gofy/support/mysql"
+	"github.com/bingcool/gofy/support/pg"
 	"go.uber.org/zap"
 )
 
 func TestValidate(t *testing.T) {
-	valid := mysql.Config{DSN: "user:pass@tcp(localhost:3306)/app"}
+	valid := pg.Config{DSN: "postgres://user:pass@localhost:5432/app"}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 
-	cases := map[string]mysql.Config{
+	cases := map[string]pg.Config{
 		"missing dsn":       {},
 		"negative idle":     {DSN: valid.DSN, MaxIdleConns: -1},
 		"negative open":     {DSN: valid.DSN, MaxOpenConns: -1},
@@ -38,49 +38,56 @@ func TestValidate(t *testing.T) {
 }
 
 func TestNewRejectsEmptyDSN(t *testing.T) {
-	_, err := mysql.New(context.Background(), mysql.Config{}, zap.NewNop())
-	if !errors.Is(err, mysql.ErrDSNRequired) {
+	_, err := pg.New(context.Background(), pg.Config{}, zap.NewNop())
+	if !errors.Is(err, pg.ErrDSNRequired) {
 		t.Fatalf("error = %v, want ErrDSNRequired", err)
 	}
 }
 
 func TestNewDoesNotLeakPassword(t *testing.T) {
-	cfg := mysql.Config{
-		DSN:         "swoolefy:supersecret@tcp(127.0.0.1:1)/swoolefy?timeout=100ms",
-		PingTimeout: 200 * time.Millisecond,
+	cases := map[string]string{
+		"url":     "postgres://app:supersecret@127.0.0.1:1/app?sslmode=disable&connect_timeout=1",
+		"keyword": "host=127.0.0.1 port=1 user=app password=supersecret dbname=app sslmode=disable connect_timeout=1",
 	}
-	_, err := mysql.New(context.Background(), cfg, zap.NewNop())
-	if err == nil {
-		t.Skip("unexpectedly connected to 127.0.0.1:1")
-	}
-	if strings.Contains(err.Error(), "supersecret") {
-		t.Fatalf("error leaked the password: %v", err)
-	}
-	if !strings.Contains(err.Error(), "***") {
-		t.Fatalf("error did not redact the DSN: %v", err)
+	for name, dsn := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := pg.New(context.Background(), pg.Config{
+				DSN:         dsn,
+				PingTimeout: 2 * time.Second,
+			}, zap.NewNop())
+			if err == nil {
+				t.Skip("unexpectedly connected to 127.0.0.1:1")
+			}
+			if strings.Contains(err.Error(), "supersecret") {
+				t.Fatalf("error leaked the password: %v", err)
+			}
+			if !strings.Contains(err.Error(), "***") {
+				t.Fatalf("error did not redact the DSN: %v", err)
+			}
+		})
 	}
 }
 
 func TestCloseNil(t *testing.T) {
-	if err := mysql.Close(nil); err != nil {
+	if err := pg.Close(nil); err != nil {
 		t.Fatalf("Close(nil) = %v, want nil", err)
 	}
 }
 
-// TestIntegration exercises a real MySQL server when GOFY_TEST_MYSQL_DSN is
+// TestIntegration exercises a real PostgreSQL server when GOFY_TEST_PG_DSN is
 // set, for example:
 //
-//	GOFY_TEST_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime=True&loc=Local' \
-//	  go test ./support/mysql -run Integration -v
+//	GOFY_TEST_PG_DSN='postgres://user:password@127.0.0.1:5432/app?sslmode=disable' \
+//	  go test ./support/pg -run Integration -v
 func TestIntegration(t *testing.T) {
-	dsn := os.Getenv("GOFY_TEST_MYSQL_DSN")
+	dsn := os.Getenv("GOFY_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip("GOFY_TEST_MYSQL_DSN is not set")
+		t.Skip("GOFY_TEST_PG_DSN is not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db, err := mysql.New(ctx, mysql.Config{
+	conn, err := pg.New(ctx, pg.Config{
 		DSN:          dsn,
 		MaxOpenConns: 5,
 		PingTimeout:  5 * time.Second,
@@ -89,20 +96,20 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer func() {
-		if err := mysql.Close(db); err != nil {
+		if err := pg.Close(conn); err != nil {
 			t.Errorf("close: %v", err)
 		}
 	}()
 
 	var one int
-	if err := db.WithContext(ctx).Raw("SELECT 1").Scan(&one).Error; err != nil {
+	if err := conn.WithContext(ctx).Raw("SELECT 1").Scan(&one).Error; err != nil {
 		t.Fatalf("select 1: %v", err)
 	}
 	if one != 1 {
 		t.Fatalf("SELECT 1 = %d", one)
 	}
 
-	sqlDB, err := db.DB()
+	sqlDB, err := conn.DB()
 	if err != nil {
 		t.Fatalf("sql db: %v", err)
 	}

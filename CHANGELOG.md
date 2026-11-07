@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/sqlite`: GORM SQLite connections on `github.com/glebarez/sqlite`
+  (modernc, pure Go, no cgo; drop-in for `gorm.io/driver/sqlite`, which needs
+  `mattn/go-sqlite3`). The API mirrors `support/db` and `support/pg`: validated
+  `Config`, `New` pings within `PingTimeout`, `Close`, the same zap-backed GORM
+  logger, and the named-instance registry with per-generation close. Pool
+  defaults are one connection (`max_idle_conns`/`max_open_conns` = 1) because
+  SQLite is single-writer; WAL and `busy_timeout` are enabled through `_pragma`
+  DSN parameters. Tests use a temp-dir database, so no external server is
+  required.
+- `support/pg`: GORM PostgreSQL connections via `gorm.io/driver/postgres`
+  (jackc/pgx/v5, no cgo). The API mirrors `support/db`: validated `Config`
+  with pool defaults, `New` pings within `PingTimeout`, `Close`, the same
+  zap-backed GORM logger, and the named-instance registry
+  (`Configure`/`NewRegistry`/`Install`/`NewIO`/`CloseAllIO`) with per-generation
+  close. DSN accepts both pgx forms (URL and keyword/value) and error messages
+  redact the password in either form. Integration tests run against a real
+  server when `GOFY_TEST_PG_DSN` is set.
 - `support/encryption`: symmetric encryption aligned with the swoolefy PHP
   Encrypter. AES-128/256-CBC adds an HMAC-SHA256 MAC, AES-128/256-GCM uses the
   AEAD tag, and the base64(JSON{iv, value, mac, tag}) payload is byte-compatible
@@ -94,7 +111,7 @@ All notable changes to this project are documented here. The format follows
   duration, and at-least-once redelivery when a handler fails. Consumers
   require a group; producers no longer register one, so duplicate-group
   validation is gone.
-- `support/mysql`, `support/redis`, `support/amqp`, `support/kafka`,
+- `support/db`, `support/redis`, `support/amqp`, `support/kafka`,
   `support/rocketmq`:
   `Configure(map[string]Config)` registers named configurations and
   `NewIO(ctx, name)` returns the cached instance for an alias, opening it on
@@ -206,6 +223,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Build guarantee:** the whole module is cgo-free. All packages build with
+  `CGO_ENABLED=0`, and the dependency graph has no `CgoFiles` (SQLite uses
+  `glebarez/sqlite`/modernc instead of `mattn/go-sqlite3`). `make cgo-free` and
+  the CI guards enforce this; `-race` still runs with cgo enabled.
+- **Breaking:** `support/mysql` is now `support/db`, positioned as the GORM
+  connection package for any MySQL-protocol server (MySQL, MariaDB, TiDB,
+  OceanBase, SelectDB/Doris). Update imports to
+  `github.com/bingcool/gofy/support/db` (suggested alias `gofydb`) and error
+  prefixes from `mysql:` to `db:`. `gofy.DatabaseConfig` is unchanged. The demo
+  moves `app/io/mysql` to `app/io/db`; `Open` no longer rejects unknown
+  instance names — `order`/`product` still open eagerly with tracing, while
+  any other name (e.g. `selectDb`) is registered for lazy `NewIO` opening and
+  is not auto-instrumented.
 - `App.Reload` keeps the OpenTelemetry provider and exporter built at startup;
   changing telemetry settings requires a process restart.
 - **Breaking:** the `transport` package is now `support`. `Router`, typed

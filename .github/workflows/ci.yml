@@ -44,7 +44,7 @@ jobs:
             echo "::warning::gofy-interface-service checkout missing; skipping example module"
             exit 0
           fi
-          go build ./...
+          CGO_ENABLED=0 go build ./...
           go vet ./...
           go test -race -count=1 ./...
 
@@ -91,6 +91,8 @@ jobs:
           cache: true
       - name: import direction
         run: ./scripts/check-imports.sh
+      - name: cgo-free build
+        run: make cgo-free
       - name: no init in public packages
         run: |
           if grep -rn "func init()" --include="*.go" \

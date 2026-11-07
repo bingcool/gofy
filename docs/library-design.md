@@ -140,8 +140,10 @@ github.com/bingcool/gofy/
 │   ├── frameworkcontext/        # 统一身份读取（本地认证优先，透传头兜底）
 │   ├── jwtauth/                 # HMAC JWT 校验
 │   ├── nacos/                   # Nacos 配置与注册
-│   ├── mysql/
-│   │   └── mysql.go             # Config、New、Close
+│   ├── db/
+│   │   └── db.go             # Config、New、Close
+│   ├── pg/                      # PostgreSQL 连接（gorm.io/driver/postgres + pgx/v5）
+│   ├── sqlite/                  # SQLite 连接（glebarez/sqlite，纯 Go 无 cgo）
 │   └── redis/
 │       └── redis.go             # Config、New、Ping、Close
 ├── logging/
@@ -176,7 +178,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/mysql`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -197,7 +199,9 @@ gofy (root)
  ├── script ─────> core
  ├── command ────> core
  ├── logging
- ├── support/mysql
+ ├── support/db
+ ├── support/pg ──> gorm.io/driver/postgres (jackc/pgx/v5)
+ ├── support/sqlite ──> glebarez/sqlite (modernc, 无 cgo)
  ├── support/redis ──> go-redis
  ├── support/jwtauth
  ├── support/headerpropagation
@@ -212,11 +216,14 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `support`、`script`、`command`、`logging`、`support/mysql`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
-| `support/mysql` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `support/db` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `support/pg` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `support/sqlite` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| 全仓库禁止 cgo：`CGO_ENABLED=0` 必须可构建，依赖图不得含 `CgoFiles` | 交叉编译与静态镜像无需 C 工具链；SQLite 用 `glebarez/sqlite`（modernc 纯 Go），`make cgo-free` 和 CI guards 校验 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
@@ -286,7 +293,7 @@ import (
 
     "github.com/bingcool/gofy/core"
     "github.com/bingcool/gofy/logging"
-    "github.com/bingcool/gofy/support/mysql"
+    gofydb "github.com/bingcool/gofy/support/db"
     "github.com/bingcool/gofy/support"
     "go.uber.org/zap"
 )
@@ -297,7 +304,7 @@ type ModuleFactory = support.ModuleFactory
 type Middleware = support.Middleware
 type Responder = support.Responder
 type CORSConfig = support.CORSConfig
-type DatabaseConfig = mysql.Config
+type DatabaseConfig = gofydb.Config
 type LogConfig = logging.Config
 
 // App 是一次应用运行的容器。
@@ -1240,10 +1247,14 @@ func (c Config) Validate() error
 func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface
 ```
 
-### 3.7 `support/mysql`
+### 3.7 `support/db`
+
+面向所有兼容 MySQL 协议的服务器（MySQL、MariaDB、TiDB、OceanBase、
+SelectDB/Doris 等）：驱动固定为 `gorm.io/driver/mysql`，DSN 指向哪种服务器
+由配置决定，实例名也可以按用途自由命名（如 `selectDb`）。
 
 ```go
-package mysql
+package db
 
 import (
     "context"
@@ -1279,7 +1290,7 @@ func (c Config) Validate() error
 - 不在 `New` 中打印 DSN；错误信息中的 DSN 需脱敏（至少隐藏密码段）。
 - 不使用 `sync.Once`、不提供包级 `GetDb()`。
 
-> v1 把 GORM 作为主依赖。若未来要支持"不用 DB 的用户零 GORM 依赖"，可把 `support/mysql` 拆成独立子 module；这属于 v2 的开放问题（见 §15.2）。
+> v1 把 GORM 作为主依赖。若未来要支持"不用 DB 的用户零 GORM 依赖"，可把 `support/db` 拆成独立子 module；这属于 v2 的开放问题（见 §15.2）。
 
 ### 3.7.1 `support/redis`
 
@@ -1333,13 +1344,13 @@ var ErrNotConfigured, ErrUnknownInstance
 Redis 不进入 `Runtime`：需要时由业务自己创建并关闭，再把客户端传给
 `support/ratelimit/redisstore` 等适配器。
 
-### 3.7.2 命名实例注册表（mysql / redis / amqp / kafka / rocketmq）
+### 3.7.2 命名实例注册表（db / pg / sqlite / redis / amqp / kafka / rocketmq）
 
-五个数据包提供同一套可选 API，用于按配置别名直接取用实例：
+七个数据包提供同一套可选 API，用于按配置别名直接取用实例：
 
 ```go
 type Registry
-func Configure(map[string]Config [, *zap.Logger]) (*Registry, error) // mysql 额外接收 logger
+func Configure(map[string]Config [, *zap.Logger]) (*Registry, error) // db、pg、sqlite 额外接收 logger
 func NewRegistry(map[string]Config [, *zap.Logger]) (*Registry, error)
 func NewIO(context.Context, string) (T, error)
 func CloseAllIO() error
@@ -1361,12 +1372,47 @@ var ErrNotConfigured, ErrUnknownInstance
   失败只关闭新代，当前代保持不变。
 - 未注册名称返回 `ErrUnknownInstance`；未调用 `Configure` 或当前代已关闭返回
   `ErrNotConfigured`。
-- `mysql` 的 `db.default` 由 `WithDatabase` 托管，业务继续使用 `Runtime.DB`；
+- `db` 的 `db.default` 由 `WithDatabase` 托管，业务继续使用 `Runtime.DB`；
   把同一别名放进注册表会创建第二个连接池。
 - `rocketmq` 注册表只缓存 producer；消费者不属于生产者客户端，业务用同一份
   `Config` 调用 `NewConsumer` 单独创建和关闭。v5 的 producer 不注册组名，
   因此没有组名去重；消费者组在 `ConsumerConfig.Group` 里显式指定。
-- 不使用 `Configure` 时五个包保持无全局状态，`New`/`Wrap`/`Close` 行为不变。
+- 不使用 `Configure` 时七个包保持无全局状态，`New`/`Wrap`/`Close` 行为不变。
+
+### 3.7.3 `support/pg`
+
+PostgreSQL 连接包，API 与 `support/db` 完全对齐（`Config` 字段、默认值、
+`New`/`Close`、zap GORM 日志、§3.7.2 的命名实例注册表），差异只在驱动和 DSN：
+
+- 驱动为 `gorm.io/driver/postgres`，底层 `jackc/pgx/v5` 经 database/sql 接入，
+  无 cgo；
+- `DSN` 接受 pgx 两种形式：URL（`postgres://user:pass@host:5432/db?sslmode=disable`）
+  和 keyword/value（`host=... user=... password=... dbname=...`）；建议显式带
+  `connect_timeout`（秒），避免网络不通时建连挂起；
+- 错误脱敏覆盖两种形式：URL 隐藏 userinfo 密码段，keyword/value 把
+  `password=xxx`（含单引号包裹）替换为 `password=***`；
+- 错误前缀为 `pg:`；哨兵错误与 db 同名（`ErrDSNRequired`、`ErrNotConfigured`、
+  `ErrUnknownInstance`）；
+- 不接入根包 `WithDatabase`（它仍只托管 MySQL 协议主库）；业务单独使用，
+  或按 `app/io` 模式自行托管生命周期。
+
+### 3.7.4 `support/sqlite`
+
+SQLite 连接包，API 与 `support/db`、`support/pg` 对齐（`Config` 字段、默认值、
+`New`/`Close`、zap GORM 日志、§3.7.2 的命名实例注册表），差异在驱动与并发默认值：
+
+- dialector 为 `github.com/glebarez/sqlite`（modernc.org/sqlite），纯 Go、无 cgo。
+  它与 `gorm.io/driver/sqlite` 调用方式一致，但后者依赖 `mattn/go-sqlite3`，
+  交叉编译和静态镜像需要 C 工具链；
+- SQLite 单写多读，默认 `max_idle_conns`/`max_open_conns` 都是 `1`，避免同进程
+  写锁竞争；提高并发需在 DSN 里用 `_pragma=journal_mode(WAL)` 和
+  `_pragma=busy_timeout(5000)`；
+- `DSN` 支持文件路径、`:memory:` 和带 `_pragma` 的 URI；`:memory:` 每个连接
+  是独立库，多连接共享需 `file::memory:?cache=shared`；
+- DSN 不含账号密码，错误信息直接带出库路径，不做脱敏；
+- 错误前缀为 `sqlite:`；哨兵错误与 db/pg 同名（`ErrDSNRequired`、
+  `ErrNotConfigured`、`ErrUnknownInstance`）；
+- 嵌入式库，测试用 `t.TempDir()` 中的真实文件库，不需要外部服务。
 
 ### 3.8 `script`
 
@@ -1650,7 +1696,7 @@ Execute("start")
   ├─ 2. 进入 building
   ├─ 3. 构建 logger（若未注入）
   ├─ 4. 构建 Runtime（Name/Env/Version/StartedAt/ctx）
-  ├─ 5. 若配置 DB：mysql.New -> Ping
+  ├─ 5. 若配置 DB：db.New -> Ping
   ├─ 6. 调用 ModuleFactory（按注册顺序）
   ├─ 7. 校验模块名 / 前缀 / 路由
   ├─ 8. gin.SetMode + 创建 gin.Engine + 框架中间件 + 业务中间件
@@ -1960,8 +2006,9 @@ order:
 
 | 句柄 | 来源 |
 | --- | --- |
-| `mysql.Db` | 框架托管的 `db.default`（`Runtime.DB`） |
-| `mysql.OrderDb` / `mysql.ProductDb` | `db.order` / `db.product`，由 `app/io` 创建 |
+| `db.Db` | 框架托管的 `db.default`（`Runtime.DB`） |
+| `db.OrderDb` / `db.ProductDb` | `db.order` / `db.product`，由 `app/io` 创建 |
+| `db.NewIO(ctx, name)` | 其它命名 `db` 实例（如 `selectDb`），首次取用时建连 |
 | `redis.Cache` / `redis.Session` | `redis.cache` / `redis.session`，`enabled: false` 时为 nil |
 | `redis.RateLimit` | `redis.ratelimit`，供分布式限流使用 |
 | `amqp.Default` | `amqp.default` 的 RabbitMQ 连接，未启用时为 nil |
@@ -2003,7 +2050,7 @@ func configPath() string {
 - JWT 校验失败只返回 `unauthorized`，不区分“token 过期”“签名错误”等内部原因；
 - 安全响应头在 `New` 阶段校验，拒绝含换行的头值；
 - 限流默认失败关闭（503），避免存储故障时失去保护；
-- `mysql.New` 的错误信息必须脱敏 DSN；
+- `db.New` 的错误信息必须脱敏 DSN；
 - 配置加载错误只输出文件路径与解析位置，不输出文件内容；
 - 生产配置建议使用环境变量注入 secret，而不是把密码写进 YAML。
 
@@ -2222,8 +2269,8 @@ demo-service/
 │   │   └── config.go
 │   ├── io/                     # 实例句柄 + 建连/Install/Close 生命周期
 │   │   ├── io_runtime.go       # 生命周期模块（NewModuleFactory）
-│   │   ├── mysql/
-│   │   │   └── mysql.go        # Db / OrderDb / ProductDb
+│   │   ├── db/
+│   │   │   └── db.go        # Db / OrderDb / ProductDb
 │   │   └── redis/
 │   │       └── redis.go        # Cache / Session / RateLimit
 │   ├── middleware/
@@ -2354,7 +2401,7 @@ func Load(ctx context.Context, path string) (*Config, error) {
 ### 9.3.1 `app/io` 实例句柄
 
 ```go
-// app/io/mysql/mysql.go
+// app/io/db/db.go
 var (
     Db        *gorm.DB // db.default，框架托管
     OrderDb   *gorm.DB // db.order
@@ -2384,7 +2431,7 @@ func Get(name string) *rocketmq.Client  // rocketmq.<name>
 业务代码直接取用，不需要依赖注入容器：
 
 ```go
-o, err := mysql.OrderDb.WithContext(ctx).First(&order)
+o, err := db.OrderDb.WithContext(ctx).First(&order)
 s, err := redis.Cache.Get(ctx, "order:1").Result()
 q, err := amqp.NewQueue(amqp.Default, queueConfig)
 ```
@@ -2392,7 +2439,9 @@ q, err := amqp.NewQueue(amqp.Default, queueConfig)
 生命周期由 `app/io` 统一管理：`Start` 打开 `db.order`、`db.product` 和启用的
 Redis、AMQP、Kafka、RocketMQ 实例并 `Install` 到句柄，`Stop` 关闭并清空。`Open`
 内部把每个启用实例注册到各包的 `Configure`，再用 `NewIO` 取用；`Set.Close` 关闭
-本代注册表。热更新时新模块先安装、旧模块后关闭，旧实例不会误清或误关新句柄。
+本代注册表。`db` 的其它实例名（如 `selectDb`，可指向任何兼容 MySQL 协议的服务器）
+只注册不预建连，业务首次 `db.NewIO` 时才打开，也不会自动安装 GORM tracing 插件。
+热更新时新模块先安装、旧模块后关闭，旧实例不会误清或误关新句柄。
 业务也可以直接调用 `redis.NewIO(ctx, "cache")` 等按别名取用；`app/io` 包同时
 提供同名薄包装，避免业务再 import 一次 support 包。RocketMQ 的 `app/io` 只发布
 producer 句柄；需要消费时业务用配置里的 `Config` 调用 `rocketmq.NewConsumer`。
@@ -2463,7 +2512,7 @@ func (m *Module) Register(r *support.Router) error {
 }
 ```
 
-`NewFromHandle` 把 `mysql.Db` 的读取推迟到每次查询：模块工厂执行时 `app/io` 尚未
+`NewFromHandle` 把 `db.Db` 的读取推迟到每次查询：模块工厂执行时 `app/io` 尚未
 `Start`，句柄还是 nil；等 `Start` 安装连接后仓库自动使用新句柄，热更新也会切到新
 连接。脚本模式没有模块生命周期，改用 `repository.New(rt.DB, rt.Logger)` 显式传连接。
 
@@ -2885,7 +2934,7 @@ gofy new demo-service \
 | --- | --- | --- |
 | `--module` | 必填 | 生成 `go.mod` 的 module path |
 | `--dir` | `./<name>` | 输出目录 |
-| `--with-db` | `false` | 生成 `support/mysql` 接入代码与 `db` 配置 |
+| `--with-db` | `false` | 生成 `support/db` 接入代码与 `db` 配置 |
 | `--with-scripts` | `true` | 生成 `script/` 目录 |
 | `--with-docker` | `false` | 生成 `Dockerfile`、`.dockerignore` |
 | `--with-makefile` | `true` | 生成 `Makefile` |
@@ -3035,6 +3084,8 @@ gopkg.in/natefinch/lumberjack.v2
 gopkg.in/yaml.v3
 gorm.io/gorm
 gorm.io/driver/mysql
+gorm.io/driver/postgres
+github.com/glebarez/sqlite
 github.com/google/uuid
 ```
 
@@ -3178,7 +3229,7 @@ fi
 | `app/route/init.go` | `examples/demo-service/app/module/order/module.go` | 业务路由注册 |
 | `app/route/demo/*` | `examples/demo-service/app/module/order/*` | 改写为 order 示例 |
 | `app/module/demo/controller/order_controller.go` | `examples/demo-service/app/module/order/controller` | 改为 `context.Context` handler |
-| `app/Io/db/mysql.go` | `support/mysql/mysql.go` | 配置驱动、可关闭、可 Ping、无 `sync.Once` |
+| `app/Io/db/db.go` | `support/db/db.go` | 配置驱动、可关闭、可 Ping、无 `sync.Once` |
 | `app/config/db.go` | `examples/demo-service/app/config/config.go` | 业务配置 |
 | `app/repository/tool.go` | `examples/demo-service/app/module/order/repository` | 改写为业务仓储 |
 | `script/kernel.go` | `examples/demo-service/script/register.go` | 改为返回 `[]script.Script` |
@@ -3198,8 +3249,8 @@ fi
 
 #### Phase 1：建立 library 骨架（不改变行为）
 
-- 新建 `core`、`apperr`、`support`、`logging`、`support/mysql`、`script`、`command`、`config`；
-- 先实现最小可编译版本：`Runtime`、`Router`、`Responder`、`logging.New`、`mysql.New`；
+- 新建 `core`、`apperr`、`support`、`logging`、`support/db`、`script`、`command`、`config`；
+- 先实现最小可编译版本：`Runtime`、`Router`、`Responder`、`logging.New`、`db.New`；
 - 保持 `examples/demo-service` 能跑通；
 - 此时旧 `src/` 仍在，CI 同时编译两者。
 
@@ -3241,7 +3292,9 @@ gofy/
 ├── core/
 ├── support/
 ├── logging/
-├── support/mysql/
+├── support/db/
+├── support/pg/
+├── support/sqlite/
 ├── script/
 ├── command/
 ├── config/
@@ -3322,7 +3375,7 @@ gofy/
 | 风险 | 说明 | 应对 |
 | --- | --- | --- |
 | API 冻结成本 | v1 后每个导出符号都是承诺 | v0.x 阶段至少两个真实服务试用；apidiff 把关 |
-| GORM 强制依赖 | 不用 DB 的业务也要下载 GORM | v1 接受；v2 可拆 `gofy/mysql` 子 module |
+| GORM 强制依赖 | 不用 DB 的业务也要下载 GORM | v1 接受；v2 可拆 `gofy/db` 子 module |
 | gin 版本耦合 | 业务可能与自有 gin 版本冲突 | gofy 统一管理版本；`Router.Gin()` 提供逃生口 |
 | 响应格式变化 | 从"永远 HTTP 200"改为真实状态码 | 提供 `WithAlwaysOK(true)` 兼容开关 |
 | 配置加载差异 | 业务已有 viper/koanf | `config.Load` 完全可选；gofy 不强制 |
@@ -3334,7 +3387,7 @@ gofy/
 
 | # | 问题 | 当前倾向 | 决策时间 |
 | --- | --- | --- | --- |
-| Q1 | 是否把 `support/mysql` 拆成独立子 module，减少非 DB 用户的依赖？ | v1 不拆；v2 评估 | v2 规划时 |
+| Q1 | 是否把 `support/db` 拆成独立子 module，减少非 DB 用户的依赖？ | v1 不拆；v2 评估 | v2 规划时 |
 | Q2 | 是否需要内置 OpenTelemetry 中间件？ | v1 只留扩展点；业务自行接入 | v1.1 评估 |
 | Q3 | 是否需要 `gofy new` 支持从远端模板拉取？ | 不；只用内置 embed 模板 | 暂不 |
 | Q4 | 是否支持 Windows 的 `stop`？ | v1 返回 `ErrUnsupported` | 有真实需求时 |
@@ -3418,7 +3471,7 @@ type Runtime = core.Runtime
 type ModuleFactory = support.ModuleFactory
 type Middleware = support.Middleware
 type Responder = support.Responder
-type DatabaseConfig = mysql.Config
+type DatabaseConfig = gofydb.Config
 type LogConfig = logging.Config
 type TelemetryConfig = otel.Config
 ```
@@ -3641,7 +3694,7 @@ func (*DelayQueue) MaxRetries() int
   `MaxRetries` 返回错误，`0` 归一为 `DefaultMaxRetries`。
 - Cluster 下重试回流脚本同时操作两个键，`Key` 应包含 hash tag（如 `{orders}`）。
 
-### A.12 `support/mysql`
+### A.12 `support/db`
 
 ```text
 type Config
@@ -4084,6 +4137,51 @@ var ErrUnsupportedCipher, ErrEncrypt, ErrDecrypt, ErrPayload, ErrMAC, ErrTag
   `ErrTag`、`ErrDecrypt`（密钥不符或认证失败）、`ErrEncrypt`、
   `ErrUnsupportedCipher`。错误信息不含密钥和明文。
 - 用途是保护配置、Token、Cookie 等可逆数据；密码哈希不属于本包。
+
+### A.22 `support/pg`
+
+```text
+type Config
+func (Config) Validate() error
+func New(context.Context, Config, *zap.Logger) (*gorm.DB, error)
+func Close(*gorm.DB) error
+
+type Registry
+func Configure(map[string]Config, *zap.Logger) (*Registry, error)
+func NewRegistry(map[string]Config, *zap.Logger) (*Registry, error)
+func NewIO(context.Context, string) (*gorm.DB, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*gorm.DB, error)
+func (*Registry) Install()
+func (*Registry) Close() error
+var ErrDSNRequired, ErrNotConfigured, ErrUnknownInstance
+```
+
+- 与 `support/db` 同一套语义（§3.7.3）：驱动 `gorm.io/driver/postgres`
+  （jackc/pgx/v5），DSN 支持 URL 和 keyword/value，两种形式的密码都会脱敏。
+
+### A.23 `support/sqlite`
+
+```text
+type Config
+func (Config) Validate() error
+func New(context.Context, Config, *zap.Logger) (*gorm.DB, error)
+func Close(*gorm.DB) error
+
+type Registry
+func Configure(map[string]Config, *zap.Logger) (*Registry, error)
+func NewRegistry(map[string]Config, *zap.Logger) (*Registry, error)
+func NewIO(context.Context, string) (*gorm.DB, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*gorm.DB, error)
+func (*Registry) Install()
+func (*Registry) Close() error
+var ErrDSNRequired, ErrNotConfigured, ErrUnknownInstance
+```
+
+- 与 `support/db`、`support/pg` 同一套语义（§3.7.4）：dialector 为
+  `github.com/glebarez/sqlite`（纯 Go，无 cgo），默认单连接，WAL 与
+  `busy_timeout` 通过 DSN 的 `_pragma` 参数开启。
 
 ---
 

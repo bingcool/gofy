@@ -14,7 +14,7 @@ import (
 	"github.com/bingcool/gofy/internal/console"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
-	"github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/spf13/pflag"
 )
 
@@ -161,7 +161,7 @@ func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Ru
 		}
 	}
 	if ownDB {
-		defer func() { _ = mysql.Close(db) }()
+		defer func() { _ = gofydb.Close(db) }()
 	}
 
 	rt := core.NewRuntime(core.RuntimeConfig{

@@ -3,7 +3,7 @@
 // connections: Start opens and installs them, Stop closes them, and a reload
 // rebuilds them together with the module.
 //
-// 业务代码直接使用 app/io/mysql、app/io/redis、app/io/amqp、app/io/kafka、
+// 业务代码直接使用 app/io/db、app/io/redis、app/io/amqp、app/io/kafka、
 // app/io/rocketmq 的包级句柄，本包只负责生命周期。
 package io
 
@@ -14,13 +14,13 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
 	appamqp "github.com/yourorg/demo-service/app/io/amqp"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
-	appmysql "github.com/yourorg/demo-service/app/io/mysql"
 	appredis "github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 )
 
-// Module publishes app/io/mysql, app/io/redis, app/io/amqp, app/io/kafka and
+// Module publishes app/io/db, app/io/redis, app/io/amqp, app/io/kafka and
 // app/io/rocketmq handles during startup.
 type Module struct {
 	rt          *gofy.Runtime
@@ -30,7 +30,7 @@ type Module struct {
 	kafkaCfg    appkafka.Config
 	rocketmqCfg approcketmq.Config
 
-	mysqlSet    *appmysql.Set
+	dbSet       *appdb.Set
 	redisSet    *appredis.Set
 	amqpSet     *appamqp.Set
 	kafkaSet    *appkafka.Set
@@ -67,26 +67,26 @@ func (m *Module) Start(ctx context.Context) error {
 	if m.rt == nil {
 		return errors.New("io: runtime is required")
 	}
-	mysqlSet, err := appmysql.Open(ctx, m.rt.DB, m.dbCfg, m.rt)
+	dbSet, err := appdb.Open(ctx, m.rt.DB, m.dbCfg, m.rt)
 	if err != nil {
 		return err
 	}
 	redisSet, err := appredis.Open(ctx, m.redisCfg, m.rt)
 	if err != nil {
-		_ = mysqlSet.Close()
+		_ = dbSet.Close()
 		return err
 	}
 	amqpSet, err := appamqp.Open(ctx, m.amqpCfg, m.rt.Logger)
 	if err != nil {
 		_ = redisSet.Close()
-		_ = mysqlSet.Close()
+		_ = dbSet.Close()
 		return err
 	}
 	kafkaSet, err := appkafka.Open(ctx, m.kafkaCfg, m.rt.Logger)
 	if err != nil {
 		_ = amqpSet.Close()
 		_ = redisSet.Close()
-		_ = mysqlSet.Close()
+		_ = dbSet.Close()
 		return err
 	}
 	rocketmqSet, err := approcketmq.Open(ctx, m.rocketmqCfg, m.rt.Logger)
@@ -94,15 +94,15 @@ func (m *Module) Start(ctx context.Context) error {
 		_ = kafkaSet.Close()
 		_ = amqpSet.Close()
 		_ = redisSet.Close()
-		_ = mysqlSet.Close()
+		_ = dbSet.Close()
 		return err
 	}
-	m.mysqlSet = mysqlSet
+	m.dbSet = dbSet
 	m.redisSet = redisSet
 	m.amqpSet = amqpSet
 	m.kafkaSet = kafkaSet
 	m.rocketmqSet = rocketmqSet
-	mysqlSet.Install()
+	dbSet.Install()
 	redisSet.Install()
 	amqpSet.Install()
 	kafkaSet.Install()
@@ -114,7 +114,7 @@ func (m *Module) Start(ctx context.Context) error {
 // the old module, so the old handles never clear the new connections.
 func (m *Module) Stop(context.Context) error {
 	return errors.Join(
-		m.mysqlSet.Close(),
+		m.dbSet.Close(),
 		m.redisSet.Close(),
 		m.amqpSet.Close(),
 		m.kafkaSet.Close(),

@@ -10,7 +10,7 @@ require (
 	github.com/spf13/pflag v1.0.6
 	go.uber.org/zap v1.27.0
 	gofy/gofy-interface-service v0.0.0
-	gorm.io/gorm v1.26.0
+	gorm.io/gorm v1.31.2
 )
 
 require (

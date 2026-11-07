@@ -18,7 +18,7 @@ import (
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
-	"github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
@@ -258,7 +258,7 @@ func (a *App) buildDB(ctx context.Context, logger *zap.Logger) (*gorm.DB, bool, 
 	if a.opts.dbConfig == nil {
 		return nil, false, nil
 	}
-	db, err := mysql.New(ctx, *a.opts.dbConfig, logger)
+	db, err := gofydb.New(ctx, *a.opts.dbConfig, logger)
 	if err != nil {
 		return nil, false, fmt.Errorf("gofy: connect database: %w", err)
 	}

@@ -12,7 +12,7 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/support"
-	"github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -52,7 +52,7 @@ type ReloadSpec struct {
 
 	// Database reconnects the MySQL pool. When set, the App owns the new
 	// connection and closes the previous one after the old modules stop.
-	Database *mysql.Config
+	Database *gofydb.Config
 
 	// ModuleFactories rebuild the modules registered through
 	// WithModuleFactories, and with them the routes. Nil rebuilds from the
@@ -165,7 +165,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 
 	rebuiltDB := false
 	if spec.Database != nil {
-		newDB, err := mysql.New(ctx, *spec.Database, lg)
+		newDB, err := gofydb.New(ctx, *spec.Database, lg)
 		if err != nil {
 			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger)
 			return fmt.Errorf("gofy: reload database: %w", err)
@@ -261,7 +261,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		lg.Error("module stop after reload failed", zap.Error(err))
 	}
 	if oldOwnDB && oldDB != db {
-		if err := mysql.Close(oldDB); err != nil {
+		if err := gofydb.Close(oldDB); err != nil {
 			lg.Error("close previous database after reload failed", zap.Error(err))
 			errs = append(errs, err)
 		}
@@ -286,7 +286,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 // rejected reload never closes the live database or syncs the live logger.
 func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, system *zap.Logger) {
 	if rebuiltDB && db != nil {
-		_ = mysql.Close(db)
+		_ = gofydb.Close(db)
 	}
 	if rebuiltLogger {
 		_ = logging.Sync(lg)

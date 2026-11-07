@@ -3,14 +3,14 @@ package repository
 import (
 	"testing"
 
-	appmysql "github.com/yourorg/demo-service/app/io/mysql"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	"gorm.io/gorm"
 )
 
 func TestNewFromHandleResolvesInstalledHandle(t *testing.T) {
-	prev := appmysql.Db
-	t.Cleanup(func() { appmysql.Db = prev })
-	appmysql.Db = nil
+	prev := appdb.Db
+	t.Cleanup(func() { appdb.Db = prev })
+	appdb.Db = nil
 
 	r := NewFromHandle(nil)
 	if got := r.conn(); got != nil {
@@ -18,19 +18,19 @@ func TestNewFromHandleResolvesInstalledHandle(t *testing.T) {
 	}
 
 	db := &gorm.DB{}
-	appmysql.Db = db
+	appdb.Db = db
 	if got := r.conn(); got != db {
-		t.Fatal("conn did not resolve mysql.Db after install")
+		t.Fatal("conn did not resolve db.Db after install")
 	}
 }
 
 func TestExplicitConnectionWinsOverHandle(t *testing.T) {
-	prev := appmysql.Db
-	t.Cleanup(func() { appmysql.Db = prev })
-	appmysql.Db = &gorm.DB{}
+	prev := appdb.Db
+	t.Cleanup(func() { appdb.Db = prev })
+	appdb.Db = &gorm.DB{}
 
 	explicit := &gorm.DB{}
 	if got := New(explicit, nil).conn(); got != explicit {
-		t.Fatal("explicit connection should take precedence over mysql.Db")
+		t.Fatal("explicit connection should take precedence over db.Db")
 	}
 }

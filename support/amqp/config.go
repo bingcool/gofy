@@ -1,5 +1,5 @@
 // Package amqp opens AMQP 0-9-1 connections (RabbitMQ) and publishes or
-// consumes messages. Like support/redis and support/mysql it keeps no global
+// consumes messages. Like support/redis and support/db it keeps no global
 // state: the caller passes a context and a Config, owns the returned Client,
 // and builds Queue values on top of it.
 //

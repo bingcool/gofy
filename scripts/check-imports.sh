@@ -37,9 +37,19 @@ if go list -deps ./logging | grep "$root_pkg/" | grep -qvx "$root_pkg/logging"; 
   fail "logging must not depend on other gofy packages"
 fi
 
-# support/mysql receives a *zap.Logger instead of importing logging.
-if go list -deps ./support/mysql | grep -q "$root_pkg/logging"; then
-  fail "support/mysql must not depend on logging"
+# support/db receives a *zap.Logger instead of importing logging.
+if go list -deps ./support/db | grep -q "$root_pkg/logging"; then
+  fail "support/db must not depend on logging"
+fi
+
+# support/pg receives a *zap.Logger instead of importing logging.
+if go list -deps ./support/pg | grep -q "$root_pkg/logging"; then
+  fail "support/pg must not depend on logging"
+fi
+
+# support/sqlite receives a *zap.Logger instead of importing logging.
+if go list -deps ./support/sqlite | grep -q "$root_pkg/logging"; then
+  fail "support/sqlite must not depend on logging"
 fi
 
 echo "import guards passed"

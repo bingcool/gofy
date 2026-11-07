@@ -1,6 +1,10 @@
-# support/mysql
+# support/db
 
-基于 GORM 的 MySQL 连接包：打开连接、配置连接池、`Ping` 校验、关闭连接。
+基于 GORM 的 MySQL 协议数据库连接包：打开连接、配置连接池、`Ping` 校验、
+关闭连接。驱动使用 `gorm.io/driver/mysql`，因此任何兼容 MySQL 协议的服务器
+都可以接入——MySQL、MariaDB、TiDB、OceanBase、SelectDB（Doris）等，实例名
+也可以按用途自由命名（如 `selectDb`）。
+
 默认没有全局状态，调用方自己传入 `context`、`Config` 和 `zap.Logger`，
 可以直接用于 `gofy.WithDatabase`，也可以单独使用；需要按配置别名取用时，
 可以用可选的 `Configure` / `NewIO` 命名实例注册表。
@@ -11,11 +15,11 @@
 import (
     "context"
 
-    "github.com/bingcool/gofy/support/mysql"
+    gofydb "github.com/bingcool/gofy/support/db"
     "go.uber.org/zap"
 )
 
-db, err := mysql.New(ctx, mysql.Config{
+db, err := gofydb.New(ctx, gofydb.Config{
     DSN:          "user:password@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime=True&loc=Local",
     MaxOpenConns: 50,
     MaxIdleConns: 10,
@@ -23,7 +27,7 @@ db, err := mysql.New(ctx, mysql.Config{
 if err != nil {
     return err
 }
-defer mysql.Close(db)
+defer gofydb.Close(db)
 
 var one int
 if err := db.WithContext(ctx).Raw("SELECT 1").Scan(&one).Error; err != nil {
@@ -36,7 +40,7 @@ if err := db.WithContext(ctx).Raw("SELECT 1").Scan(&one).Error; err != nil {
 
 ```go
 app, err := gofy.New(
-    gofy.WithDatabase(cfg.DB), // cfg.DB 是 mysql.Config
+    gofy.WithDatabase(cfg.DB), // cfg.DB 是 gofydb.Config
     // ...
 )
 ```
@@ -50,28 +54,28 @@ app, err := gofy.New(
 `NewIO(ctx, name)`。连接池在第一次使用时打开并缓存：
 
 ```go
-reg, err := mysql.Configure(map[string]mysql.Config{
-    "order":   {DSN: os.Getenv("ORDER_DB_DSN")},
-    "product": {DSN: os.Getenv("PRODUCT_DB_DSN")},
+reg, err := gofydb.Configure(map[string]gofydb.Config{
+    "order":    {DSN: os.Getenv("ORDER_DB_DSN")},
+    "selectDb": {DSN: os.Getenv("SELECT_DB_DSN")}, // 兼容 MySQL 协议的 SelectDB/Doris
 }, logger)
 if err != nil {
     return err
 }
 defer reg.Close()
 
-db, err := mysql.NewIO(ctx, "order") // 业务代码：从当前一代取用
+db, err := gofydb.NewIO(ctx, "order") // 业务代码：从当前一代取用
 ```
 
 ### 包级 NewIO 与 reg.NewIO 的区别
 
 | 写法 | 从哪一代取用 | 适用场景 |
 | --- | --- | --- |
-| `mysql.NewIO(ctx, "order")` | 包级当前一代，即最近一次 `Configure` / `Install` 的那一代 | 业务代码不持有注册表，任何位置按别名直接取用 |
+| `gofydb.NewIO(ctx, "order")` | 包级当前一代，即最近一次 `Configure` / `Install` 的那一代 | 业务代码不持有注册表，任何位置按别名直接取用 |
 | `reg.NewIO(ctx, "order")` | `reg` 这一代，与它是否已安装无关 | 装配层、热更新、测试中持有该代引用 |
 
 两者的关系按 `reg` 所处的代区分：
 
-- `reg` 是 `Configure` 返回的当前代时，`reg.NewIO` 和包级 `mysql.NewIO`
+- `reg` 是 `Configure` 返回的当前代时，`reg.NewIO` 和包级 `gofydb.NewIO`
   共用同一份懒加载缓存，返回同一个 `*gorm.DB`（同一连接池），不会打开第二个
   连接池；
 - `reg` 是用 `NewRegistry` 建好但尚未 `Install` 的新代时，`reg.NewIO`
@@ -120,7 +124,7 @@ db:
 
 | 字段 | 说明 | 默认值 |
 | --- | --- | --- |
-| `DSN` | MySQL DSN，必填 | — |
+| `DSN` | MySQL 协议 DSN，必填 | — |
 | `MaxIdleConns` | 空闲连接数 | `10` |
 | `MaxOpenConns` | 最大打开连接数 | `50` |
 | `ConnMaxLifetime` | 连接最长存活时间 | `1h` |
@@ -183,15 +187,15 @@ SQL 日志使用 `component=gorm` 的 zap 字段，包含 `elapsed`、`rows`、`
 ## 测试
 
 ```bash
-go test ./support/mysql/
+go test ./support/db/
 ```
 
 默认只跑单元测试（校验、空 DSN、错误脱敏、`Close(nil)`）。
-连接真实 MySQL 的集成测试通过 `GOFY_TEST_MYSQL_DSN` 开启：
+连接真实 MySQL 协议服务器的集成测试通过 `GOFY_TEST_MYSQL_DSN` 开启：
 
 ```bash
 GOFY_TEST_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime=True&loc=Local' \
-  go test ./support/mysql -run Integration -v
+  go test ./support/db -run Integration -v
 ```
 
 集成测试会验证 `SELECT 1` 和 `MaxOpenConns` 是否生效。

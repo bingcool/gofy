@@ -340,9 +340,21 @@ timeout, _ := doc.GetDuration("http.read_timeout") // 1h、30s、200ms
 （如 `servers.0.host`），同样会展开 `${ENV_VAR}`。它不做结构体默认值和校验，
 需要这些能力时继续使用 `Load[T]`。
 
-数据库连接用 `support/mysql`（GORM）：`WithDatabase` 交给 App 托管连接池，
+数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
+MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase` 交给 App 托管连接池，
 `WithDB` 注入已有连接。配置项、默认值和日志行为见
-[support/mysql/README.md](support/mysql/README.md)。
+[support/db/README.md](support/db/README.md)。
+
+PostgreSQL 连接用 `support/pg`（GORM + `gorm.io/driver/postgres`，底层
+`jackc/pgx/v5`）：API 与 `support/db` 对齐（`New`/`Close`、命名实例
+`Configure`/`NewIO`），DSN 支持 URL 和 keyword/value 两种 pgx 形式，错误中的
+密码段两种形式都会脱敏。配置与示例见
+[support/pg/README.md](support/pg/README.md)。
+
+SQLite 连接用 `support/sqlite`（GORM + `github.com/glebarez/sqlite`，纯 Go 的
+modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默认单连接
+（SQLite 单写多读），WAL / `busy_timeout` 通过 DSN 的 `_pragma` 参数开启。
+配置与示例见 [support/sqlite/README.md](support/sqlite/README.md)。
 
 Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
 客户端之上的缓存与队列门面。AMQP（RabbitMQ）用 `support/amqp`：支持多 host
@@ -366,8 +378,8 @@ SimpleConsumer（v5 没有 push consumer），支持 Tag / SQL92 过滤、逐条
 失败重投（at-least-once）。配置与示例见
 [support/rocketmq/README.md](support/rocketmq/README.md)。
 
-`support/mysql`、`support/redis`、`support/amqp`、`support/kafka`、
-`support/rocketmq` 还支持命名
+`support/db`、`support/pg`、`support/sqlite`、`support/redis`、`support/amqp`、
+`support/kafka`、`support/rocketmq` 还支持命名
 实例：启动时用 `Configure(map[string]Config)` 注册配置别名，之后任意位置用
 `NewIO(ctx, "default")` 按需建连并缓存。每次 `Configure` 生成一代注册表，
 `Close` 只关闭本代连接，因此热更新可以先启动新模块再关闭旧模块：
@@ -656,7 +668,13 @@ gofytest.Status(t, rr, 200)
 ```bash
 make test-race
 make example   # 构建并测试 examples/demo-service
+make cgo-free  # CGO_ENABLED=0 构建，并校验依赖图无 cgo 包
 ```
+
+全仓库不使用 cgo：SQLite 用 `glebarez/sqlite`（modernc 纯 Go 实现），MySQL、
+PostgreSQL、Redis、AMQP、Kafka、RocketMQ 客户端也都是纯 Go。`make cgo-free`
+和 CI 的 guards 会检查依赖图中没有 `CgoFiles`；需要 cgo 的 `-race` 只在
+`test-race` 中启用。
 
 `examples/demo-service` 通过 `replace gofy/gofy-interface-service => ../../../gofy-interface-service`
 消费契约模块，本地需要把 `gofy-interface-service` 仓库放在 `gofy` 的同级目录。
@@ -665,7 +683,14 @@ MySQL 集成测试默认跳过，需显式开启：
 
 ```bash
 GOFY_TEST_MYSQL_DSN='user:pass@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime=True&loc=Local' \
-  go test ./support/mysql -run Integration -v
+  go test ./support/db -run Integration -v
+```
+
+PostgreSQL 集成测试同样默认跳过：
+
+```bash
+GOFY_TEST_PG_DSN='postgres://user:pass@127.0.0.1:5432/app?sslmode=disable' \
+  go test ./support/pg -run Integration -v
 ```
 
 ## 目录结构
@@ -678,7 +703,9 @@ support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全�
 logging/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
 support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传
-support/mysql/ GORM MySQL 连接管理
+support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
+support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
+support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）
 support/redis/ Redis 客户端（go-redis）
 support/nacos/ Nacos 配置拉取、本地生成与变更监听
 support/jwtauth/ HMAC JWT 校验

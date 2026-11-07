@@ -1,4 +1,4 @@
-// Package redis opens and closes a redis.Client. Like support/mysql it keeps
+// Package redis opens and closes a redis.Client. Like support/db it keeps
 // no global state: callers pass a context and a Config, and own the returned
 // client.
 package redis

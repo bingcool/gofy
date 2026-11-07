@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	appmysql "github.com/yourorg/demo-service/app/io/mysql"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"go.uber.org/zap"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
@@ -45,7 +45,7 @@ func New(db *gorm.DB, logger *zap.Logger) *OrderRepository {
 	return newRepository(db, logger)
 }
 
-// NewFromHandle builds a repository backed by mysql.Db. Module factories run
+// NewFromHandle builds a repository backed by db.Db. Module factories run
 // before app/io installs the handle, so the lookup happens per query instead of
 // at construction; a reload also picks up the replacement connection.
 func NewFromHandle(logger *zap.Logger) *OrderRepository {
@@ -63,12 +63,12 @@ func newRepository(db *gorm.DB, logger *zap.Logger) *OrderRepository {
 }
 
 // conn returns the explicit connection when one was injected, otherwise the
-// mysql.Db handle installed by app/io.
+// db.Db handle installed by app/io.
 func (r *OrderRepository) conn() *gorm.DB {
 	if r.db != nil {
 		return r.db
 	}
-	return appmysql.Db
+	return appdb.Db
 }
 
 // FindByID returns one order or ErrNotFound.

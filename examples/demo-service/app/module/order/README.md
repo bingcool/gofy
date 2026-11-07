@@ -100,11 +100,11 @@ gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
 `NewModuleFactory` 在 `Runtime` 就绪后执行：
 
 1. 检查 `rt.DB`，为空直接返回 `order module requires database`；
-2. 用 `repository.NewFromHandle(rt.Logger)` 创建 GORM 仓库，查询时从 `mysql.Db` 取连接；
+2. 用 `repository.NewFromHandle(rt.Logger)` 创建 GORM 仓库，查询时从 `db.Db` 取连接；
 3. 用 `service.New(repo, rt.Logger, ...)` 创建服务；
 4. 调用 `NewModule(cfg, svc, rt.Logger)` 包装出模块。
 
-工厂执行时 `app/io` 还没 `Start`，`mysql.Db` 仍是 nil，所以 `NewFromHandle`
+工厂执行时 `app/io` 还没 `Start`，`db.Db` 仍是 nil，所以 `NewFromHandle`
 把句柄解析推迟到每次查询；`Start` 安装新连接后仓库自动使用新句柄。脚本模式不经过
 模块生命周期，直接用 `repository.New(rt.DB, rt.Logger)` 传显式连接。
 
@@ -127,7 +127,7 @@ module := order.NewModule(order.Config{}, myService, zap.NewNop())
 便于按层过滤。
 
 ```go
-repo := repository.NewFromHandle(rt.Logger) // HTTP 模块：查询时取 mysql.Db
+repo := repository.NewFromHandle(rt.Logger) // HTTP 模块：查询时取 db.Db
 svc := service.New(repo, rt.Logger, service.Config{...})
 h := controller.NewOrderController(svc, rt.Logger)
 ```

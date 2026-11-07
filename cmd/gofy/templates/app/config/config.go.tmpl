@@ -7,7 +7,7 @@ import (
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logging"
 {{- if .WithDB }}
-	"github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 {{- end }}
 )
 
@@ -17,7 +17,7 @@ type Config struct {
 	HTTP    gofy.HTTPConfig `yaml:"http"`
 	Log     logging.Config  `yaml:"log"`
 {{- if .WithDB }}
-	DB      mysql.Config    `yaml:"db"`
+	DB      gofydb.Config   `yaml:"db"`
 {{- end }}
 	PIDFile string          `yaml:"pid_file"`
 }

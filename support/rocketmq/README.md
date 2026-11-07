@@ -6,7 +6,7 @@ RocketMQ；Go 版本直接使用官方 v5 客户端
 [apache/rocketmq-clients/golang/v5](https://github.com/apache/rocketmq-clients/tree/master/golang)
 （本仓库锁定 `v5.1.2`），走 **gRPC proxy**（默认端口 8081），不再使用
 remoting 协议和 NameServer 9876，也不需要 sidecar。与 `support/redis`、
-`support/mysql`、`support/amqp`、`support/kafka` 一样，本包默认不持有全局状态：
+`support/db`、`support/amqp`、`support/kafka` 一样，本包默认不持有全局状态：
 
 - `New(ctx, Config)` 校验配置、创建 producer，可选地通过 `StartupTopics` 做启动探测；
 - `Wrap(rmq.Producer)` 注入已经建好的 producer；

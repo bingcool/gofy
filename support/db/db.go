@@ -1,6 +1,8 @@
-// Package mysql opens and closes a GORM MySQL connection.
-// It owns no global state: callers pass a context, a config and a logger.
-package mysql
+// Package db opens and closes GORM connections for MySQL-protocol servers:
+// MySQL, MariaDB, TiDB, OceanBase and anything else that speaks the protocol
+// through the go-sql-driver DSN. It owns no global state: callers pass a
+// context, a config and a logger.
+package db
 
 import (
 	"context"
@@ -16,9 +18,9 @@ import (
 )
 
 // ErrDSNRequired is returned when Config.DSN is empty.
-var ErrDSNRequired = errors.New("mysql: dsn is required")
+var ErrDSNRequired = errors.New("db: dsn is required")
 
-// Config describes a MySQL connection pool.
+// Config describes a MySQL-protocol connection pool.
 type Config struct {
 	DSN             string        `yaml:"dsn"`
 	MaxIdleConns    int           `yaml:"max_idle_conns" default:"10"`
@@ -37,18 +39,18 @@ func (c Config) Validate() error {
 		return ErrDSNRequired
 	}
 	if c.MaxIdleConns < 0 || c.MaxOpenConns < 0 {
-		return errors.New("mysql: pool sizes must not be negative")
+		return errors.New("db: pool sizes must not be negative")
 	}
 	if c.MaxIdleConns > 0 && c.MaxOpenConns > 0 && c.MaxIdleConns > c.MaxOpenConns {
-		return errors.New("mysql: max_idle_conns must not exceed max_open_conns")
+		return errors.New("db: max_idle_conns must not exceed max_open_conns")
 	}
 	if c.ConnMaxLifetime < 0 || c.ConnMaxIdleTime < 0 || c.PingTimeout < 0 || c.SlowThreshold < 0 {
-		return errors.New("mysql: durations must not be negative")
+		return errors.New("db: durations must not be negative")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {
 	case "", "silent", "error", "warn", "warning", "info":
 	default:
-		return fmt.Errorf("mysql: invalid log level %q", c.LogLevel)
+		return fmt.Errorf("db: invalid log level %q", c.LogLevel)
 	}
 	return nil
 }
@@ -80,8 +82,8 @@ func (c Config) withDefaults() Config {
 	return out
 }
 
-// New opens a MySQL connection, configures the pool and verifies it with a
-// ping. It never panics and never logs the DSN.
+// New opens a MySQL-protocol connection, configures the pool and verifies it
+// with a ping. It never panics and never logs the DSN.
 func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -101,12 +103,12 @@ func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) 
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("mysql: open %s: %w", redactDSN(cfg.DSN), err)
+		return nil, fmt.Errorf("db: open %s: %w", redactDSN(cfg.DSN), err)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		return nil, fmt.Errorf("mysql: get sql.DB: %w", err)
+		return nil, fmt.Errorf("db: get sql.DB: %w", err)
 	}
 	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
 	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
@@ -117,7 +119,7 @@ func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) 
 	defer cancel()
 	if err := sqlDB.PingContext(pingCtx); err != nil {
 		_ = sqlDB.Close()
-		return nil, fmt.Errorf("mysql: ping %s: %w", redactDSN(cfg.DSN), err)
+		return nil, fmt.Errorf("db: ping %s: %w", redactDSN(cfg.DSN), err)
 	}
 	return db, nil
 }
@@ -129,10 +131,10 @@ func Close(db *gorm.DB) error {
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		return fmt.Errorf("mysql: get sql.DB: %w", err)
+		return fmt.Errorf("db: get sql.DB: %w", err)
 	}
 	if err := sqlDB.Close(); err != nil {
-		return fmt.Errorf("mysql: close: %w", err)
+		return fmt.Errorf("db: close: %w", err)
 	}
 	return nil
 }

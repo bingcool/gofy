@@ -17,8 +17,8 @@ import (
 	"github.com/bingcool/gofy/internal/process"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/support"
+	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/middleware"
-	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"github.com/gin-gonic/gin"
@@ -633,7 +633,7 @@ func (a *App) cleanup() error {
 		}
 
 		if a.ownDB && a.db != nil {
-			if err := mysql.Close(a.db); err != nil {
+			if err := gofydb.Close(a.db); err != nil {
 				lg.Error("close database failed", zap.Error(err))
 				errs = append(errs, err)
 			}

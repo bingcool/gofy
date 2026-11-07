@@ -14,7 +14,7 @@ import (
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
-	"github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
@@ -45,7 +45,7 @@ type options struct {
 	pidRefresh time.Duration
 	workDir    string
 
-	dbConfig *mysql.Config
+	dbConfig *gofydb.Config
 	db       *gorm.DB
 
 	// nacosRegistration publishes this instance in Nacos naming when
@@ -220,9 +220,9 @@ func WithWorkDir(dir string) Option {
 	}
 }
 
-// WithDatabase lets the App create, own and close a MySQL connection.
+// WithDatabase lets the App create, own and close a MySQL-protocol connection.
 // It is mutually exclusive with WithDB.
-func WithDatabase(cfg mysql.Config) Option {
+func WithDatabase(cfg gofydb.Config) Option {
 	return func(o *options) error {
 		c := cfg
 		if err := c.Validate(); err != nil {

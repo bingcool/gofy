@@ -1,7 +1,7 @@
 # support/amqp
 
 在 AMQP 0-9-1（RabbitMQ）之上提供连接、拓扑声明、发布与消费，参考 swoolefy 的
-`Swoolefy\Library\Amqp`。与 `support/redis`、`support/mysql` 一样，本包默认不持有
+`Swoolefy\Library\Amqp`。与 `support/redis`、`support/db` 一样，本包默认不持有
 全局状态，也不替业务决定实例数量：
 
 - `New(ctx, Config)` 按配置建连，连接断开后可以自动重连；

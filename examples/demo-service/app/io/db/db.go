@@ -1,10 +1,11 @@
-// Package mysql exposes the demo's named MySQL connections.
+// Package db exposes the demo's named MySQL-protocol connections.
 //
-// 业务代码直接使用包级句柄：mysql.Db、mysql.OrderDb、mysql.ProductDb。
-// Db 就是框架托管的 db.default（Runtime.DB），另外两个由 app/io 包
-// 按 db.order、db.product 打开；配置里没有的实例保持 nil。
+// 业务代码直接使用包级句柄：db.Db、db.OrderDb、db.ProductDb。
+// Db 就是框架托管的 db.default（Runtime.DB），order、product 由 app/io 包
+// 按 db.order、db.product 在启动时打开；配置里没有的实例保持 nil。
+// 其余名字（如 selectDb）注册进 registry，首次 NewIO 时才建连。
 // 脚本模式不经过模块生命周期，脚本里直接用 script.Runtime.DB。
-package mysql
+package db
 
 import (
 	"context"
@@ -13,7 +14,7 @@ import (
 	"sync"
 
 	"github.com/bingcool/gofy"
-	gofymysql "github.com/bingcool/gofy/support/mysql"
+	gofydb "github.com/bingcool/gofy/support/db"
 	gofyotel "github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -33,41 +34,39 @@ var mu sync.RWMutex
 // framework and is never closed here.
 type Set struct {
 	defaultDB *gorm.DB
-	registry  *gofymysql.Registry
+	registry  *gofydb.Registry
 	order     *gorm.DB
 	product   *gorm.DB
 }
 
-// Open opens db.order and db.product. defaultDB is the framework-managed
-// db.default and is only published, not owned. Unknown instance names are
-// rejected so a typo cannot silently leave a handle nil. Extra connections come
-// from support/mysql NewIO for this generation.
+// Open opens db.order and db.product eagerly. defaultDB is the framework-managed
+// db.default and is only published, not owned. Any other instance name (selectDb
+// 等兼容 MySQL 协议的库) is registered for lazy opening via NewIO. Extra
+// connections come from support/db NewIO for this generation.
 //
-// When rt enables tracing, every extra pool also gets the GORM span plugin;
-// db.default is instrumented by the framework that owns it.
+// When rt enables tracing, the eager pools also get the GORM span plugin;
+// db.default is instrumented by the framework that owns it. Lazy instances are
+// not instrumented automatically: 业务取到连接后可自行 db.Use(gofyotel.NewGORMPlugin(...))。
 func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, rt *gofy.Runtime) (*Set, error) {
 	if defaultDB == nil {
-		return nil, errors.New("mysql: default database is required")
+		return nil, errors.New("db: default database is required")
 	}
 	logger := zap.NewNop()
 	if rt != nil && rt.Logger != nil {
 		logger = rt.Logger
 	}
 
-	extra := make(map[string]gofymysql.Config, 2)
-	for name := range cfg {
-		switch name {
-		case "default":
+	extra := make(map[string]gofydb.Config, len(cfg))
+	for name, c := range cfg {
+		if name == "default" {
 			// db.default is opened by the framework; NewIO would create a
 			// second pool, so it stays out of the registry.
-		case "order", "product":
-			extra[name] = cfg[name]
-		default:
-			return nil, fmt.Errorf("mysql: unknown instance %q (supported: default, order, product)", name)
+			continue
 		}
+		extra[name] = c
 	}
 
-	registry, err := gofymysql.NewRegistry(extra, logger)
+	registry, err := gofydb.NewRegistry(extra, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -77,17 +76,17 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 		if _, ok := cfg[name]; !ok {
 			return nil, nil
 		}
-		db, err := registry.NewIO(ctx, name)
+		pool, err := registry.NewIO(ctx, name)
 		if err != nil {
-			return nil, fmt.Errorf("mysql instance %q: %w", name, err)
+			return nil, fmt.Errorf("db instance %q: %w", name, err)
 		}
 		if rt != nil && rt.Tracing {
-			if err := db.Use(gofyotel.NewGORMPlugin(rt.TracerProvider)); err != nil {
-				return nil, fmt.Errorf("mysql instance %q tracing: %w", name, err)
+			if err := pool.Use(gofyotel.NewGORMPlugin(rt.TracerProvider)); err != nil {
+				return nil, fmt.Errorf("db instance %q tracing: %w", name, err)
 			}
 		}
-		logger.Info("mysql instance connected", zap.String("instance", name))
-		return db, nil
+		logger.Info("db instance connected", zap.String("instance", name))
+		return pool, nil
 	}
 
 	if set.order, err = open("order"); err != nil {
@@ -104,10 +103,10 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 }
 
 // NewIO returns the pool registered under name in the installed generation.
-// It is a thin wrapper over support/mysql. db.default is framework-managed, so
+// It is a thin wrapper over support/db. db.default is framework-managed, so
 // it is not part of the registry; use Db or Runtime.DB for the default pool.
 func NewIO(ctx context.Context, name string) (*gorm.DB, error) {
-	return gofymysql.NewIO(ctx, name)
+	return gofydb.NewIO(ctx, name)
 }
 
 // Install publishes the set to the package handles.
@@ -122,9 +121,9 @@ func (s *Set) Install() {
 	mu.Unlock()
 }
 
-// Close releases db.order and db.product. Handles are cleared only when they
-// still point at this set, so a reload that already installed new connections
-// keeps them intact.
+// Close releases every extra pool of this generation. Handles are cleared only
+// when they still point at this set, so a reload that already installed new
+// connections keeps them intact.
 func (s *Set) Close() error {
 	if s == nil {
 		return nil
