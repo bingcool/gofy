@@ -1309,6 +1309,9 @@ type Spec struct {
 	Deprecated          bool
 }
 
+// orderroute 定义 ServiceTag = "demoservice"，各路由统一用它填充 Spec.Tags；
+// docgen 用它做 -service 筛选、PREFIX 前缀映射与 Swagger 分组。
+
 // Route 是强类型路由描述符。
 type Route[Req, Res any] struct {
 	spec Spec
@@ -1317,6 +1320,15 @@ type Route[Req, Res any] struct {
 func New[Req, Res any](spec Spec) *Route[Req, Res] {
 	return &Route[Req, Res]{spec: spec}
 }
+
+// HTTP 方法构造器：方法/路径作参数，其余元数据在 build 回调里设置。
+func Get[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
+func Post[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
+func Put[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
+func Patch[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
+func Delete[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
+func Head[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
+func Options[Req, Res any](path string, build func(*Spec)) *Route[Req, Res]
 
 func (r *Route[Req, Res]) Spec() Spec { return r.spec }
 
@@ -1389,11 +1401,14 @@ func BindAll(
 
 ```go
 // appinterface/demoservice/orderroute/order_route.go
-const PrefixOrders = "/orders"
-
-var Orders = endpoint.NewGroup(PrefixOrders, func(group *endpoint.Group) {
+var Orders = endpoint.NewGroup("/orders", func(group *endpoint.Group) {
+	// 路由在分组回调里内联声明，并赋值给包级变量供客户端/测试复用。
+	GetOrder = endpoint.Get[Req, Res]("/orders/{id}", func(spec *endpoint.Spec) {
+		spec.OperationID = "GetOrder"
+		spec.Auth = endpoint.AuthRequired
+	})
+	// ListOrders / CreateOrder / CancelOrder 同理…
 	group.Add(GetOrder, ListOrders, CreateOrder, CancelOrder)
-	// 或内联声明：endpoint.AddRoute[Req, Res](group, endpoint.Spec{...})
 })
 
 // config_route.go 也可以把路由直接内联在分组回调里，再赋值给包级变量
@@ -1409,7 +1424,7 @@ err := gofyadapter.BindAll(orders, orderroute.Orders.Routes, impl, opts)
 ```
 
 - `endpoint.Group` 只包含 `Prefix` 与 `Routes`；前缀、路由、分组声明都放在同一个
-  路由文件里，`orderroute.Groups()` 只做聚合；
+  路由文件里，每个文件直接导出自己的分组（`Orders`、`Config`）；
 - 契约不依赖 gofy，中间件仍由服务端 `router.Group(prefix, mw...)` 安装；
 - `Spec.Path` 始终是完整路径（客户端/OpenAPI 使用）；`BindAll` 通过
   `Router.GroupPrefix()` 把路径裁剪成组内相对路径后注册，避免路径写两遍或重复前缀；

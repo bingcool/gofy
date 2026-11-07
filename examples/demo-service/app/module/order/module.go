@@ -20,6 +20,7 @@ import (
 	"go.uber.org/zap"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
+	"gofy/gofy-interface-service/contracts/common/endpoint"
 )
 
 // Config holds order module settings.
@@ -75,7 +76,7 @@ func (m *Module) Name() string { return "order" }
 // group prefix from the absolute contract paths.
 func (m *Module) Register(r *support.Router) error {
 	h := controller.NewOrderController(m.svc, m.logger)
-	for _, group := range orderroute.Groups() {
+	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
 		groupRouter := r.Group(group.Prefix)
 		if err := gofyadapter.BindAll(groupRouter, group.Routes, h, gofyadapter.BindOptions{
 			Auth: m.auth,
