@@ -2597,7 +2597,8 @@ import (
     "github.com/yourorg/demo-service/app/module/order/repository"
     "github.com/yourorg/demo-service/app/module/order/service"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-    "gofy/gofy-interface-service/appinterface/demoservice"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderroute"
+    "gofy/gofy-interface-service/contracts/common/endpoint"
 )
 
 type Config struct {
@@ -2641,9 +2642,21 @@ func (m *Module) Name() string { return "order" }
 
 func (m *Module) Register(r *support.Router) error {
     h := handler.New(m.svc)
-    return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
+    opts := gofyadapter.BindOptions{
         Auth: m.auth,
-    })
+        // 契约里声明的中间件逻辑名（分组 "audit"、CreateOrder 的 "order-audit"）
+        // 在这里映射成实现；未注册的名字在启动期报错。
+        Middleware: map[string]support.Middleware{
+            "audit":       auditMiddleware,
+            "order-audit": orderAuditMiddleware,
+        },
+    }
+    for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
+        if err := gofyadapter.BindGroup(r, group, h, opts); err != nil {
+            return err
+        }
+    }
+    return nil
 }
 ```
 
@@ -2651,7 +2664,7 @@ func (m *Module) Register(r *support.Router) error {
 `Start`，句柄还是 nil；等 `Start` 安装连接后仓库自动使用新句柄，热更新也会切到新
 连接。脚本模式没有模块生命周期，改用 `repository.New(rt.DB, rt.Logger)` 显式传连接。
 
-`BindAll` 校验并注册 `demoservice.Routes()`：路由路径、`{id}` 占位符、方法签名和 `AuthRequired` 都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`。
+`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名、`AuthRequired` 和路由级中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。
 
 最终路由：
 

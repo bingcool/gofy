@@ -17,6 +17,7 @@ import (
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
@@ -276,6 +277,43 @@ func TestCancelWithTokenConfigured(t *testing.T) {
 
 	rr = app.GET("/api/v1/order/orders/1")
 	gofytest.Status(t, rr, http.StatusUnauthorized)
+}
+
+func TestContractMiddlewareNamesAreResolved(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	svc := service.New(newFakeRepository(), zap.NewNop(), service.Config{
+		PaymentTimeout: time.Second,
+	})
+	module := order.NewModule(order.Config{}, svc, zap.New(core))
+	app := gofytest.New(t,
+		gofy.WithName("demo-service-test"),
+		gofy.WithModules(module),
+	)
+
+	// 分组名 "audit" 来自 orderroute.Orders 的 group.Use。
+	gofytest.Status(t, app.GET("/api/v1/order/orders/1"), http.StatusOK)
+	entries := logs.FilterMessage("order audit").All()
+	if len(entries) != 1 || entries[0].ContextMap()["scope"] != "group" {
+		t.Fatalf("group audit entries = %+v", entries)
+	}
+
+	// CreateOrder 另外声明了路由级名字 "order-audit"，它在分组中间件内层，
+	// 因此先于分组审计落日志。
+	gofytest.Status(t, app.POSTJSON("/api/v1/order/orders", map[string]any{
+		"user_id": 100,
+		"amount":  500,
+		"items":   []map[string]any{{"sku_id": 90001, "num": 1}},
+	}), http.StatusOK)
+	entries = logs.FilterMessage("order audit").All()
+	if len(entries) != 3 {
+		t.Fatalf("audit entries = %d, want 3", len(entries))
+	}
+	if got := entries[1].ContextMap()["scope"]; got != "route" {
+		t.Fatalf("second audit scope = %v, want route", got)
+	}
+	if got := entries[2].ContextMap()["scope"]; got != "group" {
+		t.Fatalf("third audit scope = %v, want group", got)
+	}
 }
 
 func TestVersionAndStopDoNotConnectToDatabase(t *testing.T) {

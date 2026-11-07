@@ -77,8 +77,8 @@ func (h *Handler) Do(c *gin.Context) {
 
 ## 三、在 gofy-interface-service 服务端使用
 
-gofy-interface-service 的契约路由通过 `adapter/gofy.BindAll` 绑定到
-`support.Router`。中间件分两层：
+gofy-interface-service 的契约路由通过 `adapter/gofy.BindGroup`（按分组）或
+`BindAll`（按路由集合）绑定到 `support.Router`。中间件分两层：
 
 ### 1. App 级（全局，所有契约路由生效）
 
@@ -114,18 +114,29 @@ app, err := gofy.New(
 
 ### 2. 契约路由级（adapter 的 BindOptions）
 
-`adapter/gofy.BindAll` 会按以下顺序拼接路由中间件：
-`Global → Routes[OperationID] → Auth（契约声明 AuthRequired 时）→ RateLimit(spec)`。
+契约里只声明中间件的**逻辑名**：分组级 `group.Use("audit")`、路由级
+`spec.Middleware = []string{"order-audit"}`（或链式 `.Use("order-audit")`）。
+服务端用 `BindOptions.Middleware` 把名字映射成这里的中间件实例，
+`adapter/gofy.BindGroup` 负责建组并解析分组名，内部 `BindAll` 解析路由名。
+
+最终顺序：
+`分组中间件（group.Use 顺序）→ Global → 路由中间件名（spec.Middleware 顺序）
+→ Routes[OperationID] → Auth（契约声明 AuthRequired 时）→ RateLimit(spec)`。
 
 ```go
 func (m *Module) Register(r *support.Router) error {
     h := controller.NewOrderController(m.svc, m.logger)
-    return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
+    opts := gofyadapter.BindOptions{
         // 只对契约路由生效的通用中间件。
         Global: []support.Middleware{
             middleware.RequestID(support.DefaultRequestIDHeader),
         },
-        // 按 OperationID 追加。
+        // 契约声明的逻辑名 → 具体中间件；名字缺失会在启动期报错。
+        Middleware: map[string]support.Middleware{
+            "audit":       middleware.Audit(m.logger, "group"),
+            "order-audit": middleware.Audit(m.logger, "route"),
+        },
+        // 也可以绕过名字，直接按 OperationID 追加实例。
         Routes: map[string][]support.Middleware{
             "CreateOrder": {auditMiddleware},
         },
@@ -135,14 +146,22 @@ func (m *Module) Register(r *support.Router) error {
         RateLimit: func(spec endpoint.Spec) support.Middleware {
             return limiter.For(spec.OperationID)
         },
-    })
+    }
+    for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
+        if err := gofyadapter.BindGroup(r, group, h, opts); err != nil {
+            return err
+        }
+    }
+    return nil
 }
 ```
 
 注意：
 
 - `BindAll` 在启动期校验：`AuthRequired` 路由没有 `BindOptions.Auth` 会直接报错；
-  签名不匹配、路径占位符缺 `uri` 字段等问题会聚合返回。
+  签名不匹配、路径占位符缺 `uri` 字段、中间件名未注册等问题会聚合返回。
+- 手动 `r.Group(prefix, mw...)` + `BindAll` 时分组中间件直接传实例，契约里的
+  分组名不会被解析；路由级名字仍然解析。`Bind` 只安装显式传入的 `mw`。
 - App 级 `WithJWTAuth` 已经对模块路由统一鉴权时，`BindOptions.Auth` 仍可放行
   （`c.Next()`）或做更细粒度的角色校验，避免重复解析 token。
 - `BindOptions.Global` 的中间件比 App 级 CORS/JWT 更靠内：CORS 预检根本不会
@@ -189,9 +208,9 @@ router := support.NewRouter(engine, support.RouterConfig{Prefix: "/api/v1"})
 router.Use(rateLimitMW, jwtMW) // 只作用于模块路由
 ```
 
-`support/middleware` 的测试（`bind_test.go`）就是用这种最小方式验证契约绑定：
-`engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))` 后直接调用
-`gofyadapter.BindAll`。
+gofy-interface-service 的 `adapter/gofy/bind_test.go` 就是用这种最小方式验证契约
+绑定：`engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))` 后直接
+调用 `gofyadapter.BindAll` / `BindGroup`。
 
 ## 六、安全约定
 

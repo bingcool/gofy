@@ -44,7 +44,7 @@ order/
 
 路由描述符定义在 `gofy-interface-service` 的
 `appinterface/demoservice/orderroute`，本模块通过
-`gofyadapter.BindAll` 一次性绑定，不在业务代码里重复写路径和参数校验。
+`gofyadapter.BindGroup` 按分组绑定，不在业务代码里重复写路径和参数校验。
 
 只使用模块（不带 `/api/v1`）时路径是 `/order/orders...`，测试里就是这种形态。
 
@@ -109,8 +109,17 @@ gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
 模块生命周期，直接用 `repository.New(rt.DB, rt.Logger)` 传显式连接。
 
 `NewModule` 负责鉴权：`auth_token` 非空时校验 Bearer Token，为空时放行。
-`Register` 创建 controller（同时传入 logger），并用 `gofyadapter.BindAll`
-绑定全部契约路由，把鉴权中间件作为 `BindOptions.Auth` 传入。
+`Register` 创建 controller（同时传入 logger），遍历 `orderroute.Orders` 与
+`orderroute.Config` 调用 `gofyadapter.BindGroup`，把鉴权中间件作为
+`BindOptions.Auth` 传入。
+
+契约里的中间件只声明逻辑名，实现由本模块提供：`Orders` 分组声明了
+`group.Use("audit")`，`CreateOrder` 声明了 `spec.Middleware = []string{"order-audit"}`，
+两者都映射到 `app/middleware.Audit(logger, scope)`（`scope` 区分 `group`/`route`）。
+审计中间件在 handler 之后记录方法、路由模板、状态码和 `req_id`，与框架的
+`AccessLog` 互补。执行顺序：
+`分组 audit → BindOptions.Global → 路由 order-audit → Routes[OperationID] → Auth → RateLimit`。
+名字未在 `BindOptions.Middleware` 注册时启动直接失败，不会静默跳过。
 
 测试或自定义场景可以跳过工厂，自己构造 service 后调用 `NewModule`：
 
@@ -261,8 +270,11 @@ go test ./app/module/order/...
 - 订单不存在返回 `40401`；
 - panic 返回 `50000` 且不泄露内部信息；
 - 配置 `auth_token` 后的 `40100` 与带 token 的正常路径；
-- 创建订单的初始状态为 `pending`，列表分页结果正确。
+- 创建订单的初始状态为 `pending`，列表分页结果正确；
+- 契约中间件名被解析：分组 `audit` 与 `CreateOrder` 的路由级 `order-audit`
+  都落审计日志，且路由级先于分组级完成（`TestContractMiddlewareNamesAreResolved`）。
 
 新增路由时，先在 `gofy-interface-service` 里补契约描述符，再在
-`gofyadapter.BindAll` 的绑定范围内实现 controller 方法即可；路径、校验和
-错误声明都不需要在业务模块里重复。
+`gofyadapter.BindGroup` 的绑定范围内实现 controller 方法即可；路径、校验和
+错误声明都不需要在业务模块里重复。契约新增中间件名时，同步在
+`Register` 的 `BindOptions.Middleware` 里补上实现。
