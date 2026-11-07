@@ -427,6 +427,12 @@ Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\E
 接口，注意内存占用与 excelize 要求的 Go 版本。导出文件名安全校验且绝不覆盖
 已有文件。见 [support/phpoffice/README.md](support/phpoffice/README.md)。
 
+图像处理用 `support/image`：移植自 swoolefy PHP `Image` 组件，基于标准库与
+`golang.org/x/image`（纯 Go、无 GD/Imagick）。`Open`/`Create` 返回请求级
+`Editor`，支持缩放（contain/cover/scale/stretch）、缩略图、裁剪、旋转、灰度、
+图片/文字水印、命名预设与 jpeg/png/gif 编码；`max_pixels` 与读取白名单防止
+超大图和路径穿越。见 [support/image/README.md](support/image/README.md)。
+
 ## Nacos 配置中心
 
 `support/nacos` 直接调用 Nacos Open API（不引入 SDK）：启动时把远端配置写成
@@ -743,6 +749,7 @@ support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
 support/uuidint/  基于 Redis 的分布式自增 int64 ID（与 PHP Uuid 布局互通）
 support/phpoffice/ Excel .xlsx 导出/导入（excelize，纯 Go）
+support/image/   图像缩放/裁剪/旋转/水印/编码（纯 Go，无 GD/Imagick）
 script/        维护脚本描述
 command/       自定义 CLI 命令描述
 config/        可选 YAML 加载器

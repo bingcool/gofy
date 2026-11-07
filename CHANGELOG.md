@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/image`: image decoding, resizing, thumbnails, cropping, rotation,
+  greyscale, image/text watermarks and jpeg/png/gif encoding, ported from the
+  swoolefy PHP Image module (Intervention Image) to the standard library plus
+  `golang.org/x/image` — no cgo and no GD/Imagick extension. `Manager` validates
+  the config once (`max_pixels` defaults to 40M, presets, encode defaults,
+  watermark anchors), `Open`/`OpenBytes` pre-check pixels before decoding, and
+  `Editor` applies contain/cover/scale/stretch resizes, presets, crops, 90°/any
+  angle rotation and greyscale. Watermarks support nine anchors, offsets,
+  opacity, TTF text with rotation, and enforce `..` rejection plus
+  `allowed_roots` for logo/font paths. Encoding negotiates format as
+  global→preset→call, defaults transparent sources to png, validates quality
+  and `max_bytes`, and wraps every failure in `errors.Is` sentinels. WebP
+  decodes but cannot encode; AVIF is unsupported.
 - `support/phpoffice`: Excel .xlsx export and import ported from the swoolefy
   PHP `PhpOffice\Excel` module, built on the pure-Go `xuri/excelize/v2` instead
   of the xlswriter extension. `Export` validates headers, sheet and file names,
@@ -254,6 +267,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The request id middleware moved to `support/middleware/req_trace_id.go` and
+  now propagates the id through the request context: it reuses a valid upstream
+  `X-Trace-ID` (even when a custom header is configured), otherwise generates a
+  UUID, stores it via `support.ContextWithRequestID`, and writes it into the
+  `headerpropagation` context so `gofy-interface-service/client` forwards
+  `X-Trace-Id` downstream automatically. `support.RequestIDFromContext` exposes
+  the id to handlers.
+- The request id header now defaults to `X-Trace-ID` (previously
+  `X-Request-ID`). `support.DefaultRequestIDHeader`, the RequestID middleware,
+  the responder `req_id` echo and the interface-service client's
+  `RequestIDHeader` all use the same header, so gateways and downstream calls
+  keep reusing one id. Callers that still send `X-Request-ID` must switch
+  headers or pass an explicit header name to `middleware.RequestID`.
+- CORS now follows the swoolefy `CorsMiddleware` semantics: bare domains in
+  `AllowOrigins` expand to both http and https, new `AllowOriginPatterns`
+  (`*.example.com`) and `AllowPaths` (shell globs over the request URI) are
+  supported, requests with a disallowed origin or path get a 403 instead of
+  silently continuing, all origin requests receive the full header set (not
+  just preflights), headers default to `*` and `MaxAge` to 24h, and any
+  OPTIONS request returns 204. Empty origins and patterns still disable CORS
+  and `CORS_*` environment variables are not read; both are documented
+  differences from the PHP defaults.
 - **Build guarantee:** the whole module is cgo-free. All packages build with
   `CGO_ENABLED=0`, and the dependency graph has no `CgoFiles` (SQLite uses
   `glebarez/sqlite`/modernc instead of `mattn/go-sqlite3`). `make cgo-free` and

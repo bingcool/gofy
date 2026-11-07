@@ -158,7 +158,7 @@ func TestHandlerServesTypedRoutes(t *testing.T) {
 		gofy.WithModules(module),
 	)
 
-	rr := app.GET("/api/v1/order/orders/7", "X-Request-ID", "req-7")
+	rr := app.GET("/api/v1/order/orders/7", "X-Trace-ID", "req-7")
 	gofytest.Status(t, rr, http.StatusOK)
 	body := gofytest.RawJSON(t, rr)
 	if body["req_id"] != "req-7" {

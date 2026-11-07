@@ -189,7 +189,7 @@ HTTP 状态码为 `401`。`auth_token` 为空时中间件放行，因此示例�
 {"code": 0, "msg": "success", "data": {...}, "req_id": "..."}
 ```
 
-`req_id` 会回写到 `X-Request-ID`；请求带 `X-Request-ID` 时原样透传。
+`req_id` 会回写到 `X-Trace-ID`；请求带 `X-Trace-ID` 时原样透传。
 
 | code | HTTP | 场景 |
 | --- | --- | --- |
@@ -256,7 +256,7 @@ go test ./app/module/order/...
 `OrderRepositoryInterface`，再通过 `gofytest.New` 启动一个只挂载 order 模块的
 测试应用。覆盖内容包括：
 
-- 成功响应的 envelope、`req_id` 及 `X-Request-ID` 透传；
+- 成功响应的 envelope、`req_id` 及 `X-Trace-ID` 透传；
 - 参数校验（非法 id、缺失必填字段、`page_size` 超限）；
 - 订单不存在返回 `40401`；
 - panic 返回 `50000` 且不泄露内部信息；

@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/headerpropagation"
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -23,20 +25,23 @@ func newGin() *gin.Engine {
 
 func TestRequestIDReusesValidHeader(t *testing.T) {
 	engine := newGin()
-	engine.Use(middleware.RequestID("X-Request-ID"))
+	engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))
 	engine.GET("/", func(c *gin.Context) {
-		c.String(http.StatusOK, c.GetString(support.RequestIDKey))
+		trace := headerpropagation.HeaderFromContext(c.Request.Context(), headerpropagation.HeaderTraceID)
+		c.String(http.StatusOK, c.GetString(support.RequestIDKey)+"|"+
+			support.RequestIDFromContext(c.Request.Context())+"|"+trace)
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Request-ID", "abc-123.valid_id")
+	req.Header.Set(support.DefaultRequestIDHeader, "abc-123.valid_id")
 	rr := httptest.NewRecorder()
 	engine.ServeHTTP(rr, req)
 
-	if got := rr.Body.String(); got != "abc-123.valid_id" {
-		t.Fatalf("context id = %q, want header value", got)
+	want := "abc-123.valid_id|abc-123.valid_id|abc-123.valid_id"
+	if got := rr.Body.String(); got != want {
+		t.Fatalf("gin req_id|context req_id|propagated trace = %q, want %q", got, want)
 	}
-	if got := rr.Header().Get("X-Request-ID"); got != "abc-123.valid_id" {
+	if got := rr.Header().Get(support.DefaultRequestIDHeader); got != "abc-123.valid_id" {
 		t.Fatalf("response header = %q, want header value", got)
 	}
 }
@@ -45,6 +50,11 @@ func TestRequestIDReplacesInvalidHeader(t *testing.T) {
 	engine := newGin()
 	engine.Use(middleware.RequestID(""))
 	engine.GET("/", func(c *gin.Context) {
+		trace := headerpropagation.HeaderFromContext(c.Request.Context(), headerpropagation.HeaderTraceID)
+		if support.RequestIDFromContext(c.Request.Context()) != c.GetString(support.RequestIDKey) || trace != c.GetString(support.RequestIDKey) {
+			c.String(http.StatusInternalServerError, "request id was not propagated")
+			return
+		}
 		c.String(http.StatusOK, c.GetString(support.RequestIDKey))
 	})
 
@@ -62,6 +72,24 @@ func TestRequestIDReplacesInvalidHeader(t *testing.T) {
 	}
 	if h := rr.Header().Get(support.DefaultRequestIDHeader); h != got {
 		t.Fatalf("response header = %q, want %q", h, got)
+	}
+}
+
+func TestRequestIDPrefersUpstreamTraceWithCustomHeader(t *testing.T) {
+	engine := newGin()
+	engine.Use(middleware.RequestID("X-Custom-Request-ID"))
+	engine.GET("/", func(c *gin.Context) {
+		c.String(http.StatusOK, c.GetString(support.RequestIDKey)+"|"+
+			headerpropagation.HeaderFromContext(c.Request.Context(), headerpropagation.HeaderTraceID))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(support.DefaultRequestIDHeader, "upstream-trace")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if got := rr.Body.String(); got != "upstream-trace|upstream-trace" {
+		t.Fatalf("request id|propagated = %q, want the upstream trace", got)
 	}
 }
 
@@ -209,8 +237,8 @@ func TestCORSPreflight(t *testing.T) {
 	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Fatalf("allow credentials = %q, want true", got)
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "X-Custom" {
-		t.Fatalf("allow headers = %q, want X-Custom", got)
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type" {
+		t.Fatalf("allow headers = %q, want the configured Content-Type", got)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST" {
 		t.Fatalf("allow methods = %q, want GET, POST", got)
@@ -236,5 +264,200 @@ func TestCORSWildcardWithoutCredentials(t *testing.T) {
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
 		t.Fatalf("allow credentials = %q, want empty", got)
+	}
+}
+
+func TestCORSRejectsDisallowedOrigin(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{AllowOrigins: []string{"https://example.com"}})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, method := range []string{http.MethodGet, http.MethodOptions} {
+		req := httptest.NewRequest(method, "/", nil)
+		req.Header.Set("Origin", "https://evil.example")
+		rr := httptest.NewRecorder()
+		engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s status = %d, want 403", method, rr.Code)
+		}
+		if !strings.Contains(rr.Body.String(), "Forbidden") {
+			t.Fatalf("%s body = %q", method, rr.Body.String())
+		}
+	}
+}
+
+func TestCORSBareDomainExpandsSchemes(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{AllowOrigins: []string{"example.com"}})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, origin := range []string{"http://example.com", "https://example.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Origin", origin)
+		rr := httptest.NewRecorder()
+		engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("origin %s status = %d", origin, rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != origin {
+			t.Fatalf("origin %s allow-origin = %q", origin, got)
+		}
+	}
+}
+
+func TestCORSOriginPatterns(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{
+		AllowOriginPatterns: []string{"*.example.com"},
+		AllowMethods:        []string{"GET"},
+	})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	allowed := httptest.NewRequest(http.MethodGet, "/", nil)
+	allowed.Header.Set("Origin", "https://api.example.com")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, allowed)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("pattern origin status = %d", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://api.example.com" {
+		t.Fatalf("allow origin = %q", got)
+	}
+
+	blocked := httptest.NewRequest(http.MethodGet, "/", nil)
+	blocked.Header.Set("Origin", "https://example.org")
+	rr = httptest.NewRecorder()
+	engine.ServeHTTP(rr, blocked)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("other domain status = %d, want 403", rr.Code)
+	}
+}
+
+func TestCORSPathWhitelist(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowPaths:   []string{"/api/*"},
+	})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.GET("/api/orders", func(c *gin.Context) { c.Status(http.StatusOK) })
+	engine.GET("/other", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	allowed := httptest.NewRequest(http.MethodGet, "/api/orders?page=1", nil)
+	allowed.Header.Set("Origin", "https://client.example")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, allowed)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("allowed path status = %d", rr.Code)
+	}
+
+	blocked := httptest.NewRequest(http.MethodGet, "/other", nil)
+	blocked.Header.Set("Origin", "https://client.example")
+	rr = httptest.NewRecorder()
+	engine.ServeHTTP(rr, blocked)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("blocked path status = %d, want 403", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "path=/other") {
+		t.Fatalf("blocked body = %q", rr.Body.String())
+	}
+}
+
+func TestCORSNonPreflightHeaders(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{
+		AllowOrigins:  []string{"https://example.com"},
+		AllowMethods:  []string{"GET", "POST"},
+		AllowHeaders:  []string{"Content-Type"},
+		ExposeHeaders: []string{"X-Total"},
+		MaxAge:        time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Origin", "https://example.com")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST" {
+		t.Fatalf("allow methods = %q", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type" {
+		t.Fatalf("allow headers = %q", got)
+	}
+	if got := rr.Header().Get("Access-Control-Expose-Headers"); got != "X-Total" {
+		t.Fatalf("expose headers = %q", got)
+	}
+	if got := rr.Header().Get("Access-Control-Max-Age"); got != "3600" {
+		t.Fatalf("max age = %q", got)
+	}
+	if got := rr.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("vary = %q", got)
+	}
+}
+
+func TestCORSOptionsWithoutOrigin(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{AllowOrigins: []string{"*"}})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.OPTIONS("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, httptest.NewRequest(http.MethodOptions, "/", nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS without origin = %d, want 204", rr.Code)
+	}
+}
+
+func TestCORSDefaultMaxAge(t *testing.T) {
+	mw, err := middleware.CORS(support.CORSConfig{AllowOrigins: []string{"*"}})
+	if err != nil {
+		t.Fatalf("CORS: %v", err)
+	}
+	engine := newGin()
+	engine.Use(mw)
+	engine.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Origin", "https://any.example")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+	if got := rr.Header().Get("Access-Control-Max-Age"); got != "86400" {
+		t.Fatalf("default max age = %q, want 86400", got)
+	}
+}
+
+func TestCORSRejectsInvalidPatterns(t *testing.T) {
+	cases := []support.CORSConfig{
+		{AllowOrigins: []string{"*"}, AllowOriginPatterns: []string{"https://example.com"}},
+		{AllowOrigins: []string{"*"}, AllowOriginPatterns: []string{"example.com:8080"}},
+		{AllowOrigins: []string{"*"}, AllowPaths: []string{" "}},
+	}
+	for _, cfg := range cases {
+		if _, err := middleware.CORS(cfg); err == nil {
+			t.Fatalf("CORS accepted invalid config: %+v", cfg)
+		}
 	}
 }

@@ -14,7 +14,7 @@ const (
 	RequestIDKey = "gofy.request_id"
 	// DefaultRequestIDHeader is the header read and written by the RequestID
 	// middleware.
-	DefaultRequestIDHeader = "X-Request-ID"
+	DefaultRequestIDHeader = "X-Trace-ID"
 )
 
 // Responder renders successes and errors. Implementations must be safe for

@@ -1,0 +1,27 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"runtime"
+)
+
+// fatalf 保留 log 的时间戳，把启动阶段的致命错误以红色写到 stderr 后退出。
+// 输出不是终端、设置了 NO_COLOR 或在 Windows 上时保持无色。
+func fatalf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if stderrColor() {
+		msg = "\x1b[31m" + msg + "\x1b[0m"
+	}
+	log.Print(msg)
+	os.Exit(1)
+}
+
+func stderrColor() bool {
+	if os.Getenv("NO_COLOR") != "" || runtime.GOOS == "windows" {
+		return false
+	}
+	info, err := os.Stderr.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}

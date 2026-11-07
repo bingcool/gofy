@@ -121,7 +121,7 @@ func TestGetOrderContract(t *testing.T) {
 	if reqID == "" {
 		t.Fatal("response envelope has no req_id")
 	}
-	if got := rr.Header().Get("X-Request-ID"); got != reqID {
+	if got := rr.Header().Get("X-Trace-ID"); got != reqID {
 		t.Fatalf("header req_id = %q, body req_id = %q", got, reqID)
 	}
 
@@ -148,7 +148,7 @@ func TestGetConfigContract(t *testing.T) {
 
 func TestGetOrderRequestIDIsPropagated(t *testing.T) {
 	app := newTestApp(t)
-	rr := app.GET("/api/v1/order/orders/1", "X-Request-ID", "client-request-id")
+	rr := app.GET("/api/v1/order/orders/1", "X-Trace-ID", "client-request-id")
 	gofytest.Status(t, rr, http.StatusOK)
 	if got := gofytest.RawJSON(t, rr)["req_id"]; got != "client-request-id" {
 		t.Fatalf("req_id = %v, want client-request-id", got)

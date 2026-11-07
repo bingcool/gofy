@@ -146,6 +146,7 @@ github.com/bingcool/gofy/
 │   ├── sqlite/                  # SQLite 连接（glebarez/sqlite，纯 Go 无 cgo）
 │   ├── uuidint/                 # 基于 Redis 的分布式自增 int64 ID
 │   ├── phpoffice/               # Excel .xlsx 导出/导入（excelize，纯 Go）
+│   ├── image/                   # 图像缩放/裁剪/旋转/水印/编码（纯 Go）
 │   └── redis/
 │       └── redis.go             # Config、New、Ping、Close
 ├── logging/
@@ -180,7 +181,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -206,6 +207,7 @@ gofy (root)
  ├── support/sqlite ──> glebarez/sqlite (modernc, 无 cgo)
  ├── support/uuidint ──> support/redis, go-redis
  ├── support/phpoffice ──> xuri/excelize/v2
+ ├── support/image ──> golang.org/x/image
  ├── support/redis ──> go-redis
  ├── support/jwtauth
  ├── support/headerpropagation
@@ -220,7 +222,7 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
@@ -230,6 +232,7 @@ internal/* ──> core
 | 全仓库禁止 cgo：`CGO_ENABLED=0` 必须可构建，依赖图不得含 `CgoFiles` | 交叉编译与静态镜像无需 C 工具链；SQLite 用 `glebarez/sqlite`（modernc 纯 Go），`make cgo-free` 和 CI guards 校验 |
 | `support/uuidint` 不依赖 `logging` | 错误通过返回值、`WithErrorHandler` 回调和 `ctx` 交给调用方 |
 | `support/phpoffice` 不依赖 `logging` | 错误通过哨兵错误返回，日志由业务决定 |
+| `support/image` 不依赖 `logging` | 错误通过哨兵错误返回，日志由业务决定 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
@@ -899,12 +902,18 @@ signature 等，大小写不敏感），匹配到的值替换为 `***` 后重新
 - 不把 panic 值或堆栈返回给客户端；
 - `WithRecovery(false)` 时不安装，panic 会按 gin 默认行为冒泡（不推荐）。
 
-`RequestID` 规则：
+`RequestID` 规则（实现文件 `support/middleware/req_trace_id.go`）：
 
-- 优先读取请求头 `X-Request-ID`；
+- 上游优先：请求头 `X-Trace-ID` 合法时直接沿用；即使业务配置了自定义头，
+  也不会覆盖上游已建立的 trace；都没有时才生成 UUID v4；
 - 只接受 `^[A-Za-z0-9._-]{1,128}$`，否则重新生成；
-- 生成 UUID v4；
-- 写回响应头，并放入 `gin.Context`，key 为 `gofy.request_id`。
+- 写回响应头，并放入 `gin.Context`，key 为 `gofy.request_id`；
+- 同时写入 request context：
+  - `support.ContextWithRequestID`：业务用
+    `support.RequestIDFromContext(ctx)` 直接读取；
+  - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-service/client` 会从
+    同一个 context key 读取并注入下游请求，因此无需手工调用
+    `client.ContextWithRequestID`；上游已有 `X-Trace-ID` 时传递的就是原值。
 
 `HeaderPropagation` 规则（`WithHeaderPropagation(true)` 时安装）：
 
@@ -925,33 +934,54 @@ signature 等，大小写不敏感），匹配到的值替换为 `***` 后重新
 
 #### 3.4.7 CORS
 
+行为对齐 swoolefy `CorsMiddleware`：
+
 ```go
 type CORSConfig struct {
-    AllowOrigins     []string
-    AllowMethods     []string
-    AllowHeaders     []string
-    ExposeHeaders    []string
-    AllowCredentials bool
-    MaxAge           time.Duration
+    AllowOrigins        []string // 完整来源或裸域名；"*" 表示任意来源
+    AllowOriginPatterns []string // *.example.com / example.com（含子域）
+    AllowPaths          []string // RequestURI 白名单，shell 通配符；空 = ["*"]
+    AllowMethods        []string
+    AllowHeaders        []string
+    ExposeHeaders       []string
+    AllowCredentials    bool
+    MaxAge              time.Duration
 }
 ```
 
-默认（`WithCORS` 不调用时完全不启用）：
+默认（`WithCORS` 不调用、或来源与模式都为空时完全不启用）：
 
 ```go
 CORSConfig{
     AllowOrigins:  []string{},
     AllowMethods:  []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-    AllowHeaders:  []string{"Origin", "Content-Type", "Authorization", "X-Request-ID"},
-    MaxAge:        12 * time.Hour,
+    AllowHeaders:  []string{"*"},           // 与 PHP 一致
+    MaxAge:        24 * time.Hour,          // 86400 秒
 }
 ```
 
-校验：
+匹配与响应：
 
-- `AllowCredentials == true` 且 `AllowOrigins` 包含 `"*"` -> `New` 返回错误；
-- `AllowOrigins` 为空 -> 不启用；
-- 要允许任意来源但不带凭证，显式写 `"*"`。
+- `AllowOrigins` 中的裸域名（`example.com`）自动展开为 `http://` 与
+  `https://` 两种；已带 scheme 的来源按原样精确匹配；
+- `AllowOriginPatterns` 只接受纯域名或 `*.域名`，命中 http/https 的该域名及
+  任意子域；带 scheme/路径/端口/@ 的模式在构造中间件时报错；
+- 带 `Origin` 的请求先校验来源，再校验 `AllowPaths`（对含 query 的
+  `RequestURI` 做 fnmatch 风格匹配），任一不通过立即返回 403 纯文本
+  （`Origin 403 Forbidden` / `api 403 Forbidden, path=...`）；
+- 命中后**所有方法**都写 `Allow-Origin`、`Allow-Methods`、`Allow-Headers`
+  （配置值，默认 `*`）、`Expose-Headers`、`Max-Age` 与 `Vary: Origin`；
+  任意来源且不带凭证时写 `*`，否则回显具体 Origin，凭证模式追加
+  `Allow-Credentials: true`；
+- `OPTIONS` 统一返回 204（无论是否带 Origin）；无 Origin 的普通请求不做任何
+  CORS 处理。
+
+校验与差异：
+
+- `AllowCredentials == true` 且 `AllowOrigins` 包含 `"*"` -> 构造报错；
+- `AllowOrigins` 与 `AllowOriginPatterns` 都为空 -> 不启用（PHP 默认是
+  `["*"]` 且模式默认 `*.example.com`；Go 版要求显式开启，避免默认信任域名）；
+- 不读取 `CORS_*` 环境变量，所有值由调用方显式传入。
 
 #### 3.4.8 404 / 405 统一响应
 
@@ -1478,6 +1508,33 @@ Excel（.xlsx）导出/导入，移植自 swoolefy PHP `PhpOffice\Excel`，底�
 - 与 PHP 版的差异：excelize 在 `SaveAs` 前把工作簿保存在内存中（无 constMemory
   开关与 batchSize）；导出/导入是无状态函数，不强制单实例一次性；钩子用函数
   字段代替继承覆写。
+
+### 3.7.7 `support/image`
+
+图像处理，移植自 swoolefy PHP `Image`（Intervention Image），实现只用标准库
+与 `golang.org/x/image`（纯 Go、无 cgo、无 GD/Imagick）：
+
+- `Manager` 构造时校验 `Config`：`max_pixels`（0=默认 4000 万，-1=不限制）、
+  `encode` 默认值、`presets`（模式/尺寸/preset encode）、`watermark` 取值、
+  `allowed_roots`。不读取水印文件。
+- `Open`/`OpenBytes` 先 `DecodeConfig` 预检像素再解码；`Create` 生成纯色/透明
+  画布。解码结果统一转 `*image.NRGBA`。
+- `Editor` 是请求级对象：`Resize`（contain 只缩不放 / cover 铺满后居中裁剪 /
+  scale 允许放大 / stretch 双维拉伸，单维 0 表示不限制）、`Thumbnail`
+  （只缩不放）、`Crop`、`Rotate`（90 倍数精确重排，任意角度扩展画布 + 双线性
+  插值）、`Greyscale`、`ApplyPreset`。
+- 水印：九宫格锚点 + 偏移 + 透明度；图片水印和文字字体路径拒绝 `..` 段，解析
+  后必须位于 `allowed_roots`（未配置时 `base_path`）；文字水印用 TTF/OTF 渲染，
+  支持旋转。
+- 编码：`jpeg`/`png`/`gif`；格式按「全局 → preset → 本次参数」合并，未配置时
+  透明来源默认 png、其余默认 jpeg；`quality`（1~100，默认 82）与 `max_bytes`
+  校验；webp 仅解码，avif/其它格式返回 `ErrUnsupportedFormat`。重编码丢弃
+  EXIF/GPS，渐进式 JPEG 不支持。
+- 哨兵错误：`ErrInvalidImage`、`ErrTooLarge`、`ErrInvalidConfig`、
+  `ErrUnsupportedFormat`，统一 `errors.Is`；像素上限同时约束解码、创建、
+  缩放/裁剪目标和水印图层。
+- 与 PHP 版的差异：无 driver/扩展检测；GIF 不做多帧编辑；不提供 strip/
+  progressive 开关；`Manager` 不缓存已解码图像；`Base64` 不带 data URI 前缀。
 
 ### 3.8 `script`
 
@@ -2325,7 +2382,12 @@ require (
 demo-service/
 ├── go.mod
 ├── go.sum
-├── main.go
+├── main.go                     # 启动流程：加载配置 → gofy.New → Execute
+├── options.go                  # appOptions：汇总 gofy.Option
+├── config.go                   # 配置路径、Nacos 配置加载、启动子命令判断
+├── fatal.go                    # 启动期致命错误输出（TTY 红色）
+├── reload.go                   # reloader：按新配置重建模块
+├── nacos_watch.go              # nacosWatchModule：监听变更并触发热更新
 ├── config.yaml
 ├── Makefile
 ├── Dockerfile
@@ -2358,6 +2420,11 @@ demo-service/
 ```
 
 ### 9.2 `main.go`
+
+示例入口按职责拆分：`main.go` 只保留启动流程（配置 → `gofy.New` →
+`Execute`），`options.go` 汇总 `gofy.Option`，`config.go` 负责配置路径与
+Nacos 配置加载，`reload.go` 负责按新配置重建模块，`nacos_watch.go` 负责监听
+Nacos 变更，`fatal.go` 负责启动期致命错误输出。下面是最小形态的等价代码：
 
 ```go
 package main
@@ -3152,6 +3219,7 @@ gorm.io/driver/mysql
 gorm.io/driver/postgres
 github.com/glebarez/sqlite
 github.com/xuri/excelize/v2
+golang.org/x/image
 github.com/google/uuid
 ```
 
@@ -3363,6 +3431,7 @@ gofy/
 ├── support/sqlite/
 ├── support/uuidint/
 ├── support/phpoffice/
+├── support/image/
 ├── script/
 ├── command/
 ├── config/
@@ -4315,6 +4384,48 @@ var ErrInvalidExport, ErrInvalidRow, ErrExportFailed,
 - 基于 `xuri/excelize/v2` 的纯 Go 实现（§3.7.6）：导出排他预留、类型归一化与
   钩子；大数据用 `ExportStream`（StreamWriter）保持内存平坦；导入支持全量
   `Read` 与流式 `Import`，按列覆盖读取类型。
+
+### A.26 `support/image`
+
+```text
+type Mode
+const ModeContain, ModeCover, ModeScale, ModeStretch
+type Position
+const PositionTopLeft ... PositionBottomRight
+type EncodeOptions
+type Preset
+type ImageWatermark
+type TextWatermark
+type WatermarkConfig
+type Config
+type Manager
+func NewManager(Config) (*Manager, error)
+func (*Manager) Config() Config
+func (*Manager) Open(string) (*Editor, error)
+func (*Manager) OpenBytes([]byte) (*Editor, error)
+func (*Manager) Create(int, int, string) (*Editor, error)
+
+type ImageSize
+type Editor
+func (*Editor) Size() ImageSize
+func (*Editor) Resize(int, int, Mode) error
+func (*Editor) Thumbnail(int, int) error
+func (*Editor) Crop(int, int, int, int) error
+func (*Editor) Rotate(float64) error
+func (*Editor) Greyscale()
+func (*Editor) ApplyPreset(string) error
+func (*Editor) WatermarkImage(ImageWatermark) error
+func (*Editor) WatermarkText(TextWatermark) error
+func (*Editor) Encode(*EncodeOptions) (*ProcessResult, error)
+func (*Editor) Base64(*EncodeOptions) (string, error)
+
+type ProcessResult
+var ErrInvalidImage, ErrTooLarge, ErrInvalidConfig, ErrUnsupportedFormat
+```
+
+- 纯 Go 实现（§3.7.7）：标准库 + `golang.org/x/image`；`Manager` 校验配置，
+  `Editor` 请求级操作；编码支持 jpeg/png/gif，webp 仅解码，像素与读取路径
+  受 `max_pixels`、`allowed_roots` 约束。
 
 ---
 

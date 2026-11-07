@@ -129,11 +129,11 @@ func TestSuccessEnvelopeAndRequestID(t *testing.T) {
 			return &getResponse{ID: req.ID}, nil
 		})
 
-	rr := serve(engine, http.MethodGet, "/api/v1/order/orders/42", "", "X-Request-ID", "req-123")
+	rr := serve(engine, http.MethodGet, "/api/v1/order/orders/42", "", support.DefaultRequestIDHeader, "req-123")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body)
 	}
-	if got := rr.Header().Get("X-Request-ID"); got != "req-123" {
+	if got := rr.Header().Get(support.DefaultRequestIDHeader); got != "req-123" {
 		t.Fatalf("response request id = %q, want req-123", got)
 	}
 	body := decode(t, rr)

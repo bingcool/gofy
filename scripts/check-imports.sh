@@ -62,4 +62,9 @@ if go list -deps ./support/phpoffice | grep -q "$root_pkg/logging"; then
   fail "support/phpoffice must not depend on logging"
 fi
 
+# support/image must stay independent of the root package and logging.
+if go list -deps ./support/image | grep -q "$root_pkg/logging"; then
+  fail "support/image must not depend on logging"
+fi
+
 echo "import guards passed"

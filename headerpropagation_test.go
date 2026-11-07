@@ -90,14 +90,21 @@ func TestAppHeaderPropagationTrustsProxy(t *testing.T) {
 	}
 }
 
-// 未启用 WithHeaderPropagation 时不采集任何请求头。
+// 未启用 WithHeaderPropagation 时不采集身份头；但 RequestID 仍会把 trace id
+// 写入 context，供下游客户端透传。
 func TestAppHeaderPropagationIsOptIn(t *testing.T) {
 	app := gofytest.New(t, gofy.WithModules(propagationModule(t)))
 
 	rr := app.GET("/api/v1/propagate", "X-User-Id", "user-1")
 	gofytest.Status(t, rr, http.StatusOK)
 	body := gofytest.JSON[headersResponse](t, rr)
-	if body.UserID != "" || body.TraceID != "" {
-		t.Fatalf("headers captured without the option: %+v", body)
+	if body.UserID != "" || body.TenantID != "" || body.ClientIP != "" {
+		t.Fatalf("identity headers captured without the option: %+v", body)
+	}
+	if body.TraceID == "" {
+		t.Fatal("trace id was not propagated by RequestID")
+	}
+	if got := rr.Header().Get(support.DefaultRequestIDHeader); got != body.TraceID {
+		t.Fatalf("trace id = %q, response header = %q", body.TraceID, got)
 	}
 }

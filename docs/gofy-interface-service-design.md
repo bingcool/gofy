@@ -1623,7 +1623,7 @@ type Config struct {
 	// UserAgent 默认 gofy-interface-service/<version>。
 	UserAgent string
 
-	// RequestIDHeader 默认 X-Request-ID。
+	// RequestIDHeader 默认 X-Trace-ID。
 	RequestIDHeader string
 }
 
