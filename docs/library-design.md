@@ -115,28 +115,36 @@ github.com/bingcool/gofy/
 │   └── apperr.go                # 业务错误模型
 ├── core/
 │   └── runtime.go               # Runtime（被 gofy/script/command 共享）
-├── transport/
+├── support/
 │   ├── module.go                # Module、ModuleFactory、Prefixer、Starter、Stopper
 │   ├── router.go                # Router 薄封装
 │   ├── handler.go               # 泛型 Handler 与 GET/POST/...
 │   ├── bind.go                  # 请求绑定
 │   ├── validate.go              # 校验与 message 标签
 │   ├── responder.go             # Responder 接口与默认响应包络
-│   └── middleware/
-│       ├── requestid.go
-│       ├── accesslog.go
-│       ├── recovery.go
-│       ├── cors.go
-│       └── bodylimit.go
-├── logging/
-│   ├── logging.go               # Config、New、Nop、Sync
-│   └── gorm.go                  # GORM logger 适配（可选使用）
-├── support/
+│   ├── cors.go                  # CORS 配置
+│   ├── jwtauth.go               # JWT 配置
+│   ├── ratelimit.go             # 限流配置
+│   ├── securityheaders.go       # 安全响应头配置
+│   ├── middleware/              # 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传
+│   ├── ratelimit/               # Store 接口与内存滑窗
+│   │   └── redisstore/          # Redis 共享限流存储
+│   ├── cache/                   # 基于注入 Redis 实例的键值缓存
+│   ├── queues/                  # 基于注入 Redis 实例的即时队列与延迟队列
+│   ├── amqp/                    # AMQP 连接、拓扑、发布、消费与 TTL 延迟队列
+│   ├── kafka/                   # Kafka 连接、同步生产与消费组消费
+│   ├── rocketmq/                # RocketMQ 连接、同步生产与拉取消费
 │   ├── headerpropagation/       # 入口请求头白名单与透传上下文
 │   ├── frameworkcontext/        # 统一身份读取（本地认证优先，透传头兜底）
 │   ├── jwtauth/                 # HMAC JWT 校验
-│   └── mysql/
-│       └── mysql.go             # Config、New、Close
+│   ├── nacos/                   # Nacos 配置与注册
+│   ├── mysql/
+│   │   └── mysql.go             # Config、New、Close
+│   └── redis/
+│       └── redis.go             # Config、New、Ping、Close
+├── logging/
+│   ├── logging.go               # Config、New、Nop、Sync
+│   └── gorm.go                  # GORM logger 适配（可选使用）
 ├── script/
 │   └── script.go                # Script、Runtime 别名、Validate
 ├── command/
@@ -166,7 +174,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`transport`、`logging`、`support/mysql`、`support/redis`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/mysql`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -176,10 +184,14 @@ github.com/bingcool/gofy/
 ```text
 gofy (root)
  ├── core
- ├── transport ──> apperr, core
- ├── transport/jwtauth ──> support/jwtauth
- ├── transport/middleware ──> support/headerpropagation, support/frameworkcontext
- ├── transport/ratelimit/redisstore ──> transport/ratelimit, support/redis
+ ├── support ──> apperr, core, support/jwtauth, support/ratelimit
+ ├── support/middleware ──> support, support/headerpropagation, support/frameworkcontext
+ ├── support/ratelimit/redisstore ──> support/ratelimit, support/redis
+ ├── support/cache ──> go-redis
+ ├── support/queues ──> go-redis
+ ├── support/amqp ──> amqp091-go
+ ├── support/kafka ──> franz-go
+ ├── support/rocketmq ──> rocketmq-clients/golang/v5
  ├── script ─────> core
  ├── command ────> core
  ├── logging
@@ -190,7 +202,7 @@ gofy (root)
  ├── support/frameworkcontext ──> support/headerpropagation, support/jwtauth
  └── config
 
-gofytest ──> gofy, transport
+gofytest ──> gofy, support
 internal/* ──> core
 ```
 
@@ -198,7 +210,7 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `transport`、`script`、`command`、`logging`、`support/mysql`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logging`、`support/mysql`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
@@ -273,16 +285,16 @@ import (
     "github.com/bingcool/gofy/core"
     "github.com/bingcool/gofy/logging"
     "github.com/bingcool/gofy/support/mysql"
-    "github.com/bingcool/gofy/transport"
+    "github.com/bingcool/gofy/support"
     "go.uber.org/zap"
 )
 
 type Runtime = core.Runtime
 type VersionInfo = core.VersionInfo
-type ModuleFactory = transport.ModuleFactory
-type Middleware = transport.Middleware
-type Responder = transport.Responder
-type CORSConfig = transport.CORSConfig
+type ModuleFactory = support.ModuleFactory
+type Middleware = support.Middleware
+type Responder = support.Responder
+type CORSConfig = support.CORSConfig
 type DatabaseConfig = mysql.Config
 type LogConfig = logging.Config
 
@@ -394,11 +406,11 @@ type Option func(*options) error
 | `WithDatabase(DatabaseConfig)` | 未配置 | App 创建、持有并关闭 DB | DSN 非空、连接池参数合法 |
 | `WithDB(*gorm.DB)` | 未配置 | 注入已有 DB；**App 不 Ping、不关闭** | 与 `WithDatabase` 互斥 |
 | `WithModuleFactories(...ModuleFactory)` | 空 | 启动时构建模块 | 不允许 nil；名称在构建阶段去重 |
-| `WithModules(...transport.Module)` | 空 | 直接注入模块实例（测试/简单场景） | 名称去重 |
+| `WithModules(...support.Module)` | 空 | 直接注入模块实例（测试/简单场景） | 名称去重 |
 | `WithScripts(...script.Script)` | 空 | 注册脚本 | 名称唯一、Run 非 nil、保留名检查 |
 | `WithCommands(...command.Command)` | 空 | 注册自定义命令 | 名称唯一、不与内置冲突 |
 | `WithShutdownTimeout(time.Duration)` | `10s` | HTTP 优雅关闭 + 模块停止的总预算 | `> 0` |
-| `WithResponder(transport.Responder)` | `transport.NewResponder(transport.ResponderConfig{})` | 统一响应格式 | 非 nil |
+| `WithResponder(support.Responder)` | `support.NewResponder(support.ResponderConfig{})` | 统一响应格式 | 非 nil |
 | `WithRecovery(bool)` | `true` | 是否安装 panic 恢复中间件 | — |
 | `WithAccessLog(bool)` | `true` | 是否安装访问日志 | — |
 | `WithHeaderPropagation(bool)` | `false` | 入口白名单请求头写入 request context，供下游客户端透传 | — |
@@ -509,12 +521,12 @@ func (r *Runtime) Fail(err error)
 - `Fail(err)` 内部通过 `context.WithCancelCause` 取消 Runtime 的 context；`Run` 结束时用 `context.Cause` 取出原始错误返回给调用方。
 - 脚本/命令拿到的 `Runtime` 中 `Fail` 是 no-op（一次性任务由返回的 `error` 表达失败）。
 
-### 3.4 `transport`
+### 3.4 `support`
 
 #### 3.4.1 Module 与生命周期
 
 ```go
-package transport
+package support
 
 import (
     "context"
@@ -584,7 +596,7 @@ moduleRouter = base.Group(prefix)
 #### 3.4.2 Router
 
 ```go
-package transport
+package support
 
 import "github.com/gin-gonic/gin"
 
@@ -632,7 +644,7 @@ func (r *Router) Gin() *gin.RouterGroup // 逃生口，明确标注为非兼容�
 Go 不支持泛型方法，所以泛型注册函数必须是**自由函数**，并显式接收 `*Router`：
 
 ```go
-package transport
+package support
 
 import "context"
 
@@ -654,17 +666,17 @@ func NoContent[Req any](r *Router, method, path string, h func(context.Context, 
 ```go
 import "net/http"
 
-func (m *Module) Register(r *transport.Router) error {
+func (m *Module) Register(r *support.Router) error {
     h := handler.New(m.svc)
-    transport.GET(r, "/orders/:id", h.Get)
-    transport.POST(r, "/orders", h.Create)
-    transport.GET(r, "/orders", h.List)
-    transport.NoContent(r, http.MethodDelete, "/orders/:id", h.Cancel)
+    support.GET(r, "/orders/:id", h.Get)
+    support.POST(r, "/orders", h.Create)
+    support.GET(r, "/orders", h.List)
+    support.NoContent(r, http.MethodDelete, "/orders/:id", h.Cancel)
     return nil
 }
 ```
 
-为什么不是 `r.GET(path, transport.Handle(h.Get))`：
+为什么不是 `r.GET(path, support.Handle(h.Get))`：
 
 - `Handle` 需要拿到当前 App 的 validator 和 responder；
 - 这些对象属于 App 实例，不能放在包级全局变量里；
@@ -712,7 +724,7 @@ type GetOrderRequest struct {
 #### 3.4.5 Responder 与响应包络
 
 ```go
-package transport
+package support
 
 import (
     "github.com/gin-gonic/gin"
@@ -766,18 +778,18 @@ func NewResponder(cfg ResponderConfig) Responder
 
 #### 3.4.6 中间件
 
-框架中间件位于 `transport/middleware`，全部以"显式接收依赖"的方式实现，不使用包级 logger。
+框架中间件位于 `support/middleware`，全部以"显式接收依赖"的方式实现，不使用包级 logger。
 
 ```go
 func RequestID(header string) gin.HandlerFunc
 func HeaderPropagation(trustedProxies []string) gin.HandlerFunc
 func AccessLog(logger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc
-func Recovery(logger *zap.Logger, responder transport.Responder) gin.HandlerFunc
-func CORS(cfg transport.CORSConfig) (gin.HandlerFunc, error)
+func Recovery(logger *zap.Logger, responder support.Responder) gin.HandlerFunc
+func CORS(cfg support.CORSConfig) (gin.HandlerFunc, error)
 func BodyLimit(maxBytes int64) gin.HandlerFunc
-func SecurityHeaders(cfg transport.SecurityHeadersConfig) (gin.HandlerFunc, error)
-func RateLimit(cfg transport.RateLimitConfig, responder transport.Responder) (gin.HandlerFunc, error)
-func JWTAuth(cfg transport.JWTAuthConfig, responder transport.Responder) (gin.HandlerFunc, error)
+func SecurityHeaders(cfg support.SecurityHeadersConfig) (gin.HandlerFunc, error)
+func RateLimit(cfg support.RateLimitConfig, responder support.Responder) (gin.HandlerFunc, error)
+func JWTAuth(cfg support.JWTAuthConfig, responder support.Responder) (gin.HandlerFunc, error)
 ```
 
 安装顺序（由外到内）：
@@ -809,7 +821,7 @@ func JWTAuth(cfg transport.JWTAuthConfig, responder transport.Responder) (gin.Ha
 - `BodyLimit` 在业务之前，避免大请求进入业务逻辑；
 - `RateLimit` 与 `JWTAuth` 只挂在业务路由组上：`/healthz`、`/readyz` 和未匹配路径不受影响，
   限流先于 JWT 执行，未通过认证的请求同样计入配额；
-- `JWTAuth` 在业务 handler 之前，handler 通过 `transport.JWTClaims(c)` 读取已校验的 claims。
+- `JWTAuth` 在业务 handler 之前，handler 通过 `support.JWTClaims(c)` 读取已校验的 claims。
 
 `AccessLogOptions`：
 
@@ -964,13 +976,13 @@ type JWTAuthConfig struct {
     Scheme     string   // 默认 "Bearer"
     Optional   bool     // 无 token/非法 token 时放行，由业务自行判断
     SkipPaths  []string
-    ContextKey string   // 默认 transport.JWTClaimsKey
+    ContextKey string   // 默认 support.JWTClaimsKey
 }
 ```
 
 - 失败固定返回 401 / 40100 / `"unauthorized"`，不返回 token 解析细节；
 - 响应头 `WWW-Authenticate: Bearer realm="api"`；
-- 成功时 claims 存入 gin.Context，`transport.JWTClaims(c)` 或
+- 成功时 claims 存入 gin.Context，`support.JWTClaims(c)` 或
   `middleware.Claims(c, key)` 读取；同时写入 `frameworkcontext`（§3.4.10），
   Service 等非 gin 层用 `frameworkcontext.UserID(ctx)` 读取；
 - `WithJWTAuth` 只作用于模块路由，`/healthz`、`/readyz`、静态资源和未匹配路径不受影响；
@@ -1031,7 +1043,7 @@ func Headers(ctx context.Context) http.Header
 
 #### 3.4.11 限流
 
-`transport/ratelimit` 定义存储接口，内存实现使用滑动窗口日志：
+`support/ratelimit` 定义存储接口，内存实现使用滑动窗口日志：
 
 ```go
 type Result struct {
@@ -1049,7 +1061,7 @@ type Store interface {
 
 `ratelimit.NewMemoryStore()` 适用于单进程部署；键在窗口过期后由周期性 sweep 清理。
 `Store.SetClock` 用于注入测试时钟。多实例部署使用
-`transport/ratelimit/redisstore`：它用 ZSET + Lua 实现同一套滑动窗口语义，
+`support/ratelimit/redisstore`：它用 ZSET + Lua 实现同一套滑动窗口语义，
 以 Redis 服务器时间为准，多个实例共享计数；Redis 错误原样返回，由 `FailOpen`
 决定放行还是 503。
 
@@ -1087,7 +1099,7 @@ type SecurityHeadersConfig struct {
 }
 ```
 
-- 空字段使用 `transport.DefaultSecurityHeadersConfig()` 的默认值；
+- 空字段使用 `support.DefaultSecurityHeadersConfig()` 的默认值；
 - HSTS 只在确认全站 HTTPS 后开启；
 - 所有值在 `New` 阶段校验，包含 `\r`/`\n` 或非法头名直接返回错误，避免响应头注入；
 - 安全头安装在最外层，404、405、401、429 和 500 响应同样携带。
@@ -1280,6 +1292,16 @@ func New(ctx context.Context, cfg Config) (*goredis.Client, error)
 func Ping(ctx context.Context, client *goredis.Client, timeout time.Duration) error
 func Close(client *goredis.Client) error
 func (c Config) Validate() error
+
+type Registry
+func Configure(map[string]Config) (*Registry, error)
+func NewRegistry(map[string]Config) (*Registry, error)
+func (*Registry) Install()
+func NewIO(context.Context, string) (*goredis.Client, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*goredis.Client, error)
+func (*Registry) Close() error
+var ErrNotConfigured, ErrUnknownInstance
 ```
 
 行为：
@@ -1294,7 +1316,42 @@ func (c Config) Validate() error
 - 与其他 support 包一样无全局状态、无 `init()`、不 panic。
 
 Redis 不进入 `Runtime`：需要时由业务自己创建并关闭，再把客户端传给
-`transport/ratelimit/redisstore` 等适配器。
+`support/ratelimit/redisstore` 等适配器。
+
+### 3.7.2 命名实例注册表（mysql / redis / amqp / kafka / rocketmq）
+
+五个数据包提供同一套可选 API，用于按配置别名直接取用实例：
+
+```go
+type Registry
+func Configure(map[string]Config [, *zap.Logger]) (*Registry, error) // mysql 额外接收 logger
+func NewRegistry(map[string]Config [, *zap.Logger]) (*Registry, error)
+func NewIO(context.Context, string) (T, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (T, error)
+func (*Registry) Install()
+func (*Registry) Close() error
+var ErrNotConfigured, ErrUnknownInstance
+```
+
+- `Configure` 校验每个别名和 `Config`：空别名或非法配置立即失败，空 map 表示
+  禁用全部实例（之后 `NewIO` 返回 `ErrUnknownInstance`）。
+- `NewIO` 首次调用时建连并缓存，同一别名后续返回同一实例；建连失败不缓存，
+  下一次重试。并发安全，同一别名只建一个连接。
+- 每次 `Configure` 生成一代注册表并成为“当前代”。旧代的 `Close` 只关闭本代
+  实例，不会清空或关闭已经切换到的新代；这正是 `App.Reload` 先启动新模块、
+  再停止旧模块所需的顺序。
+- `Configure` 等价于 `NewRegistry` + `Install`。需要原子切换时先用
+  `NewRegistry` 创建新代、用 `(*Registry).NewIO` 建连，全部成功后再 `Install`；
+  失败只关闭新代，当前代保持不变。
+- 未注册名称返回 `ErrUnknownInstance`；未调用 `Configure` 或当前代已关闭返回
+  `ErrNotConfigured`。
+- `mysql` 的 `db.default` 由 `WithDatabase` 托管，业务继续使用 `Runtime.DB`；
+  把同一别名放进注册表会创建第二个连接池。
+- `rocketmq` 注册表只缓存 producer；消费者不属于生产者客户端，业务用同一份
+  `Config` 调用 `NewConsumer` 单独创建和关闭。v5 的 producer 不注册组名，
+  因此没有组名去重；消费者组在 `ConsumerConfig.Group` 里显式指定。
+- 不使用 `Configure` 时五个包保持无全局状态，`New`/`Wrap`/`Close` 行为不变。
 
 ### 3.8 `script`
 
@@ -1845,6 +1902,37 @@ redis:
     db: 2
     pool_size: 5
 
+# 多实例 AMQP：hosts 按顺序尝试，default 发布为 amqp.Default
+amqp:
+  default:
+    enabled: true
+    hosts:
+      - host: ${AMQP_HOST}
+        port: 5672
+        username: ${AMQP_USERNAME}
+        password: ${AMQP_PASSWORD}
+        vhost: orders
+    heartbeat: 10s
+    connection_timeout: 5s
+  order:
+    enabled: false
+
+# 多实例 Kafka：brokers 是 seed 节点，集群信息由 metadata 发现
+kafka:
+  default:
+    enabled: true
+    brokers:
+      - ${KAFKA_BROKER_1}
+      - ${KAFKA_BROKER_2}
+    client_id: demo-service
+    dial_timeout: 5s
+    # 幂等生产默认关闭（与 franz-go 默认一致）；需要严格去重时显式开启
+    idempotent: false
+    # 0 表示使用默认值 10，-1 表示不限制重试次数
+    record_retries: 10
+  order:
+    enabled: false
+
 pid_file: /var/run/demo-service.pid
 
 order:
@@ -1861,11 +1949,15 @@ order:
 | `mysql.OrderDb` / `mysql.ProductDb` | `db.order` / `db.product`，由 `app/io` 创建 |
 | `redis.Cache` / `redis.Session` | `redis.cache` / `redis.session`，`enabled: false` 时为 nil |
 | `redis.RateLimit` | `redis.ratelimit`，供分布式限流使用 |
+| `amqp.Default` | `amqp.default` 的 RabbitMQ 连接，未启用时为 nil |
+| `amqp.Get(name)` | 其它命名 `amqp` 实例，未启用时为 nil |
+| `kafka.Default` | `kafka.default` 的 Kafka 客户端，未启用时为 nil |
+| `kafka.Get(name)` | 其它命名 `kafka` 实例，未启用时为 nil |
 
 `WithDatabase(cfg.DB["default"])` 负责主库的创建、热更新与关闭；`app/io`
 在 `Start` 中打开额外实例并 `Install` 到包级句柄，在 `Stop` 中关闭。热更新时新模块
-先 `Start`、旧模块再 `Stop`，关闭逻辑会比对句柄指针，不会误关新连接。没有 Redis 的
-环境把实例设为 `enabled: false` 即可跳过。
+先 `Start`、旧模块再 `Stop`，关闭逻辑会比对句柄指针，不会误关新连接。没有 Redis
+或 RabbitMQ 的环境把对应实例设为 `enabled: false` 即可跳过。
 
 ### 6.4 配置加载发生在 `New` 之前
 
@@ -1956,7 +2048,7 @@ RequestID
 | 请求体超限 | 413 | 41300 | request entity too large |
 | 其他 error | 500 | 50000 | internal server error |
 
-`WithAlwaysOK(true)` 时，以上所有响应 HTTP 状态统一为 `200`，仅保留包络中的 `code`（兼容当前仓库行为）。新项目不建议开启。`transport.NoContent` 成功时固定返回 `204`，不受该选项影响。
+`WithAlwaysOK(true)` 时，以上所有响应 HTTP 状态统一为 `200`，仅保留包络中的 `code`（兼容当前仓库行为）。新项目不建议开启。`support.NoContent` 成功时固定返回 `204`，不受该选项影响。
 
 ### 7.4 日志与隐私
 
@@ -2018,7 +2110,7 @@ RequestID
 | 对象 | 契约 |
 | --- | --- |
 | `*gofy.App` | `New` 返回后只读；`Run`/`Execute`/`Handler` 只能调用一次；`Shutdown` 可并发、幂等 |
-| `*transport.Router` | 只在 `Register` 阶段使用，不保证并发安全 |
+| `*support.Router` | 只在 `Register` 阶段使用，不保证并发安全 |
 | `*core.Runtime` | 只读；`Fail` 并发安全 |
 | `*gin.Context` | 只在当前请求 goroutine 内使用，禁止逃逸 |
 | `Module.Register` | 串行调用 |
@@ -2183,7 +2275,7 @@ func main() {
         gofy.WithPIDFile(cfg.PIDFile),
         gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
         gofy.WithModuleFactories(
-            appio.NewModuleFactory(cfg.DB, cfg.Redis),
+            appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP),
             order.NewModuleFactory(cfg.Order),
         ),
         gofy.WithScripts(appscript.Register(cfg)...),
@@ -2260,6 +2352,18 @@ var (
     Session   *goredis.Client // redis.session
     RateLimit *goredis.Client // redis.ratelimit
 )
+
+// app/io/amqp/amqp.go
+var Default *amqp.Client            // amqp.default
+func Get(name string) *amqp.Client  // amqp.<name>
+
+// app/io/kafka/kafka.go
+var Default *kafka.Client            // kafka.default
+func Get(name string) *kafka.Client  // kafka.<name>
+
+// app/io/rocketmq/rocketmq.go
+var Default *rocketmq.Client            // rocketmq.default
+func Get(name string) *rocketmq.Client  // rocketmq.<name>
 ```
 
 业务代码直接取用，不需要依赖注入容器：
@@ -2267,11 +2371,16 @@ var (
 ```go
 o, err := mysql.OrderDb.WithContext(ctx).First(&order)
 s, err := redis.Cache.Get(ctx, "order:1").Result()
+q, err := amqp.NewQueue(amqp.Default, queueConfig)
 ```
 
 生命周期由 `app/io` 统一管理：`Start` 打开 `db.order`、`db.product` 和启用的
-Redis 实例并 `Install` 到句柄，`Stop` 关闭并清空。热更新时新模块先安装、旧模块后
-关闭，旧实例不会误清或误关新句柄。
+Redis、AMQP、Kafka、RocketMQ 实例并 `Install` 到句柄，`Stop` 关闭并清空。`Open`
+内部把每个启用实例注册到各包的 `Configure`，再用 `NewIO` 取用；`Set.Close` 关闭
+本代注册表。热更新时新模块先安装、旧模块后关闭，旧实例不会误清或误关新句柄。
+业务也可以直接调用 `redis.NewIO(ctx, "cache")` 等按别名取用；`app/io` 包同时
+提供同名薄包装，避免业务再 import 一次 support 包。RocketMQ 的 `app/io` 只发布
+producer 句柄；需要消费时业务用配置里的 `Config` 调用 `rocketmq.NewConsumer`。
 
 ### 9.4 `app/module/order/module.go`
 
@@ -2283,7 +2392,7 @@ import (
     "time"
 
     "github.com/bingcool/gofy"
-    "github.com/bingcool/gofy/transport"
+    "github.com/bingcool/gofy/support"
     "github.com/yourorg/demo-service/app/middleware"
     "github.com/yourorg/demo-service/app/module/order/controller"
     "github.com/yourorg/demo-service/app/module/order/repository"
@@ -2300,11 +2409,11 @@ type Config struct {
 
 type Module struct {
     svc  *service.OrderService
-    auth transport.Middleware
+    auth support.Middleware
 }
 
 func NewModuleFactory(cfg Config) gofy.ModuleFactory {
-    return func(rt *gofy.Runtime) (transport.Module, error) {
+    return func(rt *gofy.Runtime) (support.Module, error) {
         if rt.DB == nil {
             return nil, errors.New("order module requires database")
         }
@@ -2331,7 +2440,7 @@ func NewModule(cfg Config, svc *service.OrderService) *Module {
 
 func (m *Module) Name() string { return "order" }
 
-func (m *Module) Register(r *transport.Router) error {
+func (m *Module) Register(r *support.Router) error {
     h := handler.New(m.svc)
     return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
         Auth: m.auth,
@@ -2696,11 +2805,11 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 package middleware
 
 import (
-    "github.com/bingcool/gofy/transport"
+    "github.com/bingcool/gofy/support"
     "github.com/gin-gonic/gin"
 )
 
-func Auth(verify func(token string) error) transport.Middleware {
+func Auth(verify func(token string) error) support.Middleware {
     return func(c *gin.Context) {
         token := c.GetHeader("Authorization")
         if err := verify(token); err != nil {
@@ -2966,7 +3075,7 @@ jobs:
       - name: no init in public packages
         run: |
           if grep -rn "func init()" --include="*.go" \
-            *.go apperr core transport logging support script command config gofytest; then
+            *.go apperr core logging support script command config gofytest; then
             echo "public packages must not use init()"
             exit 1
           fi
@@ -2988,7 +3097,7 @@ jobs:
 #!/usr/bin/env bash
 set -euo pipefail
 
-pkgs=(apperr core transport logging support/... script command config)
+pkgs=(apperr core logging support/... script command config)
 for pkg in "${pkgs[@]}"; do
   if go list -deps "./$pkg" | grep -qx 'github.com/bingcool/gofy'; then
     echo "import cycle: $pkg must not depend on the root package"
@@ -3037,20 +3146,20 @@ fi
 | `src/cmd/command/cmd.go` | 删除 | 命令常量与运行模式不再需要 |
 | `src/conf/yaml.go` | `config/load.go` | 去掉 viper、`init()`、全局配置 |
 | `src/log/logger.go` | `logging/logging.go` | 去掉 `init()`、包级 logger、切日协程；修正 `Compress` 读取 `MaxAge` 的 bug |
-| `src/request/requestLog.go` | `transport/middleware/accesslog.go` | 改为显式 logger；不再单独初始化 |
+| `src/request/requestLog.go` | `support/middleware/accesslog.go` | 改为显式 logger；不再单独初始化 |
 | `src/system/system_env.go` | 删除 | `Env` 放 `Runtime`；`WorkDir` 放 Option |
 | `src/timelocal/timezone.go` | 删除 | 不在库内修改 `time.Local`；时区由 DSN `loc` 或业务 `main` 决定 |
 | `src/utils` | `internal/` | 仅保留仍在使用的工具；删除 `IsNumber` 等无人调用的函数 |
 | `src/console` | 删除 | 未被使用 |
-| `src/http/route.go` | `transport/router.go` | 改写为 `Router` 薄封装 |
-| `app/middleware/cors.go` | `transport/middleware/cors.go` | 内部实现；校验 credentials + wildcard |
-| `app/middleware/recovery.go` | `transport/middleware/recovery.go` | 不再返回堆栈给客户端；不使用 `*gin.Context` 跨 goroutine |
-| `app/middleware/requestid.go` | `transport/middleware/requestid.go` | 内部实现；Header 校验 |
-| `app/middleware/response.go` | `transport/responder.go` | 包络结构保留，改为 `Responder` 接口 |
+| `src/http/route.go` | `support/router.go` | 改写为 `Router` 薄封装 |
+| `app/middleware/cors.go` | `support/middleware/cors.go` | 内部实现；校验 credentials + wildcard |
+| `app/middleware/recovery.go` | `support/middleware/recovery.go` | 不再返回堆栈给客户端；不使用 `*gin.Context` 跨 goroutine |
+| `app/middleware/requestid.go` | `support/middleware/requestid.go` | 内部实现；Header 校验 |
+| `app/middleware/response.go` | `support/responder.go` | 包络结构保留，改为 `Responder` 接口 |
 | `app/middleware/registermiddleware.go` | 删除 | 中间件顺序由 App 统一安装 |
 | `app/middleware/validateLogin.go` | `examples/demo-service/app/middleware/auth.go` | 示例业务中间件 |
 | `app/middleware/test.go` | 删除 | 测试用中间件不属于框架 |
-| `app/route/build/route.go` | `transport/handler.go` / `bind.go` / `validate.go` | 改为泛型 handler；删除 `panic`、`validator.New()`/请求、`gconv` |
+| `app/route/build/route.go` | `support/handler.go` / `bind.go` / `validate.go` | 改为泛型 handler；删除 `panic`、`validator.New()`/请求、`gconv` |
 | `app/route/init.go` | `examples/demo-service/app/module/order/module.go` | 业务路由注册 |
 | `app/route/demo/*` | `examples/demo-service/app/module/order/*` | 改写为 order 示例 |
 | `app/module/demo/controller/order_controller.go` | `examples/demo-service/app/module/order/controller` | 改为 `context.Context` handler |
@@ -3074,7 +3183,7 @@ fi
 
 #### Phase 1：建立 library 骨架（不改变行为）
 
-- 新建 `core`、`apperr`、`transport`、`logging`、`support/mysql`、`script`、`command`、`config`；
+- 新建 `core`、`apperr`、`support`、`logging`、`support/mysql`、`script`、`command`、`config`；
 - 先实现最小可编译版本：`Runtime`、`Router`、`Responder`、`logging.New`、`mysql.New`；
 - 保持 `examples/demo-service` 能跑通；
 - 此时旧 `src/` 仍在，CI 同时编译两者。
@@ -3115,7 +3224,7 @@ gofy/
 ├── signal.go
 ├── apperr/
 ├── core/
-├── transport/
+├── support/
 ├── logging/
 ├── support/mysql/
 ├── script/
@@ -3140,7 +3249,7 @@ gofy/
 - [ ] `go build ./...` 通过；
 - [ ] `go vet ./...` 通过；
 - [ ] `go test -race -count=1 ./...` 通过；
-- [ ] 公共包（`apperr`、`core`、`transport`、`logging`、`support`、`script`、`command`、`config`、`gofytest`）中不存在 `func init()`；
+- [ ] 公共包（`apperr`、`core`、`support`、`logging`、`script`、`command`、`config`、`gofytest`）中不存在 `func init()`；
 - [ ] 公共包中不存在包级可变 `var`（常量、哨兵错误、类型别名除外）；
 - [ ] 公共包中不存在 `os.Exit`、`log.Fatal`、`panic`（`Recovery` 内部的 `recover` 除外）；
 - [ ] `go list -deps` 检查通过：子包不依赖根包，根包不依赖 `gofytest`；
@@ -3223,7 +3332,7 @@ gofy/
 | 2026-11-03 | gofy 只作为 library 发布 | 多服务统一升级基础设施，避免 fork/merge 分叉 |
 | 2026-11-03 | 业务拥有 `main.go` 与配置 | 库不能假设部署形态、配置来源和退出策略 |
 | 2026-11-03 | `Runtime` 下沉到 `core`，根包/`script`/`command` 用别名 | 避免 `gofy -> script -> gofy` 导入环 |
-| 2026-11-03 | 泛型路由使用自由函数 `transport.GET(r, path, h)` | Go 不支持泛型方法；同时避免包级 validator/responder |
+| 2026-11-03 | 泛型路由使用自由函数 `support.GET(r, path, h)` | Go 不支持泛型方法；同时避免包级 validator/responder |
 | 2026-11-03 | 移除 `viper` | 全局单例、隐式 env、配置所有权应归业务 |
 | 2026-11-03 | 移除 `gogf/gf` | 仅为 `gconv.Map` 引入超大依赖 |
 | 2026-11-03 | 移除 `go-daemon` | 库不接管进程守护；交给 systemd/容器 |
@@ -3269,7 +3378,7 @@ func WithWorkDir(string) Option
 func WithDatabase(DatabaseConfig) Option
 func WithDB(*gorm.DB) Option
 func WithModuleFactories(...ModuleFactory) Option
-func WithModules(...transport.Module) Option
+func WithModules(...support.Module) Option
 func WithScripts(...script.Script) Option
 func WithCommands(...command.Command) Option
 func WithShutdownTimeout(time.Duration) Option
@@ -3287,12 +3396,12 @@ func WithVersionInfo(VersionInfo) Option
 
 type HTTPConfig
 func (HTTPConfig) Validate() error
-type CORSConfig = transport.CORSConfig
+type CORSConfig = support.CORSConfig
 type VersionInfo = core.VersionInfo
 type Runtime = core.Runtime
-type ModuleFactory = transport.ModuleFactory
-type Middleware = transport.Middleware
-type Responder = transport.Responder
+type ModuleFactory = support.ModuleFactory
+type Middleware = support.Middleware
+type Responder = support.Responder
 type DatabaseConfig = mysql.Config
 type LogConfig = logging.Config
 ```
@@ -3308,7 +3417,7 @@ func (*Runtime) Context() context.Context
 func (*Runtime) Fail(error)
 ```
 
-### A.3 `transport`
+### A.3 `support`
 
 ```text
 type Middleware = gin.HandlerFunc
@@ -3350,14 +3459,14 @@ type ResponderConfig
 func NewResponder(ResponderConfig) Responder
 ```
 
-### A.4 `transport/middleware`
+### A.4 `support/middleware`
 
 ```text
 func RequestID(string) gin.HandlerFunc
 func HeaderPropagation([]string) gin.HandlerFunc
 func AccessLog(*zap.Logger, AccessLogOptions) gin.HandlerFunc
-func Recovery(*zap.Logger, transport.Responder) gin.HandlerFunc
-func CORS(transport.CORSConfig) (gin.HandlerFunc, error)
+func Recovery(*zap.Logger, support.Responder) gin.HandlerFunc
+func CORS(support.CORSConfig) (gin.HandlerFunc, error)
 func BodyLimit(int64) gin.HandlerFunc
 type AccessLogOptions
 ```
@@ -3445,17 +3554,96 @@ var ErrMalformed, ErrUnsupportedAlgorithm, ErrSignature, ErrExpired,
     ErrNotYetValid, ErrIssuer, ErrAudience, ErrMissingExpiry
 ```
 
-### A.10 `support/mysql`
+### A.10 `support/cache`
+
+```text
+type Cache
+type Redis
+func NewRedis(goredis.Cmdable) (*Redis, error)
+func (*Redis) Set(context.Context, string, string, time.Duration) error
+func (*Redis) SetJSON(context.Context, string, any, time.Duration) error
+func (*Redis) Get(context.Context, string) (string, bool, error)
+func (*Redis) GetJSON(context.Context, string, any) (bool, error)
+func (*Redis) Delete(context.Context, ...string) (int64, error)
+func (*Redis) Has(context.Context, string) (bool, error)
+func (*Redis) TTL(context.Context, string) (time.Duration, bool, error)
+func (*Redis) GetMany(context.Context, ...string) (map[string]string, error)
+func (*Redis) SetMany(context.Context, map[string]string, time.Duration) error
+var ErrClientRequired
+```
+
+### A.11 `support/queues`
+
+```text
+const DefaultMaxRetries = 3
+var ErrClientRequired, ErrKeyRequired
+
+type Config struct {
+    Key        string
+    MaxRetries int
+}
+
+type Message struct {
+    ID        string
+    RetryNum  int
+    Timestamp int64
+    Payload   json.RawMessage
+}
+func (*Message) Decode(any) error
+
+type Queue
+func NewQueue(goredis.Cmdable, Config) (*Queue, error)
+func (*Queue) Push(context.Context, ...any) (int, error)
+func (*Queue) PushPriority(context.Context, ...any) (int, error)
+func (*Queue) Pop(context.Context, time.Duration) (*Message, bool, error)
+func (*Queue) Retry(context.Context, *Message, time.Duration) (bool, error)
+func (*Queue) Len(context.Context) (int64, error)
+func (*Queue) Key() string
+func (*Queue) PriorityKey() string
+func (*Queue) RetryKey() string
+func (*Queue) MaxRetries() int
+
+type DelayQueue
+func NewDelayQueue(goredis.Cmdable, Config) (*DelayQueue, error)
+func (*DelayQueue) Add(context.Context, any, time.Duration) error
+func (*DelayQueue) Pop(context.Context, int) ([]*Message, error)
+func (*DelayQueue) Retry(context.Context, *Message, time.Duration) (bool, error)
+func (*DelayQueue) Len(context.Context) (int64, error)
+func (*DelayQueue) Key() string
+func (*DelayQueue) MaxRetries() int
+```
+
+- 键布局与 swoolefy 一致：`{key}`（List）、`{key}:priority_queue`（List）、
+  `{key}:retry_queue_sort`（ZSET）；延迟队列只使用 `{key}`（ZSET）。
+- `Pop` 前用 Lua 把到期的重试消息原子回流到主队列（单次最多 100 条）；
+  `DelayQueue.Pop` 用 Lua 一次完成取消息与删除，多消费者不会重复拿到同一条。
+- 消息已删除后才交给业务，因此是 at-most-once：失败必须显式 `Retry`，
+  `MaxRetries` 是额外投递次数，达到上限后 `Retry` 返回 `false`。
+- `Queue.Pop` 的阻塞超时以秒为单位，非整秒向上取整；`timeout <= 0` 不阻塞。
+- 不接管客户端生命周期；`Config.Key` 为空返回 `ErrKeyRequired`，负数
+  `MaxRetries` 返回错误，`0` 归一为 `DefaultMaxRetries`。
+- Cluster 下重试回流脚本同时操作两个键，`Key` 应包含 hash tag（如 `{orders}`）。
+
+### A.12 `support/mysql`
 
 ```text
 type Config
 func (Config) Validate() error
 func New(context.Context, Config, *zap.Logger) (*gorm.DB, error)
 func Close(*gorm.DB) error
-var ErrDSNRequired
+
+type Registry
+func Configure(map[string]Config, *zap.Logger) (*Registry, error)
+func NewRegistry(map[string]Config, *zap.Logger) (*Registry, error)
+func NewIO(context.Context, string) (*gorm.DB, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*gorm.DB, error)
+func (*Registry) Install()
+func (*Registry) Close() error
+var ErrDSNRequired, ErrNotConfigured, ErrUnknownInstance
 ```
 
-### A.11 `script`
+### A.13 `script`
 
 ```text
 type Runtime = core.Runtime
@@ -3464,7 +3652,7 @@ func Validate([]Script) error
 func Find([]Script, string) (Script, bool)
 ```
 
-### A.12 `command`
+### A.14 `command`
 
 ```text
 type Runtime = core.Runtime
@@ -3472,19 +3660,45 @@ type Command
 func Validate([]Command, ...string) error
 ```
 
-### A.13 `config`
+### A.15 `config`
 
 ```text
 type Option
 func Load[T any](context.Context, string, ...Option) (*T, error)
+func LoadDocument(context.Context, string, ...Option) (*Document, error)
 func WithExpandEnv(bool) Option
 func WithAllowMissingEnv(bool) Option
 func WithStrict(bool) Option
 func WithApplyDefaults(bool) Option
 func WithValidate(bool) Option
+
+type Document
+func (*Document) Get(string) (any, bool)
+func (*Document) Has(string) bool
+func (*Document) GetString(string) (string, bool)
+func (*Document) GetInt(string) (int, bool)
+func (*Document) GetInt64(string) (int64, bool)
+func (*Document) GetFloat64(string) (float64, bool)
+func (*Document) GetBool(string) (bool, bool)
+func (*Document) GetDuration(string) (time.Duration, bool)
+func (*Document) GetStringSlice(string) ([]string, bool)
 ```
 
-### A.14 `gofytest`
+- 路径用点号分隔：映射按键查找，序列按数字下标查找
+  （`db.default.dsn`、`servers.0.host`）；键名本身不支持点号。
+- `Get` 返回原始值；键存在但值为 `null` 时返回 `(nil, true)`。类型方法在
+  类型不匹配、路径不存在或中途节点类型不符时返回 `false`。
+- `GetString` 把字符串、数字、布尔转成文本；`GetInt`/`GetInt64` 接受 YAML
+  整数和数字字符串；`GetBool` 额外接受 `strconv.ParseBool` 的文本形式；
+  `GetDuration` 只接受 `1h`/`30s`/`200ms` 这类字符串，裸数字因含义不明确
+  直接返回 `false`。
+- `LoadDocument` 与 `Load` 共用文件读取和 `${VAR}` 展开；只有
+  `WithExpandEnv`、`WithAllowMissingEnv` 对它生效，`WithStrict`、
+  `WithApplyDefaults`、`WithValidate` 面向结构体解码，会被忽略。
+- `Load[T]` 的行为不变：仍然应用默认值、解码和校验；`Document` 用于不需要
+  完整结构体的零散读取，两者都不持有全局状态。
+
+### A.16 `gofytest`
 
 ```text
 type App
@@ -3500,6 +3714,236 @@ func Status(*testing.T, *httptest.ResponseRecorder, int)
 func JSON[T any](*testing.T, *httptest.ResponseRecorder) T
 func RawJSON(*testing.T, *httptest.ResponseRecorder) map[string]any
 ```
+
+### A.17 `support/amqp`
+
+```text
+type Host
+type Config
+func (Config) Validate() error
+
+type Client
+func New(context.Context, Config) (*Client, error)
+func Wrap(*amqp091.Connection) *Client
+func (*Client) Channel() (*amqp091.Channel, error)
+func (*Client) Close() error
+func (*Client) IsClosed() bool
+func (*Client) Config() Config
+
+type Topology
+type QueueConfig
+type DelayConfig
+const ExchangeDirect, ExchangeFanout, ExchangeTopic, ExchangeHeaders
+
+type Queue
+func NewQueue(*Client, QueueConfig) (*Queue, error)
+type PublishOptions
+type ConsumeOptions
+type HandlerFunc
+func (*Queue) Publish(context.Context, []byte, PublishOptions) error
+func (*Queue) PublishJSON(context.Context, any, PublishOptions) error
+func (*Queue) Consume(context.Context, HandlerFunc, ConsumeOptions) error
+func (*Queue) Close() error
+
+var ErrHostRequired, ErrClientClosed, ErrNotConfigured, ErrClientRequired,
+    ErrHandlerRequired, ErrQueueRequired, ErrExchangeRequired,
+    ErrInvalidExchangeType, ErrDirectKeyRequired, ErrRoutingKeyMismatch,
+    ErrDeliveryClosed, ErrUnknownInstance
+
+type Registry
+func Configure(map[string]Config) (*Registry, error)
+func NewRegistry(map[string]Config) (*Registry, error)
+func (*Registry) Install()
+func NewIO(context.Context, string) (*Client, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*Client, error)
+func (*Registry) Close() error
+```
+
+- `Config.Hosts` 按顺序尝试，建连和重连都会跳过不可用节点；错误只包含
+  `host:port`，不会带出用户名或密码。
+- `New` 建连后保留 `Config`，连接失效时 `Channel()` 自动重连；`Wrap` 接管
+  已有连接但无法重连，连接失效后返回 `ErrNotConfigured`。
+- `Topology` 同时描述 exchange、queue 和 binding；`direct` 要求
+  `RoutingKey == BindingKey`（允许只写一边），`fanout` 忽略两者，
+  `topic`/`headers` 原样使用；`Queue` 留空表示只发布不消费。
+- `Queue` 用共享 channel 发布并加锁串行化；`Confirm` 开启发布确认，
+  `Publish` 等待 broker ack，nack 返回错误。默认 transient，`Persistent`
+  使用 delivery mode 2。
+- `Consume` 每次都开独立 channel：处理函数返回 nil 自动 ack，返回错误自动
+  nack（默认 requeue，`DiscardOnError` 关闭重入），panic 恢复为错误；连接或
+  channel 断开后按 `ReconnectDelay` 重连并重新声明拓扑，`ctx` 取消时排空
+  投递后返回 nil。
+- `DelayConfig` 在主拓扑（暂存队列）上设置 `x-message-ttl`、
+  `x-dead-letter-*`，发布时先声明 `Target` 再声明暂存队列；消费读取
+  `Target.Queue`。TTL 最小 1ms，`PublishOptions.Expiration` 作为每消息 TTL，
+  broker 取两者较小值。
+- 手动 ack 是 at-least-once：handler 失败重入或连接中断可能重复投递，业务
+  需幂等。`Mandatory` 只透传给 broker，本包不订阅 `basic.return`。
+- 与 Redis 一致，多实例由应用装配层创建多个 `Client`；本包不保存全局句柄。
+
+### A.18 `support/kafka`
+
+```text
+type Config
+func (Config) Validate() error
+
+type Client
+func New(context.Context, Config) (*Client, error)
+func Wrap(*kgo.Client) *Client
+func (*Client) Close() error
+func (*Client) IsClosed() bool
+func (*Client) Ping(context.Context) error
+func (*Client) Raw() *kgo.Client
+func (*Client) Config() Config
+
+type ProducerConfig
+type Producer
+func NewProducer(*Client, ProducerConfig) (*Producer, error)
+type PublishOptions
+func (*Producer) Publish(context.Context, []byte, PublishOptions) error
+func (*Producer) PublishJSON(context.Context, any, PublishOptions) error
+
+type ConsumerConfig
+type Consumer
+func NewConsumer(*Client, ConsumerConfig) (*Consumer, error)
+type ConsumeOptions
+type HandlerFunc
+func (*Consumer) Consume(context.Context, HandlerFunc, ConsumeOptions) error
+func (*Consumer) Close() error
+
+var ErrBrokerRequired, ErrClientRequired, ErrClientClosed, ErrNotConfigured,
+    ErrTopicRequired, ErrGroupRequired, ErrInvalidOffsetReset, ErrHandlerRequired,
+    ErrUnknownInstance
+
+type Registry
+func Configure(map[string]Config) (*Registry, error)
+func NewRegistry(map[string]Config) (*Registry, error)
+func NewIO(context.Context, string) (*Client, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*Client, error)
+func (*Registry) Install()
+func (*Registry) Close() error
+```
+
+- `Config.Brokers` 是 seed 节点列表，其余节点由 metadata 发现；`ClientID`
+  默认 `gofy`，`DialTimeout` 默认 `5s`。`Ping` 用它作为连接超时，全部失败时
+  错误只包含 broker 地址。
+- 幂等生产（`Idempotent`）默认关闭，与 franz-go 默认一致；`RecordRetries`
+  为 `0` 时取默认值 `10`，`-1` 表示不限制。`Wrap` 接管已有客户端但无法重连，
+  也没有可用的 `Config`。
+- `Producer` 用 `ProduceSync` 同步发布，返回时 broker 已接收；同一个 `Key`
+  哈希到同一分区，因此同 Key 消息保序。`PublishJSON` 自动补
+  `content-type: application/json`（不覆盖已有值，也不修改调用方的 header map）。
+- Kafka 消费者组是客户端级配置，因此 `Producer` 共享 `New` 的客户端，
+  `Consumer` 从同一 `Config` 单独建客户端；`Wrap` 注入的客户端用
+  `AddConsumeTopics` 订阅，group 必须由注入方预先配置。
+- `ConsumerConfig` 支持 `DisableAutoCommit`（配合 `CommitRecords`）、
+  `AutoCommitInterval`（默认 `200ms`）、`AutoOffsetReset`（`earliest` 默认 /
+  `latest`）、`SessionTimeout`（默认 `45s`）和
+  `OnPartitionsAssigned` / `OnPartitionsRevoked` 回调。
+- `Consume` 按分区顺序处理：handler 返回 nil 记为成功位点；返回错误时先提交此前
+  成功位点再返回错误，消息保留为未提交以便重投（at-least-once）。
+  `DiscardOnError` 把失败消息也标记为已处理，适合毒消息。handler panic 被恢复
+  为错误，并按同样的规则提交或重投。`ctx` 取消时返回 nil。
+- 自动提交开启时位点由客户端定时提交，崩溃可能丢失最后一批；需要严格控制时
+  用 `DisableAutoCommit` + `ConsumeOptions` 手动提交。关闭阶段不会提交。
+- 本包不创建 topic；开发环境可开启 broker 的 `auto.create.topics.enable`，
+  生产环境应先由运维或初始化流程建好分区与副本。
+- 与 Redis、AMQP 一致，多实例由应用装配层创建多个 `Client`；本包不保存
+  全局句柄。
+
+### A.19 `support/rocketmq`
+
+```text
+type Config
+func (Config) Validate() error
+
+type Client
+func New(context.Context, Config) (*Client, error)
+func Wrap(rmq.Producer) *Client
+func (*Client) Raw() rmq.Producer
+func (*Client) Config() Config
+func (*Client) Close() error
+func (*Client) IsClosed() bool
+func (*Client) Publish(context.Context, []byte, PublishOptions) (*SendResult, error)
+func (*Client) PublishJSON(context.Context, any, PublishOptions) (*SendResult, error)
+
+type PublishOptions
+type SendResult
+
+type ConsumerConfig
+type Consumer
+type Message
+type ConsumeOptions
+type HandlerFunc
+func NewConsumer(Config, ConsumerConfig) (*Consumer, error)
+func (*Consumer) Consume(context.Context, HandlerFunc, ConsumeOptions) error
+func (*Consumer) Config() ConsumerConfig
+func (*Consumer) Close() error
+
+var ErrEndpointRequired, ErrCredentialsIncomplete,
+    ErrClientRequired, ErrClientClosed, ErrNotConfigured, ErrUnknownInstance,
+    ErrTopicRequired, ErrInvalidDelay, ErrTooManyKeys, ErrInvalidKey,
+    ErrTooManyProperties, ErrInvalidPropertyKey, ErrInvalidPropertyValue,
+    ErrPropertiesTooLarge, ErrGroupRequired, ErrTagsConflictSQL, ErrInvalidTag,
+    ErrHandlerRequired, ErrConsumerStarted
+
+type Registry
+func Configure(map[string]Config) (*Registry, error)
+func NewRegistry(map[string]Config) (*Registry, error)
+func NewIO(context.Context, string) (*Client, error)
+func CloseAllIO() error
+func (*Registry) NewIO(context.Context, string) (*Client, error)
+func (*Registry) Install()
+func (*Registry) Close() error
+```
+
+- 底层是官方 `apache/rocketmq-clients/golang/v5`（锁定 `v5.1.2`），走 gRPC
+  proxy（默认 8081），不需要 NameServer 9876 或 sidecar。PHP 版通过
+  go-sidecar 的 proxy 协议访问，Go 版直接连 proxy。
+- `Config.Endpoint` 必填，多个地址可用 `;` 连接；`Namespace` 会加到 topic 和
+  group 上；`AccessKey` 与 `AccessSecret` 必须同时设置或同时留空，
+  `SecurityToken` 需要它们一起使用。`SendTimeout` 默认 `3s`，
+  `MaxAttempts` 为 `0` 时取默认值 `3`。
+- v5 的 producer 不绑定 topic，`Start` 只对已知 topic 查询路由。topic 属于
+  业务代码，`Config` 默认不配置：不设置 `StartupTopics` 时启动不探测，第一次
+  `Publish` 才建连并接触 broker。需要尽早发现配置错误时再设置
+  `StartupTopics`，此时 endpoint 不可达或 topic 不存在会让启动失败；
+  `SkipStartupCheck` 可临时关闭这个探测。错误信息只出现 endpoint，不带凭据。
+  v5.1.2 没有可用的 `Ping`，快速失败只能依赖该探测。
+- `Wrap` 接管已有 producer 的关闭权，但没有 `Config`，`Config()` 返回零值，
+  `Publish` 仍可用。注意 v5.1.2 的 SDK 忽略 client 级连接选项，建连固定使用
+  约 5 秒超时。
+- `Publish` 调用 `Send` 同步发送，等待由 `SendTimeout` 与 `ctx` 中较早结束的
+  一方限制；返回前检查回执非空，结果包含 `MessageID`、`Topic`、`Offset`。
+  `PublishJSON` 自动补 `content-type: application/json` 属性。
+- `PublishOptions` 在客户端校验 broker 限制：`Keys` 最多 32 个、每个不超过
+  128 字节且不含空白，重复项去掉；`Properties` 最多 32 个，Key 只能是字母、
+  数字、`_`、`.`、`-` 且不能以 `__` 开头，Value 不超过 1024 字节，合计不超过
+  16 KiB；`DeliverAt` 是绝对投递时间，必须晚于当前时间，延时消息需要 DELAY
+  类型 topic；`MessageGroup` 为 FIFO 消息选择队列，同 group 保序，需要 FIFO
+  类型 topic。
+- v5.1.2 没有 push consumer：`NewConsumer(Config, ConsumerConfig)` 只校验连接
+  配置和订阅配置，创建 `SimpleConsumer`，不建连；第一次 `Consume` 时
+  `Start`，再次调用返回 `ErrConsumerStarted`。消费者使用 Clustering 模式，
+  `Group` 必填。
+- `ConsumerConfig.Tags` 与 `SQL` 互斥（`ErrTagsConflictSQL`）。Tags 为空或
+  `["*"]` 订阅全部，元素拼成 `a || b` 交给 broker，元素本身不能含 `||`；
+  SQL92 过滤需要 broker 开启 `enablePropertyFilter=true`。`BatchSize` 默认
+  16，`Concurrency` 默认 1，`AwaitDuration` 默认 5s，`InvisibleDuration`
+  默认 30s。
+- `Consume` 运行拉取循环：`Receive` 长轮询取回一批消息，每个 worker 按顺序
+  逐条处理并 ack；handler 返回 nil 即 ack，返回错误则不 ack，不可见时间后
+  broker 重投且 `DeliveryAttempt` 递增（at-least-once），业务按 `MessageID`
+  或 `Keys` 幂等。`DiscardOnError` 上报错误后 ack 失败消息并继续；handler
+  panic 被恢复为错误，按同样规则重投。长轮询超时视为空批次继续；其它接收
+  错误通过 `OnError` 上报并退避 1 秒。`ctx` 取消或 `Close` 时返回 nil，可直接
+  作为常驻 goroutine。
+- `Close` 幂等且只发出停止信号并立即返回；底层客户端在 worker 退出后由
+  `Consume` 调用 `GracefulStop`。从未启动就 `Close` 是安全的。
+- 注册表只缓存 producer，按代关闭；消费者由业务用 `NewConsumer` 创建和关闭。
+  与 Redis、AMQP、Kafka 一致，多实例由应用装配层负责；本包不保存全局句柄。
 
 ---
 
@@ -3537,15 +3981,15 @@ import (
     "os"
 
     "github.com/bingcool/gofy"
-    "github.com/bingcool/gofy/transport"
+    "github.com/bingcool/gofy/support"
 )
 
 type pingModule struct{}
 
 func (pingModule) Name() string { return "ping" }
 
-func (pingModule) Register(r *transport.Router) error {
-    transport.GET(r, "/ping", ping)
+func (pingModule) Register(r *support.Router) error {
+    support.GET(r, "/ping", ping)
     return nil
 }
 

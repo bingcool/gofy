@@ -13,9 +13,9 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/transport"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -37,7 +37,7 @@ type options struct {
 	http      HTTPConfig
 	apiPrefix string
 
-	middleware []transport.Middleware
+	middleware []support.Middleware
 
 	pidFile    string
 	pidPerm    os.FileMode
@@ -51,29 +51,29 @@ type options struct {
 	// cfg.Register.Enabled is true.
 	nacosRegistration *nacos.Config
 
-	moduleFactories []transport.ModuleFactory
-	modules         []transport.Module
+	moduleFactories []support.ModuleFactory
+	modules         []support.Module
 
 	scripts  []script.Script
 	commands []command.Command
 
 	shutdownTimeout time.Duration
 
-	responder         transport.Responder
+	responder         support.Responder
 	responderSet      bool
 	recovery          bool
 	accessLog         bool
 	headerPropagation bool
-	cors              *transport.CORSConfig
+	cors              *support.CORSConfig
 	health            bool
 	maxBody           int64
 	trusted           []string
 	alwaysOK          bool
 	serverConf        func(*http.Server) error
 
-	jwt             *transport.JWTAuthConfig
-	rateLimit       *transport.RateLimitConfig
-	securityHeaders *transport.SecurityHeadersConfig
+	jwt             *support.JWTAuthConfig
+	rateLimit       *support.RateLimitConfig
+	securityHeaders *support.SecurityHeadersConfig
 }
 
 func defaultOptions() options {
@@ -89,7 +89,7 @@ func defaultOptions() options {
 		apiPrefix:       "/api/v1",
 		pidPerm:         0o644,
 		shutdownTimeout: 10 * time.Second,
-		responder:       transport.NewResponder(transport.ResponderConfig{}),
+		responder:       support.NewResponder(support.ResponderConfig{}),
 		recovery:        true,
 		accessLog:       true,
 		maxBody:         4 << 20,
@@ -159,13 +159,13 @@ func WithHTTP(cfg HTTPConfig) Option {
 // disables the prefix.
 func WithAPIPrefix(prefix string) Option {
 	return func(o *options) error {
-		o.apiPrefix = transport.NormalizePrefix(prefix)
+		o.apiPrefix = support.NormalizePrefix(prefix)
 		return nil
 	}
 }
 
 // WithMiddleware appends business-wide middleware after framework middleware.
-func WithMiddleware(mw ...transport.Middleware) Option {
+func WithMiddleware(mw ...support.Middleware) Option {
 	return func(o *options) error {
 		for _, m := range mw {
 			if m == nil {
@@ -259,7 +259,7 @@ func WithNacosRegistration(cfg nacos.Config) Option {
 }
 
 // WithModuleFactories registers factories invoked during startup.
-func WithModuleFactories(factories ...transport.ModuleFactory) Option {
+func WithModuleFactories(factories ...support.ModuleFactory) Option {
 	return func(o *options) error {
 		for _, f := range factories {
 			if f == nil {
@@ -273,7 +273,7 @@ func WithModuleFactories(factories ...transport.ModuleFactory) Option {
 
 // WithModules injects module instances. They do not receive a Runtime; use
 // WithModuleFactories for modules that need one.
-func WithModules(modules ...transport.Module) Option {
+func WithModules(modules ...support.Module) Option {
 	return func(o *options) error {
 		for _, m := range modules {
 			if m == nil {
@@ -319,7 +319,7 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 }
 
 // WithResponder replaces the default response renderer.
-func WithResponder(r transport.Responder) Option {
+func WithResponder(r support.Responder) Option {
 	return func(o *options) error {
 		if r == nil {
 			return fmt.Errorf("gofy: responder must not be nil")
@@ -348,7 +348,7 @@ func WithHeaderPropagation(enabled bool) Option {
 }
 
 // WithCORS enables CORS with the given policy.
-func WithCORS(cfg transport.CORSConfig) Option {
+func WithCORS(cfg support.CORSConfig) Option {
 	return func(o *options) error {
 		if err := cfg.Validate(); err != nil {
 			return err
@@ -367,7 +367,7 @@ func WithHealthEndpoints(enabled bool) Option {
 // WithJWTAuth requires a valid bearer token on module routes. Health checks,
 // static handlers registered outside modules and unmatched paths are not
 // affected.
-func WithJWTAuth(cfg transport.JWTAuthConfig) Option {
+func WithJWTAuth(cfg support.JWTAuthConfig) Option {
 	return func(o *options) error {
 		if err := cfg.Validate(); err != nil {
 			return err
@@ -380,7 +380,7 @@ func WithJWTAuth(cfg transport.JWTAuthConfig) Option {
 
 // WithRateLimit limits requests to module routes per client, method and route.
 // A nil Store or non-positive Limit/Window is rejected at startup.
-func WithRateLimit(cfg transport.RateLimitConfig) Option {
+func WithRateLimit(cfg support.RateLimitConfig) Option {
 	return func(o *options) error {
 		if err := cfg.Validate(); err != nil {
 			return err
@@ -393,8 +393,8 @@ func WithRateLimit(cfg transport.RateLimitConfig) Option {
 
 // WithSecurityHeaders adds hardening headers such as nosniff, frame options
 // and referrer policy to every response. Zero fields use the defaults from
-// transport.DefaultSecurityHeadersConfig.
-func WithSecurityHeaders(cfg transport.SecurityHeadersConfig) Option {
+// support.DefaultSecurityHeadersConfig.
+func WithSecurityHeaders(cfg support.SecurityHeadersConfig) Option {
 	return func(o *options) error {
 		if err := cfg.Validate(); err != nil {
 			return err

@@ -21,7 +21,7 @@ import (
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/logging"
 	gofyscript "github.com/bingcool/gofy/script"
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
@@ -31,12 +31,12 @@ type testModule struct {
 	name  string
 	order *recorder
 	start error
-	reg   func(*transport.Router) error
+	reg   func(*support.Router) error
 }
 
 func (m *testModule) Name() string { return m.name }
 
-func (m *testModule) Register(r *transport.Router) error {
+func (m *testModule) Register(r *support.Router) error {
 	if m.reg != nil {
 		return m.reg(r)
 	}
@@ -139,14 +139,14 @@ func TestNewDoesNotTouchTheFilesystem(t *testing.T) {
 func TestHandlerServesTypedRoutes(t *testing.T) {
 	module := &testModule{
 		name: "order",
-		reg: func(r *transport.Router) error {
-			transport.GET(r, "/orders/:id", func(_ context.Context, req *orderRequest) (*orderResponse, error) {
+		reg: func(r *support.Router) error {
+			support.GET(r, "/orders/:id", func(_ context.Context, req *orderRequest) (*orderResponse, error) {
 				return &orderResponse{ID: req.ID}, nil
 			})
-			transport.POST(r, "/orders", func(_ context.Context, _ *struct{}) (*orderResponse, error) {
+			support.POST(r, "/orders", func(_ context.Context, _ *struct{}) (*orderResponse, error) {
 				return nil, apperr.NotFound("order not found")
 			})
-			transport.GET(r, "/panic", func(context.Context, *struct{}) (*orderResponse, error) {
+			support.GET(r, "/panic", func(context.Context, *struct{}) (*orderResponse, error) {
 				panic("boom: secret")
 			})
 			return nil
@@ -199,8 +199,8 @@ func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
 
 	module := &testModule{
 		name: "panic",
-		reg: func(r *transport.Router) error {
-			transport.GET(r, "/boom", func(context.Context, *struct{}) (*orderResponse, error) {
+		reg: func(r *support.Router) error {
+			support.GET(r, "/boom", func(context.Context, *struct{}) (*orderResponse, error) {
 				panic("boom: secret")
 			})
 			return nil
@@ -580,11 +580,11 @@ func contains(haystack, needle string) bool {
 }
 
 func reloadFactory(body string, events *recorder) gofy.ModuleFactory {
-	return func(*gofy.Runtime) (transport.Module, error) {
+	return func(*gofy.Runtime) (support.Module, error) {
 		return &testModule{
 			name:  "reload",
 			order: events,
-			reg: func(r *transport.Router) error {
+			reg: func(r *support.Router) error {
 				r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, body) })
 				return nil
 			},
@@ -669,7 +669,7 @@ func TestReloadKeepsInjectedModulesRunning(t *testing.T) {
 	embedded := &testModule{
 		name:  "embedded",
 		order: events,
-		reg: func(r *transport.Router) error {
+		reg: func(r *support.Router) error {
 			r.GET("/key", func(c *gin.Context) { c.String(http.StatusOK, "static") })
 			return nil
 		},

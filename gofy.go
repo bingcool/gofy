@@ -17,9 +17,9 @@ import (
 	"github.com/bingcool/gofy/internal/version"
 	"github.com/bingcool/gofy/logging"
 	"github.com/bingcool/gofy/script"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/transport"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -72,8 +72,8 @@ type App struct {
 	// handlerSwap here so Reload can replace the route table without rebinding
 	// the listener; Handler mode has no server and leaves it nil.
 	handlerRef *handlerSwap
-	modules    []transport.Module
-	started    []transport.Module
+	modules    []support.Module
+	started    []support.Module
 
 	// registrar publishes this instance in Nacos naming; nil when
 	// registration is disabled or the App runs in Handler mode.
@@ -101,7 +101,7 @@ func New(opts ...Option) (*App, error) {
 		return nil, err
 	}
 	if o.alwaysOK && !o.responderSet {
-		o.responder = transport.NewResponder(transport.ResponderConfig{AlwaysOK: true})
+		o.responder = support.NewResponder(support.ResponderConfig{AlwaysOK: true})
 	}
 
 	a := &App{

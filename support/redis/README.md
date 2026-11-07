@@ -1,10 +1,11 @@
 # support/redis
 
 Redis 客户端包：校验配置、建立连接、`Ping` 校验、关闭连接。基于
-[`github.com/redis/go-redis/v9`](https://github.com/redis/go-redis)，包内没有全局状态，
-调用方自己持有并关闭返回的 `*redis.Client`。
+[`github.com/redis/go-redis/v9`](https://github.com/redis/go-redis)，默认不保留
+全局状态，调用方自己持有并关闭返回的 `*redis.Client`；需要按配置别名取用时，
+可以用可选的 `Configure` / `NewIO` 命名实例注册表。
 
-同时提供 `transport/ratelimit/redisstore`，把 Redis 用作多实例共享的限流存储。
+同时提供 `support/ratelimit/redisstore`，把 Redis 用作多实例共享的限流存储。
 
 ## 快速开始
 
@@ -29,6 +30,61 @@ defer redis.Close(client)
 `New` 会在 `PingTimeout` 内执行 `PING`，失败时关闭连接并返回错误，便于在启动阶段
 快速失败。
 
+## 命名实例（Configure / NewIO）
+
+按配置别名直接取用实例时，启动阶段注册一次，之后任意位置调用
+`NewIO(ctx, name)`。实例在第一次使用时建连并缓存，后续调用返回同一个
+`*redis.Client`：
+
+```go
+reg, err := redis.Configure(map[string]redis.Config{
+    "default": {Addr: os.Getenv("REDIS_ADDR"), Password: os.Getenv("REDIS_PASSWORD")},
+    "cache":   {Addr: os.Getenv("CACHE_REDIS_ADDR"), DB: 1},
+})
+if err != nil {
+    return err
+}
+defer reg.Close()
+
+client, err := redis.NewIO(ctx, "default") // 业务代码：从当前一代取用
+```
+
+### 包级 NewIO 与 reg.NewIO 的区别
+
+| 写法 | 从哪一代取用 | 适用场景 |
+| --- | --- | --- |
+| `redis.NewIO(ctx, "default")` | 包级当前一代，即最近一次 `Configure` / `Install` 的那一代 | 业务代码不持有注册表，任何位置按别名直接取用 |
+| `reg.NewIO(ctx, "default")` | `reg` 这一代，与它是否已安装无关 | 装配层、热更新、测试中持有该代引用 |
+
+两者的关系按 `reg` 所处的代区分：
+
+- `reg` 是 `Configure` 返回的当前代时，`reg.NewIO` 和包级 `redis.NewIO`
+  共用同一份懒加载缓存，返回同一个客户端，不会建第二条连接；
+- `reg` 是用 `NewRegistry` 建好但尚未 `Install` 的新代时，`reg.NewIO`
+  只预建这一代的连接，业务侧包级调用仍然用旧代；全部实例就绪后
+  `reg.Install()` 才切换；
+- 关闭同样按代区分：`CloseAllIO()` 只关闭当前一代，`reg.Close()` 关闭
+  `reg` 这一代（即使它已经不是当前代）。
+
+注册表自身的约定：
+
+- `Configure` 校验每个别名和 `Config`：空别名或非法配置直接返回错误；空 map
+  表示禁用全部实例（`NewIO` 返回 `ErrUnknownInstance`）。
+- 未注册的名称返回 `ErrUnknownInstance`；未调用 `Configure`，或当前一代已经
+  关闭，返回 `ErrNotConfigured`。
+- 建连失败不会缓存，下一次 `NewIO` 会重新尝试；并发调用安全，同一别名只建
+  一个客户端。
+- 每次 `Configure` 生成新一代注册表。旧一代的 `Close` 只关闭它自己打开的
+  连接，不影响已经切换到新一代的调用方；demo 热更新依赖这个顺序（新模块先
+  启动、旧模块后关闭）。
+- `Configure` 等价于 `NewRegistry` + `Install`。热更新时先用 `NewRegistry`
+  建好新连接，全部成功后再 `Install` 切换；失败只关闭新代，不影响正在
+  服务的旧代。
+- 包级 `CloseAllIO()` 关闭当前一代并清空；持有 `Configure` 返回值时直接用
+  `reg.Close()` 更精确。
+
+不调用 `Configure` 时，包的行为与 `New`/`Close` 完全一致，不产生全局状态。
+
 ## 限流
 
 ```go
@@ -36,8 +92,8 @@ import (
     "time"
 
     "github.com/bingcool/gofy"
-    "github.com/bingcool/gofy/transport"
-    "github.com/bingcool/gofy/transport/ratelimit/redisstore"
+    "github.com/bingcool/gofy/support"
+    "github.com/bingcool/gofy/support/ratelimit/redisstore"
 )
 
 store, err := redisstore.New(client, "order-service")
@@ -46,7 +102,7 @@ if err != nil {
 }
 
 app, err := gofy.New(
-    gofy.WithRateLimit(transport.RateLimitConfig{
+    gofy.WithRateLimit(support.RateLimitConfig{
         Store:  store,
         Limit:  100,
         Window: time.Minute,
@@ -106,7 +162,7 @@ redis:
 ## 测试
 
 ```bash
-go test ./support/redis/ ./transport/ratelimit/redisstore/
+go test ./support/redis/ ./support/ratelimit/redisstore/
 ```
 
 测试使用 `miniredis` 启动进程内 Redis，不依赖外部服务；覆盖配置校验、默认值、

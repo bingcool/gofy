@@ -11,8 +11,8 @@ import (
 
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
-	"github.com/bingcool/gofy/transport"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -55,7 +55,7 @@ type ReloadSpec struct {
 	// ModuleFactories rebuild the modules registered through
 	// WithModuleFactories, and with them the routes. Nil rebuilds from the
 	// factories passed to New.
-	ModuleFactories []transport.ModuleFactory
+	ModuleFactories []support.ModuleFactory
 }
 
 // Reload applies a new configuration to a running App without exiting the
@@ -116,7 +116,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	if factories == nil {
 		factories = a.opts.moduleFactories
 	}
-	injected := append([]transport.Module(nil), a.opts.modules...)
+	injected := append([]support.Module(nil), a.opts.modules...)
 	// Module names are unique within a build (buildModulesWith rejects
 	// duplicates), so the name identifies an injected instance across reloads
 	// without comparing interface values.
@@ -124,8 +124,8 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	for _, m := range injected {
 		injectedNames[m.Name()] = struct{}{}
 	}
-	oldStarted := make([]transport.Module, 0, len(a.started))
-	injectedStarted := make([]transport.Module, 0, len(injected))
+	oldStarted := make([]support.Module, 0, len(a.started))
+	injectedStarted := make([]support.Module, 0, len(injected))
 	for _, m := range a.started {
 		if _, ok := injectedNames[m.Name()]; ok {
 			// Injected instances keep running across the swap; remember them
@@ -190,13 +190,13 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 
 	// Start the new modules before publishing them: if any of them fails, the
 	// old routes and modules are still the live ones.
-	started := make([]transport.Module, 0, len(modules))
+	started := make([]support.Module, 0, len(modules))
 	for _, m := range modules {
 		// Injected instances were started at startup and keep running.
 		if _, ok := injectedNames[m.Name()]; ok {
 			continue
 		}
-		starter, ok := m.(transport.Starter)
+		starter, ok := m.(support.Starter)
 		if !ok {
 			continue
 		}
@@ -207,7 +207,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		}
 		started = append(started, m)
 	}
-	allStarted := make([]transport.Module, 0, len(started)+len(injectedStarted))
+	allStarted := make([]support.Module, 0, len(started)+len(injectedStarted))
 	allStarted = append(allStarted, started...)
 	allStarted = append(allStarted, injectedStarted...)
 
@@ -232,7 +232,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		a.opts.dbConfig = &cfg
 	}
 	if spec.ModuleFactories != nil {
-		a.opts.moduleFactories = append([]transport.ModuleFactory(nil), spec.ModuleFactories...)
+		a.opts.moduleFactories = append([]support.ModuleFactory(nil), spec.ModuleFactories...)
 	}
 	a.logger, a.ownLogger = lg, ownLogger
 	a.systemLogger = systemLogger
@@ -294,7 +294,7 @@ func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, syst
 // stopModuleList stops modules in reverse registration order, like cleanup,
 // and gives each Stop its own timeout so one hung module cannot block the
 // others.
-func stopModuleList(ctx context.Context, modules []transport.Module, timeout time.Duration) []error {
+func stopModuleList(ctx context.Context, modules []support.Module, timeout time.Duration) []error {
 	if len(modules) == 0 {
 		return nil
 	}
@@ -303,7 +303,7 @@ func stopModuleList(ctx context.Context, modules []transport.Module, timeout tim
 	}
 	var errs []error
 	for i := len(modules) - 1; i >= 0; i-- {
-		stopper, ok := modules[i].(transport.Stopper)
+		stopper, ok := modules[i].(support.Stopper)
 		if !ok {
 			continue
 		}

@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
   carries them in the request context. Identity headers are trusted only when
   the direct peer matches the configured proxies; plain clients cannot spoof a
   tenant, and credentials such as `Authorization` never propagate.
-- `WithHeaderPropagation` and `transport/middleware.HeaderPropagation`: install
+- `WithHeaderPropagation` and `support/middleware.HeaderPropagation`: install
   that capture in front of the business middleware. The trace id falls back to
   the generated request id. The context key is shared with
   `gofy-interface-service/client`, which forwards the headers on downstream
@@ -27,21 +27,76 @@ All notable changes to this project are documented here. The format follows
   `user_name`. `JWTAuth` populates it automatically after verification.
 - `support/headerpropagation`: `ContextWithoutHeader` removes one whitelisted
   header, used when a local identity replaces one captured from upstream.
+- `support/cache`: a `Cache` facade over an injected Redis client. It covers
+  `Set`/`Get`/`Delete`/`Has`/`TTL`, batch `SetMany`/`GetMany`, and
+  `SetJSON`/`GetJSON` helpers. `ttl <= 0` means no expiration, matching the
+  swoolefy library; the package never owns or closes the client.
+- `support/queues`: Redis-backed immediate and delayed queues over an injected
+  client, matching swoolefy's key layout. `Queue` offers FIFO, priority and
+  retry (`{key}`, `{key}:priority_queue`, `{key}:retry_queue_sort`), while
+  `DelayQueue` stores due timestamps in a ZSET. Due retries are promoted and
+  due delayed messages are claimed with Lua scripts, and messages use an
+  envelope with `__id`, `__retry_num`, `__timestamp` and a nested `payload`.
+- `support/amqp`: AMQP 0-9-1 (RabbitMQ) clients and queues. `Config` lists
+  multiple hosts with ordered fallback, `New` dials them and reconnects on
+  demand, and `Wrap` injects an existing connection. `Queue` declares
+  direct/fanout/topic/headers topologies, publishes with optional publisher
+  confirms, and consumes with prefetch, automatic ack/nack (requeue or
+  discard), panic recovery and reconnect. `DelayConfig` adds TTL + dead-letter
+  delayed messages, declaring the target topology before the staging queue.
+  Multi-instance wiring stays in the application, as with Redis.
+- `support/kafka`: a pure-Go Kafka (franz-go) client, producer and consumer
+  group. `Config` lists seed brokers, `New` discovers the cluster through
+  metadata and `Wrap` injects an existing client. `Producer` publishes
+  synchronously (`ProduceSync`) and keeps per-key ordering; `Consumer` polls a
+  group with configurable auto/manual commit, earliest/latest offset reset,
+  session timeout and rebalance callbacks. Handler errors default to
+  redelivery (at-least-once) with `DiscardOnError` for poison messages, and
+  panics are recovered into errors. Multi-instance wiring stays in the
+  application, as with AMQP.
+- `support/rocketmq`: an official `apache/rocketmq-clients/golang/v5` client
+  (`v5.1.2`) over the gRPC proxy (default 8081), so no sidecar and no name
+  server. `New` starts a producer; setting `StartupTopics` (and leaving
+  `SkipStartupCheck` false) optionally probes their routes to fail fast.
+  `Client.Publish`/`PublishJSON` send synchronously with tags, indexed business
+  keys, properties, an absolute `DeliverAt` delay and a `MessageGroup` for FIFO
+  topics. v5 has no push consumer, so `NewConsumer` builds a `SimpleConsumer`
+  and `Consume` runs a long-poll loop with per-message acknowledgement, tag and
+  SQL92 filters, a configurable batch size, concurrency and invisible
+  duration, and at-least-once redelivery when a handler fails. Consumers
+  require a group; producers no longer register one, so duplicate-group
+  validation is gone.
+- `support/mysql`, `support/redis`, `support/amqp`, `support/kafka`,
+  `support/rocketmq`:
+  `Configure(map[string]Config)` registers named configurations and
+  `NewIO(ctx, name)` returns the cached instance for an alias, opening it on
+  first use. Each `Configure` call starts a new generation whose `Close` only
+  releases its own connections, so a reload can start new modules before the
+  old ones stop. `NewRegistry` + `Install` split that into "build" and "make
+  current" so a failed startup can be discarded without replacing the working
+  generation. Unregistered names report `ErrUnknownInstance`; using `NewIO`
+  before `Configure` (or after `Close`) reports `ErrNotConfigured`. Packages
+  keep their existing `New`/`Close` behavior when `Configure` is not used.
+- `config.LoadDocument`: reads a YAML file into a `Document` so callers can
+  fetch individual values by path (`GetString("db.default.dsn")`,
+  `GetInt`, `GetBool`, `GetDuration`, `GetStringSlice`, ...) without declaring
+  a full struct. It expands `${ENV_VAR}` like `Load` and keeps `Load` unchanged
+  for typed decoding with defaults and validation.
 - `support/jwtauth`: HMAC JWT verification for HS256/HS384/HS512. It validates
   signature, `exp`/`nbf` with optional leeway, `iss` and `aud`, rejects
   `alg: none`, and returns sentinel errors so callers can log the reason
   without exposing it to clients.
-- `transport/ratelimit`: `Store` interface and `MemoryStore` sliding-window
+- `support/ratelimit`: `Store` interface and `MemoryStore` sliding-window
   limiter with injectable clock and idle-key sweep. Shared deployments use the
   Redis implementation below; the interface stays small enough for other
   backends.
 - `support/redis`: `Config` validation, `New` (pings within `PingTimeout`),
   `Ping` and `Close` around `go-redis/v9`. No global state, no logger
   overrides, and errors never include the password.
-- `transport/ratelimit/redisstore`: Redis sorted-set sliding window behind
+- `support/ratelimit/redisstore`: Redis sorted-set sliding window behind
   `ratelimit.Store`, using server time and a Lua script so multiple instances
   share one bucket. Backed by `go-redis/v9` and tested with `miniredis`.
-- `transport/middleware`: `JWTAuth`, `RateLimit` and `SecurityHeaders`.
+- `support/middleware`: `JWTAuth`, `RateLimit` and `SecurityHeaders`.
   JWT failures return 401/40100; rate limiting returns 429/42900 with
   `X-RateLimit-*` and `Retry-After`, and fails closed with 503 when the store
   errors unless `FailOpen` is set; security headers default to `nosniff`,
@@ -52,7 +107,7 @@ All notable changes to this project are documented here. The format follows
 - Unmatched paths and unsupported methods now use the shared envelope:
   404/40400 via `NoRoute` and 405/40500 via `NoMethod`. gin writes the `Allow`
   header on 405. `apperr.MethodNotAllowed` is new.
-- `transport/middleware`: the access log records the query string with
+- `support/middleware`: the access log records the query string with
   sensitive values (`password`, `token`, `authorization`, `api_key`,
   `signature`, ...) replaced by `***`; unparseable queries are logged as
   `***`. Controlled by `AccessLogOptions.LogQuery` and `SensitiveQuery`.
@@ -123,6 +178,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Breaking:** the `transport` package is now `support`. `Router`, typed
+  handlers, binding, `Responder` and the CORS/JWT/rate-limit/security-header
+  configs live in the `support` package; middleware moved to
+  `support/middleware` and the limiter to `support/ratelimit`. Update imports
+  from `github.com/bingcool/gofy/transport...` to
+  `github.com/bingcool/gofy/support...` and `transport.X` to `support.X`.
+  Config errors now use the `support:` prefix.
 - Unmatched paths now return the JSON envelope (`code 40400`) instead of gin's
   plain-text `404 page not found`, and unsupported methods return `40500`
   instead of `40400`.
@@ -153,7 +215,7 @@ All notable changes to this project are documented here. The format follows
 - `gofy.App` with a single-shot lifecycle: `New`, `Run`, `Handler`, `Execute`
   and idempotent `Shutdown`.
 - Typed HTTP handlers with request binding, defaults and `message:"tag:text"`
-  validation messages in `transport`.
+  validation messages in `support`.
 - Default response envelope `{code,msg,data,req_id,details}` and `apperr` error
   mapping to HTTP status codes and business codes.
 - Framework middleware: request id, structured access log, panic recovery,

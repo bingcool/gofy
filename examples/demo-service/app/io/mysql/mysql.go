@@ -32,13 +32,15 @@ var mu sync.RWMutex
 // framework and is never closed here.
 type Set struct {
 	defaultDB *gorm.DB
+	registry  *gofymysql.Registry
 	order     *gorm.DB
 	product   *gorm.DB
 }
 
 // Open opens db.order and db.product. defaultDB is the framework-managed
 // db.default and is only published, not owned. Unknown instance names are
-// rejected so a typo cannot silently leave a handle nil.
+// rejected so a typo cannot silently leave a handle nil. Extra connections come
+// from support/mysql NewIO for this generation.
 func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, logger *zap.Logger) (*Set, error) {
 	if defaultDB == nil {
 		return nil, errors.New("mysql: default database is required")
@@ -46,40 +48,56 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	set := &Set{defaultDB: defaultDB}
-	closeOpened := func() {
-		_ = gofymysql.Close(set.order)
-		_ = gofymysql.Close(set.product)
-	}
 
+	extra := make(map[string]gofymysql.Config, 2)
 	for name := range cfg {
 		switch name {
-		case "default", "order", "product":
+		case "default":
+			// db.default is opened by the framework; NewIO would create a
+			// second pool, so it stays out of the registry.
+		case "order", "product":
+			extra[name] = cfg[name]
 		default:
-			closeOpened()
 			return nil, fmt.Errorf("mysql: unknown instance %q (supported: default, order, product)", name)
 		}
 	}
 
-	if conf, ok := cfg["order"]; ok {
-		db, err := gofymysql.New(ctx, conf, logger)
-		if err != nil {
-			closeOpened()
-			return nil, fmt.Errorf("mysql instance %q: %w", "order", err)
-		}
-		set.order = db
-		logger.Info("mysql instance connected", zap.String("instance", "order"))
+	registry, err := gofymysql.NewRegistry(extra, logger)
+	if err != nil {
+		return nil, err
 	}
-	if conf, ok := cfg["product"]; ok {
-		db, err := gofymysql.New(ctx, conf, logger)
-		if err != nil {
-			closeOpened()
-			return nil, fmt.Errorf("mysql instance %q: %w", "product", err)
+
+	set := &Set{defaultDB: defaultDB, registry: registry}
+	open := func(name string) (*gorm.DB, error) {
+		if _, ok := cfg[name]; !ok {
+			return nil, nil
 		}
-		set.product = db
-		logger.Info("mysql instance connected", zap.String("instance", "product"))
+		db, err := registry.NewIO(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("mysql instance %q: %w", name, err)
+		}
+		logger.Info("mysql instance connected", zap.String("instance", name))
+		return db, nil
 	}
+
+	if set.order, err = open("order"); err != nil {
+		_ = registry.Close()
+		return nil, err
+	}
+	if set.product, err = open("product"); err != nil {
+		_ = registry.Close()
+		return nil, err
+	}
+	// 全部实例就绪后再切换当前一代：启动失败时旧模块的 NewIO 不受影响。
+	registry.Install()
 	return set, nil
+}
+
+// NewIO returns the pool registered under name in the installed generation.
+// It is a thin wrapper over support/mysql. db.default is framework-managed, so
+// it is not part of the registry; use Db or Runtime.DB for the default pool.
+func NewIO(ctx context.Context, name string) (*gorm.DB, error) {
+	return gofymysql.NewIO(ctx, name)
 }
 
 // Install publishes the set to the package handles.
@@ -110,12 +128,5 @@ func (s *Set) Close() error {
 	}
 	mu.Unlock()
 
-	var errs []error
-	if err := gofymysql.Close(s.order); err != nil {
-		errs = append(errs, fmt.Errorf("mysql instance %q: %w", "order", err))
-	}
-	if err := gofymysql.Close(s.product); err != nil {
-		errs = append(errs, fmt.Errorf("mysql instance %q: %w", "product", err))
-	}
-	return errors.Join(errs...)
+	return s.registry.Close()
 }

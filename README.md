@@ -23,7 +23,7 @@ import (
 	"os"
 
 	"github.com/bingcool/gofy"
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 )
 
 type helloRequest struct {
@@ -56,8 +56,8 @@ type helloModule struct{}
 
 func (helloModule) Name() string { return "hello" }
 
-func (helloModule) Register(r *transport.Router) error {
-	transport.GET(r, "/greet", func(_ context.Context, req *helloRequest) (*helloResponse, error) {
+func (helloModule) Register(r *support.Router) error {
+	support.GET(r, "/greet", func(_ context.Context, req *helloRequest) (*helloResponse, error) {
 		return &helloResponse{Message: "hello " + req.Name}, nil
 	})
 	return nil
@@ -93,20 +93,20 @@ if err != nil {
 }
 
 app, err := gofy.New(
-	gofy.WithSecurityHeaders(transport.SecurityHeadersConfig{
+	gofy.WithSecurityHeaders(support.SecurityHeadersConfig{
 		HSTS: 24 * time.Hour, // 仅在确认全站 HTTPS 后开启
 	}),
-	gofy.WithRateLimit(transport.RateLimitConfig{
+	gofy.WithRateLimit(support.RateLimitConfig{
 		Store:  ratelimit.NewMemoryStore(),
 		Limit:  100,
 		Window: time.Minute,
 	}),
-	gofy.WithJWTAuth(transport.JWTAuthConfig{Parser: parser}),
+	gofy.WithJWTAuth(support.JWTAuthConfig{Parser: parser}),
 	// ...
 )
 ```
 
-- **JWT**：失败固定返回 `401 / 40100`，成功后可 `transport.JWTClaims(c)` 读取 claims；
+- **JWT**：失败固定返回 `401 / 40100`，成功后可 `support.JWTClaims(c)` 读取 claims；
   校验后的身份同时写入 `frameworkcontext`，Service 层用
   `frameworkcontext.UserID(ctx)` 读取；`Optional: true` 时无 token 也放行，由业务自己判断。
 - **限流**：滑动窗口，按 `客户端 IP + 方法 + 路由` 分桶；响应带 `X-RateLimit-*`，
@@ -283,9 +283,69 @@ db:
 
 密钥应通过环境变量注入，不要提交到 YAML。
 
+如果只需要读取零散配置，可以按路径直读，不必定义完整结构体：
+
+```go
+doc, err := gofyconfig.LoadDocument(ctx, "config.yaml")
+if err != nil {
+    return err
+}
+dsn, ok := doc.GetString("db.default.dsn")
+if !ok {
+    return errors.New("db.default.dsn is required")
+}
+port, _ := doc.GetInt("http.port")          // 数字、字符串形式的数字都可读取
+timeout, _ := doc.GetDuration("http.read_timeout") // 1h、30s、200ms
+```
+
+`Document` 支持 `Get`、`Has`、`GetString`、`GetInt`、`GetInt64`、`GetFloat64`、
+`GetBool`、`GetDuration`、`GetStringSlice`；路径用点号分隔，序列用数字下标
+（如 `servers.0.host`），同样会展开 `${ENV_VAR}`。它不做结构体默认值和校验，
+需要这些能力时继续使用 `Load[T]`。
+
 数据库连接用 `support/mysql`（GORM）：`WithDatabase` 交给 App 托管连接池，
 `WithDB` 注入已有连接。配置项、默认值和日志行为见
 [support/mysql/README.md](support/mysql/README.md)。
+
+Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
+客户端之上的缓存与队列门面。AMQP（RabbitMQ）用 `support/amqp`：支持多 host
+回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、断线重连，以及基于
+TTL + 死信交换机的延迟队列。配置与示例见
+[support/amqp/README.md](support/amqp/README.md)。
+
+Kafka 用 `support/kafka`（纯 Go 的 franz-go，无 cgo）：`New` 连接 seed brokers
+并由 metadata 发现集群，`Wrap` 注入已有客户端；`Producer` 同步发布，同一个 Key
+落到同一分区从而保序；`Consumer` 按消费组订阅，支持自动提交或 `CommitRecords`
+手动提交、earliest/latest 重置位点和 rebalance 回调。处理函数失败默认重新投递
+（at-least-once），`DiscardOnError` 可跳过毒消息。配置与示例见
+[support/kafka/README.md](support/kafka/README.md)。
+
+RocketMQ 用 `support/rocketmq`（官方 apache/rocketmq-clients/golang v5，走 gRPC
+proxy，默认 8081，不需要 sidecar）：`New` 启动 producer，可选配置
+`StartupTopics` 做启动探测；`Client.Publish` / `PublishJSON` 同步发送，支持
+Tag、业务 Key、自定义属性、绝对时间的延时消息和 FIFO 的 `MessageGroup`；
+消费者用同一份 `Config` 调用 `NewConsumer` 创建，内部是拉取型的
+SimpleConsumer（v5 没有 push consumer），支持 Tag / SQL92 过滤、逐条 ack 和
+失败重投（at-least-once）。配置与示例见
+[support/rocketmq/README.md](support/rocketmq/README.md)。
+
+`support/mysql`、`support/redis`、`support/amqp`、`support/kafka`、
+`support/rocketmq` 还支持命名
+实例：启动时用 `Configure(map[string]Config)` 注册配置别名，之后任意位置用
+`NewIO(ctx, "default")` 按需建连并缓存。每次 `Configure` 生成一代注册表，
+`Close` 只关闭本代连接，因此热更新可以先启动新模块再关闭旧模块：
+
+```go
+reg, err := redis.Configure(map[string]redis.Config{
+    "default": {Addr: os.Getenv("REDIS_ADDR")},
+})
+if err != nil {
+    return err
+}
+defer reg.Close()
+
+client, err := redis.NewIO(ctx, "default")
+```
 
 ## Nacos 配置中心
 
@@ -567,16 +627,23 @@ GOFY_TEST_MYSQL_DSN='user:pass@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime
 gofy.go, option.go, start.go, execute.go, stop.go   App、生命周期、CLI
 apperr/        业务错误模型
 core/          共享 Runtime（叶子包）
-transport/     Router、类型化 handler、Responder、中间件、限流
+support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全头配置
 logging/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
+support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传
 support/mysql/ GORM MySQL 连接管理
 support/redis/ Redis 客户端（go-redis）
 support/nacos/ Nacos 配置拉取、本地生成与变更监听
 support/jwtauth/ HMAC JWT 校验
 support/headerpropagation/ 入口请求头白名单与服务间透传上下文
 support/frameworkcontext/ 统一身份读取（本地认证优先，透传头兜底）
-transport/ratelimit/redisstore/  Redis 共享限流存储
+support/ratelimit/ 滑动窗口限流接口与内存实现
+support/ratelimit/redisstore/  Redis 共享限流存储
+support/cache/  基于注入 Redis 实例的键值缓存门面
+support/queues/ 基于注入 Redis 实例的即时队列与延迟队列
+support/amqp/   AMQP（RabbitMQ）连接、发布、消费与 TTL 延迟队列
+support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go）
+support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRPC 客户端）
 script/        维护脚本描述
 command/       自定义 CLI 命令描述
 config/        可选 YAML 加载器

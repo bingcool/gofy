@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	appamqp "github.com/yourorg/demo-service/app/io/amqp"
 )
 
 func TestLoadDatabasesByInstanceName(t *testing.T) {
@@ -89,6 +92,186 @@ redis:
 
 	if _, err := Load(context.Background(), path); err == nil {
 		t.Fatal("Load accepted enabled redis without addr")
+	}
+}
+
+func TestLoadKafkaInstancesByInstanceName(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+kafka:
+  default:
+    enabled: true
+    brokers:
+      - 127.0.0.1:9092
+      - 127.0.0.2:9092
+    client_id: demo-service
+    dial_timeout: 3s
+    idempotent: true
+    record_retries: 5
+  order:
+    enabled: false
+    brokers:
+      - 127.0.0.1:9092
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	def := cfg.Kafka[DefaultDatabase]
+	if !def.Enabled || len(def.Brokers) != 2 || def.Brokers[0] != "127.0.0.1:9092" {
+		t.Fatalf("default kafka = %+v", def)
+	}
+	if def.ClientID != "demo-service" || def.DialTimeout != 3*time.Second ||
+		!def.Idempotent || def.RecordRetries != 5 {
+		t.Fatalf("default kafka settings = %+v", def.Config)
+	}
+	if cfg.Kafka["order"].Enabled {
+		t.Fatal("order kafka must stay disabled")
+	}
+}
+
+func TestLoadRejectsEnabledKafkaWithoutBrokers(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+kafka:
+  default:
+    enabled: true
+`)
+
+	if _, err := Load(context.Background(), path); err == nil {
+		t.Fatal("Load accepted enabled kafka without brokers")
+	}
+}
+
+func TestLoadRocketMQInstancesByInstanceName(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+rocketmq:
+  default:
+    enabled: true
+    endpoint: 127.0.0.1:8081
+    send_timeout: 3s
+    max_attempts: 5
+  order:
+    enabled: false
+    endpoint: 127.0.0.1:8081
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	def := cfg.RocketMQ[DefaultDatabase]
+	if !def.Enabled || def.Endpoint != "127.0.0.1:8081" {
+		t.Fatalf("default rocketmq = %+v", def)
+	}
+	if def.SendTimeout != 3*time.Second || def.MaxAttempts != 5 {
+		t.Fatalf("default rocketmq settings = %+v", def.Config)
+	}
+	if cfg.RocketMQ["order"].Enabled {
+		t.Fatal("order rocketmq must stay disabled")
+	}
+}
+
+func TestLoadRejectsInvalidRocketMQInstances(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "no endpoint",
+			yaml: `
+rocketmq:
+  default:
+    enabled: true
+`,
+		},
+		{
+			name: "access key without secret",
+			yaml: `
+rocketmq:
+  default:
+    enabled: true
+    endpoint: 127.0.0.1:8081
+    startup_topics:
+      - demo-topic
+    access_key: ak
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+`+test.yaml)
+			if _, err := Load(context.Background(), path); err == nil {
+				t.Fatal("Load accepted an invalid rocketmq instance")
+			}
+		})
+	}
+}
+
+func TestLoadAMQPInstancesByInstanceName(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+amqp:
+  default:
+    enabled: true
+    hosts:
+      - host: 127.0.0.1
+        port: 5672
+        username: rabbitmq
+        password: test-pass
+        vhost: my_vhost
+    heartbeat: 15s
+  order:
+    enabled: false
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	def := cfg.AMQP[appamqp.DefaultInstance]
+	if !def.Enabled || len(def.Hosts) != 1 {
+		t.Fatalf("default amqp = %+v", def)
+	}
+	host := def.Hosts[0]
+	if host.Host != "127.0.0.1" || host.Port != 5672 || host.Username != "rabbitmq" ||
+		host.Password != "test-pass" || host.Vhost != "my_vhost" {
+		t.Fatalf("amqp host = %+v", host)
+	}
+	if def.Heartbeat != 15*time.Second {
+		t.Fatalf("heartbeat = %s", def.Heartbeat)
+	}
+	if cfg.AMQP["order"].Enabled {
+		t.Fatal("order amqp must stay disabled")
+	}
+}
+
+func TestLoadRejectsEnabledAMQPWithoutHosts(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+amqp:
+  default:
+    enabled: true
+`)
+
+	if _, err := Load(context.Background(), path); err == nil {
+		t.Fatal("Load accepted enabled amqp without hosts")
 	}
 }
 

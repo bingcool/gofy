@@ -1,8 +1,9 @@
 # support/mysql
 
 基于 GORM 的 MySQL 连接包：打开连接、配置连接池、`Ping` 校验、关闭连接。
-包内没有全局状态，调用方自己传入 `context`、`Config` 和 `zap.Logger`，
-可以直接用于 `gofy.WithDatabase`，也可以单独使用。
+默认没有全局状态，调用方自己传入 `context`、`Config` 和 `zap.Logger`，
+可以直接用于 `gofy.WithDatabase`，也可以单独使用；需要按配置别名取用时，
+可以用可选的 `Configure` / `NewIO` 命名实例注册表。
 
 ## 快速开始
 
@@ -42,6 +43,65 @@ app, err := gofy.New(
 
 已有连接用 `gofy.WithDB(db)` 注入；该选项不会 `Ping`，也不会关闭连接，
 生命周期由调用方负责。两个选项互斥。
+
+## 命名实例（Configure / NewIO）
+
+按配置别名直接取用连接时，启动阶段注册一次，之后任意位置调用
+`NewIO(ctx, name)`。连接池在第一次使用时打开并缓存：
+
+```go
+reg, err := mysql.Configure(map[string]mysql.Config{
+    "order":   {DSN: os.Getenv("ORDER_DB_DSN")},
+    "product": {DSN: os.Getenv("PRODUCT_DB_DSN")},
+}, logger)
+if err != nil {
+    return err
+}
+defer reg.Close()
+
+db, err := mysql.NewIO(ctx, "order") // 业务代码：从当前一代取用
+```
+
+### 包级 NewIO 与 reg.NewIO 的区别
+
+| 写法 | 从哪一代取用 | 适用场景 |
+| --- | --- | --- |
+| `mysql.NewIO(ctx, "order")` | 包级当前一代，即最近一次 `Configure` / `Install` 的那一代 | 业务代码不持有注册表，任何位置按别名直接取用 |
+| `reg.NewIO(ctx, "order")` | `reg` 这一代，与它是否已安装无关 | 装配层、热更新、测试中持有该代引用 |
+
+两者的关系按 `reg` 所处的代区分：
+
+- `reg` 是 `Configure` 返回的当前代时，`reg.NewIO` 和包级 `mysql.NewIO`
+  共用同一份懒加载缓存，返回同一个 `*gorm.DB`（同一连接池），不会打开第二个
+  连接池；
+- `reg` 是用 `NewRegistry` 建好但尚未 `Install` 的新代时，`reg.NewIO`
+  只预建这一代的连接池，业务侧包级调用仍然用旧代；全部实例就绪后
+  `reg.Install()` 才切换；
+- 关闭同样按代区分：`CloseAllIO()` 只关闭当前一代，`reg.Close()` 关闭
+  `reg` 这一代（即使它已经不是当前代）。
+
+注册表自身的约定：
+
+- `Configure` 校验每个别名和 `Config`：空别名或非法配置直接返回错误；空 map
+  表示禁用全部实例（`NewIO` 返回 `ErrUnknownInstance`）。`logger` 为 nil 时
+  使用 `zap.NewNop()`，所有别名共享同一个 logger。
+- 未注册的名称返回 `ErrUnknownInstance`；未调用 `Configure`，或当前一代已经
+  关闭，返回 `ErrNotConfigured`。
+- 建连失败不会缓存，下一次 `NewIO` 会重新尝试；并发调用安全，同一别名只打开
+  一个连接池。
+- 每次 `Configure` 生成新一代注册表。旧一代的 `Close` 只关闭它自己打开的
+  连接池，不影响已经切换到新一代的调用方；demo 热更新依赖这个顺序（新模块先
+  启动、旧模块后关闭）。
+- `Configure` 等价于 `NewRegistry` + `Install`。热更新时先用 `NewRegistry`
+  建好新连接，全部成功后再 `Install` 切换；失败只关闭新代，不影响正在
+  服务的旧代。
+- 包级 `CloseAllIO()` 关闭当前一代并清空；持有 `Configure` 返回值时直接用
+  `reg.Close()` 更精确。
+
+`db.default` 由框架的 `WithDatabase` 创建和关闭，业务应继续使用 `Runtime.DB`
+或 `App` 注入的 `*gorm.DB`；把同一个别名再放进注册表会得到第二个连接池。
+
+不调用 `Configure` 时，包的行为与 `New`/`Close` 完全一致，不产生全局状态。
 
 ## Config
 

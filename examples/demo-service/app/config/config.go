@@ -11,7 +11,10 @@ import (
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/logging"
+	appamqp "github.com/yourorg/demo-service/app/io/amqp"
+	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	"github.com/yourorg/demo-service/app/io/redis"
+	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 	"github.com/yourorg/demo-service/app/module/order"
 )
 
@@ -19,15 +22,18 @@ import (
 const DefaultDatabase = "default"
 
 // Config 的 DB 按实例名分组：框架只托管 default，其余实例由 io 模块建连。
-// Redis 同样按实例名分组，由 io 模块统一建连和关闭。
+// Redis、AMQP、Kafka 和 RocketMQ 同样按实例名分组，由 io 模块统一建连和关闭。
 type Config struct {
-	Env     string                         `yaml:"env" default:"dev"`
-	HTTP    gofy.HTTPConfig                `yaml:"http"`
-	Log     logging.Config                 `yaml:"log"`
-	DB      map[string]gofy.DatabaseConfig `yaml:"db"`
-	Redis   redis.Config                   `yaml:"redis"`
-	PIDFile string                         `yaml:"pid_file"`
-	Order   order.Config                   `yaml:"order"`
+	Env      string                         `yaml:"env" default:"dev"`
+	HTTP     gofy.HTTPConfig                `yaml:"http"`
+	Log      logging.Config                 `yaml:"log"`
+	DB       map[string]gofy.DatabaseConfig `yaml:"db"`
+	Redis    redis.Config                   `yaml:"redis"`
+	AMQP     appamqp.Config                 `yaml:"amqp"`
+	Kafka    appkafka.Config                `yaml:"kafka"`
+	RocketMQ approcketmq.Config             `yaml:"rocketmq"`
+	PIDFile  string                         `yaml:"pid_file"`
+	Order    order.Config                   `yaml:"order"`
 }
 
 // Database returns the named instance; the caller must have checked it exists.
@@ -57,6 +63,39 @@ func Load(ctx context.Context, path string) (*Config, error) {
 		}
 		if err := inst.Config.Validate(); err != nil {
 			return nil, fmt.Errorf("config: redis.%s: %w", name, err)
+		}
+	}
+	for name, inst := range cfg.AMQP {
+		if !inst.Enabled {
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("config: amqp instance name must not be empty")
+		}
+		if err := inst.Config.Validate(); err != nil {
+			return nil, fmt.Errorf("config: amqp.%s: %w", name, err)
+		}
+	}
+	for name, inst := range cfg.Kafka {
+		if !inst.Enabled {
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("config: kafka instance name must not be empty")
+		}
+		if err := inst.Config.Validate(); err != nil {
+			return nil, fmt.Errorf("config: kafka.%s: %w", name, err)
+		}
+	}
+	for name, inst := range cfg.RocketMQ {
+		if !inst.Enabled {
+			continue
+		}
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("config: rocketmq instance name must not be empty")
+		}
+		if err := inst.Config.Validate(); err != nil {
+			return nil, fmt.Errorf("config: rocketmq.%s: %w", name, err)
 		}
 	}
 	applyLogPaths(cfg)

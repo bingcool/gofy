@@ -20,8 +20,8 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/core/systemenv"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/transport"
 	"github.com/yourorg/demo-service/app/config"
 	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/module/order"
@@ -194,11 +194,11 @@ type reloader struct {
 // runs two watchers; the old watcher is cancelled once the swap completes.
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	factories := []gofy.ModuleFactory{
-		appio.NewModuleFactory(cfg.DB, cfg.Redis),
+		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ),
 		order.NewModuleFactory(cfg.Order),
 	}
 	if r.watch {
-		factories = append(factories, func(rt *core.Runtime) (transport.Module, error) {
+		factories = append(factories, func(rt *core.Runtime) (support.Module, error) {
 			return &nacosWatchModule{
 				cfg:      r.nacosCfg,
 				logger:   rt.Logger,
@@ -258,7 +258,7 @@ type nacosWatchModule struct {
 
 func (m *nacosWatchModule) Name() string { return "nacos-watch" }
 
-func (m *nacosWatchModule) Register(*transport.Router) error { return nil }
+func (m *nacosWatchModule) Register(*support.Router) error { return nil }
 
 func (m *nacosWatchModule) Start(ctx context.Context) error {
 	// Tie the watcher to the application context: shutdown cancels it, and a

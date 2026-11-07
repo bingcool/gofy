@@ -9,7 +9,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 	"gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 )
@@ -19,12 +19,12 @@ type propagationResponse struct {
 }
 
 type propagationModule struct {
-	reg func(*transport.Router) error
+	reg func(*support.Router) error
 }
 
 func (m *propagationModule) Name() string { return "propagate" }
 
-func (m *propagationModule) Register(r *transport.Router) error { return m.reg(r) }
+func (m *propagationModule) Register(r *support.Router) error { return m.reg(r) }
 
 // TestHeaderPropagationReachesDownstreamService 串联两个仓库：
 // gofy 把入口请求头写入 request context，interface-service 客户端
@@ -43,8 +43,8 @@ func TestHeaderPropagationReachesDownstreamService(t *testing.T) {
 	}
 
 	module := &propagationModule{
-		reg: func(r *transport.Router) error {
-			transport.GET(r, "", func(ctx context.Context, _ *struct{}) (*propagationResponse, error) {
+		reg: func(r *support.Router) error {
+			support.GET(r, "", func(ctx context.Context, _ *struct{}) (*propagationResponse, error) {
 				res, err := apiClient.GetConfig(ctx, &orderrequest.GetConfigRequest{})
 				if err != nil {
 					return nil, err

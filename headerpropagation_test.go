@@ -8,8 +8,8 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/headerpropagation"
-	"github.com/bingcool/gofy/transport"
 )
 
 type headersResponse struct {
@@ -23,8 +23,8 @@ func propagationModule(t *testing.T) *testModule {
 	t.Helper()
 	return &testModule{
 		name: "propagate",
-		reg: func(r *transport.Router) error {
-			transport.GET(r, "", func(ctx context.Context, _ *struct{}) (*headersResponse, error) {
+		reg: func(r *support.Router) error {
+			support.GET(r, "", func(ctx context.Context, _ *struct{}) (*headersResponse, error) {
 				headers := headerpropagation.HeadersFromContext(ctx)
 				return &headersResponse{
 					UserID:   headers.Get(headerpropagation.HeaderUserID),

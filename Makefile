@@ -28,7 +28,7 @@ example:
 
 guards:
 	./scripts/check-imports.sh
-	@if grep -rn "func init()" --include="*.go" *.go apperr core transport logging support script command config gofytest internal; then \
+	@if grep -rn "func init()" --include="*.go" *.go apperr core logging support script command config gofytest internal; then \
 		echo "public packages must not use init()"; exit 1; \
 	fi
 

@@ -5,13 +5,13 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 	"github.com/gin-gonic/gin"
 )
 
 // Auth verifies a bearer token. Failures use the same envelope shape as the
 // framework responder so clients see a consistent payload.
-func Auth(verify func(token string) error) transport.Middleware {
+func Auth(verify func(token string) error) support.Middleware {
 	return func(c *gin.Context) {
 		token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 		if err := verify(token); err != nil {
@@ -19,7 +19,7 @@ func Auth(verify func(token string) error) transport.Middleware {
 				"code":   40100,
 				"msg":    "unauthorized",
 				"data":   nil,
-				"req_id": c.GetString(transport.RequestIDKey),
+				"req_id": c.GetString(support.RequestIDKey),
 			})
 			return
 		}

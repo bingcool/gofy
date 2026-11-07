@@ -8,9 +8,9 @@ import (
 
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/transport"
 )
 
 // Runtime is the shared runtime passed to modules, scripts and commands.
@@ -20,16 +20,16 @@ type Runtime = core.Runtime
 type VersionInfo = core.VersionInfo
 
 // ModuleFactory builds a Module during startup.
-type ModuleFactory = transport.ModuleFactory
+type ModuleFactory = support.ModuleFactory
 
 // Middleware is a gin middleware function.
-type Middleware = transport.Middleware
+type Middleware = support.Middleware
 
 // Responder renders HTTP successes and errors.
-type Responder = transport.Responder
+type Responder = support.Responder
 
 // CORSConfig is the cross-origin policy passed to WithCORS.
-type CORSConfig = transport.CORSConfig
+type CORSConfig = support.CORSConfig
 
 // DatabaseConfig is the MySQL configuration passed to WithDatabase.
 type DatabaseConfig = mysql.Config

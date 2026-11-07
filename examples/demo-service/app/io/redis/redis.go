@@ -7,7 +7,6 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -49,51 +48,58 @@ var mu sync.RWMutex
 // Set holds one generation of connections. Open builds it, Install publishes it
 // to the package handles and Close releases it.
 type Set struct {
-	clients map[string]*goredis.Client
+	registry *gofyredis.Registry
+	clients  map[string]*goredis.Client
 }
 
 // Open connects every enabled instance. Unknown names are rejected so a typo
-// does not silently leave a handle nil.
+// does not silently leave a handle nil. The connections themselves come from
+// support/redis NewIO, which caches one client per alias for this generation.
 func Open(ctx context.Context, cfg Config, logger *zap.Logger) (*Set, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	names := make([]string, 0, len(cfg))
+	confs := make(map[string]gofyredis.Config, len(cfg))
 	for name, inst := range cfg {
-		if inst.Enabled {
-			names = append(names, name)
+		if !inst.Enabled {
+			continue
 		}
+		if !isSupported(name) {
+			return nil, fmt.Errorf("redis: unknown instance %q (supported: %s)", name, strings.Join(supported, ", "))
+		}
+		names = append(names, name)
+		confs[name] = inst.Config
 	}
 	sort.Strings(names)
 
-	set := &Set{clients: make(map[string]*goredis.Client, len(names))}
-	closeOpened := func() {
-		for _, client := range set.clients {
-			_ = gofyredis.Close(client)
-		}
+	registry, err := gofyredis.NewRegistry(confs)
+	if err != nil {
+		return nil, err
 	}
 
+	set := &Set{
+		registry: registry,
+		clients:  make(map[string]*goredis.Client, len(names)),
+	}
 	for _, name := range names {
-		if !isSupported(name) {
-			closeOpened()
-			return nil, fmt.Errorf("redis: unknown instance %q (supported: %s)", name, strings.Join(supported, ", "))
-		}
-		inst := cfg[name].Config
-		client, err := gofyredis.New(ctx, inst)
+		client, err := registry.NewIO(ctx, name)
 		if err != nil {
-			closeOpened()
+			_ = registry.Close()
 			return nil, fmt.Errorf("redis instance %q: %w", name, err)
 		}
 		set.clients[name] = client
 		logger.Info("redis instance connected",
 			zap.String("instance", name),
-			zap.String("addr", inst.Addr),
-			zap.Int("db", inst.DB),
+			zap.String("addr", cfg[name].Addr),
+			zap.Int("db", cfg[name].DB),
 		)
 	}
 	if len(names) == 0 {
 		logger.Info("redis instances disabled")
 	}
+	// 全部实例就绪后再切换当前一代：启动失败时旧模块的 NewIO 不受影响。
+	registry.Install()
 	return set, nil
 }
 
@@ -128,13 +134,14 @@ func (s *Set) Close() error {
 	}
 	mu.Unlock()
 
-	var errs []error
-	for name, client := range s.clients {
-		if err := gofyredis.Close(client); err != nil {
-			errs = append(errs, fmt.Errorf("redis instance %q: %w", name, err))
-		}
-	}
-	return errors.Join(errs...)
+	return s.registry.Close()
+}
+
+// NewIO returns the client registered under name in the installed generation.
+// It is a thin wrapper over support/redis, so business code that already
+// imports this package can use the same alias lookup as the library.
+func NewIO(ctx context.Context, name string) (*goredis.Client, error) {
+	return gofyredis.NewIO(ctx, name)
 }
 
 func isSupported(name string) bool {

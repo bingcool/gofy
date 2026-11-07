@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy"
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order/controller"
 	"github.com/yourorg/demo-service/app/module/order/repository"
@@ -33,13 +33,13 @@ type Config struct {
 // Module wires the order HTTP routes.
 type Module struct {
 	svc    *service.OrderService
-	auth   transport.Middleware
+	auth   support.Middleware
 	logger *zap.Logger
 }
 
 // NewModuleFactory builds the module from the application runtime.
 func NewModuleFactory(cfg Config) gofy.ModuleFactory {
-	return func(rt *gofy.Runtime) (transport.Module, error) {
+	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
@@ -71,7 +71,7 @@ func NewModule(cfg Config, svc *service.OrderService, logger *zap.Logger) *Modul
 func (m *Module) Name() string { return "order" }
 
 // Register binds every demoservice contract route to the handler.
-func (m *Module) Register(r *transport.Router) error {
+func (m *Module) Register(r *support.Router) error {
 	h := controller.NewOrderController(m.svc, m.logger)
 	return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
 		Auth: m.auth,

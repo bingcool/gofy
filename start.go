@@ -16,10 +16,10 @@ import (
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/internal/process"
 	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/middleware"
 	"github.com/bingcool/gofy/support/mysql"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/transport"
-	"github.com/bingcool/gofy/transport/middleware"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -204,11 +204,11 @@ func (a *App) run(parent context.Context) error {
 	return reason
 }
 
-func (a *App) buildHTTP(rt *core.Runtime, lg, system *zap.Logger) (*gin.Engine, []transport.Module, error) {
+func (a *App) buildHTTP(rt *core.Runtime, lg, system *zap.Logger) (*gin.Engine, []support.Module, error) {
 	return a.buildHTTPWith(rt, lg, system, a.opts.moduleFactories, a.opts.modules)
 }
 
-func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories []transport.ModuleFactory, injected []transport.Module) (*gin.Engine, []transport.Module, error) {
+func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories []support.ModuleFactory, injected []support.Module) (*gin.Engine, []support.Module, error) {
 	gin.SetMode(ginMode(a.opts.http.Mode))
 	engine := gin.New()
 	if len(a.opts.trusted) > 0 {
@@ -222,7 +222,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 	}
 
-	engine.Use(middleware.RequestID(transport.DefaultRequestIDHeader))
+	engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))
 	if a.opts.headerPropagation {
 		// 紧贴 RequestID 安装：用 req_id 兜底 X-Trace-Id，
 		// 并保证后续业务中间件和 handler 都能从 context 读到透传头。
@@ -259,10 +259,10 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	}
 	registerFallbacks(engine, a.opts.responder)
 
-	base := transport.NewRouter(engine, transport.RouterConfig{
+	base := support.NewRouter(engine, support.RouterConfig{
 		Prefix:    a.opts.apiPrefix,
 		Responder: a.opts.responder,
-		Validator: transport.NewValidator(),
+		Validator: support.NewValidator(),
 	})
 	// Rate limiting and JWT apply to module routes only, so probes and unknown
 	// paths keep their plain behavior (200 and 404).
@@ -290,15 +290,15 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	return engine, modules, nil
 }
 
-func (a *App) buildModules(rt *core.Runtime) ([]transport.Module, error) {
+func (a *App) buildModules(rt *core.Runtime) ([]support.Module, error) {
 	return a.buildModulesWith(rt, a.opts.moduleFactories, a.opts.modules)
 }
 
-func (a *App) buildModulesWith(rt *core.Runtime, factories []transport.ModuleFactory, injected []transport.Module) ([]transport.Module, error) {
-	modules := make([]transport.Module, 0, len(factories)+len(injected))
+func (a *App) buildModulesWith(rt *core.Runtime, factories []support.ModuleFactory, injected []support.Module) ([]support.Module, error) {
+	modules := make([]support.Module, 0, len(factories)+len(injected))
 	seen := make(map[string]struct{}, cap(modules))
 
-	add := func(m transport.Module) error {
+	add := func(m support.Module) error {
 		name := strings.TrimSpace(m.Name())
 		if !namePattern.MatchString(name) {
 			return fmt.Errorf("gofy: invalid module name %q", name)
@@ -331,7 +331,7 @@ func (a *App) buildModulesWith(rt *core.Runtime, factories []transport.ModuleFac
 	return modules, nil
 }
 
-func callFactory(factory transport.ModuleFactory, rt *core.Runtime) (m transport.Module, err error) {
+func callFactory(factory support.ModuleFactory, rt *core.Runtime) (m support.Module, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("panic: %v", rec)
@@ -340,15 +340,15 @@ func callFactory(factory transport.ModuleFactory, rt *core.Runtime) (m transport
 	return factory(rt)
 }
 
-func (a *App) registerModules(base *transport.Router, modules []transport.Module) error {
+func (a *App) registerModules(base *support.Router, modules []support.Module) error {
 	used := make(map[string]string, len(modules))
 	for _, m := range modules {
 		prefix := "/" + m.Name()
-		if p, ok := m.(transport.Prefixer); ok {
+		if p, ok := m.(support.Prefixer); ok {
 			prefix = p.Prefix()
 		}
-		prefix = transport.NormalizePrefix(prefix)
-		full := transport.NormalizePrefix(a.opts.apiPrefix + prefix)
+		prefix = support.NormalizePrefix(prefix)
+		full := support.NormalizePrefix(a.opts.apiPrefix + prefix)
 		if other, ok := used[full]; ok {
 			return fmt.Errorf("gofy: route prefix %q is used by both %q and %q", full, other, m.Name())
 		}
@@ -360,7 +360,7 @@ func (a *App) registerModules(base *transport.Router, modules []transport.Module
 	return nil
 }
 
-func registerModule(m transport.Module, r *transport.Router) (err error) {
+func registerModule(m support.Module, r *support.Router) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("gofy: module %q register panic: %v", m.Name(), rec)
@@ -374,7 +374,7 @@ func registerModule(m transport.Module, r *transport.Router) (err error) {
 
 func (a *App) startModules(rt *core.Runtime) error {
 	for _, m := range a.modules {
-		starter, ok := m.(transport.Starter)
+		starter, ok := m.(support.Starter)
 		if !ok {
 			continue
 		}
@@ -475,7 +475,7 @@ func (a *App) startPIDRefresh(lg *zap.Logger) {
 
 // registerFallbacks renders unmatched paths and unsupported methods with the
 // same envelope as handlers. Without NoRoute, gin returns a plain-text 404.
-func registerFallbacks(engine *gin.Engine, responder transport.Responder) {
+func registerFallbacks(engine *gin.Engine, responder support.Responder) {
 	engine.HandleMethodNotAllowed = true
 	engine.NoRoute(func(c *gin.Context) {
 		responder.Error(c, apperr.NotFound("route not found"))
@@ -591,7 +591,7 @@ func (a *App) cleanup() error {
 
 		for i := len(a.started) - 1; i >= 0; i-- {
 			m := a.started[i]
-			stopper, ok := m.(transport.Stopper)
+			stopper, ok := m.(support.Stopper)
 			if !ok {
 				continue
 			}

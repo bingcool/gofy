@@ -1,5 +1,9 @@
 // Package config is an optional YAML loader. Applications may ignore it and
 // load configuration however they prefer.
+//
+// Load decodes the whole file into a typed struct. LoadDocument returns a
+// read-only view whose GetString/GetInt/GetBool methods read one key by path,
+// for settings that do not deserve a struct field.
 package config
 
 import (
@@ -58,22 +62,9 @@ var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 // Load reads path into T, applying defaults, environment expansion and
 // validation. It never mutates process-level state.
 func Load[T any](ctx context.Context, path string, opts ...Option) (*T, error) {
-	o := options{expandEnv: true, applyDefaults: true, validate: true}
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if err := opt(&o); err != nil {
-			return nil, fmt.Errorf("config: option: %w", err)
-		}
-	}
-	if ctx != nil {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-	}
-	if strings.TrimSpace(path) == "" {
-		return nil, fmt.Errorf("config: path is required")
+	o, data, err := readConfig(ctx, path, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	var cfg T
@@ -83,16 +74,6 @@ func Load[T any](ctx context.Context, path string, opts ...Option) (*T, error) {
 		}
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("config: read %s: %w", path, err)
-	}
-	if o.expandEnv {
-		data, err = expandEnvVars(data, o.allowMissing)
-		if err != nil {
-			return nil, fmt.Errorf("config: %s: %w", path, err)
-		}
-	}
 	if o.strict {
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
@@ -114,6 +95,40 @@ func Load[T any](ctx context.Context, path string, opts ...Option) (*T, error) {
 		}
 	}
 	return &cfg, nil
+}
+
+// readConfig resolves options and returns the file content with environment
+// variables expanded. Both Load and LoadDocument share it.
+func readConfig(ctx context.Context, path string, opts []Option) (options, []byte, error) {
+	o := options{expandEnv: true, applyDefaults: true, validate: true}
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(&o); err != nil {
+			return options{}, nil, fmt.Errorf("config: option: %w", err)
+		}
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return options{}, nil, err
+		}
+	}
+	if strings.TrimSpace(path) == "" {
+		return options{}, nil, fmt.Errorf("config: path is required")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return options{}, nil, fmt.Errorf("config: read %s: %w", path, err)
+	}
+	if o.expandEnv {
+		data, err = expandEnvVars(data, o.allowMissing)
+		if err != nil {
+			return options{}, nil, fmt.Errorf("config: %s: %w", path, err)
+		}
+	}
+	return o, data, nil
 }
 
 func expandEnvVars(data []byte, allowMissing bool) ([]byte, error) {

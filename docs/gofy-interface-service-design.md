@@ -55,7 +55,7 @@
 
 ### 1.2 目标
 
-1. 把 swoolefy 中**与 HTTP 相关、与 Swoole 运行时无关**的能力，按 gofy 的 library 形态重新实现，形成可复用的 `transport` / `middleware` / `support` 包。
+1. 把 swoolefy 中**与 HTTP 相关、与 Swoole 运行时无关**的能力，按 gofy 的 library 形态重新实现，形成可复用的 `support`（HTTP 基础能力）与 `support/middleware` 包。
 2. 新建 `gofy-interface-service`，让所有 Go 服务共享同一套 DTO、Request、Response、常量、枚举、错误码。
 3. 服务端只实现业务接口；路由、绑定、校验、响应信封、OpenAPI 元数据由契约描述符统一驱动。
 4. 调用方通过强类型 Go Client 调用，不手写 URL、JSON 字段和错误码判断。
@@ -103,42 +103,42 @@
 
 | # | swoolefy 能力 | swoolefy 位置 | gofy 现状 | 移植方案 | gofy 目标包 | 阶段 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 路由分组、组中间件 | `src/Http/Route.php` `group()` | `Router.Group(prefix, mw...)` 已有 | 保持；补充组级 after 语义 | `transport` | 已有 |
-| 2 | before / after 路由中间件 | `HttpRoute::handleBeforeRouteMiddles` / `handleAfterRouteMiddles` | 只有普通 gin 中间件 | `Router.After(...)`：在 handler 返回后、响应渲染前执行；用于审计、耗时、结果加工 | `transport` | P2 |
-| 3 | 路由选项（DB debug、OTel、限流、route meta cache） | `src/Http/RouteOption.php` | 无 | 新增 `transport.RouteConfig` / `RouteOption`；meta cache 不移植 | `transport` | P2 |
-| 4 | Controller `_beforeAction` / `_afterAction` | `HttpRoute::invoke` | 无 | 用 before/after 中间件和 handler hook 等价实现；不复制 Controller 基类 | `transport` | P2 |
+| 1 | 路由分组、组中间件 | `src/Http/Route.php` `group()` | `Router.Group(prefix, mw...)` 已有 | 保持；补充组级 after 语义 | `support` | 已有 |
+| 2 | before / after 路由中间件 | `HttpRoute::handleBeforeRouteMiddles` / `handleAfterRouteMiddles` | 只有普通 gin 中间件 | `Router.After(...)`：在 handler 返回后、响应渲染前执行；用于审计、耗时、结果加工 | `support` | P2 |
+| 3 | 路由选项（DB debug、OTel、限流、route meta cache） | `src/Http/RouteOption.php` | 无 | 新增 `support.RouteConfig` / `RouteOption`；meta cache 不移植 | `support` | P2 |
+| 4 | Controller `_beforeAction` / `_afterAction` | `HttpRoute::invoke` | 无 | 用 before/after 中间件和 handler hook 等价实现；不复制 Controller 基类 | `support` | P2 |
 | 5 | `denyActions` | `HttpRoute::$denyActions` | 无 | 不移植：Go 路由静态注册，不存在按 URL 反射调用任意方法 | — | 不移植 |
 | 6 | 路由元数据缓存 | `parseDispatchControllerMeta` | 无 | 不移植：启动期注册，天然只解析一次 | — | 不移植 |
-| 7 | 入参绑定：JSON / form / query / route | `HttpRoute::bindActionParams`、`RequestParseTrait` | `ShouldBindUri` + `ShouldBind` + validator 已有 | 保持；补 header/cookie 绑定 | `transport` | P0 |
-| 8 | 嵌套 DTO 与数组集合校验 | `RequestValidate` | validator 支持嵌套 struct；slice 需 `dive` | 文档化 `dive` 规则；不支持 PHP 的 `foo.*.bar` 通配 map 语法 | `transport` + 契约规范 | P0 |
-| 9 | 校验消息定制 | `#[ValidationRule(message: ...)]` | `message:"rule:文本,..."` 已有 | 保持；契约统一使用 `message` tag | `transport` | 已有 |
+| 7 | 入参绑定：JSON / form / query / route | `HttpRoute::bindActionParams`、`RequestParseTrait` | `ShouldBindUri` + `ShouldBind` + validator 已有 | 保持；补 header/cookie 绑定 | `support` | P0 |
+| 8 | 嵌套 DTO 与数组集合校验 | `RequestValidate` | validator 支持嵌套 struct；slice 需 `dive` | 文档化 `dive` 规则；不支持 PHP 的 `foo.*.bar` 通配 map 语法 | `support` + 契约规范 | P0 |
+| 9 | 校验消息定制 | `#[ValidationRule(message: ...)]` | `message:"rule:文本,..."` 已有 | 保持；契约统一使用 `message` tag | `support` | 已有 |
 | 10 | `StringToInt` | `src/Annotation/StringToInt.php` | query/form 绑定已自动转 int；JSON 字符串数字不转 | 新增 `types.Int64String` / `types.Uint64String`，同时支持 JSON 数字与字符串 | 契约 `types` | P0 |
 | 11 | `IntToString`（大整数防精度丢失） | `src/Annotation/IntToString.php` | 无 | 同上；对外 ID 建议统一用字符串类型 | 契约 `types` | P0 |
-| 12 | Header / Cookie / Raw Body 读取 | `RequestParseTrait` | gin 可读，但绑定器未统一处理 header/cookie | 扩展 `bindAndValidate`：`ShouldBindHeader`；提供 `transport.RawBody(c)`；Cookie 用 `c.Cookie` | `transport` | P1 |
-| 13 | 上传文件 | `src/Http/UploadedFile.php`、`RequestParseTrait::file/files` | gin 支持 `*multipart.FileHeader`，无安全保存/校验工具 | 新增 `upload.File`：大小、MIME、扩展名校验，安全文件名，禁止路径穿越 | `transport/upload` | P1 |
-| 14 | MIME 映射 | `src/Http/MimeType.php`（811 行） | 标准库 `mime` + 已有 `gabriel-vasile/mimetype` 间接依赖 | 不复制 811 行表；用 `mime.TypeByExtension` + `mimetype.Detect` | `transport/upload` | P1 |
-| 15 | 响应信封 `{code,msg,data}` | `BaseResponse`、`ResponseCode` | `transport.Responder` 已实现 `{code,msg,data,req_id,details}` | 保持；契约 Response 只描述 `data` | `transport` | 已有 |
-| 16 | 重定向 | `ResponseOutput::redirect` | 无 | 新增 `transport.Redirect`（实现 `Renderer`） | `transport` | P1 |
-| 17 | 自定义 Header / Cookie | `ResponseOutput::withHeader/withCookie` | gin 原生可做，无统一 helper | 新增响应 helper；Cookie 支持 `SameSite`、`Partitioned` | `transport` | P1 |
-| 18 | 文件下载 / inline | `DownloadResponse` 注解 | 无 | `transport.Download{Reader,Filename,ContentType,Inline}` + `Content-Disposition` 安全编码 | `transport` | P1 |
-| 19 | SSE | `src/Http/EventStream.php` | 无 | `transport.EventStream`：`event/id/data/retry/comment/heartbeat`，自动 flush | `transport/sse` | P1 |
-| 20 | 分块输出 | `src/Http/HttpChunkedResponse.php` | 无 | `transport.ChunkWriter`：`Write/WriteLine/WriteJSON/WriteFile` | `transport/chunked` | P1 |
-| 21 | 普通文本/原始响应 | `ResponseOutput::echo` | `c.String` 可用 | `transport.Raw{ContentType,Body}` | `transport` | P1 |
+| 12 | Header / Cookie / Raw Body 读取 | `RequestParseTrait` | gin 可读，但绑定器未统一处理 header/cookie | 扩展 `bindAndValidate`：`ShouldBindHeader`；提供 `support.RawBody(c)`；Cookie 用 `c.Cookie` | `support` | P1 |
+| 13 | 上传文件 | `src/Http/UploadedFile.php`、`RequestParseTrait::file/files` | gin 支持 `*multipart.FileHeader`，无安全保存/校验工具 | 新增 `upload.File`：大小、MIME、扩展名校验，安全文件名，禁止路径穿越 | `support/upload` | P1 |
+| 14 | MIME 映射 | `src/Http/MimeType.php`（811 行） | 标准库 `mime` + 已有 `gabriel-vasile/mimetype` 间接依赖 | 不复制 811 行表；用 `mime.TypeByExtension` + `mimetype.Detect` | `support/upload` | P1 |
+| 15 | 响应信封 `{code,msg,data}` | `BaseResponse`、`ResponseCode` | `support.Responder` 已实现 `{code,msg,data,req_id,details}` | 保持；契约 Response 只描述 `data` | `support` | 已有 |
+| 16 | 重定向 | `ResponseOutput::redirect` | 无 | 新增 `support.Redirect`（实现 `Renderer`） | `support` | P1 |
+| 17 | 自定义 Header / Cookie | `ResponseOutput::withHeader/withCookie` | gin 原生可做，无统一 helper | 新增响应 helper；Cookie 支持 `SameSite`、`Partitioned` | `support` | P1 |
+| 18 | 文件下载 / inline | `DownloadResponse` 注解 | 无 | `support.Download{Reader,Filename,ContentType,Inline}` + `Content-Disposition` 安全编码 | `support` | P1 |
+| 19 | SSE | `src/Http/EventStream.php` | 无 | `support.EventStream`：`event/id/data/retry/comment/heartbeat`，自动 flush | `support/sse` | P1 |
+| 20 | 分块输出 | `src/Http/HttpChunkedResponse.php` | 无 | `support.ChunkWriter`：`Write/WriteLine/WriteJSON/WriteFile` | `support/chunked` | P1 |
+| 21 | 普通文本/原始响应 | `ResponseOutput::echo` | `c.String` 可用 | `support.Raw{ContentType,Body}` | `support` | P1 |
 | 22 | 返回值归一化 | `src/Http/ActionResultNormalizer.php` | 泛型 handler 已强类型 | 不移植 PHP 的数组/对象归一化；`nil` 响应输出 `data:null` | — | 不移植 |
-| 23 | CORS | `src/Http/Middleware/CorsMiddleware.php` | 精确 origin、credentials、expose、max-age 已有 | 补 `AllowOriginPatterns`（`https://*.example.com`）、`AllowPaths`、预检 204 统一 | `transport/middleware` | P2 |
-| 24 | 安全响应头 | `SecurityHeadersMiddleware.php` | 无 | 新增：`nosniff`、`DENY/SAMEORIGIN`、`Referrer-Policy`、`Permissions-Policy`、CSP、HSTS（仅 TLS） | `transport/middleware` | P1 |
-| 25 | Bearer 鉴权 / 可选鉴权 | `AuthenticateMiddleware`、`OptionalAuthenticateMiddleware` | 示例服务手写 | 新增 `Authenticator` 接口 + `Bearer` / `OptionalBearer`；Principal 放 context | `transport/auth` | P1 |
-| 26 | Locale / i18n 协商 | `LocaleMiddleware.php` | 无 | 新增 `Locale`：`Accept-Language`、`?lang=`、cookie、`X-Locale`，只做协商与 context，不内置翻译 | `transport/middleware` | P2 |
-| 27 | 限流与限流响应头 | `RateLimit/*`、`AbstractRateLimiterMiddleware` | 无 | `Limiter` 接口 + 内存滑窗实现；Redis 适配器独立模块；`X-RateLimit-*`、429 信封 | `transport/ratelimit` | P2 |
-| 28 | 健康检查（DB/Redis/文件存储） | `src/Http/Health/*` | `/healthz`、`/readyz` 仅 DB ping | `health.Registry` + `Check` 接口；并发检查、超时、详情开关、路径别名；内置 DB Check | `transport/health` | P2 |
+| 23 | CORS | `src/Http/Middleware/CorsMiddleware.php` | 精确 origin、credentials、expose、max-age 已有 | 补 `AllowOriginPatterns`（`https://*.example.com`）、`AllowPaths`、预检 204 统一 | `support/middleware` | P2 |
+| 24 | 安全响应头 | `SecurityHeadersMiddleware.php` | 无 | 新增：`nosniff`、`DENY/SAMEORIGIN`、`Referrer-Policy`、`Permissions-Policy`、CSP、HSTS（仅 TLS） | `support/middleware` | P1 |
+| 25 | Bearer 鉴权 / 可选鉴权 | `AuthenticateMiddleware`、`OptionalAuthenticateMiddleware` | 示例服务手写 | 新增 `Authenticator` 接口 + `Bearer` / `OptionalBearer`；Principal 放 context | `support/auth` | P1 |
+| 26 | Locale / i18n 协商 | `LocaleMiddleware.php` | 无 | 新增 `Locale`：`Accept-Language`、`?lang=`、cookie、`X-Locale`，只做协商与 context，不内置翻译 | `support/middleware` | P2 |
+| 27 | 限流与限流响应头 | `RateLimit/*`、`AbstractRateLimiterMiddleware` | 无 | `Limiter` 接口 + 内存滑窗实现；Redis 适配器独立模块；`X-RateLimit-*`、429 信封 | `support/ratelimit` | P2 |
+| 28 | 健康检查（DB/Redis/文件存储） | `src/Http/Health/*` | `/healthz`、`/readyz` 仅 DB ping | `health.Registry` + `Check` 接口；并发检查、超时、详情开关、路径别名；内置 DB Check | `support/health` | P2 |
 | 29 | 进程健康检查 | `Health/Check/ProcessHealthCheck.php` | 无 | 不移植：进程管理不在范围 | — | 不移植 |
 | 30 | 日志参数脱敏 | `src/Http/LogParamSanitizer.php` | 无 | 新增 `logging.Sanitize`：password/token/secret/cookie/authorization 等 | `logging` | P2 |
-| 31 | 忽略路径配置 | `src/Http/IgnoreRouteConfig.php` | accesslog 只有精确 `SkipPaths` | 新增 `routematch.Matcher`：精确、前缀 `/*`、`:param`；供 accesslog/auth/ratelimit 共用 | `transport/routematch` | P2 |
+| 31 | 忽略路径配置 | `src/Http/IgnoreRouteConfig.php` | accesslog 只有精确 `SkipPaths` | 新增 `routematch.Matcher`：精确、前缀 `/*`、`:param`；供 accesslog/auth/ratelimit 共用 | `support/routematch` | P2 |
 | 32 | OpenTelemetry | `src/Http/OpenTelemetry/*` | 无 | 可选模块：trace id 注入响应头与日志；不进入核心依赖 | `contrib/otel` | P3 |
 | 33 | API 文档注解与生成 | `src/Annotation/Api*`、`src/Script/ApiDoc` | 无 | 契约描述符 + struct tag + 反射生成 OpenAPI 3.0.3；Swagger UI 内嵌 | 新仓库 `docgen` | P0 |
 | 34 | 请求辅助（isMobile/getBrowser/previousUrl） | `RequestParseTrait` | 无 | 不移植：业务价值低且依赖 UA/会话 | — | 不移植 |
 | 35 | `dump()` 调试输出 | `ResponseOutput::dump` | 无 | 不移植：Go 用日志/调试器 | — | 不移植 |
-| 36 | 静态文件 | `HttpServer` 路由 | `Router.Static` 已有 | 保持 | `transport` | 已有 |
+| 36 | 静态文件 | `HttpServer` 路由 | `Router.Static` 已有 | 保持 | `support` | 已有 |
 
 ### 2.3 不移植清单及原因
 
@@ -158,7 +158,7 @@
 
 ```text
 gofy/
-  transport/
+  support/
     result.go            # Renderer、Redirect、Raw、Download、Cookie helper
     route_config.go      # RouteConfig / RouteOption（P2）
     router.go            # 增加 After（P2）
@@ -187,7 +187,7 @@ gofy/
     middleware.go        # 可选 OpenTelemetry
 ```
 
-> `transport` 现有包不引入 Redis、OTel、Swagger 依赖；限流只定义接口和内存实现。Redis 适配器、OTel 采集器放独立模块，避免核心 `go.mod` 膨胀。
+> `support` 现有包不引入 Redis、OTel、Swagger 依赖；限流只定义接口和内存实现。Redis 适配器、OTel 采集器放独立模块，避免核心 `go.mod` 膨胀。
 
 ---
 
@@ -814,14 +814,14 @@ PayType PayType `json:"pay_type" validate:"omitempty,oneof=1 2" doc:"支付方�
 
 | code | HTTP | 含义 | gofy 对应 |
 | --- | --- | --- | --- |
-| 0 | 200 | 成功 | `transport` 默认 |
+| 0 | 200 | 成功 | `support` 默认 |
 | 40000 | 400 | 请求错误 | `apperr.BadRequest` |
 | 40001 | 400 | 参数非法 | `apperr.InvalidArgument` |
 | 40100 | 401 | 未认证 | `apperr.Unauthorized` |
 | 40300 | 403 | 无权限 | `apperr.Forbidden` |
 | 40400 | 404 | 资源不存在 | `apperr.NotFound` |
 | 40900 | 409 | 冲突 | `apperr.Conflict` |
-| 41300 | 413 | 请求体过大 | `transport.bindError` |
+| 41300 | 413 | 请求体过大 | `support.bindError` |
 | 42900 | 429 | 限流 | `apperr.TooManyRequests` |
 | 50000 | 500 | 服务内部错误 | `apperr.Internal` |
 | 50300 | 503 | 服务不可用 | `apperr.Unavailable` |
@@ -1350,10 +1350,10 @@ type Descriptor interface {
 
 ```go
 func Bind[Req, Res any](
-	r *transport.Router,
+	r *support.Router,
 	rt *endpoint.Route[Req, Res],
-	h transport.Handler[Req, Res],
-	mw ...transport.Middleware,
+	h support.Handler[Req, Res],
+	mw ...support.Middleware,
 )
 ```
 
@@ -1362,23 +1362,23 @@ func Bind[Req, Res any](
 ```go
 type BindOptions struct {
 	// Global 应用到所有契约路由的中间件（RequestID/AccessLog 等由 gofy 根包负责）。
-	Global []transport.Middleware
+	Global []support.Middleware
 
 	// Routes 按 OperationID 追加路由级中间件。
-	Routes map[string][]transport.Middleware
+	Routes map[string][]support.Middleware
 
 	// Auth 是 Bearer 鉴权中间件；当契约声明 AuthRequired/AuthOptional 时必须提供。
-	Auth transport.Middleware
+	Auth support.Middleware
 
 	// RateLimit 根据契约元数据构造路由级限流中间件；未提供时忽略限流元数据。
-	RateLimit func(endpoint.Spec) transport.Middleware
+	RateLimit func(endpoint.Spec) support.Middleware
 
 	// Strict 为 true 时，实现类型缺少方法、签名不符会返回错误（默认 true）。
 	Strict bool
 }
 
 func BindAll(
-	r *transport.Router,
+	r *support.Router,
 	routes []endpoint.Descriptor,
 	impl any,
 	opts BindOptions,
@@ -1394,7 +1394,7 @@ func BindAll(
    - SSE/Download/Chunked 使用专用绑定函数，不进入普通 JSON 分支。
 3. 根据 `Spec.Auth` 安装鉴权中间件；`AuthRequired` 且 `opts.Auth == nil` 返回错误。
 4. 根据 `Spec.RateLimit` 和 `opts.RateLimit` 安装限流中间件。
-5. 调用 gofy 的 `transport.Any(r, method, path, h, mw...)` 注册。
+5. 调用 gofy 的 `support.Any(r, method, path, h, mw...)` 注册。
 6. 返回聚合错误，列出所有缺失/签名不符的方法，而不是遇到第一个就退出。
 
 **业务实现：**
@@ -1442,14 +1442,14 @@ func (h *Handler) GetConfig(ctx context.Context, req *orderrequest.GetConfigRequ
 **模块注册：**
 
 ```go
-func (m *Module) Register(r *transport.Router) error {
+func (m *Module) Register(r *support.Router) error {
 	return gofyadapter.BindAll(
 		r,
 		demoservice.Routes(),
 		m.handler,
 		gofyadapter.BindOptions{
 			Auth: m.auth,
-			RateLimit: func(spec endpoint.Spec) transport.Middleware {
+			RateLimit: func(spec endpoint.Spec) support.Middleware {
 				return m.rateLimiter(spec)
 			},
 		},
@@ -1488,35 +1488,35 @@ RequestID
 
 ### 5.5 特殊响应绑定
 
-JSON 之外的响应不使用 `transport.Handler[Req,Res]`，避免契约包导入 gofy 类型。
+JSON 之外的响应不使用 `support.Handler[Req,Res]`，避免契约包导入 gofy 类型。
 
 ```go
 // SSE：handler 向流写入事件，返回后结束。
 func BindSSE[Req any](
-	r *transport.Router,
+	r *support.Router,
 	rt *endpoint.Route[Req, endpoint.NoBody],
 	h func(ctx context.Context, req *Req, stream *sse.Stream) error,
-	mw ...transport.Middleware,
+	mw ...support.Middleware,
 )
 
 // 下载：返回文件流；Content-Disposition 由 gofy 生成。
 func BindDownload[Req any](
-	r *transport.Router,
+	r *support.Router,
 	rt *endpoint.Route[Req, endpoint.NoBody],
-	h func(ctx context.Context, req *Req) (*transport.Download, error),
-	mw ...transport.Middleware,
+	h func(ctx context.Context, req *Req) (*support.Download, error),
+	mw ...support.Middleware,
 )
 
 // 分块：handler 直接写 chunk。
 func BindChunked[Req any](
-	r *transport.Router,
+	r *support.Router,
 	rt *endpoint.Route[Req, endpoint.NoBody],
 	h func(ctx context.Context, req *Req, w *chunked.Writer) error,
-	mw ...transport.Middleware,
+	mw ...support.Middleware,
 )
 ```
 
-> **实现状态（gofy v0.1）：** gofy 的 `transport` 尚未提供 `sse.Stream`、`transport.Download`、`chunked.Writer`。
+> **实现状态（gofy v0.1）：** gofy 的 `support` 尚未提供 `sse.Stream`、`support.Download`、`chunked.Writer`。
 > `adapter/gofy.BindAll` 对 `KindSSE`/`KindDownload`/`KindChunked` 会在启动时返回聚合错误
 > （`response kind ... is not supported by the gofy adapter`），不会静默降级为 JSON。
 > 客户端 `client.StreamSSE`/`DownloadFile`/`StreamChunked` 已实现，可用于调用其他服务的这类路由；
@@ -2276,7 +2276,7 @@ mux.Handle("/openapi.json", docs)
 package gofyadapter
 
 import (
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 	"gofy/gofy-interface-service/docsui"
 	"github.com/gin-gonic/gin"
 )
@@ -2285,13 +2285,13 @@ type docsModule struct {
 	cfg docsui.Config
 }
 
-func DocsModule(cfg docsui.Config) transport.Module {
+func DocsModule(cfg docsui.Config) support.Module {
 	return &docsModule{cfg: cfg}
 }
 
 func (m *docsModule) Name() string { return "docs" }
 
-func (m *docsModule) Register(r *transport.Router) error {
+func (m *docsModule) Register(r *support.Router) error {
 	m.cfg.Enabled = true
 	h, err := docsui.Handler(m.cfg)
 	if err != nil {
@@ -2416,7 +2416,7 @@ func (e *engine) bindAndValidate(c *gin.Context, req any) error {
 注意：
 
 - `ShouldBind` 对 GET 使用 query，对 POST 使用 body；`ShouldBindHeader` 额外绑定 `header` tag。
-- Cookie 绑定不通过 `ShouldBind`；新增 `transport.BindCookies(c, req)` 或让契约用 `header:"Cookie"` 手动解析。v1 建议 Cookie 用 `c.Cookie(name)`，不进入 DTO。
+- Cookie 绑定不通过 `ShouldBind`；新增 `support.BindCookies(c, req)` 或让契约用 `header:"Cookie"` 手动解析。v1 建议 Cookie 用 `c.Cookie(name)`，不进入 DTO。
 - 重复绑定同一字段时，后绑定的覆盖前者；文档约定不同来源使用不同字段。
 
 **Raw Body：**
@@ -2483,7 +2483,7 @@ gin 的 multipart 绑定支持 `*multipart.FileHeader`；测试覆盖。
 ### 8.5 下载、重定向、原始响应
 
 ```go
-package transport
+package support
 
 // Renderer 让 handler 返回值绕过 JSON 信封。
 type Renderer interface {
@@ -2641,8 +2641,8 @@ type Options struct {
 	ContextKey  string // 默认 "gofy.principal"
 }
 
-func Bearer(a Authenticator, opts Options) transport.Middleware
-func OptionalBearer(a Authenticator, opts Options) transport.Middleware
+func Bearer(a Authenticator, opts Options) support.Middleware
+func OptionalBearer(a Authenticator, opts Options) support.Middleware
 func PrincipalFrom(c *gin.Context) (Principal, bool)
 ```
 
@@ -2814,7 +2814,7 @@ func SanitizeFields(fields []zap.Field, opts SanitizeOptions) []zap.Field
 
 ### 8.13 CORS 增强
 
-扩展 `transport.CORSConfig`：
+扩展 `support.CORSConfig`：
 
 ```go
 type CORSConfig struct {
@@ -2848,7 +2848,7 @@ type Config struct {
 	Propagator  propagation.TextMapPropagator
 }
 
-func Middleware(cfg Config) transport.Middleware
+func Middleware(cfg Config) support.Middleware
 ```
 
 **规则：**
@@ -2860,7 +2860,7 @@ func Middleware(cfg Config) transport.Middleware
 
 ### 8.15 兼容性
 
-- 新包全部是加法；现有 `transport.GET/POST/...` 签名不变。
+- 新包全部是加法；现有 `support.GET/POST/...` 签名不变。
 - `bindAndValidate` 增加 `ShouldBindHeader` 可能影响同一字段同时有 `header` 和 `form` tag 的场景；文档约定不混用。
 - `WithAlwaysOK` 不影响 `NoContent`（保持 204）、SSE、下载。
 - 现有 `WithHealthEndpoints` 行为保持：未使用新 Registry 时仍只做 DB ping。
@@ -2901,7 +2901,7 @@ Handler 方法直接使用契约 Request/Response。
 **4. 模块注册：**
 
 ```go
-func (m *Module) Register(r *transport.Router) error {
+func (m *Module) Register(r *support.Router) error {
 	return gofyadapter.BindAll(r, demoservice.Routes(), m.handler, gofyadapter.BindOptions{
 		Auth: m.auth,
 		RateLimit: m.rateLimitMiddleware,
@@ -3044,10 +3044,10 @@ go.work
 | `docgen/operation` | 参数位置、请求体、响应、错误码、鉴权/限流 |
 | `refcheck` | 合法/非法导入、测试 fixture |
 | `docsui` | `/docs`、`/openapi.json`、BasicAuth |
-| gofy `transport/upload` | 大小、MIME、扩展名、路径穿越、随机文件名 |
-| gofy `transport/sse` | event/id/data/retry、多行 data、heartbeat、flush |
-| gofy `transport/chunked` | 分块写、JSON、文件、错误 |
-| gofy `transport` Download | Content-Disposition、RFC5987、关闭 reader |
+| gofy `support/upload` | 大小、MIME、扩展名、路径穿越、随机文件名 |
+| gofy `support/sse` | event/id/data/retry、多行 data、heartbeat、flush |
+| gofy `support/chunked` | 分块写、JSON、文件、错误 |
+| gofy `support` Download | Content-Disposition、RFC5987、关闭 reader |
 | gofy `middleware` Security | 每个 header、HSTS 仅 TLS、skip |
 | gofy `auth` | bearer、optional、invalid、principal |
 | gofy `ratelimit` | 允许/拒绝、窗口重置、headers |
@@ -3097,7 +3097,7 @@ go.work
 
 | 迁移前 | 迁移后 |
 | --- | --- |
-| `transport.POST(r, "/orders", ...)` | `Spec.Path = "/orders"`，模块前缀不变 |
+| `support.POST(r, "/orders", ...)` | `Spec.Path = "/orders"`，模块前缀不变 |
 | 最终 `POST /api/v1/order/orders` | 最终 `POST /api/v1/order/orders` |
 | 本地 `dto.ListOrderRequest{Page, Size}` | `paging.PageRequest{Page, PageSize}` |
 

@@ -2,7 +2,7 @@ package example
 
 import (
 	"github.com/bingcool/gofy"
-	"github.com/bingcool/gofy/transport"
+	"github.com/bingcool/gofy/support"
 
 	"{{.Module}}/app/module/example/handler"
 )
@@ -12,7 +12,7 @@ type Module struct{}
 
 // NewModuleFactory builds the module during application startup.
 func NewModuleFactory() gofy.ModuleFactory {
-	return func(_ *gofy.Runtime) (transport.Module, error) {
+	return func(_ *gofy.Runtime) (support.Module, error) {
 		return NewModule(), nil
 	}
 }
@@ -22,14 +22,14 @@ func NewModule() *Module {
 	return &Module{}
 }
 
-// Name satisfies transport.Module.
+// Name satisfies support.Module.
 func (m *Module) Name() string {
 	return "example"
 }
 
 // Register mounts the module at /api/v1/example.
-func (m *Module) Register(r *transport.Router) error {
+func (m *Module) Register(r *support.Router) error {
 	h := handler.New()
-	transport.GET(r, "/hello", h.Hello)
+	support.GET(r, "/hello", h.Hello)
 	return nil
 }

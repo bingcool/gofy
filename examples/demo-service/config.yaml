@@ -82,6 +82,70 @@ redis:
     db: 2
     pool_size: 5
 
+# 多实例 AMQP（RabbitMQ）：按名字分组，由 app/io 建连和关闭。
+# default 对应业务句柄 amqp.Default，其它实例用 amqp.Get("名字") 取用。
+# 本机 dev-rabbitmq 的凭据来自 dockerfiles/docker-compose.yml
+# （rabbitmq / 123456 / vhost my_vhost）；没有 RabbitMQ 时把 enabled 改成
+# false，服务仍可启动。hosts 可配置多个 broker 节点，按顺序尝试连接。
+amqp:
+  default:
+    enabled: true
+    hosts:
+      - host: 127.0.0.1
+        port: 5672
+        username: rabbitmq
+        password: 123456
+        vhost: my_vhost
+    heartbeat: 10s
+    connection_timeout: 5s
+  # 演示第二个实例：同一个 broker 上的独立连接，按需打开。
+  order:
+    enabled: false
+    hosts:
+      - host: 127.0.0.1
+        port: 5672
+        username: rabbitmq
+        password: 123456
+        vhost: my_vhost
+
+# 多实例 Kafka：按名字分组，由 app/io 建连和关闭。
+# default 对应业务句柄 kafka.Default，其它实例用 kafka.Get("名字") 取用。
+# broker 来自 dockerfiles/docker-compose.yml 的 dev-kafka；容器宣告地址是
+# 宿主机 LAN IP，宿主机 IP 变化时同步修改 brokers，或用
+# HOST_IP=192.168.x.x docker compose up -d 重新启动 Kafka。
+# Producer 共享连接；Consumer 会按消费者组单独建客户端。
+kafka:
+  default:
+    enabled: true
+    brokers:
+      - 127.0.0.1:9092
+    client_id: demo-service
+    dial_timeout: 5s
+    idempotent: false
+    record_retries: 10
+  # 演示第二个实例：独立连接，按需打开。
+  order:
+    enabled: false
+    brokers:
+      - 127.0.0.1:9092
+
+# 多实例 RocketMQ：按名字分组，由 app/io 建连和关闭。
+# default 对应业务句柄 rocketmq.Default，其它实例用 rocketmq.Get("名字") 取用。
+# v5 走 gRPC proxy（默认 8081），不再是 nameserver 9876；topic 由业务在发布时
+# 指定，这里不配置；本机没有 RocketMQ 或 proxy 时把 enabled 保持 false。
+# 集群开启 ACL 时成对填写 access_key / access_secret；消费者按需传 group，
+# 生产者不再注册 producer group。
+rocketmq:
+  default:
+    enabled: false
+    endpoint: 127.0.0.1:8081
+    send_timeout: 3s
+    max_attempts: 3
+  # 演示第二个实例：独立 producer，按需打开。
+  order:
+    enabled: false
+    endpoint: 127.0.0.1:8081
+
 pid_file: app/demo-service.pid
 
 order:
