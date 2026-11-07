@@ -1385,6 +1385,37 @@ func BindAll(
 ) error
 ```
 
+**路由分组（Gin 风格，分组声明在路由文件里）：**
+
+```go
+// appinterface/demoservice/orderroute/order_route.go
+const PrefixOrders = "/orders"
+
+var Orders = endpoint.NewGroup(PrefixOrders, func(group *endpoint.Group) {
+	group.Add(GetOrder, ListOrders, CreateOrder, CancelOrder)
+	// 或内联声明：endpoint.AddRoute[Req, Res](group, endpoint.Spec{...})
+})
+
+// config_route.go 也可以把路由直接内联在分组回调里，再赋值给包级变量
+// 供客户端复用：
+// var Config = endpoint.NewGroup("/config", func(group *endpoint.Group) {
+//     GetConfig = endpoint.New[Req, Res](endpoint.Spec{...})
+//     group.Add(GetConfig)
+// })
+
+// 服务端按 Gin 习惯注册，分组中间件只写一次。
+orders := router.Group(orderroute.Orders.Prefix, auditMiddleware)
+err := gofyadapter.BindAll(orders, orderroute.Orders.Routes, impl, opts)
+```
+
+- `endpoint.Group` 只包含 `Prefix` 与 `Routes`；前缀、路由、分组声明都放在同一个
+  路由文件里，`orderroute.Groups()` 只做聚合；
+- 契约不依赖 gofy，中间件仍由服务端 `router.Group(prefix, mw...)` 安装；
+- `Spec.Path` 始终是完整路径（客户端/OpenAPI 使用）；`BindAll` 通过
+  `Router.GroupPrefix()` 把路径裁剪成组内相对路径后注册，避免路径写两遍或重复前缀；
+- 中间件顺序：分组中间件（Group 安装）→ `BindOptions.Global` →
+  `Routes[OperationID]` → `Auth`（AuthRequired 时）→ `RateLimit`（契约声明时）。
+
 `BindAll` 的行为：
 
 1. 校验路由集合：方法/路径/OperationID 合法、无重复。
@@ -1468,6 +1499,9 @@ RequestID
   -> BodyLimit
   -> CORS
   -> 业务全局中间件（WithMiddleware）
+  -> 模块 RateLimit / JWTAuth
+  -> 路由分组中间件（router.Group(prefix, mw...)）
+  -> BindOptions.Global
   -> 契约路由中间件（BindOptions.Routes[OperationID]）
   -> Auth（如果契约声明）
   -> RateLimit（如果契约声明）

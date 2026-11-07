@@ -15,6 +15,9 @@ type Router struct {
 	group  *gin.RouterGroup
 	engine *engine
 	prefix string
+	// bindPrefix 是相对「模块根 Router」的分组前缀，适配器据此裁剪契约路径；
+	// 框架为模块创建的 Router 从这里开始，业务再 Group 时逐层累加。
+	bindPrefix string
 }
 
 type engine struct {
@@ -50,16 +53,44 @@ func NewRouter(e *gin.Engine, cfg RouterConfig) *Router {
 // Group creates a sub-router. The prefix is normalized to start with "/" and
 // to have no trailing "/". An empty prefix keeps the parent path.
 func (r *Router) Group(prefix string, mw ...Middleware) *Router {
+	return r.subRouter(prefix, true, mw...)
+}
+
+// ModuleGroup creates the Router handed to a module during startup. Unlike
+// Group it does not accumulate the binding prefix, so adapters can bind full
+// contract paths without stripping the module name. It is used by the gofy
+// root package; business code should call Group.
+func (r *Router) ModuleGroup(prefix string, mw ...Middleware) *Router {
+	return r.subRouter(prefix, false, mw...)
+}
+
+// subRouter 是 Group 的内部实现；bind 为 false 时（框架创建模块 Router）不累计
+// 绑定前缀，保证模块内直接绑定完整契约路径不会被误裁剪。
+func (r *Router) subRouter(prefix string, bind bool, mw ...Middleware) *Router {
 	prefix = NormalizePrefix(prefix)
 	group := r.group.Group(prefix)
 	if len(mw) > 0 {
 		group.Use(mw...)
 	}
-	return &Router{
-		group:  group,
-		engine: r.engine,
-		prefix: joinPrefix(r.prefix, prefix),
+	bindPrefix := r.bindPrefix
+	if bind {
+		bindPrefix = joinPrefix(r.bindPrefix, prefix)
 	}
+	return &Router{
+		group:      group,
+		engine:     r.engine,
+		prefix:     joinPrefix(r.prefix, prefix),
+		bindPrefix: bindPrefix,
+	}
+}
+
+// GroupPrefix 返回当前 Router 自模块根以来的分组前缀（如 "/orders"）；
+// 模块根 Router 与普通根 Router 返回空字符串。
+func (r *Router) GroupPrefix() string {
+	if r == nil {
+		return ""
+	}
+	return r.bindPrefix
 }
 
 // Use appends middleware to this router.

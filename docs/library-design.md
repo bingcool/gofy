@@ -647,6 +647,9 @@ type RouterConfig struct {
 func NewRouter(e *gin.Engine, cfg RouterConfig) *Router
 
 func (r *Router) Group(prefix string, mw ...Middleware) *Router
+// ModuleGroup 由框架创建模块 Router 时使用，不累计契约绑定前缀。
+func (r *Router) ModuleGroup(prefix string, mw ...Middleware) *Router
+func (r *Router) GroupPrefix() string
 func (r *Router) Use(mw ...Middleware)
 func (r *Router) GET(path string, h gin.HandlerFunc, mw ...Middleware)
 func (r *Router) POST(path string, h gin.HandlerFunc, mw ...Middleware)
@@ -3639,6 +3642,8 @@ type Router
 type RouterConfig
 func NewRouter(*gin.Engine, RouterConfig) *Router
 func (*Router) Group(string, ...Middleware) *Router
+func (*Router) ModuleGroup(string, ...Middleware) *Router
+func (*Router) GroupPrefix() string
 func (*Router) Use(...Middleware)
 func (*Router) GET(string, gin.HandlerFunc, ...Middleware)
 func (*Router) POST(string, gin.HandlerFunc, ...Middleware)

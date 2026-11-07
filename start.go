@@ -384,7 +384,7 @@ func (a *App) registerModules(base *support.Router, modules []support.Module) er
 			return fmt.Errorf("gofy: route prefix %q is used by both %q and %q", full, other, m.Name())
 		}
 		used[full] = m.Name()
-		if err := registerModule(m, base.Group(prefix)); err != nil {
+		if err := registerModule(m, base.ModuleGroup(prefix)); err != nil {
 			return err
 		}
 	}

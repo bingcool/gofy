@@ -19,7 +19,7 @@ import (
 	"github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-	"gofy/gofy-interface-service/appinterface/demoservice"
+	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
 )
 
 // Config holds order module settings.
@@ -70,10 +70,18 @@ func NewModule(cfg Config, svc *service.OrderService, logger *zap.Logger) *Modul
 // Name returns the route prefix of the module.
 func (m *Module) Name() string { return "order" }
 
-// Register binds every demoservice contract route to the handler.
+// Register binds every demoservice contract route to the handler. Route groups
+// follow Gin: each group installs its middleware once, then BindAll strips the
+// group prefix from the absolute contract paths.
 func (m *Module) Register(r *support.Router) error {
 	h := controller.NewOrderController(m.svc, m.logger)
-	return gofyadapter.BindAll(r, demoservice.Routes(), h, gofyadapter.BindOptions{
-		Auth: m.auth,
-	})
+	for _, group := range orderroute.Groups() {
+		groupRouter := r.Group(group.Prefix)
+		if err := gofyadapter.BindAll(groupRouter, group.Routes, h, gofyadapter.BindOptions{
+			Auth: m.auth,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
