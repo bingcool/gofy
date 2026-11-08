@@ -11,6 +11,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// NameAccessLog 是 AccessLog 在契约路由里使用的中间件别名。
+const NameAccessLog = "access-log"
+
 // AccessLogOptions controls the access log middleware.
 type AccessLogOptions struct {
 	SkipPaths     []string

@@ -6,6 +6,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameBodyLimit 是 BodyLimit 在契约路由里使用的中间件别名。
+const NameBodyLimit = "body-limit"
+
 // BodyLimit caps the request body size. Reads beyond the limit fail with
 // *http.MaxBytesError, which the binder maps to 413.
 func BodyLimit(maxBytes int64) gin.HandlerFunc {

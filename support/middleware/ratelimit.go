@@ -9,6 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameRateLimit 是 RateLimit 在契约路由里使用的中间件别名。
+const NameRateLimit = "rate-limit"
+
 // RateLimit rejects requests above cfg.Limit inside cfg.Window. Every response
 // carries X-RateLimit-* headers so clients can back off before being rejected;
 // a rejection adds Retry-After and returns 429 with the shared envelope.

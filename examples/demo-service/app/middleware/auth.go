@@ -9,6 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameAuth 是 Auth 在契约路由里使用的中间件别名。
+const NameAuth = "auth"
+
 // Auth verifies a bearer token. Failures use the same envelope shape as the
 // framework responder so clients see a consistent payload.
 func Auth(verify func(token string) error) support.Middleware {

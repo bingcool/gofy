@@ -8,6 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameSecurityHeaders 是 SecurityHeaders 在契约路由里使用的中间件别名。
+const NameSecurityHeaders = "security-headers"
+
 // SecurityHeaders sets hardening headers on every response, including error
 // responses produced later in the chain.
 func SecurityHeaders(cfg support.SecurityHeadersConfig) (gin.HandlerFunc, error) {

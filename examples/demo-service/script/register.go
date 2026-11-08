@@ -7,7 +7,7 @@ import (
 
 func Register(cfg *config.Config) []gofyscript.Script {
 	return []gofyscript.Script{
-		FixOrder(cfg),
+		FixOrder(),
 		GenUUID(cfg),
 	}
 }

@@ -10,6 +10,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// NameRequestID 是 RequestID 在契约路由里使用的中间件别名。
+const NameRequestID = "request-id"
+
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 // RequestID 读取（或生成）请求 ID，并保证同一个 ID 能传到下游服务：

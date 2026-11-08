@@ -126,7 +126,7 @@ github.com/bingcool/gofy/
 │   ├── jwtauth.go               # JWT 配置
 │   ├── ratelimit.go             # 限流配置
 │   ├── securityheaders.go       # 安全响应头配置
-│   ├── middleware/              # 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传
+│   ├── middleware/              # 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、别名注册表
 │   ├── ratelimit/               # Store 接口与内存滑窗
 │   │   └── redisstore/          # Redis 共享限流存储
 │   ├── cache/                   # 基于注入 Redis 实例的键值缓存
@@ -826,6 +826,45 @@ func RateLimit(cfg support.RateLimitConfig, responder support.Responder) (gin.Ha
 func JWTAuth(cfg support.JWTAuthConfig, responder support.Responder) (gin.HandlerFunc, error)
 ```
 
+每个中间件在自己的文件里导出一个别名常量，供 gofy-interface-service 的契约路由
+按名字引用（契约层不依赖 gofy/gin，只写字符串）：
+
+```go
+const (
+	NameRequestID         = "request-id"          // req_trace_id.go
+	NameHeaderPropagation = "header-propagation"  // headerpropagation.go
+	NameAccessLog         = "access-log"          // accesslog.go
+	NameRecovery          = "recovery"            // recovery.go
+	NameCORS              = "cors"                // cors.go
+	NameBodyLimit         = "body-limit"          // bodylimit.go
+	NameSecurityHeaders   = "security-headers"    // securityheaders.go
+	NameRateLimit         = "rate-limit"          // ratelimit.go
+	NameJWTAuth           = "jwt-auth"            // jwt.go
+)
+```
+
+别名只是名字，不会自动注册。`registry.go` 提供显式的「别名 → 实例」注册表，
+由服务装配方创建并注入 `gofyadapter.BindOptions.Registry`：
+
+```go
+func NewRegistry() *Registry
+func (r *Registry) Register(name string, mw support.Middleware) error
+func (r *Registry) MustRegister(name string, mw support.Middleware)
+func (r *Registry) Lookup(name string) (support.Middleware, bool)
+func (r *Registry) Names() []string
+```
+
+- 别名与实例一一对应：`Register` 校验别名非空（去首尾空白）、实例非 `nil`、
+  别名未被占用，重复注册返回错误而不是覆盖；`MustRegister` 是启动期 panic 版本；
+- 内部 `sync.RWMutex`，注册与查找可并发；`Names()` 返回排序副本用于诊断；
+  `Lookup` 对 `nil` 注册表返回 `(nil, false)`；
+- 不是包级全局：每次装配新建一份，Nacos 热更新与测试互不污染；
+- adapter 只依赖 `Lookup(name string) (support.Middleware, bool)`
+  （`gofyadapter.MiddlewareRegistry` 接口），解析优先级为
+  `BindOptions.Middleware`（单次覆盖）→ `Registry`，两处都缺失时启动期报错；
+- **注册表只服务契约路由**，不接管下面的 App 级安装顺序；把全局链里已安装的
+  中间件再注册给契约路由会执行两次，只在需要按路由覆盖全局行为时才这么做。
+
 安装顺序（由外到内）：
 
 ```text
@@ -1221,6 +1260,7 @@ package logging
 type Config struct {
     Level              string            `yaml:"level" default:"info"`        // debug|info|warn|error
     Encoding           string            `yaml:"encoding" default:"json"`     // json|console
+    Color              string            `yaml:"color" default:"auto"`        // auto|always|never，仅 stdout/stderr
     Outputs            []string          `yaml:"outputs"`                     // stdout|stderr|文件路径
     ErrorOutputs       []string          `yaml:"error_outputs"`               // 仅 error 及以上
     SystemErrorOutputs []string          `yaml:"system_error_outputs"`        // 仅框架捕获的系统错误
@@ -1277,6 +1317,13 @@ func (c Config) Validate() error
   App 把它用于 HTTP recovery，panic 不会进入主 logger。为空时回落到主 logger，
   panic 仍写入 `ErrorOutputs`，保持旧行为。
 - `BaseFields` 会作为固定字段附加到每条日志（如 `service`、`env`、`version`）。
+- `Color` 只作用于 `stdout`/`stderr`：`auto`（默认）按 TTY 检测，`always` 供
+  IDE 这类非 TTY 控制台强制开启，`never` 关闭；非法值在 `Validate` 阶段报错。
+  文件 sink（含滚动文件）永不着色，`NO_COLOR` 与 Windows 始终优先关闭。
+- 着色生效时，`error` 及以上条目渲染成红色多行块：首行是时间、大写级别、
+  caller、消息和其余字段（`BaseFields` 与 `logger.With` 的字段同样保留），
+  `error`/`zap.NamedError` 各自单独成行，`stacktrace` 逐帧展开，不再挤在一行
+  JSON 里。低于 `error` 的条目仍按 `Encoding` 输出，文件里的格式完全不变。
 - 返回的 logger 由调用方负责 `Sync`；App 内建的 logger 由 App 在关闭时 `Sync`。
 - 无 `init()`、无包级 logger、无后台切日 goroutine。
 
@@ -2035,6 +2082,7 @@ http:
 log:
   level: info
   encoding: json
+  color: auto             # auto|always|never；IDE 控制台非 TTY，需要彩色时设 always
   outputs:
     - stdout
     - /var/log/demo-service/app.log
@@ -2122,7 +2170,8 @@ kafka:
 pid_file: /var/run/demo-service.pid
 
 order:
-  payment_timeout: 3s
+  # 设置后所有契约路由都要求 Bearer Token
+  auth_token: ""
 ```
 
 `${ORDER_DB_DSN}` 在加载时展开；缺失时启动失败（除非显式允许）。
@@ -2404,7 +2453,8 @@ demo-service/
 │   │   └── redis/
 │   │       └── redis.go        # Cache / Session / RateLimit
 │   ├── middleware/
-│   │   └── auth.go
+│   │   ├── auth.go         # Auth + NameAuth
+│   │   └── audit.go        # Audit + NameAudit / NameOrderAudit
 │   └── module/
 │       └── order/
 │           ├── module.go
@@ -2588,7 +2638,6 @@ package order
 
 import (
     "errors"
-    "time"
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/support"
@@ -2602,7 +2651,6 @@ import (
 )
 
 type Config struct {
-    PaymentTimeout time.Duration `yaml:"payment_timeout" default:"3s"`
     // 非空时所有契约路由都要求该 Bearer Token；为空则跳过校验。
     AuthToken string `yaml:"auth_token"`
 }
@@ -2618,8 +2666,9 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
             return nil, errors.New("order module requires database")
         }
         repo := repository.NewFromHandle(rt.Logger)
-        svc := service.New(repo, rt.Logger, service.Config{
-            PaymentTimeout: cfg.PaymentTimeout,
+        svc := service.NewOrderService(service.Deps{
+            Orders: repo,
+            Logger: rt.Logger,
         })
         return NewModule(cfg, svc), nil
     }
@@ -2641,15 +2690,19 @@ func NewModule(cfg Config, svc *service.OrderService) *Module {
 func (m *Module) Name() string { return "order" }
 
 func (m *Module) Register(r *support.Router) error {
-    h := handler.New(m.svc)
+    h := controller.NewOrderController(m.svc, m.logger)
+    // 每次装配新建一份注册表：契约只声明别名（分组 "audit"、CreateOrder 的
+    // "order-audit"），实例在这里注册；未注册的名字在启动期报错。
+    reg := gofymiddleware.NewRegistry()
+    if err := reg.Register(middleware.NameAudit, middleware.Audit(m.logger, "group")); err != nil {
+        return err
+    }
+    if err := reg.Register(middleware.NameOrderAudit, middleware.Audit(m.logger, "route")); err != nil {
+        return err
+    }
     opts := gofyadapter.BindOptions{
-        Auth: m.auth,
-        // 契约里声明的中间件逻辑名（分组 "audit"、CreateOrder 的 "order-audit"）
-        // 在这里映射成实现；未注册的名字在启动期报错。
-        Middleware: map[string]support.Middleware{
-            "audit":       auditMiddleware,
-            "order-audit": orderAuditMiddleware,
-        },
+        Auth:     m.auth,
+        Registry: reg,
     }
     for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
         if err := gofyadapter.BindGroup(r, group, h, opts); err != nil {
@@ -2664,7 +2717,7 @@ func (m *Module) Register(r *support.Router) error {
 `Start`，句柄还是 nil；等 `Start` 安装连接后仓库自动使用新句柄，热更新也会切到新
 连接。脚本模式没有模块生命周期，改用 `repository.New(rt.DB, rt.Logger)` 显式传连接。
 
-`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名、`AuthRequired` 和路由级中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。
+`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名、`AuthRequired` 和路由级中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查 `BindOptions.Registry`（服务装配时注入的注册表）。
 
 最终路由：
 
@@ -2788,7 +2841,6 @@ package service
 
 import (
     "context"
-    "time"
 
     "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/repository"
@@ -2798,28 +2850,28 @@ import (
     "gofy/gofy-interface-service/contracts/common/types"
 )
 
-type Config struct {
-    PaymentTimeout time.Duration
-}
-
 var ErrOrderNotFound = repository.ErrNotFound
 
-type OrderService struct {
-    repo   repository.OrderRepositoryInterface
-    logger *zap.Logger
-    cfg    Config
+// Deps 汇总依赖：组合多个 repository 时只加字段，构造函数签名不变。
+type Deps struct {
+    Orders repository.OrderRepositoryInterface
+    Logger *zap.Logger
 }
 
-func New(repo repository.OrderRepositoryInterface, logger *zap.Logger, cfg Config) *OrderService {
+type OrderService struct {
+    orders repository.OrderRepositoryInterface
+    logger *zap.Logger
+}
+
+func NewOrderService(deps Deps) *OrderService {
     return &OrderService{
-        repo:   repo,
-        logger: logger.With(zap.String("component", "order.service")),
-        cfg:    cfg,
+        orders: deps.Orders,
+        logger: deps.Logger.With(zap.String("component", "order.service")),
     }
 }
 
 func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, error) {
-    o, err := s.repo.FindByID(ctx, id)
+    o, err := s.orders.FindByID(ctx, id)
     if err != nil {
         return nil, err
     }
@@ -2827,7 +2879,7 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, 
 }
 
 func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*orderdto.OrderDTO, error) {
-    o, err := s.repo.Create(ctx, &model.Order{
+    o, err := s.orders.Create(ctx, &model.Order{
         UserID: userID,
         Amount: amount,
         Status: string(orderenum.OrderStatusPending),
@@ -2839,7 +2891,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) 
 }
 
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderdto.OrderDTO, int64, error) {
-    items, total, err := s.repo.ListByUser(ctx, userID, (page-1)*size, size)
+    items, total, err := s.orders.ListByUser(ctx, userID, (page-1)*size, size)
     if err != nil {
         return nil, 0, err
     }
@@ -2851,7 +2903,7 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 }
 
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-    return s.repo.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
+    return s.orders.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
 }
 
 // toDTO is the only place service touches the persistence model.
@@ -2865,6 +2917,10 @@ func toDTO(o *model.Order) *orderdto.OrderDTO {
     }
 }
 ```
+
+service 的依赖集中在 `Deps`：要组合多个 repository 时只加字段（`Orders`、`Users`…），
+构造函数签名不变，调用方按字段名注入；跨模块接口由 `module.go` 装配后传入，service
+不 import 其他模块的 GORM 实现。`Logger` 为 nil 时退化为 `zap.NewNop()`（节选省略）。
 
 ### 9.8 `app/module/order/repository/order_repository.go`（节选）
 
@@ -2959,7 +3015,7 @@ import (
 
 func Register(cfg *config.Config) []gofyscript.Script {
     return []gofyscript.Script{
-        FixOrder(cfg),
+        FixOrder(),
     }
 }
 ```
@@ -2973,11 +3029,10 @@ import (
     "github.com/bingcool/gofy/apperr"
     gofyscript "github.com/bingcool/gofy/script"
     "github.com/spf13/pflag"
-    "github.com/yourorg/demo-service/app/config"
     "go.uber.org/zap"
 )
 
-func FixOrder(cfg *config.Config) gofyscript.Script {
+func FixOrder() gofyscript.Script {
     return gofyscript.Script{
         Name:  "fix-order",
         Short: "fix inconsistent order data",
@@ -2994,7 +3049,6 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
             rt.Logger.Info("fix order",
                 zap.Uint64("order_id", id),
                 zap.Bool("dry_run", dryRun),
-                zap.Duration("payment_timeout", cfg.Order.PaymentTimeout),
             )
             // 使用 rt.DB 执行数据修复
             return nil
@@ -3021,6 +3075,9 @@ import (
     "github.com/gin-gonic/gin"
 )
 
+// NameAuth 是 Auth 在契约路由里使用的中间件别名。
+const NameAuth = "auth"
+
 func Auth(verify func(token string) error) support.Middleware {
     return func(c *gin.Context) {
         token := c.GetHeader("Authorization")
@@ -3043,6 +3100,15 @@ func Auth(verify func(token string) error) support.Middleware {
 
 标准 Bearer JWT 不需要业务自己写中间件：使用 `WithJWTAuth`（§3.4.9）即可；
 上面的 `Auth` 仍适合需要调用外部认证服务的场景。
+
+业务中间件和框架中间件一样，在自己的文件里导出别名常量，装配时注册进
+`support/middleware.Registry` 再交给契约路由按名字使用（§3.4.6）。demo-service 的
+`app/middleware/audit.go` 导出 `NameAudit = "audit"`（订单分组）与
+`NameOrderAudit = "order-audit"`（CreateOrder 单路由），两者是同一个 `Audit`
+构造器配不同 `scope`，便于在日志里区分名字来自哪一层；`order.Module.Register`
+每次装配新建一份注册表，注册这两个别名与 `NameAuth`，再经 `BindOptions.Registry`
+注入。`AuthRequired` 的路由由 `BindOptions.Auth` 安装鉴权，因此同一条路由不要
+既声明 `AuthRequired` 又 `Use("auth")`，否则鉴权会执行两次。
 
 ### 9.11 CLI 行为
 
@@ -3694,6 +3760,14 @@ func Recovery(*zap.Logger, support.Responder) gin.HandlerFunc
 func CORS(support.CORSConfig) (gin.HandlerFunc, error)
 func BodyLimit(int64) gin.HandlerFunc
 type AccessLogOptions
+const NameRequestID / NameHeaderPropagation / NameAccessLog / NameRecovery /
+      NameCORS / NameBodyLimit / NameSecurityHeaders / NameRateLimit / NameJWTAuth
+type Registry
+func NewRegistry() *Registry
+func (*Registry) Register(string, support.Middleware) error
+func (*Registry) MustRegister(string, support.Middleware)
+func (*Registry) Lookup(string) (support.Middleware, bool)
+func (*Registry) Names() []string
 ```
 
 ### A.5 `apperr`

@@ -9,20 +9,25 @@ Gin 中间件集合：请求 ID、访问日志、异常恢复、Body 上限、CO
 
 ## 一、中间件清单
 
-| 中间件 | 构造方式 | 根包选项 | 作用 |
-| --- | --- | --- | --- |
-| `RequestID` | `RequestID(support.DefaultRequestIDHeader)` | 自动安装 | 上游 `X-Trace-ID` 合法则复用，否则生成 UUID；写回响应头与 request context，下游 interface-service 客户端自动透传 |
-| `AccessLog` | `AccessLog(logger, opts)` | `WithAccessLog(true)` | 结构化访问日志；跳过 `/healthz`、`/readyz`；query 中的 token/password 等敏感键脱敏；慢请求阈值 500ms |
-| `Recovery` | `Recovery(logger, responder)` | `WithRecovery(true)`（默认开） | panic → 500 标准包络，堆栈只进日志不外泄 |
-| `BodyLimit` | `BodyLimit(maxBytes)` | `WithMaxBodyBytes(n)` | `http.MaxBytesReader` 限制请求体，超限由绑定层映射为 413 |
-| `CORS` | `CORS(cfg)` | `WithCORS(cfg)` | 裸域名展开 http/https、`*.example.com` 子域、路径白名单、非法来源 403；详见包内 cors.go |
-| `JWTAuth` | `JWTAuth(cfg, responder)` | `WithJWTAuth(cfg)` | 校验 Bearer token，claims 写入 gin context 与 `frameworkcontext`；失败返回标准包络 |
-| `RateLimit` | `RateLimit(cfg, responder)` | `WithRateLimit(cfg)` | 按 IP + 方法 + 路由分桶的滑动窗口；默认失败关闭（503） |
-| `SecurityHeaders` | `SecurityHeaders(cfg)` | `WithSecurityHeaders(cfg)` | `X-Content-Type-Options`、`X-Frame-Options`、Referrer-Policy、HSTS、CSP、Permissions-Policy 与自定义头 |
-| `HeaderPropagation` | `HeaderPropagation(trustedProxies)` | `WithHeaderPropagation(true)` | 把入口白名单头写入 context；身份头只采信可信代理，`Authorization`/`Cookie` 永不透传 |
+| 中间件 | 契约别名常量 | 构造方式 | 根包选项 | 作用 |
+| --- | --- | --- | --- | --- |
+| `RequestID` | `NameRequestID` = `request-id` | `RequestID(support.DefaultRequestIDHeader)` | 自动安装 | 上游 `X-Trace-ID` 合法则复用，否则生成 UUID；写回响应头与 request context，下游 interface-service 客户端自动透传 |
+| `AccessLog` | `NameAccessLog` = `access-log` | `AccessLog(logger, opts)` | `WithAccessLog(true)` | 结构化访问日志；跳过 `/healthz`、`/readyz`；query 中的 token/password 等敏感键脱敏；慢请求阈值 500ms |
+| `Recovery` | `NameRecovery` = `recovery` | `Recovery(logger, responder)` | `WithRecovery(true)`（默认开） | panic → 500 标准包络，堆栈只进日志不外泄 |
+| `BodyLimit` | `NameBodyLimit` = `body-limit` | `BodyLimit(maxBytes)` | `WithMaxBodyBytes(n)` | `http.MaxBytesReader` 限制请求体，超限由绑定层映射为 413 |
+| `CORS` | `NameCORS` = `cors` | `CORS(cfg)` | `WithCORS(cfg)` | 裸域名展开 http/https、`*.example.com` 子域、路径白名单、非法来源 403；详见包内 cors.go |
+| `JWTAuth` | `NameJWTAuth` = `jwt-auth` | `JWTAuth(cfg, responder)` | `WithJWTAuth(cfg)` | 校验 Bearer token，claims 写入 gin context 与 `frameworkcontext`；失败返回标准包络 |
+| `RateLimit` | `NameRateLimit` = `rate-limit` | `RateLimit(cfg, responder)` | `WithRateLimit(cfg)` | 按 IP + 方法 + 路由分桶的滑动窗口；默认失败关闭（503） |
+| `SecurityHeaders` | `NameSecurityHeaders` = `security-headers` | `SecurityHeaders(cfg)` | `WithSecurityHeaders(cfg)` | `X-Content-Type-Options`、`X-Frame-Options`、Referrer-Policy、HSTS、CSP、Permissions-Policy 与自定义头 |
+| `HeaderPropagation` | `NameHeaderPropagation` = `header-propagation` | `HeaderPropagation(trustedProxies)` | `WithHeaderPropagation(true)` | 把入口白名单头写入 context；身份头只采信可信代理，`Authorization`/`Cookie` 永不透传 |
 
 `support.Middleware` 就是 `gin.HandlerFunc`，因此自定义 gin 中间件可以直接
 传给 `gofy.WithMiddleware(...)` 或 `support.Router.Use(...)`。
+
+别名常量只是**名字**，不会自动注册，也不改变 App 级安装顺序：全局链仍由
+`gofy.With*` 选项决定。只有当契约路由按名字引用某个中间件时，服务才需要把
+实例注册进注册表（见第三节第 3 小节）。业务自定义中间件同样在自己的文件里
+导出 `NameXxx` 常量，保持「别名与实例一一对应」。
 
 ## 二、App 的安装顺序`gofy.New` 在构建 HTTP server 时按下面顺序安装（`start.go`）：
 
@@ -116,7 +121,7 @@ app, err := gofy.New(
 
 契约里只声明中间件的**逻辑名**：分组级 `group.Use("audit")`、路由级
 `spec.Middleware = []string{"order-audit"}`（或链式 `.Use("order-audit")`）。
-服务端用 `BindOptions.Middleware` 把名字映射成这里的中间件实例，
+服务端把「别名 → 实例」注册进中间件注册表，经 `BindOptions.Registry` 注入，
 `adapter/gofy.BindGroup` 负责建组并解析分组名，内部 `BindAll` 解析路由名。
 
 最终顺序：
@@ -124,17 +129,29 @@ app, err := gofy.New(
 → Routes[OperationID] → Auth（契约声明 AuthRequired 时）→ RateLimit(spec)`。
 
 ```go
+import (
+    gofymiddleware "github.com/bingcool/gofy/support/middleware"
+    "github.com/yourorg/demo-service/app/middleware" // 业务自己的中间件与别名
+)
+
 func (m *Module) Register(r *support.Router) error {
     h := controller.NewOrderController(m.svc, m.logger)
+
+    // 每次装配新建一份注册表：热更新重建路由时不会与旧实例共享状态。
+    reg := gofymiddleware.NewRegistry()
+    if err := reg.Register(middleware.NameAudit, middleware.Audit(m.logger, "group")); err != nil {
+        return err
+    }
+    if err := reg.Register(middleware.NameOrderAudit, middleware.Audit(m.logger, "route")); err != nil {
+        return err
+    }
+
     opts := gofyadapter.BindOptions{
-        // 只对契约路由生效的通用中间件。
+        // 契约声明的分组名与路由名都从这里解析。
+        Registry: reg,
+        // 只对契约路由生效的通用中间件，不走名字。
         Global: []support.Middleware{
-            middleware.RequestID(support.DefaultRequestIDHeader),
-        },
-        // 契约声明的逻辑名 → 具体中间件；名字缺失会在启动期报错。
-        Middleware: map[string]support.Middleware{
-            "audit":       middleware.Audit(m.logger, "group"),
-            "order-audit": middleware.Audit(m.logger, "route"),
+            gofymiddleware.RequestID(support.DefaultRequestIDHeader),
         },
         // 也可以绕过名字，直接按 OperationID 追加实例。
         Routes: map[string][]support.Middleware{
@@ -166,6 +183,51 @@ func (m *Module) Register(r *support.Router) error {
   （`c.Next()`）或做更细粒度的角色校验，避免重复解析 token。
 - `BindOptions.Global` 的中间件比 App 级 CORS/JWT 更靠内：CORS 预检根本不会
   进入契约路由。
+
+### 3. 中间件别名注册表（Registry）
+
+`registry.go` 提供一份显式的「别名 → 中间件实例」注册表，是契约名字与服务端
+实现之间唯一的桥：
+
+| API | 行为 |
+| --- | --- |
+| `NewRegistry()` | 创建空注册表；由装配方持有，不是包级全局 |
+| `Register(name, mw) error` | 别名去首尾空白后不能为空、实例不能为 nil、同名不可覆盖，违反任一条返回错误 |
+| `MustRegister(name, mw)` | `Register` 的 panic 版本，用于启动期装配，别名写错立刻失败 |
+| `Lookup(name) (support.Middleware, bool)` | 按别名查实例；名字不存在、值为 nil 或注册表本身为 nil 都返回 `(nil, false)` |
+| `Names() []string` | 已注册别名的排序副本，用于启动日志与排查 |
+
+规则与取舍：
+
+- **一一对应，不可覆盖**：重复注册返回 `middleware alias "x" is already registered`，
+  避免两个中间件悄悄抢同一个名字；需要替换时新建一份注册表。
+- **并发安全**：内部 `sync.RWMutex`，注册与查找可同时进行；热更新每次装配新建
+  一份，旧路由继续持有旧实例，不会被半更新状态影响。
+- **解析优先级**：`BindOptions.Middleware`（本次绑定的显式映射）→
+  `BindOptions.Registry`。前者用于测试桩或单个模块的定制覆盖，后者是服务级默认。
+- **缺失即启动失败**：两处都查不到时 adapter 报
+  `middleware "x" is not registered in BindOptions.Middleware or BindOptions.Registry`，
+  分组名带 `group "<prefix>"` 前缀、路由名带 OperationID 前缀，路由不会带着
+  缺失的中间件上线。
+- **adapter 不依赖具体类型**：`gofyadapter.MiddlewareRegistry` 只要求
+  `Lookup(name string) (support.Middleware, bool)`，因此可以注入自己的实现。
+- **只服务契约路由**：App 级全局链仍由 `gofy.With*` 选项安装，注册表不接管它。
+  把已在全局链安装的中间件（如 `NameCORS`）再注册给契约路由会执行两次，
+  只在确实需要「按路由覆盖全局行为」时才这么做。
+
+契约需要某个框架内建中间件时，用它的别名常量注册即可：
+
+```go
+corsMW, err := gofymiddleware.CORS(cfg.CORS)
+if err != nil {
+    return err
+}
+if corsMW != nil { // 未配置来源时 CORS 返回 (nil, nil)，表示不启用
+    if err := reg.Register(gofymiddleware.NameCORS, corsMW); err != nil {
+        return err
+    }
+}
+```
 
 ## 四、在 gofy-interface-service 客户端侧
 
@@ -208,9 +270,11 @@ router := support.NewRouter(engine, support.RouterConfig{Prefix: "/api/v1"})
 router.Use(rateLimitMW, jwtMW) // 只作用于模块路由
 ```
 
-gofy-interface-service 的 `adapter/gofy/bind_test.go` 就是用这种最小方式验证契约
-绑定：`engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))` 后直接
-调用 `gofyadapter.BindAll` / `BindGroup`。
+gofy-interface-service 的 `adapter/gofy/bind_test.go` 与
+`adapter/gofy/middleware_registry_test.go` 就是用这种最小方式验证契约绑定：
+`engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))` 后直接调用
+`gofyadapter.BindAll` / `BindGroup`，后者专门覆盖注册表解析、显式映射覆盖与
+名字缺失时的启动期报错。
 
 ## 六、安全约定
 
@@ -225,7 +289,9 @@ gofy-interface-service 的 `adapter/gofy/bind_test.go` 就是用这种最小方�
 
 ```bash
 go test ./support/middleware/
+go test -race ./support/middleware/ -run Registry
 ```
 
 覆盖 RequestID、访问日志脱敏与字段、Recovery 包络、CORS 来源/模式/路径/403、
-JWT 校验与 Claims、限流键与失败关闭、安全头与透传头的可信代理判定。
+JWT 校验与 Claims、限流键与失败关闭、安全头与透传头的可信代理判定，以及注册表
+的注册/查找/重复别名/空名/nil 实例/MustRegister panic/Names 排序与并发读写。

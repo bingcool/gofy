@@ -274,7 +274,7 @@ gofy-interface-service/
 │   └── gofy/
 │       ├── bind.go                 # Bind、BindGroup、BindAll、BindSSE、BindDownload、BindChunked
 │       ├── errors.go               # errcode.Fault -> *apperr.Error
-│       └── options.go              # BindOptions、路由级中间件
+│       └── options.go              # BindOptions、MiddlewareRegistry、路由级中间件
 ├── client/
 │   ├── client.go                   # Client、Config
 │   ├── call.go                     # Call[Req,Res]
@@ -1376,6 +1376,12 @@ func Bind[Req, Res any](
 **按接口批量绑定：**
 
 ```go
+// MiddlewareRegistry 是服务端注入的「别名 → 中间件实例」查询接口，
+// 由 support/middleware.Registry 实现；adapter 只依赖这一个方法。
+type MiddlewareRegistry interface {
+	Lookup(name string) (support.Middleware, bool)
+}
+
 type BindOptions struct {
 	// Global 应用到所有契约路由的中间件（RequestID/AccessLog 等由 gofy 根包负责）。
 	Global []support.Middleware
@@ -1383,10 +1389,14 @@ type BindOptions struct {
 	// Routes 按 OperationID 追加路由级中间件。
 	Routes map[string][]support.Middleware
 
-	// Middleware 把契约声明的逻辑名映射成具体中间件：分组名来自
-	// endpoint.Group.Use（BindGroup 解析），路由名来自 Spec.Middleware /
-	// Route.Use（BindAll 解析）；未注册或值为 nil 的名字在启动期报错。
+	// Middleware 是本次绑定的显式别名映射，优先级高于 Registry，用于测试桩
+	// 或单个模块的定制覆盖；未注册或值为 nil 的名字在启动期报错。
 	Middleware map[string]support.Middleware
+
+	// Registry 是服务装配时创建的中间件注册表，解析契约声明的分组名
+	// （endpoint.Group.Use，由 BindGroup 处理）与路由名（Spec.Middleware /
+	// Route.Use，由 BindAll 处理）。为 nil 时只用 Middleware 映射。
+	Registry MiddlewareRegistry
 
 	// Auth 是 Bearer 鉴权中间件；当契约声明 AuthRequired/AuthOptional 时必须提供。
 	Auth support.Middleware
@@ -1428,7 +1438,7 @@ var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
 // })
 
 // 服务端也可以按 Gin 习惯手动建组：分组中间件直接传实例，
-// 路由级名字仍由 opts.Middleware 解析。
+// 路由级名字仍由 opts.Registry / opts.Middleware 解析。
 orders := router.Group(orderroute.Orders.Prefix, auditMiddleware)
 err := gofyadapter.BindAll(orders, orderroute.Orders.Routes, impl, opts)
 ```
@@ -1449,13 +1459,19 @@ var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
 	group.Add(GetOrder, ListOrders, CreateOrder, CancelOrder)
 })
 
-// 服务端：BindGroup 解析分组名并创建 router.Group(prefix, mw...)，
+// 服务端：装配时把别名与实例注册进注册表（每次装配新建一份）
+reg := middleware.NewRegistry() // github.com/bingcool/gofy/support/middleware
+if err := reg.Register("audit", auditMiddleware); err != nil {
+	return err
+}
+if err := reg.Register("order-audit", orderAuditMiddleware); err != nil {
+	return err
+}
+
+// BindGroup 解析分组名并创建 router.Group(prefix, mw...)，
 // 内部 BindAll 再解析每条路由的名字
 err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOptions{
-	Middleware: map[string]support.Middleware{
-		"audit":       auditMiddleware,
-		"order-audit": orderAuditMiddleware,
-	},
+	Registry: reg,
 })
 ```
 
@@ -1463,8 +1479,10 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
   分组与中间件名都放在同一个路由文件里，每个文件直接导出自己的分组；
 - `Spec.Middleware []string` 是路由级名字，`Route.Use(names...)` 是它的链式写法；
   空名字会被忽略，重复名字按声明顺序重复执行；
-- 契约不依赖 gofy，`BindOptions.Middleware` 把逻辑名映射成具体中间件；
-  未注册（或值为 nil）的名字在启动期报错，错误带上分组前缀或 OperationID；
+- 契约不依赖 gofy，服务端把别名与实例注册进 `support/middleware.Registry` 后经
+  `BindOptions.Registry` 注入；解析优先级为 `BindOptions.Middleware`（单次覆盖）
+  → `Registry`，两处都查不到（或值为 nil）的名字在启动期报错，错误带上分组前缀
+  或 OperationID；
 - 手动 `router.Group(prefix, mw...)` + `BindAll` 时分组名不会被解析（分组中间件
   已直接传实例），路由级名字仍会解析；`Bind` 只安装显式传入的 `mw`；
 - `Spec.Path` 始终是完整路径（客户端/OpenAPI 使用）；`BindGroup`/`BindAll` 通过
@@ -1480,11 +1498,47 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
    - JSON：`func(context.Context, *Req) (*Res, error)`
    - `NoContent`：`func(context.Context, *Req) error`
    - SSE/Download/Chunked 使用专用绑定函数，不进入普通 JSON 分支。
-3. 解析 `Spec.Middleware` 逻辑名（`opts.Middleware`），缺失即记入聚合错误。
+3. 解析 `Spec.Middleware` 逻辑名（`opts.Middleware` → `opts.Registry`），缺失即记入聚合错误。
 4. 根据 `Spec.Auth` 安装鉴权中间件；`AuthRequired` 且 `opts.Auth == nil` 返回错误。
 5. 根据 `Spec.RateLimit` 和 `opts.RateLimit` 安装限流中间件。
 6. 调用 gofy 的 `support.Any(r, method, path, h, mw...)` 注册。
 7. 返回聚合错误，列出所有缺失/签名不符的方法，而不是遇到第一个就退出。
+
+**中间件别名注册表（`support/middleware.Registry`）：**
+
+契约只写别名，实例由服务端注册。注册表实现在 gofy 的
+`support/middleware/registry.go`，adapter 通过 `MiddlewareRegistry` 接口消费，
+因此契约层和 adapter 都不认识具体中间件类型：
+
+```go
+type Registry struct {
+	// mu sync.RWMutex; entries map[string]support.Middleware
+}
+
+func NewRegistry() *Registry
+func (r *Registry) Register(name string, mw support.Middleware) error
+func (r *Registry) MustRegister(name string, mw support.Middleware)
+func (r *Registry) Lookup(name string) (support.Middleware, bool)
+func (r *Registry) Names() []string
+```
+
+- **显式实例，无包级全局**：装配方（`Module.Register` / `main`）创建后经
+  `BindOptions.Registry` 注入；Nacos 热更新和测试各自持有一份，互不污染；
+- **别名与实例一一对应**：`Register` 去掉首尾空白后校验别名非空、实例非 `nil`、
+  别名未被占用，重复注册返回 `middleware alias "x" is already registered`，
+  不静默覆盖；`MustRegister` 是 panic 版本，用于启动期装配；
+- **并发安全**：内部 `sync.RWMutex`；`Names()` 返回排序副本，供启动日志与排查；
+  `Lookup` 对 `nil` 注册表返回 `(nil, false)`，typed-nil 注入不会 panic；
+- **解析优先级**：`BindOptions.Middleware`（本次绑定的显式覆盖）→ `Registry`；
+  两处都查不到时启动期报
+  `middleware "x" is not registered in BindOptions.Middleware or BindOptions.Registry`；
+- **别名常量与中间件同文件**：框架内建导出 `NameAccessLog`、`NameBodyLimit`、
+  `NameCORS`、`NameHeaderPropagation`、`NameJWTAuth`、`NameRateLimit`、
+  `NameRecovery`、`NameRequestID`、`NameSecurityHeaders`；业务中间件在自己的文件里
+  导出 `NameXxx`（demo-service：`NameAuth`、`NameAudit`、`NameOrderAudit`）；
+- **只服务契约路由**：App 级全局链仍由 `gofy.With*` 选项安装，注册表不接管它。
+  把全局链里已安装的中间件再注册给契约路由会执行两次，只在确实需要「按路由
+  覆盖全局行为」时才这么做。
 
 **业务实现：**
 
@@ -1532,17 +1586,28 @@ func (h *Handler) GetConfig(ctx context.Context, req *orderrequest.GetConfigRequ
 
 ```go
 func (m *Module) Register(r *support.Router) error {
-	return gofyadapter.BindAll(
-		r,
-		demoservice.Routes(),
-		m.handler,
-		gofyadapter.BindOptions{
-			Auth: m.auth,
-			RateLimit: func(spec endpoint.Spec) support.Middleware {
-				return m.rateLimiter(spec)
-			},
+	// 每次装配新建一份注册表：热更新重建路由时不与旧实例共享状态。
+	reg := middleware.NewRegistry() // github.com/bingcool/gofy/support/middleware
+	if err := reg.Register("audit", m.audit); err != nil {
+		return err
+	}
+	if err := reg.Register("order-audit", m.orderAudit); err != nil {
+		return err
+	}
+	opts := gofyadapter.BindOptions{
+		Auth: m.auth,
+		// 契约声明的分组名与路由名都从注册表解析，缺失的名字启动期报错。
+		Registry: reg,
+		RateLimit: func(spec endpoint.Spec) support.Middleware {
+			return m.rateLimiter(spec)
 		},
-	)
+	}
+	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
+		if err := gofyadapter.BindGroup(r, group, m.handler, opts); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 ```
 
@@ -1663,8 +1728,9 @@ var DownloadInvoice = endpoint.New[DownloadInvoiceRequest, endpoint.NoBody](endp
 10. 路径占位符在 Request 的 `uri` tag 中不存在。
 11. `Spec.Path` 中的占位符重复或为空。
 12. `RequestContentType=multipart/form-data` 但 Request 没有文件字段（警告，不阻止）。
-13. 中间件逻辑名未在 `BindOptions.Middleware` 注册或值为 `nil`：分组名由
-    `BindGroup` 报（错误带分组前缀），路由名由 `BindAll` 报（错误带 `OperationID`）。
+13. 中间件别名既不在 `BindOptions.Middleware` 也不在 `BindOptions.Registry`
+    注册，或解析结果为 `nil`：分组名由 `BindGroup` 报（错误带分组前缀），
+    路由名由 `BindAll` 报（错误带 `OperationID`）。
 
 ---
 
@@ -2997,10 +3063,22 @@ Handler 方法直接使用契约 Request/Response。
 
 ```go
 func (m *Module) Register(r *support.Router) error {
-	return gofyadapter.BindAll(r, demoservice.Routes(), m.handler, gofyadapter.BindOptions{
-		Auth: m.auth,
+	// 契约声明的中间件别名在这里注册成实例，热更新每次装配新建一份。
+	reg := middleware.NewRegistry()
+	if err := reg.Register(middleware.NameAudit, m.audit); err != nil {
+		return err
+	}
+	opts := gofyadapter.BindOptions{
+		Auth:      m.auth,
+		Registry:  reg,
 		RateLimit: m.rateLimitMiddleware,
-	})
+	}
+	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
+		if err := gofyadapter.BindGroup(r, group, m.handler, opts); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 ```
 
@@ -3400,11 +3478,11 @@ jobs:
 | `contracts/common/paging` | `PageRequest`、`Offset()`、`ListData[T]`、`PageData[T]` |
 | `contracts/common/errcode` | `Code`、`Fault`、`New`、公共码常量 |
 | `contracts/common/types` | `Int64String`、`Uint64String`、`Date`、`Decimal` |
-| `contracts/common/endpoint` | `Spec`、`Route[Req,Res]`、`Descriptor`、`New`、`NoBody`、`AuthMode`、`RateKey`、`ResponseKind`、`ErrorSpec` |
+| `contracts/common/endpoint` | `Spec`、`Route[Req,Res]`、`Descriptor`、`New`、`NewRouteGroup`、`Group`、`Get`/`Post`/`Put`/`Patch`/`Delete`、`NoBody`、`AuthMode`、`RateKey`、`ResponseKind`、`ErrorSpec` |
 | `contracts/common/enum` | `Values`、`Labels`、`Valid` 辅助 |
 | `appinterface/{domain}service` | `Service`、DTO、Request、Response、Const、Enum、`Routes()` |
 | `appinterface/{domain}service/{domain}serviceclient` | `Client`、`New`、`NewWithBaseURL`、`NewWithResolver`、各路由方法 |
-| `adapter/gofy` | `Bind`、`BindGroup`、`BindAll`、`BindSSE`、`BindDownload`、`BindChunked`、`BindOptions`、`Error` |
+| `adapter/gofy` | `Bind`、`BindGroup`、`BindAll`、`BindSSE`、`BindDownload`、`BindChunked`、`BindOptions`、`MiddlewareRegistry`、`Error` |
 | `client` | `New`、`Config`、`Call`、`StreamSSE`、`DownloadFile`、`StreamChunked`、`APIError`、`CodeOf`、`RequestIDOf`、`Resolver`、`StaticResolver`、`CallOption`、`WithTimeout`、`WithConnectTimeout`、`WithHTTPClient`、`WithHeader(s)` |
 | `docgen` | `Build`、`Options`、`Validate` |
 | `docsui` | `Handler`、`Config`、`BasicAuth` |

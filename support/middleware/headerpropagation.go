@@ -7,6 +7,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// NameHeaderPropagation 是 HeaderPropagation 在契约路由里使用的中间件别名。
+const NameHeaderPropagation = "header-propagation"
+
 // HeaderPropagation 把白名单请求头写入 request context，
 // 使 handler 和下游 interface-service 客户端可以继续转发调用方身份和 trace id。
 //

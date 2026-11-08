@@ -10,6 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameJWTAuth 是 JWTAuth 在契约路由里使用的中间件别名。
+const NameJWTAuth = "jwt-auth"
+
 // JWTAuth verifies a bearer token and stores the claims in the gin context.
 // Rejections use the shared responder so clients see the standard envelope;
 // the token error itself is never exposed.

@@ -99,8 +99,9 @@ func newTestApp(t *testing.T) *gofytest.App {
 
 func newTestAppWithConfig(t *testing.T, cfg order.Config) *gofytest.App {
 	t.Helper()
-	svc := service.New(newFakeRepository(), zap.NewNop(), service.Config{
-		PaymentTimeout: time.Second,
+	svc := service.NewOrderService(service.Deps{
+		Orders: newFakeRepository(),
+		Logger: zap.NewNop(),
 	})
 	module := order.NewModule(cfg, svc, zap.NewNop())
 	return gofytest.New(t,
@@ -142,7 +143,7 @@ func TestGetConfigContract(t *testing.T) {
 	gofytest.Status(t, rr, http.StatusOK)
 
 	resp := gofytest.JSON[orderresponse.GetConfigResponse](t, rr)
-	if resp.PaymentTimeout != "3s" || resp.AuthRequired {
+	if resp.AuthRequired {
 		t.Fatalf("config = %+v", resp)
 	}
 }
@@ -281,8 +282,9 @@ func TestCancelWithTokenConfigured(t *testing.T) {
 
 func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := service.New(newFakeRepository(), zap.NewNop(), service.Config{
-		PaymentTimeout: time.Second,
+	svc := service.NewOrderService(service.Deps{
+		Orders: newFakeRepository(),
+		Logger: zap.NewNop(),
 	})
 	module := order.NewModule(order.Config{}, svc, zap.New(core))
 	app := gofytest.New(t,
@@ -313,6 +315,28 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	}
 	if got := entries[2].ContextMap()["scope"]; got != "group" {
 		t.Fatalf("third audit scope = %v, want group", got)
+	}
+}
+
+// 同一个 module 实例被装配两次（等价于 Nacos 热更新重建路由）时，每次
+// Register 都新建一份中间件注册表，因此不会撞上「别名已注册」错误。
+func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	svc := service.NewOrderService(service.Deps{
+		Orders: newFakeRepository(),
+		Logger: zap.NewNop(),
+	})
+	module := order.NewModule(order.Config{}, svc, zap.New(core))
+
+	for i := 0; i < 2; i++ {
+		app := gofytest.New(t,
+			gofy.WithName("demo-service-test"),
+			gofy.WithModules(module),
+		)
+		gofytest.Status(t, app.GET("/api/v1/order/orders/1"), http.StatusOK)
+	}
+	if got := len(logs.FilterMessage("order audit").All()); got != 2 {
+		t.Fatalf("audit entries = %d, want one per assembly", got)
 	}
 }
 

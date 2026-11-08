@@ -14,9 +14,6 @@ func TestGetConfigOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConfig: %v", err)
 	}
-	if got.PaymentTimeout != "3s" {
-		t.Fatalf("payment timeout = %q, want 3s", got.PaymentTimeout)
-	}
 	if got.AuthRequired {
 		t.Fatal("auth_required should be false in the sample output")
 	}

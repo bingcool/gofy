@@ -9,10 +9,10 @@ package order
 
 import (
 	"errors"
-	"time"
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
+	gofymiddleware "github.com/bingcool/gofy/support/middleware"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order/controller"
 	"github.com/yourorg/demo-service/app/module/order/repository"
@@ -25,7 +25,6 @@ import (
 
 // Config holds order module settings.
 type Config struct {
-	PaymentTimeout time.Duration `yaml:"payment_timeout" default:"3s"`
 	// AuthToken is required by every contract route when non-empty; empty
 	// disables the check so the example runs without credentials.
 	AuthToken string `yaml:"auth_token"`
@@ -45,7 +44,10 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
 			return nil, errors.New("order module requires database")
 		}
 		repo := repository.NewFromHandle(rt.Logger)
-		svc := service.New(repo, rt.Logger, service.Config{PaymentTimeout: cfg.PaymentTimeout})
+		svc := service.NewOrderService(service.Deps{
+			Orders: repo,
+			Logger: rt.Logger,
+		})
 		return NewModule(cfg, svc, rt.Logger), nil
 	}
 }
@@ -71,23 +73,44 @@ func NewModule(cfg Config, svc *service.OrderService, logger *zap.Logger) *Modul
 // Name returns the route prefix of the module.
 func (m *Module) Name() string { return "order" }
 
-// Register binds every demoservice contract route to the handler. BindGroup
-// resolves the middleware names declared in the contract (group "audit" and
-// CreateOrder's "order-audit"), creates router.Group(prefix, mw...) and strips
-// the group prefix from the absolute contract paths.
+// Register binds every demoservice contract route to the handler. 契约只声明
+// 中间件别名（分组 "audit"、CreateOrder 的 "order-audit"），这里把实例注册进
+// 注册表并交给 BindGroup 解析：它按名字查出中间件，创建 router.Group(prefix, mw...)
+// 并把分组前缀从契约的完整路径里裁掉。
 func (m *Module) Register(r *support.Router) error {
 	h := controller.NewOrderController(m.svc, m.logger)
-	opts := gofyadapter.BindOptions{
-		Auth: m.auth,
-		Middleware: map[string]support.Middleware{
-			"audit":       middleware.Audit(m.logger, "group"),
-			"order-audit": middleware.Audit(m.logger, "route"),
-		},
+	reg, err := m.newMiddlewareRegistry()
+	if err != nil {
+		return err
 	}
+	opts := gofyadapter.BindOptions{Auth: m.auth, Registry: reg}
 	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
 		if err := gofyadapter.BindGroup(r, group, h, opts); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// newMiddlewareRegistry 每次装配都新建一份注册表：Nacos 热更新会重新调用
+// Register，新旧实例互不共享，别名冲突也能在启动期直接暴露。
+// AuthRequired 的路由由 BindOptions.Auth 安装鉴权，这里同时注册 "auth" 别名，
+// 让契约也能按名字引用它；同一条路由不要既声明 AuthRequired 又 Use("auth")，
+// 否则鉴权会执行两次。
+func (m *Module) newMiddlewareRegistry() (*gofymiddleware.Registry, error) {
+	reg := gofymiddleware.NewRegistry()
+	entries := []struct {
+		alias string
+		mw    support.Middleware
+	}{
+		{middleware.NameAudit, middleware.Audit(m.logger, "group")},
+		{middleware.NameOrderAudit, middleware.Audit(m.logger, "route")},
+		{middleware.NameAuth, m.auth},
+	}
+	for _, e := range entries {
+		if err := reg.Register(e.alias, e.mw); err != nil {
+			return nil, err
+		}
+	}
+	return reg, nil
 }

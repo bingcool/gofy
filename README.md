@@ -340,6 +340,18 @@ timeout, _ := doc.GetDuration("http.read_timeout") // 1h、30s、200ms
 （如 `servers.0.host`），同样会展开 `${ENV_VAR}`。它不做结构体默认值和校验，
 需要这些能力时继续使用 `Load[T]`。
 
+日志用 `logging`（zap）：`log.color` 控制终端着色，`auto`（默认）只在 TTY 上
+生效，`always` 供 IDE 这类非 TTY 控制台强制开启，`never` 关闭，非法值启动即报错。
+着色生效时 `error` 及以上渲染成红色多行块：首行是时间、级别、caller、消息和
+其余字段，`error` 单独成行，`stacktrace` 逐帧展开；低于 `error` 的条目和所有
+文件日志仍按 `log.encoding` 输出，`NO_COLOR` 与 Windows 始终关闭着色。
+
+```yaml
+log:
+  encoding: json
+  color: always   # IDE 控制台不是 TTY，需要彩色分行错误时显式开启
+```
+
 数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
 MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase` 交给 App 托管连接池，
 `WithDB` 注入已有连接。配置项、默认值和日志行为见
@@ -729,7 +741,7 @@ core/          共享 Runtime（叶子包）
 support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全头配置
 logging/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
-support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传
+support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、契约别名注册表
 support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
 support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
 support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）

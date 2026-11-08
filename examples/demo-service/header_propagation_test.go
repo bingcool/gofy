@@ -15,7 +15,7 @@ import (
 )
 
 type propagationResponse struct {
-	Config string `json:"config"`
+	AuthRequired bool `json:"auth_required"`
 }
 
 type propagationModule struct {
@@ -33,7 +33,7 @@ func TestHeaderPropagationReachesDownstreamService(t *testing.T) {
 	var seen http.Header
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = r.Header.Clone()
-		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"payment_timeout":"tenant-from-header","auth_required":false}}`)
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"auth_required":true}}`)
 	}))
 	defer downstream.Close()
 
@@ -49,7 +49,7 @@ func TestHeaderPropagationReachesDownstreamService(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return &propagationResponse{Config: res.PaymentTimeout}, nil
+				return &propagationResponse{AuthRequired: res.AuthRequired}, nil
 			})
 			return nil
 		},
@@ -68,8 +68,8 @@ func TestHeaderPropagationReachesDownstreamService(t *testing.T) {
 	)
 	gofytest.Status(t, rr, http.StatusOK)
 	body := gofytest.JSON[propagationResponse](t, rr)
-	if body.Config != "tenant-from-header" {
-		t.Fatalf("downstream saw tenant %q", body.Config)
+	if !body.AuthRequired {
+		t.Fatal("downstream response was not parsed")
 	}
 	if seen.Get("X-Tenant-Id") != "tenant-1" || seen.Get("X-User-Id") != "user-1" {
 		t.Fatalf("identity headers not forwarded: %v", seen)

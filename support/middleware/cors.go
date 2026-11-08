@@ -12,6 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameCORS 是 CORS 在契约路由里使用的中间件别名。
+const NameCORS = "cors"
+
 // CORS 构建跨域中间件，行为对齐 swoolefy CorsMiddleware：
 //
 //   - AllowOrigins 支持裸域名（自动展开 http/https）与完整来源；

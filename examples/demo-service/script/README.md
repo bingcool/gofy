@@ -89,7 +89,7 @@ func RebuildIndex(cfg *config.Config) gofyscript.Script {
 ```go
 func Register(cfg *config.Config) []gofyscript.Script {
 	return []gofyscript.Script{
-		FixOrder(cfg),
+		FixOrder(),
 		RebuildIndex(cfg),
 	}
 }

@@ -13,6 +13,10 @@ http:
 log:
   level: info
   encoding: json
+  # 终端着色：auto 只在 TTY 上生效，always 供 IDE 控制台（非 TTY）强制开启，
+  # never 关闭。生效时 error 及以上按红色多行块输出：error 单独一行、
+  # stacktrace 逐帧展开；文件日志永不着色，NO_COLOR 与 Windows 始终关闭。
+  color: always
   # 日志文件由 app/config 按启动模式追加：HTTP 写 storage/log/http/<date>/，
   # 脚本写 storage/log/script/<date>/info/ 和 error/，文件名取自脚本名
   # （fix-order-h<H>.log、fix-order.log）；这里保留 stdout 方便本地查看。
@@ -193,5 +197,4 @@ rocketmq:
 pid_file: app/demo-service.pid
 
 order:
-  payment_timeout: 6s
   # auth_token: set to require a bearer token on every contract route

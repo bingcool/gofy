@@ -2,6 +2,7 @@ package logging_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,7 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 	cases := map[string]logging.Config{
 		"bad level":             {Level: "verbose"},
 		"bad encoding":          {Encoding: "xml"},
+		"bad color":             {Color: "rainbow"},
 		"negative rotation":     {Rotation: logging.RotationConfig{MaxSizeMB: -1}},
 		"bad rotation mode":     {Rotation: logging.RotationConfig{Mode: "weekly"}},
 		"bad date layout":       {Rotation: logging.RotationConfig{DateLayout: "2006/01/02"}},
@@ -71,6 +73,35 @@ func TestNewWritesJSONWithBaseFields(t *testing.T) {
 	}
 	if _, ok := entry["ts"]; !ok {
 		t.Fatal("timestamp is missing")
+	}
+}
+
+// color=always 只影响 stdout/stderr；写进文件的 error 仍是无 ANSI 的 JSON，
+// stacktrace 保持单行转义，方便日志采集。
+func TestColorAlwaysKeepsFileOutputPlain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	logger, err := logging.New(logging.Config{Color: "always", Outputs: []string{path}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Error("boom", zap.Error(errors.New("database unreachable")))
+	if err := logging.Sync(logger); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	line := strings.TrimSpace(readFile(t, path))
+	if strings.Contains(line, "\x1b[") {
+		t.Fatalf("file output contains ANSI codes: %q", line)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("decode %q: %v", line, err)
+	}
+	if entry["error"] != "database unreachable" {
+		t.Fatalf("error field = %v", entry["error"])
+	}
+	if _, ok := entry["stacktrace"]; !ok {
+		t.Fatalf("stacktrace missing: %v", entry)
 	}
 }
 

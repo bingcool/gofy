@@ -6,13 +6,12 @@ import (
 	"github.com/bingcool/gofy/apperr"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/spf13/pflag"
-	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"go.uber.org/zap"
 )
 
 // FixOrder repairs inconsistent order status.
-func FixOrder(cfg *config.Config) gofyscript.Script {
+func FixOrder() gofyscript.Script {
 	return gofyscript.Script{
 		Name:  "fix-order",
 		Short: "fix inconsistent order data",
@@ -29,7 +28,6 @@ func FixOrder(cfg *config.Config) gofyscript.Script {
 			rt.Logger.Info("fix order",
 				zap.Uint64("order_id", id),
 				zap.Bool("dry_run", dryRun),
-				zap.Duration("payment_timeout", cfg.Order.PaymentTimeout),
 			)
 			if dryRun {
 				rt.Logger.Info("fix order dry-run, no data changed", zap.Uint64("order_id", id))

@@ -77,17 +77,15 @@ curl 'http://127.0.0.1:8080/api/v1/order/orders?user_id=100&page=1&page_size=20'
 
 ```yaml
 order:
-  payment_timeout: 6s
   # auth_token: 设置后，所有契约路由都要求 Bearer Token
 ```
 
 | YAML 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `payment_timeout` | duration | `3s`（tag 默认值） | 传给 `service.Config`，当前仅记录在启动日志中，尚未实现超时任务 |
 | `auth_token` | string | 空 | 非空时启用鉴权；为空时关闭校验，方便本地直接调用 |
 
-默认值来自结构体 tag，只有通过 `gofyconfig.Load` 加载时才会应用；手工构造
-`order.Config{}` 时 `PaymentTimeout` 为零值。
+`order.Config` 由 `gofyconfig.Load` 从配置文件填充；手工构造 `order.Config{}`
+时 `AuthToken` 为空，即关闭鉴权。
 
 ## 装配
 
@@ -101,7 +99,7 @@ gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
 
 1. 检查 `rt.DB`，为空直接返回 `order module requires database`；
 2. 用 `repository.NewFromHandle(rt.Logger)` 创建 GORM 仓库，查询时从 `db.Db` 取连接；
-3. 用 `service.New(repo, rt.Logger, ...)` 创建服务；
+3. 用 `service.NewOrderService(service.Deps{...})` 创建服务；
 4. 调用 `NewModule(cfg, svc, rt.Logger)` 包装出模块。
 
 工厂执行时 `app/io` 还没 `Start`，`db.Db` 仍是 nil，所以 `NewFromHandle`
@@ -113,19 +111,66 @@ gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
 `orderroute.Config` 调用 `gofyadapter.BindGroup`，把鉴权中间件作为
 `BindOptions.Auth` 传入。
 
-契约里的中间件只声明逻辑名，实现由本模块提供：`Orders` 分组声明了
+契约里的中间件只声明别名，实现由本模块提供：`Orders` 分组声明了
 `group.Use("audit")`，`CreateOrder` 声明了 `spec.Middleware = []string{"order-audit"}`，
 两者都映射到 `app/middleware.Audit(logger, scope)`（`scope` 区分 `group`/`route`）。
 审计中间件在 handler 之后记录方法、路由模板、状态码和 `req_id`，与框架的
 `AccessLog` 互补。执行顺序：
 `分组 audit → BindOptions.Global → 路由 order-audit → Routes[OperationID] → Auth → RateLimit`。
-名字未在 `BindOptions.Middleware` 注册时启动直接失败，不会静默跳过。
+
+别名与实例的对应关系放在中间件注册表里：`app/middleware` 导出
+`NameAuth = "auth"`、`NameAudit = "audit"`、`NameOrderAudit = "order-audit"`，
+`Register` 每次装配都用 `gofymiddleware.NewRegistry()` 新建一份注册表
+（`github.com/bingcool/gofy/support/middleware`，与本模块的业务 `middleware` 包
+区分别名），注册这三个实例后经 `BindOptions.Registry` 交给 `BindGroup` 解析。
+名字查不到时启动直接失败，不会静默跳过；重复注册同一别名也会报错，避免两个
+中间件抢同一个名字。热更新重建路由时用的是新注册表，因此不会与旧实例冲突
+（`TestModuleRegisterBuildsFreshRegistry`）。
+
+`AuthRequired` 的路由由 `BindOptions.Auth` 安装鉴权，注册表里的 `auth` 别名只是
+让契约也能按名字引用它；同一条路由不要既声明 `AuthRequired` 又 `Use("auth")`，
+否则鉴权会执行两次。需要覆盖某个别名时（例如测试桩），用
+`BindOptions.Middleware` 传显式映射，它的优先级高于 `Registry`。
 
 测试或自定义场景可以跳过工厂，自己构造 service 后调用 `NewModule`：
 
 ```go
 module := order.NewModule(order.Config{}, myService, zap.NewNop())
 ```
+
+## 服务依赖
+
+`OrderService` 的依赖集中在 `service.Deps`，构造函数只收一个结构体：
+
+```go
+svc := service.NewOrderService(service.Deps{
+    Orders: repo,      // repository.OrderRepositoryInterface
+    Logger: rt.Logger, // nil 时退化为 zap.NewNop()
+})
+```
+
+要组合多个 repository（例如订单还需要读用户、产品）时，只在 `Deps` 里加字段，
+构造函数签名不变，调用方按字段名注入，不必记参数顺序（示意）：
+
+```go
+type Deps struct {
+    Orders   repository.OrderRepositoryInterface
+    Users    user.Repository    // 其他模块导出的持久化接口
+    Products product.Repository
+    Logger   *zap.Logger
+}
+```
+
+约定：
+
+- 字段按聚合命名（`Orders` 而不是 `Repo`），service 内部对应 `s.orders`、`s.users`，
+  读代码时能直接看出数据来自哪个聚合；
+- 跨模块依赖由 `module.go` 装配后注入：对方模块导出接口，service 不 import 它的
+  GORM 实现，也不在用例里临时 `new`；
+- 必填依赖（如 `Orders`）由装配方保证非 nil，`Logger` 允许为 nil；
+- 只有“同一聚合、同一事务”的多个接口才考虑 embed 成一个聚合接口，否则会把不相关
+  的持久化绑死在同一个实现和 mock 上；
+- 测试用 fake 实现填 `Deps`，不需要真实数据库（见 `module_test.go`）。
 
 ## 日志
 
@@ -137,7 +182,7 @@ module := order.NewModule(order.Config{}, myService, zap.NewNop())
 
 ```go
 repo := repository.NewFromHandle(rt.Logger) // HTTP 模块：查询时取 db.Db
-svc := service.New(repo, rt.Logger, service.Config{...})
+svc := service.NewOrderService(service.Deps{Orders: repo, Logger: rt.Logger})
 h := controller.NewOrderController(svc, rt.Logger)
 ```
 
@@ -272,9 +317,11 @@ go test ./app/module/order/...
 - 配置 `auth_token` 后的 `40100` 与带 token 的正常路径；
 - 创建订单的初始状态为 `pending`，列表分页结果正确；
 - 契约中间件名被解析：分组 `audit` 与 `CreateOrder` 的路由级 `order-audit`
-  都落审计日志，且路由级先于分组级完成（`TestContractMiddlewareNamesAreResolved`）。
+  都落审计日志，且路由级先于分组级完成（`TestContractMiddlewareNamesAreResolved`）；
+- 同一个模块装配两次不会撞别名冲突，每次 `Register` 都新建注册表
+  （`TestModuleRegisterBuildsFreshRegistry`）。
 
 新增路由时，先在 `gofy-interface-service` 里补契约描述符，再在
 `gofyadapter.BindGroup` 的绑定范围内实现 controller 方法即可；路径、校验和
-错误声明都不需要在业务模块里重复。契约新增中间件名时，同步在
-`Register` 的 `BindOptions.Middleware` 里补上实现。
+错误声明都不需要在业务模块里重复。契约新增中间件别名时，在 `app/middleware`
+里导出对应的 `NameXxx` 常量，并在 `Register` 的 `newMiddlewareRegistry` 中注册实例。

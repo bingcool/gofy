@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/middleware`: alias registry for contract routes. Every built-in
+  middleware exports its alias next to its constructor (`NameRequestID`,
+  `NameHeaderPropagation`, `NameAccessLog`, `NameRecovery`, `NameCORS`,
+  `NameBodyLimit`, `NameSecurityHeaders`, `NameRateLimit`, `NameJWTAuth`), and
+  `NewRegistry` builds an explicit, concurrency-safe alias→instance map:
+  `Register` rejects blank aliases, nil middleware and duplicate names (never
+  overwrites), `MustRegister` panics for startup wiring, `Lookup` reports
+  missing names (a nil registry reads as empty) and `Names` returns a sorted
+  copy for diagnostics. Services create one registry per assembly and inject it
+  through `gofyadapter.BindOptions.Registry`, so Nacos reloads and tests never
+  share state. The adapter resolves `BindOptions.Middleware` first as a
+  per-binding override and fails at startup when a contract group or route name
+  is unknown. The App-level chain installed by `gofy.With*` is unchanged.
+- `examples/demo-service`: `app/middleware` exports `NameAuth`, `NameAudit` and
+  `NameOrderAudit`, and the order module registers those instances in a fresh
+  registry on every `Register` call before binding the contract groups. Tests
+  cover the audit order (route-level name inside the group name) and rebuilding
+  the same module twice without an alias conflict.
 - `support/image`: image decoding, resizing, thumbnails, cropping, rotation,
   greyscale, image/text watermarks and jpeg/png/gif encoding, ported from the
   swoolefy PHP Image module (Intervention Image) to the standard library plus
@@ -267,6 +285,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `logging`: colored console sinks now render `error` and above as a red
+  multi-line block — a header line with time, level, caller, message and the
+  remaining fields, one line per `error`/`zap.NamedError` field, and the
+  stacktrace expanded frame by frame — instead of one JSON line with escaped
+  newlines. The new `log.color` knob (`auto` by default, `always`, `never`;
+  invalid values fail `Validate`) decides when it applies: `auto` keeps TTY
+  detection, `always` forces it for non-TTY IDE consoles, `never` disables it.
+  File sinks are never colored, entries below `error` keep `log.encoding`,
+  `NO_COLOR` and Windows still win, and base fields plus `logger.With` fields
+  are preserved in the block.
 - The request id middleware moved to `support/middleware/req_trace_id.go` and
   now propagates the id through the request context: it reuses a valid upstream
   `X-Trace-ID` (even when a custom header is configured), otherwise generates a
@@ -325,6 +353,13 @@ All notable changes to this project are documented here. The format follows
 - `examples/demo-service` now binds its routes to the `gofy-interface-service`
   `demoservice` contract; the local `app/module/order/dto` package is gone and
   responses use the contract envelope shapes (`order`, `paging.ListData`).
+- **Breaking:** the demo `GetConfig` response no longer returns
+  `payment_timeout`; `GetConfigResponse` exposes only `auth_required`. On the
+  consumer side `examples/demo-service` drops the `order.payment_timeout`
+  config key, the `service.Config`/`Deps.Config` plumbing and its startup log
+  field, and the `fix-order` script no longer logs a payment timeout, so
+  `script.FixOrder` takes no config argument. The demo OpenAPI golden files
+  were regenerated.
 
 ### Fixed
 

@@ -11,6 +11,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// NameRecovery 是 Recovery 在契约路由里使用的中间件别名。
+const NameRecovery = "recovery"
+
 // Recovery turns panics into a 500 response without leaking the panic value or
 // stack trace to the client. It must be installed outside business middleware.
 func Recovery(logger *zap.Logger, responder support.Responder) gin.HandlerFunc {

@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -21,6 +19,7 @@ import (
 type Config struct {
 	Level              string            `yaml:"level" default:"info"`    // debug|info|warn|error
 	Encoding           string            `yaml:"encoding" default:"json"` // json|console
+	Color              string            `yaml:"color" default:"auto"`    // auto|always|never，仅作用于 stdout/stderr
 	Outputs            []string          `yaml:"outputs"`                 // stdout|stderr|file path
 	ErrorOutputs       []string          `yaml:"error_outputs"`           // error level and above only
 	SystemErrorOutputs []string          `yaml:"system_error_outputs"`    // framework errors only
@@ -59,6 +58,9 @@ func (c Config) Validate() error {
 	case "", "json", "console":
 	default:
 		return fmt.Errorf("logging: invalid encoding %q (want json or console)", c.Encoding)
+	}
+	if normalizeColor(c.Color) == "" {
+		return fmt.Errorf("logging: invalid color %q (want auto, always or never)", c.Color)
 	}
 	if c.Rotation.MaxSizeMB < 0 || c.Rotation.MaxAgeDays < 0 || c.Rotation.MaxBackups < 0 || c.Rotation.DateDirMaxAgeDays < 0 {
 		return errors.New("logging: rotation values must not be negative")
@@ -183,11 +185,19 @@ func parseLevel(level string) (zapcore.Level, error) {
 }
 
 func newEncoder(cfg Config) zapcore.Encoder {
+	encCfg := encoderConfig(cfg)
+	if strings.EqualFold(cfg.Encoding, "console") {
+		return zapcore.NewConsoleEncoder(encCfg)
+	}
+	return zapcore.NewJSONEncoder(encCfg)
+}
+
+func encoderConfig(cfg Config) zapcore.EncoderConfig {
 	layout := cfg.TimeLayout
 	if layout == "" {
 		layout = "2006-01-02 15:04:05"
 	}
-	encCfg := zapcore.EncoderConfig{
+	return zapcore.EncoderConfig{
 		TimeKey:        "ts",
 		LevelKey:       "level",
 		NameKey:        "logger",
@@ -201,62 +211,22 @@ func newEncoder(cfg Config) zapcore.Encoder {
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 	}
-	if strings.EqualFold(cfg.Encoding, "console") {
-		return zapcore.NewConsoleEncoder(encCfg)
-	}
-	return zapcore.NewJSONEncoder(encCfg)
 }
 
-// newSinkEncoder builds the encoder for one output. Terminal sinks also color
-// error entries red, which the encoder owns so files stay free of ANSI codes
-// even when the same process writes to both.
+// newSinkEncoder builds the encoder for one output. Console sinks render error
+// entries as a red multi-line block, which the encoder owns so files stay free
+// of ANSI codes even when the same process writes to both.
 func newSinkEncoder(cfg Config, file *os.File) zapcore.Encoder {
 	encoder := newEncoder(cfg)
-	if colorEnabled(file) {
-		return newColorErrorEncoder(encoder)
+	if colorAllowed(cfg.Color, file) {
+		return newTerminalErrorEncoder(encoder, cfg)
 	}
 	return encoder
 }
 
-func colorEnabled(f *os.File) bool {
-	if f == nil || os.Getenv("NO_COLOR") != "" || runtime.GOOS == "windows" {
-		return false
-	}
-	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-// colorErrorEncoder wraps error entries (and above) in red.
-type colorErrorEncoder struct {
-	zapcore.Encoder
-	// pool backs the colored buffer; zap frees whatever EncodeEntry returns,
-	// and a zero-value Buffer cannot be freed.
-	pool buffer.Pool
-}
-
-func newColorErrorEncoder(enc zapcore.Encoder) colorErrorEncoder {
-	return colorErrorEncoder{Encoder: enc, pool: buffer.NewPool()}
-}
-
-func (e colorErrorEncoder) Clone() zapcore.Encoder {
-	return colorErrorEncoder{Encoder: e.Encoder.Clone(), pool: e.pool}
-}
-
-func (e colorErrorEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (*buffer.Buffer, error) {
-	buf, err := e.Encoder.EncodeEntry(ent, fields)
-	if err != nil || ent.Level < zapcore.ErrorLevel {
-		return buf, err
-	}
-	colored := e.pool.Get()
-	colored.AppendString("\x1b[31m")
-	colored.AppendBytes(buf.Bytes())
-	colored.AppendString("\x1b[0m")
-	buf.Free()
-	return colored, nil
-}
-
 // openSink builds one output. mode is "" for info outputs (they follow
-// Rotation.Mode) and "size" for error streams.
+// Rotation.Mode) and "size" for error streams. The second result is the console
+// file (stdout/stderr) or nil for file sinks, which never get ANSI colors.
 func openSink(target string, rotation RotationConfig, fallback *os.File, mode string) (zapcore.WriteSyncer, *os.File, error) {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "stdout":
@@ -280,7 +250,7 @@ func openSink(target string, rotation RotationConfig, fallback *os.File, mode st
 	if err != nil {
 		return nil, nil, fmt.Errorf("logging: open %s: %w", target, err)
 	}
-	return zapcore.AddSync(f), f, nil
+	return zapcore.AddSync(f), nil, nil
 }
 
 func baseFields(fields map[string]string) []zap.Field {
