@@ -231,12 +231,19 @@ func (a *App) run(parent context.Context) error {
 }
 
 func (a *App) buildHTTP(rt *core.Runtime, lg, system *zap.Logger) (*gin.Engine, []support.Module, error) {
-	return a.buildHTTPWith(rt, lg, system, a.opts.moduleFactories, a.opts.modules)
+	return a.buildHTTPWith(rt, lg, system, a.opts.moduleFactories, a.opts.modules, a.opts.middlewareRegistrars)
 }
 
-func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories []support.ModuleFactory, injected []support.Module) (*gin.Engine, []support.Module, error) {
+func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories []support.ModuleFactory, injected []support.Module, registrars []MiddlewareRegistrar) (*gin.Engine, []support.Module, error) {
 	gin.SetMode(ginMode(a.opts.http.Mode))
 	engine := gin.New()
+	registry := middleware.NewRegistry()
+	register := func(name string, mw support.Middleware) error {
+		if err := registry.Register(name, mw); err != nil {
+			return fmt.Errorf("gofy: register middleware %q: %w", name, err)
+		}
+		return nil
+	}
 	if len(a.opts.trusted) > 0 {
 		if err := engine.SetTrustedProxies(a.opts.trusted); err != nil {
 			return nil, nil, fmt.Errorf("gofy: trusted proxies: %w", err)
@@ -248,7 +255,11 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 	}
 
-	engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))
+	requestID := middleware.RequestID(support.DefaultRequestIDHeader)
+	engine.Use(requestID)
+	if err := register(middleware.NameRequestID, requestID); err != nil {
+		return nil, nil, err
+	}
 	// Trace 中间件紧跟 RequestID：先建立 span，后续 HeaderPropagation 才能用
 	// trace id 兜底 X-Trace-Id；探针请求不进入 trace。
 	if traceMW := a.telemetry.GinMiddleware(otel.SkipPaths("/healthz", "/readyz")); traceMW != nil {
@@ -257,7 +268,11 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	if a.opts.headerPropagation {
 		// 紧贴 RequestID 安装：用 req_id 或 OTel trace id 兜底 X-Trace-Id，
 		// 并保证后续业务中间件和 handler 都能从 context 读到透传头。
-		engine.Use(middleware.HeaderPropagation(a.opts.trusted))
+		headerPropagation := middleware.HeaderPropagation(a.opts.trusted)
+		engine.Use(headerPropagation)
+		if err := register(middleware.NameHeaderPropagation, headerPropagation); err != nil {
+			return nil, nil, err
+		}
 	}
 	if a.opts.securityHeaders != nil {
 		mw, err := middleware.SecurityHeaders(*a.opts.securityHeaders)
@@ -265,9 +280,16 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 			return nil, nil, err
 		}
 		engine.Use(mw)
+		if err := register(middleware.NameSecurityHeaders, mw); err != nil {
+			return nil, nil, err
+		}
 	}
 	if a.opts.accessLog {
-		engine.Use(middleware.AccessLog(lg, middleware.DefaultAccessLogOptions()))
+		accessLog := middleware.AccessLog(lg, middleware.DefaultAccessLogOptions())
+		engine.Use(accessLog)
+		if err := register(middleware.NameAccessLog, accessLog); err != nil {
+			return nil, nil, err
+		}
 	}
 	if a.opts.cors != nil {
 		corsMW, err := middleware.CORS(*a.opts.cors)
@@ -276,12 +298,23 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 		if corsMW != nil {
 			engine.Use(corsMW)
+			if err := register(middleware.NameCORS, corsMW); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	if a.opts.recovery {
-		engine.Use(middleware.Recovery(system, a.opts.responder))
+		recovery := middleware.Recovery(system, a.opts.responder)
+		engine.Use(recovery)
+		if err := register(middleware.NameRecovery, recovery); err != nil {
+			return nil, nil, err
+		}
 	}
-	engine.Use(middleware.BodyLimit(a.opts.maxBody))
+	bodyLimit := middleware.BodyLimit(a.opts.maxBody)
+	engine.Use(bodyLimit)
+	if err := register(middleware.NameBodyLimit, bodyLimit); err != nil {
+		return nil, nil, err
+	}
 	if len(a.opts.middleware) > 0 {
 		engine.Use(a.opts.middleware...)
 	}
@@ -290,11 +323,15 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	}
 	registerFallbacks(engine, a.opts.responder)
 
+	// 根 Router 携带本进程唯一的中间件注册表，所有模块分组都通过
+	// engine 共享它；必须在全局 engine.Use 之后创建，才能继承全局链。
 	base := support.NewRouter(engine, support.RouterConfig{
-		Prefix:    a.opts.apiPrefix,
-		Responder: a.opts.responder,
-		Validator: support.NewValidator(),
+		Prefix:     a.opts.apiPrefix,
+		Responder:  a.opts.responder,
+		Validator:  support.NewValidator(),
+		Middleware: registry,
 	})
+
 	// Rate limiting and JWT apply to module routes only, so probes and unknown
 	// paths keep their plain behavior (200 and 404).
 	if a.opts.rateLimit != nil {
@@ -303,6 +340,9 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 			return nil, nil, err
 		}
 		base.Use(mw)
+		if err := register(middleware.NameRateLimit, mw); err != nil {
+			return nil, nil, err
+		}
 	}
 	if a.opts.jwt != nil {
 		mw, err := middleware.JWTAuth(*a.opts.jwt, a.opts.responder)
@@ -310,6 +350,19 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 			return nil, nil, err
 		}
 		base.Use(mw)
+		if err := register(middleware.NameJWTAuth, mw); err != nil {
+			return nil, nil, err
+		}
+	}
+	// 应用层中间件在框架内建项之后注册；同别名重复注册会在启动期直接失败。
+	for i, registrar := range registrars {
+		if err := registrar(MiddlewareRegistration{
+			Runtime:   rt,
+			Registry:  registry,
+			Responder: a.opts.responder,
+		}); err != nil {
+			return nil, nil, fmt.Errorf("gofy: middleware registrar %d: %w", i, err)
+		}
 	}
 	modules, err := a.buildModulesWith(rt, factories, injected)
 	if err != nil {

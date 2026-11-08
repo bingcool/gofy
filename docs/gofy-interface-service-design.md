@@ -1389,17 +1389,14 @@ type BindOptions struct {
 	// Routes 按 OperationID 追加路由级中间件。
 	Routes map[string][]support.Middleware
 
-	// Middleware 是本次绑定的显式别名映射，优先级高于 Registry，用于测试桩
+	// Middleware 是本次绑定的显式别名映射，优先级最高，用于测试桩
 	// 或单个模块的定制覆盖；未注册或值为 nil 的名字在启动期报错。
 	Middleware map[string]support.Middleware
 
-	// Registry 是服务装配时创建的中间件注册表，解析契约声明的分组名
-	// （endpoint.Group.Use，由 BindGroup 处理）与路由名（Spec.Middleware /
-	// Route.Use，由 BindAll 处理）。为 nil 时只用 Middleware 映射。
+	// Registry 是可选的显式注册表。通常不需要：App 启动时把别名注册进
+	// Router 携带的共享注册表（support.RouterConfig.Middleware），adapter
+	// 直接从这里解析。
 	Registry MiddlewareRegistry
-
-	// Auth 是 Bearer 鉴权中间件；当契约声明 AuthRequired/AuthOptional 时必须提供。
-	Auth support.Middleware
 
 	// RateLimit 根据契约元数据构造路由级限流中间件；未提供时忽略限流元数据。
 	RateLimit func(endpoint.Spec) support.Middleware
@@ -1421,6 +1418,8 @@ func BindAll(
 ```go
 // appinterface/demoservice/orderroute/order_route.go
 var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
+	// 中间件（含认证）都按名字显式声明；spec.Auth 只用于 OpenAPI 标记。
+	group.Use("audit", "auth")
 	// 路由在分组回调里内联声明，并赋值给包级变量供客户端/测试复用。
 	GetOrder = endpoint.Get[Req, Res]("/orders/{id}", func(spec *endpoint.Spec) {
 		spec.OperationID = "GetOrder"
@@ -1437,59 +1436,66 @@ var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
 //     group.Add(GetConfig)
 // })
 
-// 服务端也可以按 Gin 习惯手动建组：分组中间件直接传实例，
-// 路由级名字仍由 opts.Registry / opts.Middleware 解析。
-orders := router.Group(orderroute.Orders.Prefix, auditMiddleware)
+// 服务端也可以按 Gin 习惯手动建组：分组名不会被解析，契约里的
+// "audit"/"auth" 需要在这里显式传实例；路由级名字仍由 Router 的
+// App 注册表 / opts.Registry / opts.Middleware 解析。
+orders := router.Group(orderroute.Orders.Prefix, auditMiddleware, authMiddleware)
 err := gofyadapter.BindAll(orders, orderroute.Orders.Routes, impl, opts)
 ```
 
 **分组与路由中间件（契约声明名字，服务端提供实现）：**
 
 ```go
-// 路由文件：分组级与路由级都只声明逻辑名，顺序即执行顺序
+// 路由文件：分组级与路由级都只声明逻辑名，顺序即执行顺序；
+// 认证同样是名字（"auth"），adapter 不会因为 AuthRequired 自动补中间件。
 var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
-	group.Use("audit")
+	group.Use("audit", "auth")
 
 	CreateOrder = endpoint.Post[Req, Res]("/orders", func(spec *endpoint.Spec) {
 		spec.OperationID = "CreateOrder"
 		spec.Middleware = []string{"order-audit"}
-		spec.Auth = endpoint.AuthRequired
+		spec.Auth = endpoint.AuthRequired // 仅 OpenAPI 标记
 	})
 	// 等价链式写法：endpoint.Post[Req, Res]("/orders", build).Use("order-audit")
 	group.Add(GetOrder, ListOrders, CreateOrder, CancelOrder)
 })
 
-// 服务端：装配时把别名与实例注册进注册表（每次装配新建一份）
-reg := middleware.NewRegistry() // github.com/bingcool/gofy/support/middleware
-if err := reg.Register("audit", auditMiddleware); err != nil {
-	return err
-}
-if err := reg.Register("order-audit", orderAuditMiddleware); err != nil {
-	return err
-}
-
-// BindGroup 解析分组名并创建 router.Group(prefix, mw...)，
-// 内部 BindAll 再解析每条路由的名字
-err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOptions{
-	Registry: reg,
+// 服务端：App 启动时执行 registrar，把别名与实例注册进本次装配的共享注册表
+gofy.WithMiddlewareRegistrar(func(m gofy.MiddlewareRegistration) error {
+	if err := m.Registry.Register("audit", auditMiddleware); err != nil {
+		return err
+	}
+	if err := m.Registry.Register("order-audit", orderAuditMiddleware); err != nil {
+		return err
+	}
+	return m.Registry.Register("auth", authMiddleware)
 })
+
+// 模块只绑定路由：BindGroup 从 Router 携带的注册表解析分组名，
+// 内部 BindAll 再解析每条路由声明的名字；没有任何隐式注入
+err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOptions{})
 ```
 
 - `endpoint.Group` 包含 `Prefix`、`Routes`、`Middleware []string`；前缀、路由、
   分组与中间件名都放在同一个路由文件里，每个文件直接导出自己的分组；
 - `Spec.Middleware []string` 是路由级名字，`Route.Use(names...)` 是它的链式写法；
   空名字会被忽略，重复名字按声明顺序重复执行；
-- 契约不依赖 gofy，服务端把别名与实例注册进 `support/middleware.Registry` 后经
-  `BindOptions.Registry` 注入；解析优先级为 `BindOptions.Middleware`（单次覆盖）
-  → `Registry`，两处都查不到（或值为 nil）的名字在启动期报错，错误带上分组前缀
-  或 OperationID；
+- 契约不依赖 gofy，服务端把别名与实例注册进 `support/middleware.Registry`，由 App
+  在启动时挂到 Router 上（`support.RouterConfig.Middleware`）；解析优先级为
+  `BindOptions.Middleware`（单次覆盖）→ `BindOptions.Registry`（可选显式注入）
+  → Router 携带的 App 注册表，都查不到（或值为 nil）的名字在启动期报错，错误带上
+  分组前缀或 OperationID；
 - 手动 `router.Group(prefix, mw...)` + `BindAll` 时分组名不会被解析（分组中间件
   已直接传实例），路由级名字仍会解析；`Bind` 只安装显式传入的 `mw`；
 - `Spec.Path` 始终是完整路径（客户端/OpenAPI 使用）；`BindGroup`/`BindAll` 通过
   `Router.GroupPrefix()` 把路径裁剪成组内相对路径后注册，避免路径写两遍或重复前缀；
 - 中间件顺序：分组中间件（按 `group.Use` 顺序）→ `BindOptions.Global` →
   路由中间件名（按 `spec.Middleware` 顺序）→ `Routes[OperationID]` →
-  `Auth`（AuthRequired 时）→ `RateLimit`（契约声明时）。
+  `RateLimit`（契约声明时）；
+- 所有中间件都必须显式声明并注册，不存在默认别名或内建兜底：
+  `spec.Auth = AuthRequired` 只写入 OpenAPI 的 security 标记，adapter 不会自动
+  附加认证中间件；需要认证时在契约里写 `group.Use("auth")` 或
+  `spec.Middleware = []string{"auth"}`。
 
 `BindAll` 的行为：
 
@@ -1498,11 +1504,13 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
    - JSON：`func(context.Context, *Req) (*Res, error)`
    - `NoContent`：`func(context.Context, *Req) error`
    - SSE/Download/Chunked 使用专用绑定函数，不进入普通 JSON 分支。
-3. 解析 `Spec.Middleware` 逻辑名（`opts.Middleware` → `opts.Registry`），缺失即记入聚合错误。
-4. 根据 `Spec.Auth` 安装鉴权中间件；`AuthRequired` 且 `opts.Auth == nil` 返回错误。
-5. 根据 `Spec.RateLimit` 和 `opts.RateLimit` 安装限流中间件。
-6. 调用 gofy 的 `support.Any(r, method, path, h, mw...)` 注册。
-7. 返回聚合错误，列出所有缺失/签名不符的方法，而不是遇到第一个就退出。
+3. 解析 `Spec.Middleware` 逻辑名（`opts.Middleware` → `opts.Registry` → Router 的
+   App 注册表），缺失即记入聚合错误；认证也走同一条路径，没有默认别名。
+4. 根据 `Spec.RateLimit` 和 `opts.RateLimit` 安装限流中间件。
+5. 调用 gofy 的 `support.Any(r, method, path, h, mw...)` 注册。
+6. 返回聚合错误，列出所有缺失/签名不符的方法，而不是遇到第一个就退出。
+
+`Spec.Auth` 不参与中间件装配，只供 docgen 生成 OpenAPI 的 `security` 标记。
 
 **中间件别名注册表（`support/middleware.Registry`）：**
 
@@ -1522,20 +1530,23 @@ func (r *Registry) Lookup(name string) (support.Middleware, bool)
 func (r *Registry) Names() []string
 ```
 
-- **显式实例，无包级全局**：装配方（`Module.Register` / `main`）创建后经
-  `BindOptions.Registry` 注入；Nacos 热更新和测试各自持有一份，互不污染；
+- **显式实例，无包级全局**：App 在每次装配（启动 / `Reload`）时新建一份，通过
+  `WithMiddlewareRegistrar` 注册应用别名，再随 `support.Router` 交给 adapter；
+  模块不再自己创建或注入，Nacos 热更新和测试各自持有一份，互不污染；
 - **别名与实例一一对应**：`Register` 去掉首尾空白后校验别名非空、实例非 `nil`、
   别名未被占用，重复注册返回 `middleware alias "x" is already registered`，
   不静默覆盖；`MustRegister` 是 panic 版本，用于启动期装配；
 - **并发安全**：内部 `sync.RWMutex`；`Names()` 返回排序副本，供启动日志与排查；
   `Lookup` 对 `nil` 注册表返回 `(nil, false)`，typed-nil 注入不会 panic；
-- **解析优先级**：`BindOptions.Middleware`（本次绑定的显式覆盖）→ `Registry`；
-  两处都查不到时启动期报
-  `middleware "x" is not registered in BindOptions.Middleware or BindOptions.Registry`；
+- **解析优先级**：`BindOptions.Middleware`（本次绑定的显式覆盖）→
+  `BindOptions.Registry`（可选）→ Router 的 App 注册表；都查不到时启动期报
+  `middleware "x" is not registered in BindOptions.Middleware, BindOptions.Registry or the app middleware registry`；
 - **别名常量与中间件同文件**：框架内建导出 `NameAccessLog`、`NameBodyLimit`、
   `NameCORS`、`NameHeaderPropagation`、`NameJWTAuth`、`NameRateLimit`、
   `NameRecovery`、`NameRequestID`、`NameSecurityHeaders`；业务中间件在自己的文件里
   导出 `NameXxx`（demo-service：`NameAuth`、`NameAudit`、`NameOrderAudit`）；
+  认证别名（demo 的 `"auth"`）与其他别名完全一样，必须在契约里显式声明并在
+  注册表里注册，没有默认别名或框架兜底；
 - **只服务契约路由**：App 级全局链仍由 `gofy.With*` 选项安装，注册表不接管它。
   把全局链里已安装的中间件再注册给契约路由会执行两次，只在确实需要「按路由
   覆盖全局行为」时才这么做。
@@ -1586,18 +1597,11 @@ func (h *Handler) GetConfig(ctx context.Context, req *orderrequest.GetConfigRequ
 
 ```go
 func (m *Module) Register(r *support.Router) error {
-	// 每次装配新建一份注册表：热更新重建路由时不与旧实例共享状态。
-	reg := middleware.NewRegistry() // github.com/bingcool/gofy/support/middleware
-	if err := reg.Register("audit", m.audit); err != nil {
-		return err
-	}
-	if err := reg.Register("order-audit", m.orderAudit); err != nil {
-		return err
-	}
+	// 应用层中间件（含认证 "auth"）由 App 启动时的 WithMiddlewareRegistrar
+	// 注册进共享注册表，随 support.Router 下发；模块只绑定路由，不创建注册表、
+	// 不构造认证中间件。
 	opts := gofyadapter.BindOptions{
-		Auth: m.auth,
-		// 契约声明的分组名与路由名都从注册表解析，缺失的名字启动期报错。
-		Registry: reg,
+		// RateLimit 按契约元数据构造；未提供时忽略 spec.RateLimit。
 		RateLimit: func(spec endpoint.Spec) support.Middleware {
 			return m.rateLimiter(spec)
 		},
@@ -1610,6 +1614,9 @@ func (m *Module) Register(r *support.Router) error {
 	return nil
 }
 ```
+
+契约里 `group.Use("audit", "auth")` 声明了分组级中间件，`spec.Middleware`
+声明了路由级中间件；它们都在启动期从 App 注册表解析，缺失即报错。
 
 ### 5.4 中间件安装顺序
 
@@ -1627,7 +1634,6 @@ RequestID
   -> BindOptions.Global
   -> 契约路由中间件名（Spec.Middleware，按声明顺序）
   -> 契约路由中间件（BindOptions.Routes[OperationID]）
-  -> Auth（如果契约声明）
   -> RateLimit（如果契约声明）
   -> 参数绑定 + 校验
   -> handler
@@ -1720,17 +1726,17 @@ var DownloadInvoice = endpoint.New[DownloadInvoiceRequest, endpoint.NoBody](endp
 2. 路径不以 `/` 开头。
 3. `OperationID` 为空或重复。
 4. 同模块 `(Method, Path)` 重复。
-5. `AuthRequired` 但未提供 `Auth` 中间件。
-6. `NoContent` 与 `ResponseKind` 同时设置。
-7. `ResponseKind != ""` 但 `ResponseType` 不是 `endpoint.NoBody`。
-8. `impl` 缺少方法。
-9. 方法签名不符（参数个数、参数类型、返回类型）。
-10. 路径占位符在 Request 的 `uri` tag 中不存在。
-11. `Spec.Path` 中的占位符重复或为空。
-12. `RequestContentType=multipart/form-data` 但 Request 没有文件字段（警告，不阻止）。
-13. 中间件别名既不在 `BindOptions.Middleware` 也不在 `BindOptions.Registry`
-    注册，或解析结果为 `nil`：分组名由 `BindGroup` 报（错误带分组前缀），
-    路由名由 `BindAll` 报（错误带 `OperationID`）。
+5. `NoContent` 与 `ResponseKind` 同时设置。
+6. `ResponseKind != ""` 但 `ResponseType` 不是 `endpoint.NoBody`。
+7. `impl` 缺少方法。
+8. 方法签名不符（参数个数、参数类型、返回类型）。
+9. 路径占位符在 Request 的 `uri` tag 中不存在。
+10. `Spec.Path` 中的占位符重复或为空。
+11. `RequestContentType=multipart/form-data` 但 Request 没有文件字段（警告，不阻止）。
+12. 中间件别名（含认证 `"auth"`）既不在 `BindOptions.Middleware`、`BindOptions.Registry`
+    也未注册到 App 注册表，或解析结果为 `nil`：分组名由 `BindGroup` 报（错误带
+    分组前缀），路由名由 `BindAll` 报（错误带 `OperationID`）。`Spec.Auth` 本身
+    不参与校验，它只是 OpenAPI 标记。
 
 ---
 
@@ -3063,14 +3069,9 @@ Handler 方法直接使用契约 Request/Response。
 
 ```go
 func (m *Module) Register(r *support.Router) error {
-	// 契约声明的中间件别名在这里注册成实例，热更新每次装配新建一份。
-	reg := middleware.NewRegistry()
-	if err := reg.Register(middleware.NameAudit, m.audit); err != nil {
-		return err
-	}
+	// 应用层别名由 App 启动时的 WithMiddlewareRegistrar 注册进共享注册表；
+	// 模块只绑定路由，认证与审计都通过契约声明的名字解析。
 	opts := gofyadapter.BindOptions{
-		Auth:      m.auth,
-		Registry:  reg,
 		RateLimit: m.rateLimitMiddleware,
 	}
 	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
@@ -3207,7 +3208,7 @@ go.work
 | 包 | 测试重点 |
 | --- | --- |
 | `endpoint` | `Spec` 校验、泛型类型反射、重复路由 |
-| `adapter/gofy` | `BindAll` 方法映射、签名不符、NoContent、Auth 缺失、错误映射 |
+| `adapter/gofy` | `BindAll` 方法映射、签名不符、NoContent、中间件名缺失、错误映射 |
 | `client/encode` | path 替换、query 编码、slice 重复 key、multipart |
 | `client/decode` | 成功/错误信封、空 body、非法 JSON、未知字段、大整数 |
 | `client/retry` | 幂等/非幂等、429/503、退避、context 取消 |

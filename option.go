@@ -15,6 +15,7 @@ import (
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
+	"github.com/bingcool/gofy/support/middleware"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
@@ -23,6 +24,22 @@ import (
 
 // Option customizes an App during New. Options are applied in order.
 type Option func(*options) error
+
+// MiddlewareRegistration 是启动装配阶段传给 MiddlewareRegistrar 的上下文。
+// Registry 已包含框架内建中间件，registrar 只需补充应用层别名。
+type MiddlewareRegistration struct {
+	// Runtime 是本次装配的运行时，可用于取 Logger 等依赖。
+	Runtime *core.Runtime
+	// Registry 是本次装配唯一的中间件注册表，随 Router 交给 adapter 解析契约别名。
+	Registry *middleware.Registry
+	// Responder 是 App 的响应器，应用层中间件应复用它渲染错误。
+	Responder support.Responder
+}
+
+// MiddlewareRegistrar 在模块绑定路由之前，把应用层中间件注册进 App 的注册表。
+// 启动和每次 Reload 都会用新的 Runtime、Responder 和空注册表重新执行，因此
+// 热更新不会复用旧实例，配置变化也能生效。
+type MiddlewareRegistrar func(MiddlewareRegistration) error
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
@@ -38,7 +55,8 @@ type options struct {
 	http      HTTPConfig
 	apiPrefix string
 
-	middleware []support.Middleware
+	middleware           []support.Middleware
+	middlewareRegistrars []MiddlewareRegistrar
 
 	pidFile    string
 	pidPerm    os.FileMode
@@ -176,6 +194,20 @@ func WithMiddleware(mw ...support.Middleware) Option {
 			}
 		}
 		o.middleware = append(o.middleware, mw...)
+		return nil
+	}
+}
+
+// WithMiddlewareRegistrar 注册一个应用级中间件装配函数。App 在启动和每次
+// Reload 时先建好包含框架内建中间件的注册表，再依次执行这些函数；重复别名
+// 会在装配期报错。契约里的 group/route 中间件别名都从这份表解析，
+// 业务模块因此不需要再创建或传递注册表。
+func WithMiddlewareRegistrar(fn MiddlewareRegistrar) Option {
+	return func(o *options) error {
+		if fn == nil {
+			return fmt.Errorf("gofy: middleware registrar must not be nil")
+		}
+		o.middlewareRegistrars = append(o.middlewareRegistrars, fn)
 		return nil
 	}
 }

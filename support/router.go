@@ -20,16 +20,25 @@ type Router struct {
 	bindPrefix string
 }
 
+// MiddlewareResolver 按契约里的逻辑名查找中间件实例。App 启动时为整个进程
+// 安装一份注册表（support/middleware.Registry 实现该接口），模块只负责绑定
+// 路由，不再自己创建或注入注册表。
+type MiddlewareResolver interface {
+	Lookup(name string) (Middleware, bool)
+}
+
 type engine struct {
-	responder Responder
-	validator *validator.Validate
+	responder  Responder
+	validator  *validator.Validate
+	middleware MiddlewareResolver
 }
 
 // RouterConfig configures the root router of an application.
 type RouterConfig struct {
-	Prefix    string
-	Responder Responder
-	Validator *validator.Validate
+	Prefix     string
+	Responder  Responder
+	Validator  *validator.Validate
+	Middleware MiddlewareResolver
 }
 
 // NewRouter creates the root router on top of e. It is called by the gofy
@@ -41,7 +50,7 @@ func NewRouter(e *gin.Engine, cfg RouterConfig) *Router {
 	if cfg.Validator == nil {
 		cfg.Validator = NewValidator()
 	}
-	eng := &engine{responder: cfg.Responder, validator: cfg.Validator}
+	eng := &engine{responder: cfg.Responder, validator: cfg.Validator, middleware: cfg.Middleware}
 	prefix := NormalizePrefix(cfg.Prefix)
 	return &Router{
 		group:  e.Group(prefix),
@@ -156,6 +165,15 @@ func (r *Router) Gin() *gin.RouterGroup { return r.group }
 // Responder returns the responder configured for this application so adapters
 // can render results with the same envelope.
 func (r *Router) Responder() Responder { return r.engine.responder }
+
+// Middleware 按契约里的逻辑名查找应用级中间件。注册表由 App 在启动时统一
+// 安装，分组 Router 共享同一份；未安装注册表或名字不存在时返回 (nil, false)。
+func (r *Router) Middleware(name string) (Middleware, bool) {
+	if r == nil || r.engine == nil || r.engine.middleware == nil {
+		return nil, false
+	}
+	return r.engine.middleware.Lookup(name)
+}
 
 // Validator returns the validator shared by this application.
 func (r *Router) Validator() *validator.Validate { return r.engine.validator }

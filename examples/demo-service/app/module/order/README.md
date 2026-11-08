@@ -73,26 +73,39 @@ curl 'http://127.0.0.1:8080/api/v1/order/orders?user_id=100&page=1&page_size=20'
 
 ## 配置
 
-配置位于 `config.yaml` 的 `order` 段，结构体是 `order.Config`：
+配置位于 `config.yaml` 顶层的 `jwt` 段，结构体是 `middleware.JWTConfig`
+（`app/middleware`）：
 
 ```yaml
-order:
-  # auth_token: 设置后，所有契约路由都要求 Bearer Token
+# 契约在分组上显式声明了 "auth" 中间件，其内部用框架 JWT 校验 Bearer Token；
+# secret 为空时放行。生产环境从环境变量注入密钥。
+jwt:
+  secret: <从 JWT_SECRET 注入，不要提交>
+  algorithms: [HS256]
+  issuer: demo-service
+  audience: demoservice
+  require_expiry: true
 ```
 
 | YAML 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `auth_token` | string | 空 | 非空时启用鉴权；为空时关闭校验，方便本地直接调用 |
+| `jwt.secret` | string | 空 | HMAC 密钥；非空时契约中声明了 `"auth"` 的路由校验 Bearer Token，为空时放行 |
+| `jwt.algorithms` | []string | `[HS256]` | 允许的 `alg`，支持 HS256/HS384/HS512 |
+| `jwt.issuer` | string | 空 | 非空时要求 token 的 `iss` 与之一致 |
+| `jwt.audience` | string | 空 | 非空时要求 token 的 `aud` 包含该值 |
+| `jwt.require_expiry` | bool | false | 为 true 时拒绝没有 `exp` 的 token |
 
-`order.Config` 由 `gofyconfig.Load` 从配置文件填充；手工构造 `order.Config{}`
-时 `AuthToken` 为空，即关闭鉴权。
+`middleware.JWTConfig` 由 `app/config` 从 `config.yaml` 的 `jwt` 段填充，再由
+`options.go` 的 `middlewareRegistrar(cfg)` 闭包在 App 启动时注册 `auth` 别名；
+手工构造不带 `JWT.Secret` 的配置时，`auth` 是放行中间件。
 
 ## 装配
 
 `main.go` 通过工厂注册模块，启动和热更新共用同一份工厂列表：
 
 ```go
-gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
+gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
+gofy.WithModuleFactories(order.NewModuleFactory())
 ```
 
 `NewModuleFactory` 在 `Runtime` 就绪后执行：
@@ -100,42 +113,47 @@ gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order))
 1. 检查 `rt.DB`，为空直接返回 `order module requires database`；
 2. 用 `repository.NewFromHandle(rt.Logger)` 创建 GORM 仓库，查询时从 `db.Db` 取连接；
 3. 用 `service.NewOrderService(service.Deps{...})` 创建服务；
-4. 调用 `NewModule(cfg, svc, rt.Logger)` 包装出模块。
+4. 调用 `NewModule(svc, rt.Logger)` 包装出模块。
 
 工厂执行时 `app/io` 还没 `Start`，`db.Db` 仍是 nil，所以 `NewFromHandle`
 把句柄解析推迟到每次查询；`Start` 安装新连接后仓库自动使用新句柄。脚本模式不经过
 模块生命周期，直接用 `repository.New(rt.DB, rt.Logger)` 传显式连接。
 
-`NewModule` 负责鉴权：`auth_token` 非空时校验 Bearer Token，为空时放行。
-`Register` 创建 controller（同时传入 logger），遍历 `orderroute.Orders` 与
-`orderroute.Config` 调用 `gofyadapter.BindGroup`，把鉴权中间件作为
-`BindOptions.Auth` 传入。
+`Register` 只创建 controller（传入 logger），遍历 `orderroute.Orders` 与
+`orderroute.Config` 调用 `gofyadapter.BindGroup`，不再创建或注入中间件注册表。
 
-契约里的中间件只声明别名，实现由本模块提供：`Orders` 分组声明了
-`group.Use("audit")`，`CreateOrder` 声明了 `spec.Middleware = []string{"order-audit"}`，
-两者都映射到 `app/middleware.Audit(logger, scope)`（`scope` 区分 `group`/`route`）。
-审计中间件在 handler 之后记录方法、路由模板、状态码和 `req_id`，与框架的
-`AccessLog` 互补。执行顺序：
-`分组 audit → BindOptions.Global → 路由 order-audit → Routes[OperationID] → Auth → RateLimit`。
+契约里的中间件只声明别名，认证也不例外：`Orders` 分组声明了
+`group.Use("audit", "auth")`，`Config` 分组声明了 `group.Use("auth")`，
+`CreateOrder` 另外声明了 `spec.Middleware = []string{"order-audit"}`。审计名字
+映射到 `app/middleware.Audit(logger, scope)`（`scope` 区分 `group`/`route`），
+`auth` 映射到 `app/middleware.Auth`（内部调用框架
+`support/middleware.JWTAuth`）。`spec.Auth = AuthRequired` 只用于 OpenAPI 的
+security 标记，adapter 不会因此自动附加认证中间件。审计中间件在 handler 之后
+记录方法、路由模板、状态码和 `req_id`，与框架的 `AccessLog` 互补。执行顺序：
+`分组 audit → 分组 auth → BindOptions.Global → 路由 order-audit → Routes[OperationID] → RateLimit`。
 
-别名与实例的对应关系放在中间件注册表里：`app/middleware` 导出
+别名与实例的对应关系集中在 `app/middleware.Register`：该包导出
 `NameAuth = "auth"`、`NameAudit = "audit"`、`NameOrderAudit = "order-audit"`，
-`Register` 每次装配都用 `gofymiddleware.NewRegistry()` 新建一份注册表
-（`github.com/bingcool/gofy/support/middleware`，与本模块的业务 `middleware` 包
-区分别名），注册这三个实例后经 `BindOptions.Registry` 交给 `BindGroup` 解析。
-名字查不到时启动直接失败，不会静默跳过；重复注册同一别名也会报错，避免两个
-中间件抢同一个名字。热更新重建路由时用的是新注册表，因此不会与旧实例冲突
-（`TestModuleRegisterBuildsFreshRegistry`）。
+`Register(reg, Deps{Logger, JWT, Responder})` 把应用层别名注册进 App 在本次装配
+（启动 / `Reload`）创建的共享注册表。注册表随 Router 下发给模块，`BindGroup`
+直接按名字解析；新增别名只改 `app/middleware`，不用改模块。名字查不到时启动
+直接失败，不会静默跳过；重复注册同一别名也会报错，避免两个中间件抢同一个名字。
+热更新会执行新的 registrar 并得到新注册表，不会与旧实例冲突
+（`TestModuleRegisterBuildsFreshRegistry`、`TestRegisterUsesTheGivenRegistry`）。
 
-`AuthRequired` 的路由由 `BindOptions.Auth` 安装鉴权，注册表里的 `auth` 别名只是
-让契约也能按名字引用它；同一条路由不要既声明 `AuthRequired` 又 `Use("auth")`，
-否则鉴权会执行两次。需要覆盖某个别名时（例如测试桩），用
-`BindOptions.Middleware` 传显式映射，它的优先级高于 `Registry`。
+认证同样是显式声明：契约在分组或路由上写 `"auth"`，再由注册表解析，没有默认
+别名或框架兜底；`AuthRequired` 只影响 OpenAPI 文档。需要覆盖某个别名时（例如
+测试桩），用 `BindOptions.Middleware` 传显式映射，它的优先级最高。
 
-测试或自定义场景可以跳过工厂，自己构造 service 后调用 `NewModule`：
+测试或自定义场景可以跳过工厂，自己构造 service 后调用 `NewModule`，并用
+`gofy.WithMiddlewareRegistrar` 安装与 main 相同的 registrar：
 
 ```go
-module := order.NewModule(order.Config{}, myService, zap.NewNop())
+module := order.NewModule(myService, zap.NewNop())
+app := gofytest.New(t,
+    gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), middleware.JWTConfig{})),
+    gofy.WithModules(module),
+)
 ```
 
 ## 服务依赖
@@ -220,20 +238,26 @@ HTTP 模式是 `info-h<H>.log` / `error.log` / `system_error.log`；脚本模式
 `error/fix-order.log`、`error/fix-order-system_error.log`），一个脚本对应
 一组日志文件，panic 才进 `system_error.log`。
 
-Nacos 热更新时，`main.go` 会重新执行工厂并替换模块；端口不变，新配置里的
-`order` 段会生效。已有请求不受影响，新请求使用新模块。
+Nacos 热更新时，`main.go` 会重新执行 registrar 与工厂并替换模块；端口不变，
+新配置里的 `jwt` 段会生效（registrar 重建 `auth` 实例）。已有请求不受影响，
+新请求使用新模块。
 
 ## 鉴权
 
-`app/middleware.Auth` 从 `Authorization: Bearer <token>` 中取 token，
-校验失败时返回与框架一致的响应包：
+契约在分组/路由上显式声明 `"auth"`，对应实例由应用层 `app/middleware.Auth`
+构造的 JWT 中间件（内部调用 `support/middleware.JWTAuth` + `support/jwtauth`）
+校验 `Authorization: Bearer <token>`。`Auth` 把 `config.yaml` 的 `jwt` 段映射成
+`jwtauth.Config`，以别名 `auth` 注册进 App 共享注册表，adapter 按契约声明的名字
+把它装到路由上；`AuthRequired` 只是 OpenAPI 标记。校验失败时返回与框架一致的
+响应包：
 
 ```json
 {"code": 40100, "msg": "unauthorized", "data": null, "req_id": "..."}
 ```
 
-HTTP 状态码为 `401`。`auth_token` 为空时中间件放行，因此示例默认不需要
-凭证。
+HTTP 状态码为 `401`。`jwt.secret` 为空时 `Auth` 返回一个直接放行的
+中间件，因此示例默认不需要凭证；填入密钥后只接受同一密钥签发、且满足
+`algorithms` / `issuer` / `audience` / `require_expiry` 约束的 token。
 
 ## 响应与错误码
 
@@ -248,7 +272,7 @@ HTTP 状态码为 `401`。`auth_token` 为空时中间件放行，因此示例�
 | code | HTTP | 场景 |
 | --- | --- | --- |
 | `40001` | 400 | 参数校验失败，`details` 按字段给出原因 |
-| `40100` | 401 | 鉴权失败（仅在配置了 `auth_token` 时） |
+| `40100` | 401 | JWT 鉴权失败（仅在配置了 `jwt.secret` 时） |
 | `40401` | 404 | 订单不存在 |
 | `50000` | 500 | 内部错误；具体原因只写日志，不返回给客户端 |
 
@@ -314,14 +338,16 @@ go test ./app/module/order/...
 - 参数校验（非法 id、缺失必填字段、`page_size` 超限）；
 - 订单不存在返回 `40401`；
 - panic 返回 `50000` 且不泄露内部信息；
-- 配置 `auth_token` 后的 `40100` 与带 token 的正常路径；
+- 配置 `jwt.secret` 后的 `40100`、合法 token 的正常路径与错误签名
+  （`TestCancelWithJWT`）；
 - 创建订单的初始状态为 `pending`，列表分页结果正确；
 - 契约中间件名被解析：分组 `audit` 与 `CreateOrder` 的路由级 `order-audit`
   都落审计日志，且路由级先于分组级完成（`TestContractMiddlewareNamesAreResolved`）；
-- 同一个模块装配两次不会撞别名冲突，每次 `Register` 都新建注册表
-  （`TestModuleRegisterBuildsFreshRegistry`）。
+- 同一个模块装配两次不会撞别名冲突，每次装配 App 都新建注册表
+  （`TestModuleRegisterBuildsFreshRegistry`、`TestRegisterUsesTheGivenRegistry`）。
 
 新增路由时，先在 `gofy-interface-service` 里补契约描述符，再在
 `gofyadapter.BindGroup` 的绑定范围内实现 controller 方法即可；路径、校验和
 错误声明都不需要在业务模块里重复。契约新增中间件别名时，在 `app/middleware`
-里导出对应的 `NameXxx` 常量，并在 `Register` 的 `newMiddlewareRegistry` 中注册实例。
+里导出对应的 `NameXxx` 常量，并在 `Register` 的 `entries` 里加一行；业务模块
+的 `Register` 不用改。

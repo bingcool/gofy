@@ -86,7 +86,8 @@
 app, _ := gofy.New(
     gofy.WithName("demo-service"),
     gofy.WithHTTP(gofy.HTTPConfig{Port: 8080}),
-    gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order)),
+    gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
+    gofy.WithModuleFactories(order.NewModuleFactory()),
 )
 if err := app.Execute(ctx); err != nil {
     os.Exit(gofy.ExitCode(err))
@@ -417,6 +418,7 @@ type Option func(*options) error
 | `WithHTTP(HTTPConfig)` | 见 §3.6 | HTTP 监听与超时 | `Validate()` |
 | `WithAPIPrefix(string)` | `"/api/v1"` | 业务路由统一前缀；`""` 表示不加前缀 | 规范化后必须以 `/` 开头 |
 | `WithMiddleware(...Middleware)` | 空 | 业务全局中间件，位于框架中间件之后 | 不允许 nil |
+| `WithMiddlewareRegistrar(MiddlewareRegistrar)` | 空 | 模块绑定路由前，把应用层中间件别名注册进 App 的共享注册表 | 不允许 nil；执行错误中止启动 / 热更新；`Reload` 可用 `ReloadSpec.MiddlewareRegistrars` 替换 |
 | `WithPIDFile(string)` | `""`（关闭） | pid 文件路径；相对路径基于 `WithWorkDir` | 路径非空；启动阶段校验父目录 |
 | `WithPIDFilePerm(os.FileMode)` | `0o644` | pid 文件权限 | 必须包含写权限 |
 | `WithPIDRefreshInterval(time.Duration)` | `0`（关闭） | 周期性重写 pid；`0` 表示只写一次 | `>= 0` |
@@ -447,7 +449,9 @@ type Option func(*options) error
 多次调用 `WithModuleFactories`、`WithModules`、`WithScripts`、`WithCommands` 是**累加**的，不是覆盖。构建顺序固定为：
 
 ```text
-ModuleFactory（按注册顺序）
+全局 engine 中间件 + 内建别名注册
+  -> MiddlewareRegistrar（按注册顺序，补充应用层别名）
+  -> ModuleFactory（按注册顺序）
   -> 直接注入的 Module（按注册顺序）
   -> 脚本 / 命令只注册，不参与启动顺序
 ```
@@ -844,7 +848,8 @@ const (
 ```
 
 别名只是名字，不会自动注册。`registry.go` 提供显式的「别名 → 实例」注册表，
-由服务装配方创建并注入 `gofyadapter.BindOptions.Registry`：
+由 App 在装配 HTTP 层时创建一份，先把内建中间件逐个注册进去，再执行应用注册的
+`MiddlewareRegistrar` 补充应用到别名：
 
 ```go
 func NewRegistry() *Registry
@@ -852,16 +857,33 @@ func (r *Registry) Register(name string, mw support.Middleware) error
 func (r *Registry) MustRegister(name string, mw support.Middleware)
 func (r *Registry) Lookup(name string) (support.Middleware, bool)
 func (r *Registry) Names() []string
+
+type MiddlewareRegistration struct {
+    Runtime   *core.Runtime
+    Registry  *Registry
+    Responder support.Responder
+}
+type MiddlewareRegistrar func(MiddlewareRegistration) error
+
+func WithMiddlewareRegistrar(fn MiddlewareRegistrar) Option
 ```
 
 - 别名与实例一一对应：`Register` 校验别名非空（去首尾空白）、实例非 `nil`、
   别名未被占用，重复注册返回错误而不是覆盖；`MustRegister` 是启动期 panic 版本；
 - 内部 `sync.RWMutex`，注册与查找可并发；`Names()` 返回排序副本用于诊断；
   `Lookup` 对 `nil` 注册表返回 `(nil, false)`；
-- 不是包级全局：每次装配新建一份，Nacos 热更新与测试互不污染；
+- 注册表由 App 持有并随根 `support.Router`（`support.RouterConfig.Middleware`）
+  分发到所有模块分组，业务模块只按契约名字解析，不再自己创建或注入；
+- `MiddlewareRegistrar` 在模块绑定路由之前执行，失败会使启动（或热更新）失败；
+  每次启动/`Reload` 都用新的 Runtime、Responder 和空注册表重新执行，Nacos
+  更新 jwt 等配置后立即得到新实例；
 - adapter 只依赖 `Lookup(name string) (support.Middleware, bool)`
   （`gofyadapter.MiddlewareRegistry` 接口），解析优先级为
-  `BindOptions.Middleware`（单次覆盖）→ `Registry`，两处都缺失时启动期报错；
+  `BindOptions.Middleware`（单次覆盖）→ `BindOptions.Registry`（可选显式注入）
+  → Router 携带的 App 注册表，三处都缺失时启动期报错；
+- 认证不再有特殊通道：`AuthRequired` 只是 OpenAPI 标记，需要认证的契约路由
+  显式声明 `group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`，与其他
+  别名一样从注册表解析；不存在默认别名或 `"jwt-auth"` 兜底；
 - **注册表只服务契约路由**，不接管下面的 App 级安装顺序；把全局链里已安装的
   中间件再注册给契约路由会执行两次，只在需要按路由覆盖全局行为时才这么做。
 
@@ -2049,7 +2071,7 @@ import (
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logging"
     "github.com/yourorg/demo-service/app/io/redis"
-    "github.com/yourorg/demo-service/app/module/order"
+    "github.com/yourorg/demo-service/app/middleware"
 )
 
 type Config struct {
@@ -2059,7 +2081,7 @@ type Config struct {
     DB      map[string]gofy.DatabaseConfig `yaml:"db"` // 按实例名分组
     Redis   redis.Config `yaml:"redis"`             // 多实例，按名字索引
     PIDFile string              `yaml:"pid_file"`
-    Order   order.Config        `yaml:"order"`
+    JWT     middleware.JWTConfig `yaml:"jwt"`
 }
 
 func Load(ctx context.Context, path string) (*Config, error) {
@@ -2169,9 +2191,14 @@ kafka:
 
 pid_file: /var/run/demo-service.pid
 
-order:
-  # 设置后所有契约路由都要求 Bearer Token
-  auth_token: ""
+# app/middleware.Auth 的内部 JWT 校验参数；契约在分组/路由上显式声明 "auth"，
+# 再由 App 注册表解析。secret 为空时示例放行
+jwt:
+  secret: ""
+  algorithms: [HS256]
+  issuer: demo-service
+  audience: demoservice
+  require_expiry: true
 ```
 
 `${ORDER_DB_DSN}` 在加载时展开；缺失时启动失败（除非显式允许）。
@@ -2453,8 +2480,9 @@ demo-service/
 │   │   └── redis/
 │   │       └── redis.go        # Cache / Session / RateLimit
 │   ├── middleware/
-│   │   ├── auth.go         # Auth + NameAuth
-│   │   └── audit.go        # Audit + NameAudit / NameOrderAudit
+│   │   ├── auth.go         # Auth + JWTConfig（调用框架 JWTAuth）
+│   │   ├── audit.go        # Audit + NameAudit / NameOrderAudit
+│   │   └── registry_middleware.go  # Register：集中注册应用层别名
 │   └── module/
 │       └── order/
 │           ├── module.go
@@ -2521,9 +2549,12 @@ func main() {
         gofy.WithAPIPrefix("/api/v1"),
         gofy.WithPIDFile(cfg.PIDFile),
         gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
+        // middlewareRegistrar 定义在 options.go，把 app/middleware 的别名注册进
+        // App 共享注册表（见 §9.10）。
+        gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
         gofy.WithModuleFactories(
             appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP),
-            order.NewModuleFactory(cfg.Order),
+            order.NewModuleFactory(),
         ),
         gofy.WithScripts(appscript.Register(cfg)...),
         gofy.WithVersionInfo(gofy.VersionInfo{
@@ -2565,7 +2596,7 @@ import (
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logging"
     "github.com/yourorg/demo-service/app/io/redis"
-    "github.com/yourorg/demo-service/app/module/order"
+    "github.com/yourorg/demo-service/app/middleware"
 )
 
 type Config struct {
@@ -2575,7 +2606,7 @@ type Config struct {
     DB      map[string]gofy.DatabaseConfig `yaml:"db"` // 按实例名分组
     Redis   redis.Config `yaml:"redis"`             // 多实例，按名字索引
     PIDFile string              `yaml:"pid_file"`
-    Order   order.Config        `yaml:"order"`
+    JWT     middleware.JWTConfig `yaml:"jwt"`
 }
 
 func Load(ctx context.Context, path string) (*Config, error) {
@@ -2641,26 +2672,21 @@ import (
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/support"
-    "github.com/yourorg/demo-service/app/middleware"
     "github.com/yourorg/demo-service/app/module/order/controller"
     "github.com/yourorg/demo-service/app/module/order/repository"
     "github.com/yourorg/demo-service/app/module/order/service"
+    "go.uber.org/zap"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
     "gofy/gofy-interface-service/appinterface/demoservice/orderroute"
     "gofy/gofy-interface-service/contracts/common/endpoint"
 )
 
-type Config struct {
-    // 非空时所有契约路由都要求该 Bearer Token；为空则跳过校验。
-    AuthToken string `yaml:"auth_token"`
-}
-
 type Module struct {
-    svc  *service.OrderService
-    auth support.Middleware
+    svc    *service.OrderService
+    logger *zap.Logger
 }
 
-func NewModuleFactory(cfg Config) gofy.ModuleFactory {
+func NewModuleFactory() gofy.ModuleFactory {
     return func(rt *gofy.Runtime) (support.Module, error) {
         if rt.DB == nil {
             return nil, errors.New("order module requires database")
@@ -2670,42 +2696,26 @@ func NewModuleFactory(cfg Config) gofy.ModuleFactory {
             Orders: repo,
             Logger: rt.Logger,
         })
-        return NewModule(cfg, svc), nil
+        return NewModule(svc, rt.Logger), nil
     }
 }
 
-func NewModule(cfg Config, svc *service.OrderService) *Module {
-    verify := func(string) error { return nil }
-    if cfg.AuthToken != "" {
-        verify = func(token string) error {
-            if token != cfg.AuthToken {
-                return errors.New("invalid token")
-            }
-            return nil
-        }
+func NewModule(svc *service.OrderService, logger *zap.Logger) *Module {
+    if logger == nil {
+        logger = zap.NewNop()
     }
-    return &Module{svc: svc, auth: middleware.Auth(verify)}
+    return &Module{svc: svc, logger: logger}
 }
 
 func (m *Module) Name() string { return "order" }
 
 func (m *Module) Register(r *support.Router) error {
     h := controller.NewOrderController(m.svc, m.logger)
-    // 每次装配新建一份注册表：契约只声明别名（分组 "audit"、CreateOrder 的
-    // "order-audit"），实例在这里注册；未注册的名字在启动期报错。
-    reg := gofymiddleware.NewRegistry()
-    if err := reg.Register(middleware.NameAudit, middleware.Audit(m.logger, "group")); err != nil {
-        return err
-    }
-    if err := reg.Register(middleware.NameOrderAudit, middleware.Audit(m.logger, "route")); err != nil {
-        return err
-    }
-    opts := gofyadapter.BindOptions{
-        Auth:     m.auth,
-        Registry: reg,
-    }
+    // 契约只声明别名（分组 "audit"/"auth"、CreateOrder 的 "order-audit"）。
+    // 这些实例由 App 启动时通过 WithMiddlewareRegistrar 注册进 Router 携带的
+    // 共享注册表，模块不再创建或注入注册表；未注册的名字在启动期报错。
     for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
-        if err := gofyadapter.BindGroup(r, group, h, opts); err != nil {
+        if err := gofyadapter.BindGroup(r, group, h, gofyadapter.BindOptions{}); err != nil {
             return err
         }
     }
@@ -2717,7 +2727,7 @@ func (m *Module) Register(r *support.Router) error {
 `Start`，句柄还是 nil；等 `Start` 安装连接后仓库自动使用新句柄，热更新也会切到新
 连接。脚本模式没有模块生命周期，改用 `repository.New(rt.DB, rt.Logger)` 显式传连接。
 
-`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名、`AuthRequired` 和路由级中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查 `BindOptions.Registry`（服务装配时注入的注册表）。
+`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：`AuthRequired` 只用于 OpenAPI 标记，契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`）。
 
 最终路由：
 
@@ -3066,49 +3076,113 @@ func FixOrder() gofyscript.Script {
 
 ### 9.10 业务中间件
 
+业务中间件不需要自己写校验：契约在需要认证的分组/路由上显式声明 `"auth"`，
+实例由应用层 `app/middleware.Auth` 构造，内部调用框架
+`support/middleware.JWTAuth`（§3.4.9 的 `WithJWTAuth` 同款实现）。`Auth` 把
+`config.yaml` 的 `jwt` 段映射成 `jwtauth.Config` 后交给框架，并以别名 `auth`
+注册到 App 的共享注册表；`AuthRequired` 本身只写入 OpenAPI 标记，不会触发
+任何自动装配：
+
 ```go
 // app/middleware/auth.go
 package middleware
 
 import (
+    "fmt"
+
     "github.com/bingcool/gofy/support"
+    "github.com/bingcool/gofy/support/jwtauth"
+    gofymiddleware "github.com/bingcool/gofy/support/middleware"
     "github.com/gin-gonic/gin"
 )
 
-// NameAuth 是 Auth 在契约路由里使用的中间件别名。
+// NameAuth 是认证中间件的显式别名，契约在分组/路由上声明 "auth"。
 const NameAuth = "auth"
 
-func Auth(verify func(token string) error) support.Middleware {
-    return func(c *gin.Context) {
-        token := c.GetHeader("Authorization")
-        if err := verify(token); err != nil {
-            // 注意：中间件里不能直接调用 Responder；
-            // 这里使用 gin 的 abort + 由业务自行写响应，
-            // 或者把校验放到 handler 内返回 apperr。
-            c.AbortWithStatusJSON(401, gin.H{
-                "code": 40100,
-                "msg":  "unauthorized",
-            })
-            return
+type JWTConfig struct {
+    // Secret 是 HMAC 密钥；为空时示例放行所有请求。
+    Secret        string   `yaml:"secret"`
+    Algorithms    []string `yaml:"algorithms"`
+    Issuer        string   `yaml:"issuer"`
+    Audience      string   `yaml:"audience"`
+    RequireExpiry bool     `yaml:"require_expiry"`
+}
+
+func Auth(cfg JWTConfig, responder support.Responder) (support.Middleware, error) {
+    if cfg.Secret == "" {
+        return func(c *gin.Context) { c.Next() }, nil
+    }
+    parser, err := jwtauth.NewParser(jwtauth.Config{
+        Secret:        []byte(cfg.Secret),
+        Algorithms:    cfg.Algorithms,
+        Issuer:        cfg.Issuer,
+        Audience:      cfg.Audience,
+        RequireExpiry: cfg.RequireExpiry,
+    })
+    if err != nil {
+        return nil, fmt.Errorf("middleware: jwt: %w", err)
+    }
+    return gofymiddleware.JWTAuth(support.JWTAuthConfig{Parser: parser}, responder)
+}
+```
+
+业务自己实现的中间件（如审计）和框架中间件一样，在自己的文件里导出别名常量，
+装配时注册进 App 创建的 `support/middleware.Registry`，契约路由再按名字取用
+（§3.4.6）。demo-service 的 `app/middleware/audit.go` 导出
+`NameAudit = "audit"`（订单分组）与 `NameOrderAudit = "order-audit"`
+（CreateOrder 单路由），两者是同一个 `Audit` 构造器配不同 `scope`，便于在日志里
+区分名字来自哪一层。
+
+所有应用层别名集中在 `app/middleware/registry_middleware.go`：
+
+```go
+type Deps struct {
+    Logger    *zap.Logger
+    JWT       JWTConfig
+    Responder support.Responder
+}
+
+func Register(reg *gofymiddleware.Registry, deps Deps) error {
+    auth, err := Auth(deps.JWT, deps.Responder)
+    if err != nil {
+        return err
+    }
+    for _, e := range []struct {
+        alias string
+        mw    support.Middleware
+    }{
+        {NameAuth, auth},
+        {NameAudit, Audit(deps.Logger, "group")},
+        {NameOrderAudit, Audit(deps.Logger, "route")},
+    } {
+        if err := reg.Register(e.alias, e.mw); err != nil {
+            return err
         }
-        c.Next()
+    }
+    return nil
+}
+```
+
+注册时机由框架负责：`options.go` 用 `gofy.WithMiddlewareRegistrar` 传入一个
+闭包，App 在模块绑定路由之前执行它；`reload.go` 在每次热更新时把用新配置
+构造的 registrar 放进 `ReloadSpec.MiddlewareRegistrars`：
+
+```go
+func middlewareRegistrar(cfg *config.Config) gofy.MiddlewareRegistrar {
+    return func(reg gofy.MiddlewareRegistration) error {
+        return middleware.Register(reg.Registry, middleware.Deps{
+            Logger:    reg.Runtime.Logger,
+            JWT:       cfg.JWT,
+            Responder: reg.Responder,
+        })
     }
 }
 ```
 
-> 中间件的错误响应有两种做法：一是像上面直接写；二是把错误放进 `c`，在统一中间件里交给 `Responder`。v1 推荐把认证失败收敛到 handler 返回 `apperr.Unauthorized`，避免每个中间件重复响应格式。
-
-标准 Bearer JWT 不需要业务自己写中间件：使用 `WithJWTAuth`（§3.4.9）即可；
-上面的 `Auth` 仍适合需要调用外部认证服务的场景。
-
-业务中间件和框架中间件一样，在自己的文件里导出别名常量，装配时注册进
-`support/middleware.Registry` 再交给契约路由按名字使用（§3.4.6）。demo-service 的
-`app/middleware/audit.go` 导出 `NameAudit = "audit"`（订单分组）与
-`NameOrderAudit = "order-audit"`（CreateOrder 单路由），两者是同一个 `Audit`
-构造器配不同 `scope`，便于在日志里区分名字来自哪一层；`order.Module.Register`
-每次装配新建一份注册表，注册这两个别名与 `NameAuth`，再经 `BindOptions.Registry`
-注入。`AuthRequired` 的路由由 `BindOptions.Auth` 安装鉴权，因此同一条路由不要
-既声明 `AuthRequired` 又 `Use("auth")`，否则鉴权会执行两次。
+业务模块只按契约名字 `BindGroup(..., BindOptions{})`，新增别名只改
+`app/middleware`，不用改任何模块。所有名字都必须显式注册，没有默认别名或
+框架兜底：`AuthRequired` 只是 OpenAPI 标记，需要认证的路由必须在契约里写
+`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`。
 
 ### 9.11 CLI 行为
 
@@ -3439,7 +3513,7 @@ fi
 | `app/middleware/requestid.go` | `support/middleware/requestid.go` | 内部实现；Header 校验 |
 | `app/middleware/response.go` | `support/responder.go` | 包络结构保留，改为 `Responder` 接口 |
 | `app/middleware/registermiddleware.go` | 删除 | 中间件顺序由 App 统一安装 |
-| `app/middleware/validateLogin.go` | `examples/demo-service/app/middleware/auth.go` | 示例业务中间件 |
+| `app/middleware/validateLogin.go` | `app/middleware/auth.go` | `Auth` 内部调用 `support/middleware.JWTAuth` 校验标准 Bearer JWT |
 | `app/middleware/test.go` | 删除 | 测试用中间件不属于框架 |
 | `app/route/build/route.go` | `support/handler.go` / `bind.go` / `validate.go` | 改为泛型 handler；删除 `panic`、`validator.New()`/请求、`gconv` |
 | `app/route/init.go` | `examples/demo-service/app/module/order/module.go` | 业务路由注册 |

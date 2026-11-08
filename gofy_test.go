@@ -653,6 +653,77 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 	}
 }
 
+// TestReloadRebuildsMiddlewareRegistry 证明注册表由 App 按次装配创建：
+// 模块只按名字解析，Reload 传入新的 registrar 后新路由立即使用新实例。
+func TestReloadRebuildsMiddlewareRegistry(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	registrar := func(version string) gofy.MiddlewareRegistrar {
+		return func(reg gofy.MiddlewareRegistration) error {
+			return reg.Registry.Register("stamp", func(c *gin.Context) {
+				c.String(http.StatusOK, version)
+			})
+		}
+	}
+	factory := func(*gofy.Runtime) (support.Module, error) {
+		return &testModule{
+			name:  "reload",
+			order: events,
+			reg: func(r *support.Router) error {
+				r.GET("/stamp", func(c *gin.Context) {
+					mw, ok := r.Middleware("stamp")
+					if !ok {
+						c.String(http.StatusInternalServerError, "missing")
+						return
+					}
+					mw(c)
+				})
+				return nil
+			},
+		}, nil
+	}
+	app, err := gofy.New(
+		gofy.WithName("reload-registry"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithMiddlewareRegistrar(registrar("v1")),
+		gofy.WithModuleFactories(factory),
+		gofy.WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	if got := getText(t, port, "/api/v1/reload/stamp"); got != "v1" {
+		t.Fatalf("before reload: %q", got)
+	}
+
+	if err := app.Reload(context.Background(), gofy.ReloadSpec{
+		MiddlewareRegistrars: []gofy.MiddlewareRegistrar{registrar("v2")},
+	}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := getText(t, port, "/api/v1/reload/stamp"); got != "v2" {
+		t.Fatalf("after reload: %q", got)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
 func TestReloadRequiresRunningServer(t *testing.T) {
 	app, err := gofy.New(gofy.WithName("reload-idle"))
 	if err != nil {

@@ -2,7 +2,11 @@ package order_test
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
+	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
@@ -94,20 +99,48 @@ func (f *fakeRepository) UpdateStatus(_ context.Context, id uint64, status strin
 
 func newTestApp(t *testing.T) *gofytest.App {
 	t.Helper()
-	return newTestAppWithConfig(t, order.Config{})
+	return newTestAppWithConfig(t, middleware.JWTConfig{})
 }
 
-func newTestAppWithConfig(t *testing.T, cfg order.Config) *gofytest.App {
+// newTestAppWithConfig 用与 demo-service 相同的装配方式启动测试 App：
+// 应用层中间件通过 WithMiddlewareRegistrar 注册进框架创建的共享注册表。
+func newTestAppWithConfig(t *testing.T, jwtCfg middleware.JWTConfig) *gofytest.App {
 	t.Helper()
 	svc := service.NewOrderService(service.Deps{
 		Orders: newFakeRepository(),
 		Logger: zap.NewNop(),
 	})
-	module := order.NewModule(cfg, svc, zap.NewNop())
+	module := order.NewModule(svc, zap.NewNop())
 	return gofytest.New(t,
 		gofy.WithName("demo-service-test"),
+		gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), jwtCfg)),
 		gofy.WithModules(module),
 	)
+}
+
+// testRegistrar 注册测试用的应用层中间件，与 main 里的 middlewareRegistrar
+// 走同一条框架注册路径。
+func testRegistrar(logger *zap.Logger, jwtCfg middleware.JWTConfig) gofy.MiddlewareRegistrar {
+	return func(reg gofy.MiddlewareRegistration) error {
+		return middleware.Register(reg.Registry, middleware.Deps{
+			Logger:    logger,
+			JWT:       jwtCfg,
+			Responder: reg.Responder,
+		})
+	}
+}
+
+// signJWT 签一个 HS256 token：模块用框架 jwtauth 校验，测试只需合法签名。
+func signJWT(t *testing.T, secret string, expires time.Time) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString(
+		[]byte(fmt.Sprintf(`{"sub":"tester","exp":%d}`, expires.Unix())),
+	)
+	unsigned := header + "." + payload
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(unsigned))
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func TestGetOrderContract(t *testing.T) {
@@ -261,8 +294,9 @@ func TestCancelWithoutTokenConfigured(t *testing.T) {
 	}
 }
 
-func TestCancelWithTokenConfigured(t *testing.T) {
-	app := newTestAppWithConfig(t, order.Config{AuthToken: "test-token"})
+func TestCancelWithJWT(t *testing.T) {
+	const secret = "test-jwt-secret"
+	app := newTestAppWithConfig(t, middleware.JWTConfig{Secret: secret, RequireExpiry: true})
 
 	rr := app.DELETE("/api/v1/order/orders/1")
 	gofytest.Status(t, rr, http.StatusUnauthorized)
@@ -270,13 +304,14 @@ func TestCancelWithTokenConfigured(t *testing.T) {
 		t.Fatalf("code = %v, want 40100", code)
 	}
 
-	rr = app.DELETE("/api/v1/order/orders/1", "Authorization", "Bearer test-token")
+	token := signJWT(t, secret, time.Now().Add(time.Hour))
+	rr = app.DELETE("/api/v1/order/orders/1", "Authorization", "Bearer "+token)
 	gofytest.Status(t, rr, http.StatusNoContent)
 
-	rr = app.DELETE("/api/v1/order/orders/999", "Authorization", "Bearer test-token")
+	rr = app.DELETE("/api/v1/order/orders/999", "Authorization", "Bearer "+token)
 	gofytest.Status(t, rr, http.StatusNotFound)
 
-	rr = app.GET("/api/v1/order/orders/1")
+	rr = app.GET("/api/v1/order/orders/1", "Authorization", "Bearer "+signJWT(t, "wrong-secret", time.Now().Add(time.Hour)))
 	gofytest.Status(t, rr, http.StatusUnauthorized)
 }
 
@@ -286,9 +321,10 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 		Orders: newFakeRepository(),
 		Logger: zap.NewNop(),
 	})
-	module := order.NewModule(order.Config{}, svc, zap.New(core))
+	module := order.NewModule(svc, zap.New(core))
 	app := gofytest.New(t,
 		gofy.WithName("demo-service-test"),
+		gofy.WithMiddlewareRegistrar(testRegistrar(zap.New(core), middleware.JWTConfig{})),
 		gofy.WithModules(module),
 	)
 
@@ -318,19 +354,20 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	}
 }
 
-// 同一个 module 实例被装配两次（等价于 Nacos 热更新重建路由）时，每次
-// Register 都新建一份中间件注册表，因此不会撞上「别名已注册」错误。
+// 同一个 module 实例被装配两次（等价于 Nacos 热更新重建路由）时，每次装配
+// App 都新建一份注册表并重新执行 registrar，因此不会撞上「别名已注册」错误。
 func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	svc := service.NewOrderService(service.Deps{
 		Orders: newFakeRepository(),
 		Logger: zap.NewNop(),
 	})
-	module := order.NewModule(order.Config{}, svc, zap.New(core))
+	module := order.NewModule(svc, zap.New(core))
 
 	for i := 0; i < 2; i++ {
 		app := gofytest.New(t,
 			gofy.WithName("demo-service-test"),
+			gofy.WithMiddlewareRegistrar(testRegistrar(zap.New(core), middleware.JWTConfig{})),
 			gofy.WithModules(module),
 		)
 		gofytest.Status(t, app.GET("/api/v1/order/orders/1"), http.StatusOK)

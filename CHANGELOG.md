@@ -8,24 +8,45 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `support/middleware`: alias registry for contract routes. Every built-in
-  middleware exports its alias next to its constructor (`NameRequestID`,
+- Root package: the App now owns the contract middleware registry. On startup
+  and on every `Reload` it creates one `support/middleware.Registry`, registers
+  every built-in middleware under its alias (`NameRequestID`,
   `NameHeaderPropagation`, `NameAccessLog`, `NameRecovery`, `NameCORS`,
-  `NameBodyLimit`, `NameSecurityHeaders`, `NameRateLimit`, `NameJWTAuth`), and
-  `NewRegistry` builds an explicit, concurrency-safe alias→instance map:
-  `Register` rejects blank aliases, nil middleware and duplicate names (never
-  overwrites), `MustRegister` panics for startup wiring, `Lookup` reports
-  missing names (a nil registry reads as empty) and `Names` returns a sorted
-  copy for diagnostics. Services create one registry per assembly and inject it
-  through `gofyadapter.BindOptions.Registry`, so Nacos reloads and tests never
-  share state. The adapter resolves `BindOptions.Middleware` first as a
-  per-binding override and fails at startup when a contract group or route name
-  is unknown. The App-level chain installed by `gofy.With*` is unchanged.
-- `examples/demo-service`: `app/middleware` exports `NameAuth`, `NameAudit` and
-  `NameOrderAudit`, and the order module registers those instances in a fresh
-  registry on every `Register` call before binding the contract groups. Tests
-  cover the audit order (route-level name inside the group name) and rebuilding
-  the same module twice without an alias conflict.
+  `NameBodyLimit`, `NameSecurityHeaders`, `NameRateLimit`, `NameJWTAuth`), then
+  runs the new `WithMiddlewareRegistrar` callbacks to add application aliases.
+  The registry is handed to the root `support.Router`
+  (`support.RouterConfig.Middleware`) and shared by every module group, so
+  modules resolve contract names through `Router.Middleware(name)` and no
+  longer create or inject registries. `ReloadSpec.MiddlewareRegistrars`
+  rebuilds the registry with new configuration, so a changed JWT secret takes
+  effect without a restart. A registrar error aborts startup or reload.
+- `support/middleware`: alias registry for contract routes. Every built-in
+  middleware exports its alias next to its constructor, and `NewRegistry`
+  builds an explicit, concurrency-safe alias→instance map: `Register` rejects
+  blank aliases, nil middleware and duplicate names (never overwrites),
+  `MustRegister` panics for startup wiring, `Lookup` reports missing names (a
+  nil registry reads as empty) and `Names` returns a sorted copy for
+  diagnostics. The App-level chain installed by `gofy.With*` is unchanged.
+- `gofy-interface-service` adapter: every contract middleware name resolves
+  through `BindOptions.Middleware` (per-binding override) →
+  `BindOptions.Registry` (optional explicit injection) → the router's App
+  registry, and unknown names fail at startup. There are no default aliases or
+  implicit injection: `Spec.Auth = AuthRequired` is an OpenAPI marker only, and
+  protected routes must declare `"auth"` explicitly (`group.Use("auth")` or
+  `spec.Middleware = []string{"auth"}`); `BindOptions.Auth`, `AuthAlias` and
+  `DefaultAuthAlias` were removed.
+- `examples/demo-service`: `app/middleware.Register(reg, Deps{Logger, JWT,
+  Responder})` registers `auth`, `audit` and `order-audit` into the App's
+  registry; `options.go` wires it with `WithMiddlewareRegistrar` and `reload.go`
+  passes the rebuilt registrar through `ReloadSpec`. `app/middleware.Auth` maps
+  the top-level `jwt` config (`secret`/`algorithms`/`issuer`/`audience`/
+  `require_expiry`) to `jwtauth.Config` and wraps the framework
+  `support/middleware.JWTAuth`; an empty secret yields a pass-through
+  middleware so the example stays open by default. The order module now only
+  binds routes (`BindOptions{}`). The contract declares `"auth"` explicitly on
+  the order and config groups. Tests cover the alias set, fresh registries per
+  assembly, startup/reload resolution, the audit order inside the contract
+  binding, and the JWT policy (40100, valid token, wrong signature).
 - `support/image`: image decoding, resizing, thumbnails, cropping, rotation,
   greyscale, image/text watermarks and jpeg/png/gif encoding, ported from the
   swoolefy PHP Image module (Intervention Image) to the standard library plus

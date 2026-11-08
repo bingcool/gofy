@@ -48,7 +48,7 @@ type reloader struct {
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	factories := []gofy.ModuleFactory{
 		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt),
-		order.NewModuleFactory(cfg.Order),
+		order.NewModuleFactory(),
 	}
 	if r.watch {
 		factories = append(factories, func(rt *core.Runtime) (support.Module, error) {
@@ -91,9 +91,10 @@ func (r *reloader) reload(ctx context.Context) error {
 	}
 	dbCfg := cfg.Database(config.DefaultDatabase)
 	return app.Reload(ctx, gofy.ReloadSpec{
-		Env:             env,
-		Log:             &cfg.Log,
-		Database:        &dbCfg,
-		ModuleFactories: r.factories(cfg),
+		Env:                  env,
+		Log:                  &cfg.Log,
+		Database:             &dbCfg,
+		ModuleFactories:      r.factories(cfg),
+		MiddlewareRegistrars: []gofy.MiddlewareRegistrar{middlewareRegistrar(cfg)},
 	})
 }

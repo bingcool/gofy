@@ -24,8 +24,14 @@ log:
     - stdout
   rotation:
     enabled: true
-    # info.log 按小时切分（info-h0.log ... info-h23.log）；error.log 和
-    # system_error.log 固定按大小切分，避免每小时产生碎片文件。
+    # mode 只有两个合法值，大小写不敏感，留空等同 size，其它值启动期报错：
+    #   size   —— 默认。info.log 一直追加，满 max_size_mb 由 lumberjack 滚成带
+    #             时间戳的备份，受 max_age_days / max_backups / compress 约束。
+    #   hourly —— 每小时一个文件（info-h0.log ... info-h23.log，h 不补零）；
+    #             上面四个按大小保留的参数全部失效，旧日志只能靠 date_dir +
+    #             date_dir_max_age_days 删除整个日期目录来清理。
+    # mode 只作用于 outputs；error.log 和 system_error.log 固定按 size 切分，
+    # 避免每小时产生碎片文件。enabled: false 时 mode 被忽略。
     mode: hourly
     date_dir: true
     date_layout: "20060102"
@@ -196,5 +202,13 @@ rocketmq:
 
 pid_file: app/demo-service.pid
 
-order:
-  # auth_token: set to require a bearer token on every contract route
+# 契约在分组上显式声明了 "auth" 中间件，其内部用框架 JWT
+# （support/middleware/jwt.go）校验 Bearer Token。secret 为空时示例放行；
+# 生产环境从环境变量（如 JWT_SECRET）注入，建议不要写进 YAML。
+# 需要开启时取消注释并填入密钥：
+# jwt:
+#   secret: <从 JWT_SECRET 注入，不要提交>
+#   algorithms: [HS256]
+#   issuer: demo-service
+#   audience: demoservice
+#   require_expiry: true

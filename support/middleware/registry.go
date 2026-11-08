@@ -11,11 +11,12 @@ import (
 
 // Registry 保存「中间件逻辑名 → 中间件实例」的一一映射，供 gofy-interface-service
 // 的契约路由使用：契约里只写名字（group.Use("audit") 或 Route.Use("cors")），
-// 服务在装配时把实例注册进来，adapter 绑定路由时按名字查出实例。
+// App 在启动装配时把内建与应用层实例注册进来，adapter 绑定路由时按名字查出实例。
 //
-// 注册表是显式实例而非包级全局：装配方用 NewRegistry 创建并注入
-// BindOptions.Registry，因此 Nacos 热更新和测试各自持有一份，互不影响。
-// 契约层与 adapter 都不认识具体中间件，只依赖 Lookup。
+// 注册表是显式实例而非包级全局：App 为每次装配（启动 / Reload）用 NewRegistry
+// 创建一份，先把内建中间件注册进去，再执行应用注册的 MiddlewareRegistrar；
+// 随后随 support.Router 下发给模块。因此 Nacos 热更新和测试各自持有一份，
+// 互不影响。契约层与 adapter 都不认识具体中间件，只依赖 Lookup。
 //
 // 别名一经注册不可覆盖，重复注册返回错误，避免两个中间件悄悄抢同一个名字。
 // 所有方法都可并发调用。

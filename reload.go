@@ -58,12 +58,18 @@ type ReloadSpec struct {
 	// WithModuleFactories, and with them the routes. Nil rebuilds from the
 	// factories passed to New.
 	ModuleFactories []support.ModuleFactory
+
+	// MiddlewareRegistrars rebuild the application middleware registry. Nil
+	// reuses the registrars passed to New. They run against a fresh registry on
+	// every reload, so configuration that feeds a middleware (for example a new
+	// JWT secret) takes effect without a restart.
+	MiddlewareRegistrars []MiddlewareRegistrar
 }
 
 // Reload applies a new configuration to a running App without exiting the
-// process. It rebuilds the logger, the database pool and the modules, starts
-// the new modules, swaps the HTTP handler atomically and then stops the old
-// modules.
+// process. It rebuilds the logger, the database pool, the middleware registry
+// and the modules, starts the new modules, swaps the HTTP handler atomically
+// and then stops the old modules.
 //
 // New modules start before the old ones stop, so requests are served
 // throughout the swap. The overhead is a short window where both module sets
@@ -74,8 +80,10 @@ type ReloadSpec struct {
 // re-registered on the new router, because Reload cannot rebuild instances it
 // did not create. Their Runtime is whatever they captured at construction.
 //
-// Reload never changes the listening address, the pid file or the registered
-// middleware. Those are fixed at startup.
+// The middleware registry is rebuilt from the registrars, but middleware
+// installed directly on the engine by options (CORS, rate limit, JWT, and so
+// on) keeps its startup behavior. Reload never changes the listening address
+// or the pid file; those require a restart.
 //
 // A reload proceeds in five steps: validate the spec, build the new logger and
 // DB pool, rebuild and start the new modules, publish the new state and
@@ -117,6 +125,10 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	factories := spec.ModuleFactories
 	if factories == nil {
 		factories = a.opts.moduleFactories
+	}
+	registrars := spec.MiddlewareRegistrars
+	if registrars == nil {
+		registrars = a.opts.middlewareRegistrars
 	}
 	injected := append([]support.Module(nil), a.opts.modules...)
 	// Module names are unique within a build (buildModulesWith rejects
@@ -187,7 +199,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		Propagator:     a.telemetry.Propagator(),
 		Tracing:        a.telemetry.Enabled(),
 	})
-	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, factories, injected)
+	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, factories, injected, registrars)
 	if err != nil {
 		discard()
 		return err
@@ -238,6 +250,9 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	}
 	if spec.ModuleFactories != nil {
 		a.opts.moduleFactories = append([]support.ModuleFactory(nil), spec.ModuleFactories...)
+	}
+	if spec.MiddlewareRegistrars != nil {
+		a.opts.middlewareRegistrars = append([]MiddlewareRegistrar(nil), spec.MiddlewareRegistrars...)
 	}
 	a.logger, a.ownLogger = lg, ownLogger
 	a.systemLogger = systemLogger

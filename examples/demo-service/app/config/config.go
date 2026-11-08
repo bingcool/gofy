@@ -16,7 +16,7 @@ import (
 	"github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
-	"github.com/yourorg/demo-service/app/module/order"
+	"github.com/yourorg/demo-service/app/middleware"
 )
 
 // DefaultDatabase is the instance the framework manages and scripts use.
@@ -36,7 +36,7 @@ type Config struct {
 	UUIDInt  appuuidint.Config              `yaml:"uuidint"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
-	Order    order.Config                   `yaml:"order"`
+	JWT      middleware.JWTConfig           `yaml:"jwt"`
 }
 
 // Database returns the named instance; the caller must have checked it exists.

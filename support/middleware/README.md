@@ -25,11 +25,14 @@ Gin 中间件集合：请求 ID、访问日志、异常恢复、Body 上限、CO
 传给 `gofy.WithMiddleware(...)` 或 `support.Router.Use(...)`。
 
 别名常量只是**名字**，不会自动注册，也不改变 App 级安装顺序：全局链仍由
-`gofy.With*` 选项决定。只有当契约路由按名字引用某个中间件时，服务才需要把
-实例注册进注册表（见第三节第 3 小节）。业务自定义中间件同样在自己的文件里
+`gofy.With*` 选项决定。App 构建 HTTP 层时会创建一份注册表，先把内建中间件注册
+进去，再执行 `WithMiddlewareRegistrar` 注册应用层别名；契约路由按名字从 Router
+携带的这份注册表取实例（见第三节第 3 小节）。业务自定义中间件同样在自己的文件里
 导出 `NameXxx` 常量，保持「别名与实例一一对应」。
 
-## 二、App 的安装顺序`gofy.New` 在构建 HTTP server 时按下面顺序安装（`start.go`）：
+## 二、App 的安装顺序
+
+`gofy.New` 在构建 HTTP server 时按下面顺序安装（`start.go`）：
 
 ```text
 RequestID
@@ -42,6 +45,7 @@ RequestID
   → BodyLimit
   → WithMiddleware 追加的业务中间件
   → /healthz、/readyz 与 404/405 兜底
+  → 内建别名逐个注册 + MiddlewareRegistrar 注册应用别名
   → 模块路由子 Router：RateLimit → JWTAuth
   → 契约路由（adapter 的 Global/Routes/Auth/RateLimit 中间件）
   → 业务 handler
@@ -113,42 +117,45 @@ app, err := gofy.New(
     }, responder),
     gofy.WithMaxBodyBytes(8<<20),
     gofy.WithHeaderPropagation(true),
-    gofy.WithModuleFactories(order.NewModuleFactory(cfg.Order)),
+    // 应用层中间件（auth / audit / order-audit）在模块绑定路由之前注册，
+    // 契约只写逻辑名，模块不再自己创建注册表。
+    gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
+    gofy.WithModuleFactories(order.NewModuleFactory()),
 )
 ```
 
 ### 2. 契约路由级（adapter 的 BindOptions）
 
-契约里只声明中间件的**逻辑名**：分组级 `group.Use("audit")`、路由级
+契约里只声明中间件的**逻辑名**：分组级 `group.Use("audit", "auth")`、路由级
 `spec.Middleware = []string{"order-audit"}`（或链式 `.Use("order-audit")`）。
-服务端把「别名 → 实例」注册进中间件注册表，经 `BindOptions.Registry` 注入，
-`adapter/gofy.BindGroup` 负责建组并解析分组名，内部 `BindAll` 解析路由名。
+App 启动时把这些名字对应的实例注册进共享注册表并随 Router 下发，
+`adapter/gofy.BindGroup` 负责建组并解析分组名，内部 `BindAll` 解析路由名；
+业务模块只绑定路由，不再创建或注入注册表。
+
+认证没有特殊通道：`spec.Auth = AuthRequired` 只写入 OpenAPI 标记，adapter
+不会自动附加认证中间件；需要认证时像其他中间件一样显式声明名字（上面
+`group.Use` 里的 `"auth"`）。所有名字都必须显式注册，没有默认别名或兜底。
 
 最终顺序：
 `分组中间件（group.Use 顺序）→ Global → 路由中间件名（spec.Middleware 顺序）
-→ Routes[OperationID] → Auth（契约声明 AuthRequired 时）→ RateLimit(spec)`。
+→ Routes[OperationID] → RateLimit(spec)`。
 
 ```go
-import (
-    gofymiddleware "github.com/bingcool/gofy/support/middleware"
-    "github.com/yourorg/demo-service/app/middleware" // 业务自己的中间件与别名
-)
+// main / options.go：注册应用层别名，启动和每次 Reload 都会用新配置执行一次。
+func demoMiddlewareRegistrar(cfg *config.Config) gofy.MiddlewareRegistrar {
+    return func(reg gofy.MiddlewareRegistration) error {
+        return middleware.Register(reg.Registry, middleware.Deps{
+            Logger:    reg.Runtime.Logger,
+            JWT:       cfg.JWT,          // Auth 内部调用框架 JWTAuth
+            Responder: reg.Responder,
+        })
+    }
+}
 
+// app/module/order/module.go：模块只声明契约，不再关心注册表。
 func (m *Module) Register(r *support.Router) error {
     h := controller.NewOrderController(m.svc, m.logger)
-
-    // 每次装配新建一份注册表：热更新重建路由时不会与旧实例共享状态。
-    reg := gofymiddleware.NewRegistry()
-    if err := reg.Register(middleware.NameAudit, middleware.Audit(m.logger, "group")); err != nil {
-        return err
-    }
-    if err := reg.Register(middleware.NameOrderAudit, middleware.Audit(m.logger, "route")); err != nil {
-        return err
-    }
-
     opts := gofyadapter.BindOptions{
-        // 契约声明的分组名与路由名都从这里解析。
-        Registry: reg,
         // 只对契约路由生效的通用中间件，不走名字。
         Global: []support.Middleware{
             gofymiddleware.RequestID(support.DefaultRequestIDHeader),
@@ -157,8 +164,6 @@ func (m *Module) Register(r *support.Router) error {
         Routes: map[string][]support.Middleware{
             "CreateOrder": {auditMiddleware},
         },
-        // 契约声明 AuthRequired 的路由必须提供 Auth。
-        Auth: m.auth,
         // 契约声明 RateLimit 时按 spec 生成限流中间件。
         RateLimit: func(spec endpoint.Spec) support.Middleware {
             return limiter.For(spec.OperationID)
@@ -175,12 +180,17 @@ func (m *Module) Register(r *support.Router) error {
 
 注意：
 
-- `BindAll` 在启动期校验：`AuthRequired` 路由没有 `BindOptions.Auth` 会直接报错；
-  签名不匹配、路径占位符缺 `uri` 字段、中间件名未注册等问题会聚合返回。
+- 分组名与路由名从 Router 携带的 App 注册表解析；`BindOptions.Registry` 只是
+  可选的显式注入，`BindOptions.Middleware` 仍是单次绑定的最高优先级覆盖。
+- `BindAll` 在启动期校验：契约声明的每个名字（含认证 `"auth"`）都必须能在
+  `BindOptions.Middleware`、`BindOptions.Registry` 或 App 注册表里查到；签名不
+  匹配、路径占位符缺 `uri` 字段、名字未注册等问题会聚合返回。`AuthRequired`
+  本身不参与校验，也不触发任何中间件安装。
 - 手动 `r.Group(prefix, mw...)` + `BindAll` 时分组中间件直接传实例，契约里的
-  分组名不会被解析；路由级名字仍然解析。`Bind` 只安装显式传入的 `mw`。
-- App 级 `WithJWTAuth` 已经对模块路由统一鉴权时，`BindOptions.Auth` 仍可放行
-  （`c.Next()`）或做更细粒度的角色校验，避免重复解析 token。
+  分组名（含 `"auth"`）不会被解析；路由级名字仍然解析。`Bind` 只安装显式传入
+  的 `mw`。
+- 如果 App 级 `WithJWTAuth` 已经对模块路由统一鉴权，就不要再在契约里声明
+  `"auth"`，否则 token 会被解析两次；两者按需选一个。
 - `BindOptions.Global` 的中间件比 App 级 CORS/JWT 更靠内：CORS 预检根本不会
   进入契约路由。
 
@@ -191,7 +201,7 @@ func (m *Module) Register(r *support.Router) error {
 
 | API | 行为 |
 | --- | --- |
-| `NewRegistry()` | 创建空注册表；由装配方持有，不是包级全局 |
+| `NewRegistry()` | 创建空注册表；由 App 在每次装配（启动 / `Reload`）时创建，不是包级全局 |
 | `Register(name, mw) error` | 别名去首尾空白后不能为空、实例不能为 nil、同名不可覆盖，违反任一条返回错误 |
 | `MustRegister(name, mw)` | `Register` 的 panic 版本，用于启动期装配，别名写错立刻失败 |
 | `Lookup(name) (support.Middleware, bool)` | 按别名查实例；名字不存在、值为 nil 或注册表本身为 nil 都返回 `(nil, false)` |
@@ -199,14 +209,17 @@ func (m *Module) Register(r *support.Router) error {
 
 规则与取舍：
 
+- **App 持有，模块只解析**：`gofy.WithMiddlewareRegistrar` 在模块绑定路由之前
+  补充应用别名；注册表随 `support.RouterConfig.Middleware` 下发，模块用
+  `r.Middleware(name)` 或 adapter 的名字解析取实例。
 - **一一对应，不可覆盖**：重复注册返回 `middleware alias "x" is already registered`，
   避免两个中间件悄悄抢同一个名字；需要替换时新建一份注册表。
 - **并发安全**：内部 `sync.RWMutex`，注册与查找可同时进行；热更新每次装配新建
   一份，旧路由继续持有旧实例，不会被半更新状态影响。
 - **解析优先级**：`BindOptions.Middleware`（本次绑定的显式映射）→
-  `BindOptions.Registry`。前者用于测试桩或单个模块的定制覆盖，后者是服务级默认。
-- **缺失即启动失败**：两处都查不到时 adapter 报
-  `middleware "x" is not registered in BindOptions.Middleware or BindOptions.Registry`，
+  `BindOptions.Registry`（可选显式注入）→ Router 携带的 App 注册表。
+- **缺失即启动失败**：都查不到时 adapter 报
+  `middleware "x" is not registered in BindOptions.Middleware, BindOptions.Registry or the app middleware registry`，
   分组名带 `group "<prefix>"` 前缀、路由名带 OperationID 前缀，路由不会带着
   缺失的中间件上线。
 - **adapter 不依赖具体类型**：`gofyadapter.MiddlewareRegistry` 只要求
@@ -215,18 +228,19 @@ func (m *Module) Register(r *support.Router) error {
   把已在全局链安装的中间件（如 `NameCORS`）再注册给契约路由会执行两次，
   只在确实需要「按路由覆盖全局行为」时才这么做。
 
-契约需要某个框架内建中间件时，用它的别名常量注册即可：
+契约需要某个框架内建中间件时，在 registrar 里用它的别名常量注册即可：
 
 ```go
-corsMW, err := gofymiddleware.CORS(cfg.CORS)
-if err != nil {
-    return err
-}
-if corsMW != nil { // 未配置来源时 CORS 返回 (nil, nil)，表示不启用
-    if err := reg.Register(gofymiddleware.NameCORS, corsMW); err != nil {
+gofy.WithMiddlewareRegistrar(func(m gofy.MiddlewareRegistration) error {
+    corsMW, err := gofymiddleware.CORS(cfg.CORS)
+    if err != nil {
         return err
     }
-}
+    if corsMW == nil { // 未配置来源时 CORS 返回 (nil, nil)，表示不启用
+        return nil
+    }
+    return m.Registry.Register(gofymiddleware.NameCORS, corsMW)
+})
 ```
 
 ## 四、在 gofy-interface-service 客户端侧
@@ -266,15 +280,19 @@ engine.Use(corsMW)       // middleware.CORS(cfg)
 engine.Use(middleware.Recovery(logger, responder))
 engine.Use(middleware.BodyLimit(8 << 20))
 
-router := support.NewRouter(engine, support.RouterConfig{Prefix: "/api/v1"})
+router := support.NewRouter(engine, support.RouterConfig{
+    Prefix: "/api/v1",
+    // 契约路由按名字解析时使用；不解析名字时可以为 nil。
+    Middleware: reg,
+})
 router.Use(rateLimitMW, jwtMW) // 只作用于模块路由
 ```
 
 gofy-interface-service 的 `adapter/gofy/bind_test.go` 与
 `adapter/gofy/middleware_registry_test.go` 就是用这种最小方式验证契约绑定：
 `engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))` 后直接调用
-`gofyadapter.BindAll` / `BindGroup`，后者专门覆盖注册表解析、显式映射覆盖与
-名字缺失时的启动期报错。
+`gofyadapter.BindAll` / `BindGroup`，后者覆盖 Router 注册表解析、显式映射覆盖、
+认证别名显式解析、`AuthRequired` 不注入中间件，以及名字缺失时的启动期报错。
 
 ## 六、安全约定
 
