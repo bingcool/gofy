@@ -3,43 +3,53 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
+	"github.com/bingcool/gofy/support/registry"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
+	apprepository "github.com/yourorg/demo-service/app/repository"
 	"go.uber.org/zap"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gofy/gofy-interface-service/contracts/common/types"
 )
 
-// ErrOrderNotFound is returned when an order does not exist.
-var ErrOrderNotFound = repository.ErrNotFound
+var (
+	// ErrOrderNotFound is returned when an order does not exist.
+	ErrOrderNotFound = repository.ErrNotFound
+	// ErrProductNotFound is returned when a requested SKU does not exist.
+	ErrProductNotFound = errors.New("product not found")
+	// ErrProductUnavailable is returned when a requested SKU is not on sale.
+	ErrProductUnavailable = errors.New("product unavailable")
+)
 
-// Deps 汇总 OrderService 的依赖。组合多个 repository 时只在这里加字段
-// （如 Users user.Repository），构造函数签名保持不变，调用方用字段名显式注入，
-// 不必记参数顺序；跨模块的接口由 module.go 装配，service 不自己 new。
-type Deps struct {
-	// Orders 是订单持久化契约，必填；测试传入自己的实现。
-	Orders repository.OrderRepositoryInterface
-	// Logger 为 nil 时退化为 zap.NewNop()。
-	Logger *zap.Logger
+// CreateItem is one SKU line of a create-order request. The controller maps
+// the contract type to this plain value so the service never imports it.
+type CreateItem struct {
+	SkuID uint64
+	Num   int32
 }
 
 // OrderService implements order use cases.
 type OrderService struct {
 	orders repository.OrderRepositoryInterface
+	// repos 用于按需取用 product.products（模式 B）；名字由模块工厂在启动期校验。
+	repos  *registry.Registry
 	logger *zap.Logger
 }
 
-// NewOrderService builds an OrderService from explicit dependencies.
-func NewOrderService(deps Deps) *OrderService {
-	logger := deps.Logger
+// NewOrderService builds an OrderService. Orders is required; repos is the
+// assembly-scoped registry used to resolve product.products on demand. A nil
+// logger falls back to zap.NewNop().
+func NewOrderService(orders repository.OrderRepositoryInterface, repos *registry.Registry, logger *zap.Logger) *OrderService {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	logger.Debug("order service initialized", zap.String("component", "order.service"))
 	return &OrderService{
-		orders: deps.Orders,
+		orders: orders,
+		repos:  repos,
 		logger: logger.With(zap.String("component", "order.service")),
 	}
 }
@@ -54,8 +64,15 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, 
 	return toDTO(o), nil
 }
 
-// Create persists a pending order and returns it as a DTO.
-func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*orderdto.OrderDTO, error) {
+// Create validates every SKU against the product module, then persists a
+// pending order. Product lookup goes through the assembly registry (mode B):
+// the dependency is resolved on demand rather than stored as a constructor
+// parameter, and the module factory still fails fast when it is missing.
+func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderdto.OrderDTO, error) {
+	names, err := s.validateItems(ctx, items)
+	if err != nil {
+		return nil, err
+	}
 	o, err := s.orders.Create(ctx, &model.Order{
 		UserID: userID,
 		Amount: amount,
@@ -68,8 +85,46 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) 
 		zap.Uint64("order_id", o.ID),
 		zap.Uint64("user_id", userID),
 		zap.Int64("amount", amount),
+		zap.Strings("products", names),
 	)
 	return toDTO(o), nil
+}
+
+// validateItems 按 SKU 批量查产品仓库，确认全部存在且上架。返回产品名称用于
+// 日志；错误使用哨兵值，HTTP 层据此映射业务错误码。
+func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	products, err := apprepository.ProductProducts(s.repos)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uint64, 0, len(items))
+	seen := make(map[uint64]struct{}, len(items))
+	for _, item := range items {
+		if _, ok := seen[item.SkuID]; ok {
+			continue
+		}
+		seen[item.SkuID] = struct{}{}
+		ids = append(ids, item.SkuID)
+	}
+	views, err := products.ListByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		view, ok := views[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: sku %d", ErrProductNotFound, id)
+		}
+		if !view.OnSale() {
+			return nil, fmt.Errorf("%w: sku %d", ErrProductUnavailable, id)
+		}
+		names = append(names, view.Name)
+	}
+	return names, nil
 }
 
 // List returns one page of DTOs plus the total count.

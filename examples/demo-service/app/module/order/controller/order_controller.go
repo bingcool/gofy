@@ -60,10 +60,19 @@ func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.List
 	return &paging.ListData[orderdto.OrderDTO]{Total: total, List: items}, nil
 }
 
-// CreateOrder creates an order and returns it.
+// CreateOrder creates an order and returns it. SKUs are validated by the
+// service against the product module; unknown or off-sale products are client
+// errors, not server failures.
 func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
-	o, err := c.orderService.Create(ctx, req.UserID.Uint64(), req.Amount)
+	items := make([]service.CreateItem, 0, len(req.Items))
+	for _, item := range req.Items {
+		items = append(items, service.CreateItem{SkuID: item.SkuID.Uint64(), Num: item.Num})
+	}
+	o, err := c.orderService.Create(ctx, req.UserID.Uint64(), req.Amount, items)
 	if err != nil {
+		if errors.Is(err, service.ErrProductNotFound) || errors.Is(err, service.ErrProductUnavailable) {
+			return nil, apperr.BadRequest(err.Error())
+		}
 		c.logger.Error("create order failed",
 			zap.Uint64("user_id", req.UserID.Uint64()),
 			zap.Int64("amount", req.Amount),

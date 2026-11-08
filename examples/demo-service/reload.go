@@ -19,6 +19,7 @@ import (
 	"github.com/yourorg/demo-service/app/config"
 	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/module/order"
+	apprepository "github.com/yourorg/demo-service/app/repository"
 )
 
 // reloader rebuilds the modules from a freshly loaded config and applies them
@@ -46,9 +47,12 @@ type reloader struct {
 // Reload starts this set before stopping the previous one, so a change briefly
 // runs two watchers; the old watcher is cancelled once the swap completes.
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
+	// 每个装配周期一份 Provider：启动和每次 Reload 都重新构建 repository，
+	// 新旧两代实例不共享可变状态。
+	repos := apprepository.NewProvider()
 	factories := []gofy.ModuleFactory{
 		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt),
-		order.NewModuleFactory(),
+		order.NewModuleFactory(repos),
 	}
 	if r.watch {
 		factories = append(factories, func(rt *core.Runtime) (support.Module, error) {

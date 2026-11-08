@@ -16,11 +16,14 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
+	"github.com/bingcool/gofy/support/registry"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	apprepository "github.com/yourorg/demo-service/app/repository"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
@@ -97,6 +100,54 @@ func (f *fakeRepository) UpdateStatus(_ context.Context, id uint64, status strin
 	return nil
 }
 
+// fakeProductRepository 提供订单服务跨模块读取的产品视图：90001 上架，
+// 90002 下架，其余 SKU 不存在。
+type fakeProductRepository struct {
+	products map[uint64]productrepo.ProductView
+}
+
+func newFakeProductRepository() *fakeProductRepository {
+	return &fakeProductRepository{products: map[uint64]productrepo.ProductView{
+		90001: {ID: 90001, Name: "Gofy Demo SKU", Price: 1000, Stock: 999, Status: productrepo.StatusOnSale},
+		90002: {ID: 90002, Name: "Retired SKU", Price: 500, Stock: 0, Status: 0},
+	}}
+}
+
+func (f *fakeProductRepository) FindByID(_ context.Context, id uint64) (*productrepo.ProductView, error) {
+	view, ok := f.products[id]
+	if !ok {
+		return nil, productrepo.ErrNotFound
+	}
+	return &view, nil
+}
+
+func (f *fakeProductRepository) ListByIDs(_ context.Context, ids []uint64) (map[uint64]productrepo.ProductView, error) {
+	out := make(map[uint64]productrepo.ProductView, len(ids))
+	for _, id := range ids {
+		if view, ok := f.products[id]; ok {
+			out[id] = view
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeProductRepository) DecreaseStock(_ context.Context, id uint64, num int) (int64, error) {
+	view, ok := f.products[id]
+	if !ok || !view.OnSale() || view.Stock < num {
+		return 0, nil
+	}
+	view.Stock -= num
+	f.products[id] = view
+	return 1, nil
+}
+
+// newTestService 装配一个持有 fake 注册表的订单服务，产品仓库通过模式 B 取用。
+func newTestService() *service.OrderService {
+	reg := registry.NewRegistry()
+	reg.MustRegister(apprepository.NameProductProducts, newFakeProductRepository())
+	return service.NewOrderService(newFakeRepository(), reg, zap.NewNop())
+}
+
 func newTestApp(t *testing.T) *gofytest.App {
 	t.Helper()
 	return newTestAppWithConfig(t, middleware.JWTConfig{})
@@ -106,10 +157,7 @@ func newTestApp(t *testing.T) *gofytest.App {
 // 应用层中间件通过 WithMiddlewareRegistrar 注册进框架创建的共享注册表。
 func newTestAppWithConfig(t *testing.T, jwtCfg middleware.JWTConfig) *gofytest.App {
 	t.Helper()
-	svc := service.NewOrderService(service.Deps{
-		Orders: newFakeRepository(),
-		Logger: zap.NewNop(),
-	})
+	svc := newTestService()
 	module := order.NewModule(svc, zap.NewNop())
 	return gofytest.New(t,
 		gofy.WithName("demo-service-test"),
@@ -257,6 +305,30 @@ func TestCreateOrderContract(t *testing.T) {
 	}
 }
 
+func TestCreateOrderRejectsUnknownOrOffSaleProduct(t *testing.T) {
+	app := newTestApp(t)
+
+	rr := app.POSTJSON("/api/v1/order/orders", map[string]any{
+		"user_id": 100,
+		"amount":  500,
+		"items":   []map[string]any{{"sku_id": 404, "num": 1}},
+	})
+	gofytest.Status(t, rr, http.StatusBadRequest)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40000) {
+		t.Fatalf("unknown sku code = %v, want 40000", code)
+	}
+
+	rr = app.POSTJSON("/api/v1/order/orders", map[string]any{
+		"user_id": 100,
+		"amount":  500,
+		"items":   []map[string]any{{"sku_id": 90002, "num": 1}},
+	})
+	gofytest.Status(t, rr, http.StatusBadRequest)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40000) {
+		t.Fatalf("off-sale sku code = %v, want 40000", code)
+	}
+}
+
 func TestListOrderDefaultsAndPagination(t *testing.T) {
 	app := newTestApp(t)
 	rr := app.GET("/api/v1/order/orders?user_id=100")
@@ -317,10 +389,7 @@ func TestCancelWithJWT(t *testing.T) {
 
 func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := service.NewOrderService(service.Deps{
-		Orders: newFakeRepository(),
-		Logger: zap.NewNop(),
-	})
+	svc := newTestService()
 	module := order.NewModule(svc, zap.New(core))
 	app := gofytest.New(t,
 		gofy.WithName("demo-service-test"),
@@ -358,10 +427,7 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 // App 都新建一份注册表并重新执行 registrar，因此不会撞上「别名已注册」错误。
 func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := service.NewOrderService(service.Deps{
-		Orders: newFakeRepository(),
-		Logger: zap.NewNop(),
-	})
+	svc := newTestService()
 	module := order.NewModule(svc, zap.New(core))
 
 	for i := 0; i < 2; i++ {

@@ -9,12 +9,14 @@ package order
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/module/order/controller"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	apprepository "github.com/yourorg/demo-service/app/repository"
 	"go.uber.org/zap"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
@@ -27,17 +29,35 @@ type Module struct {
 	logger *zap.Logger
 }
 
-// NewModuleFactory builds the module from the application runtime.
-func NewModuleFactory() gofy.ModuleFactory {
+// OrderRepositoryDeps 汇总订单模块自己的 repository 契约（模式 A），由模块工厂
+// 从装配注册表取出后注入 service；跨模块依赖不放在这里，由 service 通过注册表
+// 按需取用（模式 B）。新增本模块仓库时只在这里加字段。
+type OrderRepositoryDeps struct {
+	// Orders 是订单持久化契约，必填。
+	Orders repository.OrderRepositoryInterface
+}
+
+// NewModuleFactory builds the module from the assembly-scoped repository
+// provider. The order repository is resolved at startup (mode A); the product
+// repository is only checked here and fetched on demand by the service (mode
+// B), so a missing or mistyped registration still fails before serving traffic.
+func NewModuleFactory(repos *apprepository.Provider) gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
-		repo := repository.NewFromHandle(rt.Logger)
-		svc := service.NewOrderService(service.Deps{
-			Orders: repo,
-			Logger: rt.Logger,
-		})
+		reg, err := repos.Repositories(rt)
+		if err != nil {
+			return nil, err
+		}
+		deps := OrderRepositoryDeps{}
+		if deps.Orders, err = apprepository.OrderOrders(reg); err != nil {
+			return nil, fmt.Errorf("order module: %w", err)
+		}
+		if _, err := apprepository.ProductProducts(reg); err != nil {
+			return nil, fmt.Errorf("order module: %w", err)
+		}
+		svc := service.NewOrderService(deps.Orders, reg, rt.Logger)
 		return NewModule(svc, rt.Logger), nil
 	}
 }
@@ -55,9 +75,9 @@ func NewModule(svc *service.OrderService, logger *zap.Logger) *Module {
 func (m *Module) Name() string { return "order" }
 
 // Register binds every demoservice contract route to the handler. 契约只声明
-// 中间件别名（分组 "audit"、CreateOrder 的 "order-audit"、AuthRequired 的
-// "auth"），App 启动时已把这些实例注册进 Router 携带的共享注册表，
-// BindGroup 直接按名字解析，模块不再创建或注入注册表。
+// 中间件别名（分组 "audit"、CreateOrder 的 "order-audit"、认证 "auth"），
+// App 启动时已把这些实例注册进 Router 携带的共享注册表，BindGroup 直接按
+// 名字解析，模块不再创建或注入注册表。
 func (m *Module) Register(r *support.Router) error {
 	h := controller.NewOrderController(m.svc, m.logger)
 	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {

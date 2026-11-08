@@ -105,18 +105,22 @@ jwt:
 
 ```go
 gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
-gofy.WithModuleFactories(order.NewModuleFactory())
+gofy.WithModuleFactories(order.NewModuleFactory(apprepository.NewProvider()))
 ```
 
 `NewModuleFactory` 在 `Runtime` 就绪后执行：
 
 1. 检查 `rt.DB`，为空直接返回 `order module requires database`；
-2. 用 `repository.NewFromHandle(rt.Logger)` 创建 GORM 仓库，查询时从 `db.Db` 取连接；
-3. 用 `service.NewOrderService(service.Deps{...})` 创建服务；
-4. 调用 `NewModule(svc, rt.Logger)` 包装出模块。
+2. 向装配级 `app/repository.Provider` 取本次装配的注册表；
+3. 用 `apprepository.OrderOrders(reg)` 取出订单仓库（模式 A，装配期取用）；
+4. 用 `apprepository.ProductProducts(reg)` 只做启动期校验，产品仓库由 service
+   在用例中按需取用（模式 B）；
+5. 用 `service.NewOrderService(repos.Orders, reg, rt.Logger)` 创建服务；
+6. 调用 `NewModule(svc, rt.Logger)` 包装出模块。
 
-工厂执行时 `app/io` 还没 `Start`，`db.Db` 仍是 nil，所以 `NewFromHandle`
-把句柄解析推迟到每次查询；`Start` 安装新连接后仓库自动使用新句柄。脚本模式不经过
+注册表里的 repository 都用 `NewFromHandle` 构造：工厂执行时 `app/io` 还没
+`Start`，`db.Db` 仍是 nil，所以句柄解析推迟到每次查询；`Start` 安装新连接后
+仓库自动使用新句柄，`Reload` 也会得到新的 Provider / 注册表。脚本模式不经过
 模块生命周期，直接用 `repository.New(rt.DB, rt.Logger)` 传显式连接。
 
 `Register` 只创建 controller（传入 logger），遍历 `orderroute.Orders` 与
@@ -158,37 +162,86 @@ app := gofytest.New(t,
 
 ## 服务依赖
 
-`OrderService` 的依赖集中在 `service.Deps`，构造函数只收一个结构体：
+本模块用两种取用模式组合其他模块的 repository：
+
+- **模式 A（订单仓库）**：模块工厂在装配期取出，显式传给构造函数。`module.go`
+  保留 `OrderRepositoryDeps` 汇总本模块的持久化契约，新增依赖时只加字段；
+- **模式 B（产品仓库）**：service 持有装配级注册表，在 `Create` 里按需取出
+  `product.products`。模块工厂仍会调用一次 `ProductProducts`，把缺注册或类型
+  不符提前到启动期失败。
 
 ```go
-svc := service.NewOrderService(service.Deps{
-    Orders: repo,      // repository.OrderRepositoryInterface
-    Logger: rt.Logger, // nil 时退化为 zap.NewNop()
-})
+type OrderRepositoryDeps struct {
+    Orders repository.OrderRepositoryInterface
+}
+
+reg, _ := repos.Repositories(rt)                 // repos 是 app/repository.Provider
+deps := OrderRepositoryDeps{}
+deps.Orders, _ = apprepository.OrderOrders(reg)  // 模式 A
+_, _ = apprepository.ProductProducts(reg)        // 模式 B 的启动期校验
+svc := service.NewOrderService(deps.Orders, reg, rt.Logger)
 ```
 
-要组合多个 repository（例如订单还需要读用户、产品）时，只在 `Deps` 里加字段，
-构造函数签名不变，调用方按字段名注入，不必记参数顺序（示意）：
+service 内部：
 
 ```go
-type Deps struct {
-    Orders   repository.OrderRepositoryInterface
-    Users    user.Repository    // 其他模块导出的持久化接口
-    Products product.Repository
-    Logger   *zap.Logger
+type OrderService struct {
+    orders repository.OrderRepositoryInterface
+    repos  *registry.Registry // 取用 product.products
+    logger *zap.Logger
 }
 ```
 
+`Create` 按 SKU 批量查产品仓库，确认全部存在且上架后才落单；产品不存在或已下架
+返回 400（`40000`），不会创建订单。这样同一个 service 既能读其他模块数据，
+又不需要在构造函数上堆积每个读取点。
+
 约定：
 
-- 字段按聚合命名（`Orders` 而不是 `Repo`），service 内部对应 `s.orders`、`s.users`，
-  读代码时能直接看出数据来自哪个聚合；
-- 跨模块依赖由 `module.go` 装配后注入：对方模块导出接口，service 不 import 它的
-  GORM 实现，也不在用例里临时 `new`；
-- 必填依赖（如 `Orders`）由装配方保证非 nil，`Logger` 允许为 nil；
-- 只有“同一聚合、同一事务”的多个接口才考虑 embed 成一个聚合接口，否则会把不相关
-  的持久化绑死在同一个实现和 mock 上；
-- 测试用 fake 实现填 `Deps`，不需要真实数据库（见 `module_test.go`）。
+- 字段按聚合命名（`Orders` 而不是 `Repo`），service 内部对应 `s.orders`；
+- 跨模块只依赖对方 repository 的接口和只读视图（`productrepo.ProductView`），
+  不 import 对方的 `model` 或 GORM 实现；
+- 注册表按装配周期创建，service 不得缓存到包级变量或跨请求保存；
+- 必填依赖由装配方保证非 nil，`Logger` 单独传入并允许为 nil；
+- 测试直接填 fake 注册表与 fake repository，不连数据库（见 `module_test.go`）；
+- 如果后续某个跨模块依赖是业务必需的，也可以改回模式 A：在模块工厂取出后作为
+  构造参数传入，两种模式可以混用。
+
+## 事务
+
+单库（`db.default`）下，repository 的连接解析统一为 `conn(ctx)`：
+
+```go
+func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
+    fallback := r.db
+    if fallback == nil {
+        fallback = appdb.Db
+    }
+    return gofydb.FromContext(ctx, fallback)
+}
+```
+
+调用方 service 用 `gofydb.Transaction(ctx, rt.DB, fn)` 开启事务，事务会放进传给
+`fn` 的 context；订单、产品等模块的 repository 从 ctx 取到同一个事务：
+
+```go
+err := gofydb.Transaction(ctx, db, func(ctx context.Context) error {
+    if _, err := products.DecreaseStock(ctx, skuID, num); err != nil {
+        return err
+    }
+    _, err := orders.Create(ctx, order)
+    return err
+})
+```
+
+- 嵌套 `Transaction` 复用外层事务，不创建 savepoint；内层错误冒泡到外层，由最外层
+  统一回滚，内层成功也不会提前提交；
+- 没有事务时 `FromContext` 回退到 repository 的显式连接或 `appdb.Db`；显式连接
+  不会覆盖事务；
+- 跨模块只读调用可以不显式开事务；需要一致性的多步读写必须传入同一个 ctx；
+- 当前 demo 的 `Create` 只写一条订单记录，尚未在 service 里开启事务；事务能力由
+  [`app/repository/transaction_test.go`](../../repository/transaction_test.go)
+  的跨模块用例覆盖：同一事务内扣库存 + 建订单，返回错误后两者一起回滚。
 
 ## 日志
 
@@ -199,8 +252,9 @@ type Deps struct {
 便于按层过滤。
 
 ```go
-repo := repository.NewFromHandle(rt.Logger) // HTTP 模块：查询时取 db.Db
-svc := service.NewOrderService(service.Deps{Orders: repo, Logger: rt.Logger})
+reg, _ := apprepository.NewProvider().Repositories(rt)
+repo, _ := apprepository.OrderOrders(reg)
+svc := service.NewOrderService(repo, reg, rt.Logger)
 h := controller.NewOrderController(svc, rt.Logger)
 ```
 
@@ -227,7 +281,7 @@ h := controller.NewOrderController(svc, rt.Logger)
 一条创建订单的成功日志和一条失败日志大致如下：
 
 ```text
-{"level":"info","ts":"...","caller":"service/order_service.go:...","msg":"order created","component":"order.service","order_id":42,"user_id":100,"amount":500}
+{"level":"info","ts":"...","caller":"service/order_service.go:...","msg":"order created","component":"order.service","order_id":42,"user_id":100,"amount":500,"products":["Gofy Demo SKU"]}
 {"level":"error","ts":"...","caller":"controller/order_controller.go:...","msg":"create order failed","component":"order.controller","user_id":100,"amount":500,"error":"create order: ..."}
 ```
 
@@ -271,6 +325,7 @@ HTTP 状态码为 `401`。`jwt.secret` 为空时 `Auth` 返回一个直接放行
 
 | code | HTTP | 场景 |
 | --- | --- | --- |
+| `40000` | 400 | 下单失败：SKU 不存在或未上架 |
 | `40001` | 400 | 参数校验失败，`details` 按字段给出原因 |
 | `40100` | 401 | JWT 鉴权失败（仅在配置了 `jwt.secret` 时） |
 | `40401` | 404 | 订单不存在 |
@@ -280,6 +335,8 @@ HTTP 状态码为 `401`。`jwt.secret` 为空时 `Auth` 返回一个直接放行
 
 - controller 把 `service.ErrOrderNotFound` 转成
   `gofyadapter.Error(demoservice.ErrOrderNotFound)`；
+- `service.ErrProductNotFound` / `ErrProductUnavailable` 是客户端错误，映射为
+  `apperr.BadRequest(err.Error())`，响应里带具体 SKU；
 - 其他错误用 `apperr.Internal(...).WithCause(err)`，响应只保留通用文案；
 - panic 由框架恢复为 `50000`，堆栈和内部信息不会出现在响应里。
 
@@ -323,16 +380,25 @@ CREATE TABLE IF NOT EXISTS orders (
 `UpdateStatus` 在 `RowsAffected == 0` 时返回 `ErrNotFound`，因此取消不存在的
 订单会得到 `40401`。
 
+产品表由产品模块维护，DDL 在
+[`migrations/0002_products.sql`](../../../migrations/0002_products.sql)；订单
+服务只通过 `product.products` 仓库读取 `ProductView`，不直接查产品表。创建订单
+前会校验请求里的每个 SKU 存在且 `status = 1`（上架），否则返回 `40000`。产品
+仓库同时提供 `DecreaseStock`：上架与库存条件写在 SQL 里，返回受影响行数，0 行
+由调用方映射为业务错误，避免先查后改的竞争。
+
 ## 测试
 
 ```bash
 cd examples/demo-service
-go test ./app/module/order/...
+go test ./app/module/order/... ./app/repository/...
 ```
 
-测试不需要数据库：`module_test.go` 用 `fakeRepository` 实现
-`OrderRepositoryInterface`，再通过 `gofytest.New` 启动一个只挂载 order 模块的
-测试应用。覆盖内容包括：
+测试不需要外部数据库：`module_test.go` 用 `fakeRepository` 实现
+`OrderRepositoryInterface`，并用 `fakeProductRepository` 填进
+`registry.NewRegistry()`，再通过 `gofytest.New` 启动一个只挂载 order 模块的
+测试应用；跨模块事务用例改用纯 Go 的内存 SQLite，同样不依赖外部 MySQL。覆盖
+内容包括：
 
 - 成功响应的 envelope、`req_id` 及 `X-Trace-ID` 透传；
 - 参数校验（非法 id、缺失必填字段、`page_size` 超限）；
@@ -341,10 +407,20 @@ go test ./app/module/order/...
 - 配置 `jwt.secret` 后的 `40100`、合法 token 的正常路径与错误签名
   （`TestCancelWithJWT`）；
 - 创建订单的初始状态为 `pending`，列表分页结果正确；
+- 下单时 SKU 不存在或已下架返回 `40000`，不会落单
+  （`TestCreateOrderRejectsUnknownOrOffSaleProduct`）；
+- 跨模块事务：SQLite 上提交、回滚与库存不足分支
+  （`app/repository/transaction_test.go`，覆盖“扣库存 + 建订单”一起回滚）；
 - 契约中间件名被解析：分组 `audit` 与 `CreateOrder` 的路由级 `order-audit`
   都落审计日志，且路由级先于分组级完成（`TestContractMiddlewareNamesAreResolved`）；
 - 同一个模块装配两次不会撞别名冲突，每次装配 App 都新建注册表
   （`TestModuleRegisterBuildsFreshRegistry`、`TestRegisterUsesTheGivenRegistry`）。
+
+`make guards`（根仓库 `make check` 也会调用）运行
+`examples/demo-service/scripts/check-imports.sh`，强制分层边界：controller 不得
+import `app/repository`、任何 `model` 或其他模块的 repository/service；repository
+不得 import service；除 `app/repository` 外，一个包最多 import 一个其他模块的
+repository。测试文件不参与检查，可以同时引用多个 fake。
 
 新增路由时，先在 `gofy-interface-service` 里补契约描述符，再在
 `gofyadapter.BindGroup` 的绑定范围内实现 controller 方法即可；路径、校验和

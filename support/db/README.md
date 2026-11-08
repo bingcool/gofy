@@ -163,6 +163,36 @@ db:
 `Close(db)` 释放底层 `sql.DB` 连接池；`nil` 是空操作。调用后不要继续使用该
 `*gorm.DB`。
 
+## 事务上下文
+
+`Transaction(ctx, db, fn)` 在 `db` 上开启事务，并把事务放进传给 `fn` 的
+context；repository 用 `FromContext(ctx, fallback)` 取连接，同一次请求内多个
+模块的调用就会共享同一个事务：
+
+```go
+err := gofydb.Transaction(ctx, rt.DB, func(ctx context.Context) error {
+    if _, err := products.DecreaseStock(ctx, skuID, num); err != nil {
+        return err
+    }
+    _, err := orders.Create(ctx, order)
+    return err
+})
+```
+
+```go
+func Transaction(ctx context.Context, db *gorm.DB, fn func(ctx context.Context) error) error
+func FromContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
+```
+
+- 嵌套调用复用外层事务，不创建 savepoint；内层返回错误会冒泡到外层并导致整体
+  回滚，内层成功也不会提前提交；
+- `FromContext` 优先返回 ctx 中的事务，没有事务时才返回 `fallback`；repository
+  的显式连接不会覆盖事务，内层只消费最外层开启的事务；
+- `fn` 为 nil 返回 `ErrTxFuncRequired`；ctx 无事务且 `db` 为 nil 返回
+  `ErrTxDBRequired`；`ctx` 为 nil 时按 `context.Background()` 处理；
+- 事务由调用方 service 开启，repository 不自行提交；context 只承载请求范围
+  数据（trace、request id、事务），不要放 repository/service。
+
 ## 日志
 
 `LogLevel` 映射到 GORM 日志级别：
@@ -190,7 +220,8 @@ SQL 日志使用 `component=gorm` 的 zap 字段，包含 `elapsed`、`rows`、`
 go test ./support/db/
 ```
 
-默认只跑单元测试（校验、空 DSN、错误脱敏、`Close(nil)`）。
+默认只跑单元测试（校验、空 DSN、错误脱敏、`Close(nil)`，以及基于纯 Go
+SQLite 的事务提交 / 回滚 / 嵌套复用）。
 连接真实 MySQL 协议服务器的集成测试通过 `GOFY_TEST_MYSQL_DSN` 开启：
 
 ```bash

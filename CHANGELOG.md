@@ -8,6 +8,42 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/registry`: generic, explicit name→instance registry for cross-module
+  wiring. `NewRegistry` builds a concurrency-safe map; `Register` rejects blank
+  names, nil instances (including typed nil pointers/maps/slices) and duplicate
+  names without overwriting, `MustRegister` panics for startup assembly,
+  `Lookup` returns `(nil, false)` for missing entries (nil registries read as
+  empty), `Names` returns a sorted copy for diagnostics, and the generic
+  `Get[T]` performs the type assertion with errors that include the name and
+  both types. Each assembly (startup or `Reload`) creates its own registry, so
+  instances are never shared across generations; unlike
+  `support/middleware.Registry` it is untyped and not limited to middleware.
+- `examples/demo-service`: cross-module repository composition. `app/repository`
+  assembles one `support/registry.Registry` per assembly (`order.orders`,
+  `product.products`) behind a lazy `Provider`, exposes typed accessors and is
+  rebuilt on every `Reload`. The product module gains a real `db.default`
+  repository (`ProductView`, `FindByID`, `ListByIDs`) backed by the new
+  `migrations/0002_products.sql` table and demo rows. The order service uses
+  mode B: it holds the registry and resolves `product.products` on demand to
+  validate that every requested SKU exists and is on sale before creating an
+  order (unknown/off-sale SKUs return 400), while the module factory still
+  validates the registration at startup.
+- `support/db`: context-propagated transactions. `Transaction(ctx, db, fn)`
+  opens a transaction and stores it on the context passed to `fn`; nested calls
+  reuse the outer transaction (no savepoint) and a nil callback or connection
+  returns `ErrTxFuncRequired`/`ErrTxDBRequired`. `FromContext(ctx, fallback)`
+  resolves the transaction first and only then the explicit connection or app
+  handle, so one request can span repositories from several modules. Covered by
+  pure-Go SQLite tests for commit, rollback and nested reuse.
+- `examples/demo-service`: repositories resolve connections through
+  `support/db.FromContext`, and the product repository gained `DecreaseStock`
+  (status/stock conditions pushed into the SQL update, 0 rows left to the
+  caller). A composition-level SQLite test proves stock decrease and order
+  create share one transaction and roll back together.
+  `scripts/check-imports.sh` enforces the layering rules (no controller →
+  repository/model, no repository → service, a package may aggregate more than
+  one other module's repository only through `app/repository`), wired into the
+  demo and root `make guards`/`make check`.
 - Root package: the App now owns the contract middleware registry. On startup
   and on every `Reload` it creates one `support/middleware.Registry`, registers
   every built-in middleware under its alias (`NameRequestID`,

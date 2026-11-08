@@ -83,11 +83,12 @@
 ### 1.4 迁移后的使用方式（一句话）
 
 ```go
+repos := apprepository.NewProvider()
 app, _ := gofy.New(
     gofy.WithName("demo-service"),
     gofy.WithHTTP(gofy.HTTPConfig{Port: 8080}),
     gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
-    gofy.WithModuleFactories(order.NewModuleFactory()),
+    gofy.WithModuleFactories(order.NewModuleFactory(repos)),
 )
 if err := app.Execute(ctx); err != nil {
     os.Exit(gofy.ExitCode(err))
@@ -128,6 +129,7 @@ github.com/bingcool/gofy/
 │   ├── ratelimit.go             # 限流配置
 │   ├── securityheaders.go       # 安全响应头配置
 │   ├── middleware/              # 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、别名注册表
+│   ├── registry/                # 通用 name -> instance 注册表（Register/Lookup/Names/Get[T]）
 │   ├── ratelimit/               # Store 接口与内存滑窗
 │   │   └── redisstore/          # Redis 共享限流存储
 │   ├── cache/                   # 基于注入 Redis 实例的键值缓存
@@ -182,7 +184,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -1386,6 +1388,11 @@ type Config struct {
 func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error)
 func Close(db *gorm.DB) error
 func (c Config) Validate() error
+
+// Transaction 在 db 上开启事务，并把事务放进传给 fn 的 context。
+func Transaction(ctx context.Context, db *gorm.DB, fn func(ctx context.Context) error) error
+// FromContext 优先返回 ctx 中的事务，没有时返回 fallback。
+func FromContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
 ```
 
 行为：
@@ -1397,6 +1404,18 @@ func (c Config) Validate() error
 - `Close` 是 `sqlDB.Close()` 的薄封装。
 - 不在 `New` 中打印 DSN；错误信息中的 DSN 需脱敏（至少隐藏密码段）。
 - 不使用 `sync.Once`、不提供包级 `GetDb()`。
+
+事务上下文用于“同一次请求内多个 repository 共用同一个事务”：`Transaction`
+把 `*gorm.DB` 事务存进 context，repository 通过 `FromContext(ctx, fallback)`
+取连接。约定：
+
+- 嵌套 `Transaction` 复用外层事务，不创建 savepoint；内层错误冒泡到外层统一
+  回滚，内层成功也不会提前提交；
+- `FromContext` 优先返回事务，没有事务时才返回 fallback；显式连接不会覆盖事务；
+- `fn` 为 nil 返回 `ErrTxFuncRequired`；ctx 无事务且 `db` 为 nil 返回
+  `ErrTxDBRequired`；`ctx` 为 nil 时按 `context.Background()` 处理；
+- 事务由调用方 service 开启，repository 只消费 ctx；context 不存放 repository /
+  service，只承载 trace、request id、事务等请求范围数据。
 
 > v1 把 GORM 作为主依赖。若未来要支持"不用 DB 的用户零 GORM 依赖"，可把 `support/db` 拆成独立子 module；这属于 v2 的开放问题（见 §15.2）。
 
@@ -1607,6 +1626,29 @@ Excel（.xlsx）导出/导入，移植自 swoolefy PHP `PhpOffice\Excel`，底�
   缩放/裁剪目标和水印图层。
 - 与 PHP 版的差异：无 driver/扩展检测；GIF 不做多帧编辑；不提供 strip/
   progressive 开关；`Manager` 不缓存已解码图像；`Base64` 不带 data URI 前缀。
+
+### 3.7.8 `support/registry`
+
+通用「名字 → 实例」注册表，供应用在启动装配时登记跨模块共享的实例
+（repository、client、service），再按名字取用。它解决 service 如何即取即用地
+拿到其他模块依赖的问题，同时避免包级单例。
+
+```go
+reg := registry.NewRegistry()
+if err := reg.Register(name, instance); err != nil { ... }
+reg.MustRegister(name, instance)              // 启动期装配，失败 panic
+instance, ok := reg.Lookup(name)              // 原始取用
+typed, err := registry.Get[T](reg, name)      // 类型化取用（推荐）
+names := reg.Names()                          // 排序副本，供启动日志
+```
+
+- 空名字（trim 后）、`nil` 实例（含 nil 指针 / map / slice）、重复名字都返回错误，
+  重复注册不覆盖；
+- 注册表是普通对象而非全局：每次装配（启动 / `Reload`）新建一份，随依赖显式传递；
+- 所有方法并发安全；`Lookup`/`Names`/`Get` 对 nil 注册表安全；
+- 名字由使用方定义为常量，应用层建议 `<module>.<aggregate>`，注册表不校验格式；
+- 与 `support/middleware.Registry` 分工：后者强类型、只存中间件，由 Router 解析
+  契约别名；通用注册表存任意跨模块实例，由应用组合层和 service 使用，两者不合并。
 
 ### 3.8 `script`
 
@@ -2483,21 +2525,33 @@ demo-service/
 │   │   ├── auth.go         # Auth + JWTConfig（调用框架 JWTAuth）
 │   │   ├── audit.go        # Audit + NameAudit / NameOrderAudit
 │   │   └── registry_middleware.go  # Register：集中注册应用层别名
+│   ├── repository/         # 组合层：Provider、装配、名字常量与类型化 accessor
+│   │   ├── provider.go
+│   │   ├── assemble.go
+│   │   ├── names.go
+│   │   └── accessors.go
 │   └── module/
-│       └── order/
-│           ├── module.go
-│           ├── controller/
-│           │   └── order_controller.go
-│           ├── service/
-│           │   └── order_service.go
+│       ├── order/
+│       │   ├── module.go
+│       │   ├── controller/
+│       │   │   └── order_controller.go
+│       │   ├── service/
+│       │   │   └── order_service.go
+│       │   ├── repository/
+│       │   │   └── order_repository.go
+│       │   └── model/
+│       │       └── order.go
+│       └── product/
 │           ├── repository/
-│           │   └── order_repository.go
+│           │   └── product_repository.go
 │           └── model/
-│               └── order.go
+│               └── product.go
 ├── script/
 │   ├── register.go
 │   └── fix_order.go
 └── migrations/
+    ├── 0001_orders.sql
+    └── 0002_products.sql
 ```
 
 ### 9.2 `main.go`
@@ -2523,6 +2577,7 @@ import (
     "github.com/yourorg/demo-service/app/config"
     appio "github.com/yourorg/demo-service/app/io"
     "github.com/yourorg/demo-service/app/module/order"
+    apprepository "github.com/yourorg/demo-service/app/repository"
     appscript "github.com/yourorg/demo-service/script"
 )
 
@@ -2541,6 +2596,8 @@ func main() {
         log.Fatalf("load config: %v", err)
     }
 
+    // 每次装配一份 repository Provider；Reload 会重新执行工厂列表。
+    repos := apprepository.NewProvider()
     app, err := gofy.New(
         gofy.WithName("demo-service"),
         gofy.WithEnv(cfg.Env),
@@ -2554,7 +2611,7 @@ func main() {
         gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
         gofy.WithModuleFactories(
             appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP),
-            order.NewModuleFactory(),
+            order.NewModuleFactory(repos),
         ),
         gofy.WithScripts(appscript.Register(cfg)...),
         gofy.WithVersionInfo(gofy.VersionInfo{
@@ -2669,12 +2726,14 @@ package order
 
 import (
     "errors"
+    "fmt"
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/support"
     "github.com/yourorg/demo-service/app/module/order/controller"
     "github.com/yourorg/demo-service/app/module/order/repository"
     "github.com/yourorg/demo-service/app/module/order/service"
+    apprepository "github.com/yourorg/demo-service/app/repository"
     "go.uber.org/zap"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
     "gofy/gofy-interface-service/appinterface/demoservice/orderroute"
@@ -2686,16 +2745,29 @@ type Module struct {
     logger *zap.Logger
 }
 
-func NewModuleFactory() gofy.ModuleFactory {
+// OrderRepositoryDeps 汇总订单模块的 repository 契约，由模块工厂装配。
+type OrderRepositoryDeps struct {
+    Orders repository.OrderRepositoryInterface
+}
+
+func NewModuleFactory(repos *apprepository.Provider) gofy.ModuleFactory {
     return func(rt *gofy.Runtime) (support.Module, error) {
         if rt.DB == nil {
             return nil, errors.New("order module requires database")
         }
-        repo := repository.NewFromHandle(rt.Logger)
-        svc := service.NewOrderService(service.Deps{
-            Orders: repo,
-            Logger: rt.Logger,
-        })
+        reg, err := repos.Repositories(rt)
+        if err != nil {
+            return nil, err
+        }
+        deps := OrderRepositoryDeps{}
+        if deps.Orders, err = apprepository.OrderOrders(reg); err != nil {
+            return nil, fmt.Errorf("order module: %w", err)
+        }
+        // 模式 B：启动期校验产品仓库存在且类型正确，service 再按需取用。
+        if _, err := apprepository.ProductProducts(reg); err != nil {
+            return nil, fmt.Errorf("order module: %w", err)
+        }
+        svc := service.NewOrderService(deps.Orders, reg, rt.Logger)
         return NewModule(svc, rt.Logger), nil
     }
 }
@@ -2822,8 +2894,15 @@ func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.List
 }
 
 func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
-    o, err := c.orderService.Create(ctx, req.UserID.Uint64(), req.Amount)
+    items := make([]service.CreateItem, 0, len(req.Items))
+    for _, item := range req.Items {
+        items = append(items, service.CreateItem{SkuID: item.SkuID.Uint64(), Num: item.Num})
+    }
+    o, err := c.orderService.Create(ctx, req.UserID.Uint64(), req.Amount, items)
     if err != nil {
+        if errors.Is(err, service.ErrProductNotFound) || errors.Is(err, service.ErrProductUnavailable) {
+            return nil, apperr.BadRequest(err.Error())
+        }
         return nil, apperr.Internal("create order failed").WithCause(err)
     }
     return &orderresponse.CreateOrderResponse{Order: o}, nil
@@ -2851,9 +2930,12 @@ package service
 
 import (
     "context"
+    "fmt"
 
+    "github.com/bingcool/gofy/support/registry"
     "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/repository"
+    apprepository "github.com/yourorg/demo-service/app/repository"
     "go.uber.org/zap"
     "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
     "gofy/gofy-interface-service/appinterface/demoservice/orderenum"
@@ -2862,21 +2944,28 @@ import (
 
 var ErrOrderNotFound = repository.ErrNotFound
 
-// Deps 汇总依赖：组合多个 repository 时只加字段，构造函数签名不变。
-type Deps struct {
-    Orders repository.OrderRepositoryInterface
-    Logger *zap.Logger
+type CreateItem struct {
+    SkuID uint64
+    Num   int32
 }
 
 type OrderService struct {
     orders repository.OrderRepositoryInterface
+    // repos 用于按需取用 product.products（模式 B）。
+    repos  *registry.Registry
     logger *zap.Logger
 }
 
-func NewOrderService(deps Deps) *OrderService {
+// NewOrderService 接收本模块必需的 orders 和装配级注册表；跨模块依赖在用例中
+// 按需取用，模块工厂负责启动期校验。
+func NewOrderService(orders repository.OrderRepositoryInterface, repos *registry.Registry, logger *zap.Logger) *OrderService {
+    if logger == nil {
+        logger = zap.NewNop()
+    }
     return &OrderService{
-        orders: deps.Orders,
-        logger: deps.Logger.With(zap.String("component", "order.service")),
+        orders: orders,
+        repos:  repos,
+        logger: logger.With(zap.String("component", "order.service")),
     }
 }
 
@@ -2888,7 +2977,10 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, 
     return toDTO(o), nil
 }
 
-func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) (*orderdto.OrderDTO, error) {
+func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderdto.OrderDTO, error) {
+    if _, err := s.validateItems(ctx, items); err != nil {
+        return nil, err
+    }
     o, err := s.orders.Create(ctx, &model.Order{
         UserID: userID,
         Amount: amount,
@@ -2898,6 +2990,34 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64) 
         return nil, err
     }
     return toDTO(o), nil
+}
+
+// validateItems 按 SKU 批量查产品仓库，确认全部存在且上架。
+func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([]string, error) {
+    products, err := apprepository.ProductProducts(s.repos)
+    if err != nil {
+        return nil, err
+    }
+    ids := make([]uint64, 0, len(items))
+    for _, item := range items {
+        ids = append(ids, item.SkuID)
+    }
+    views, err := products.ListByIDs(ctx, ids)
+    if err != nil {
+        return nil, err
+    }
+    names := make([]string, 0, len(ids))
+    for _, id := range ids {
+        view, ok := views[id]
+        if !ok {
+            return nil, fmt.Errorf("product not found: sku %d", id)
+        }
+        if !view.OnSale() {
+            return nil, fmt.Errorf("product unavailable: sku %d", id)
+        }
+        names = append(names, view.Name)
+    }
+    return names, nil
 }
 
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderdto.OrderDTO, int64, error) {

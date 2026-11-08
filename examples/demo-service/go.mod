@@ -26,9 +26,12 @@ require (
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/creasty/defaults v1.8.0 // indirect
 	github.com/dchest/siphash v1.2.3 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/gin-contrib/sse v1.1.2 // indirect
+	github.com/glebarez/go-sqlite v1.21.2 // indirect
+	github.com/glebarez/sqlite v1.11.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-playground/locales v0.14.2 // indirect
@@ -62,6 +65,7 @@ require (
 	github.com/rabbitmq/amqp091-go v1.16.0 // indirect
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.23.0 // indirect
 	github.com/redis/go-redis/extra/redisotel/v9 v9.23.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/cobra v1.9.1 // indirect
 	github.com/swaggest/swgui v1.8.9 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
@@ -100,6 +104,10 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/mysql v1.5.7 // indirect
+	modernc.org/libc v1.22.5 // indirect
+	modernc.org/mathutil v1.5.0 // indirect
+	modernc.org/memory v1.5.0 // indirect
+	modernc.org/sqlite v1.23.1 // indirect
 )
 
 replace (

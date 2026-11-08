@@ -445,6 +445,11 @@ Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\E
 图片/文字水印、命名预设与 jpeg/png/gif 编码；`max_pixels` 与读取白名单防止
 超大图和路径穿越。见 [support/image/README.md](support/image/README.md)。
 
+跨模块依赖取用用 `support/registry`：显式的「名字 → 实例」注册表，启动装配时
+登记 repository/client/service，再按名字取用（`Get[T]` 带类型检查）。空名字、
+nil 实例、重复注册都直接报错；每次启动/热更新新建一份，不做包级全局。见
+[support/registry/README.md](support/registry/README.md)。
+
 ## Nacos 配置中心
 
 `support/nacos` 直接调用 Nacos Open API（不引入 SDK）：启动时把远端配置写成
@@ -742,6 +747,7 @@ support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全�
 logging/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
 support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、契约别名注册表
+support/registry/ 通用 name -> instance 注册表（跨模块依赖取用）
 support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
 support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
 support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）
