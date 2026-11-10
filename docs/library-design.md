@@ -83,12 +83,11 @@
 ### 1.4 迁移后的使用方式（一句话）
 
 ```go
-repos := apprepository.NewProvider()
 app, _ := gofy.New(
     gofy.WithName("demo-service"),
     gofy.WithHTTP(gofy.HTTPConfig{Port: 8080}),
     gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
-    gofy.WithModuleFactories(order.NewModuleFactory(repos)),
+    gofy.WithModuleFactories(order.NewModuleFactory()),
 )
 if err := app.Execute(ctx); err != nil {
     os.Exit(gofy.ExitCode(err))
@@ -152,8 +151,8 @@ github.com/bingcool/gofy/
 │   ├── image/                   # 图像缩放/裁剪/旋转/水印/编码（纯 Go）
 │   └── redis/
 │       └── redis.go             # Config、New、Ping、Close
-├── logging/
-│   ├── logging.go               # Config、New、Nop、Sync
+├── logger/
+│   ├── logger.go               # Config、New、Nop、Sync
 │   └── gorm.go                  # GORM logger 适配（可选使用）
 ├── script/
 │   └── script.go                # Script、Runtime 别名、Validate
@@ -184,7 +183,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -204,7 +203,7 @@ gofy (root)
  ├── support/rocketmq ──> rocketmq-clients/golang/v5
  ├── script ─────> core
  ├── command ────> core
- ├── logging
+ ├── logger
  ├── support/db
  ├── support/pg ──> gorm.io/driver/postgres (jackc/pgx/v5)
  ├── support/sqlite ──> glebarez/sqlite (modernc, 无 cgo)
@@ -225,17 +224,17 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `support`、`script`、`command`、`logging`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
-| `logging` 不依赖任何 gofy 子包 | 可被业务独立使用 |
-| `support/db` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
-| `support/pg` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
-| `support/sqlite` 不依赖 `logging` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `logger` 不依赖任何 gofy 子包 | 可被业务独立使用 |
+| `support/db` 不依赖 `logger` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `support/pg` 不依赖 `logger` | 通过参数接收 `*zap.Logger`，避免耦合 |
+| `support/sqlite` 不依赖 `logger` | 通过参数接收 `*zap.Logger`，避免耦合 |
 | 全仓库禁止 cgo：`CGO_ENABLED=0` 必须可构建，依赖图不得含 `CgoFiles` | 交叉编译与静态镜像无需 C 工具链；SQLite 用 `glebarez/sqlite`（modernc 纯 Go），`make cgo-free` 和 CI guards 校验 |
-| `support/uuidint` 不依赖 `logging` | 错误通过返回值、`WithErrorHandler` 回调和 `ctx` 交给调用方 |
-| `support/phpoffice` 不依赖 `logging` | 错误通过哨兵错误返回，日志由业务决定 |
-| `support/image` 不依赖 `logging` | 错误通过哨兵错误返回，日志由业务决定 |
+| `support/uuidint` 不依赖 `logger` | 错误通过返回值、`WithErrorHandler` 回调和 `ctx` 交给调用方 |
+| `support/phpoffice` 不依赖 `logger` | 错误通过哨兵错误返回，日志由业务决定 |
+| `support/image` 不依赖 `logger` | 错误通过哨兵错误返回，日志由业务决定 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
@@ -304,7 +303,7 @@ import (
     "time"
 
     "github.com/bingcool/gofy/core"
-    "github.com/bingcool/gofy/logging"
+    "github.com/bingcool/gofy/logger"
     gofydb "github.com/bingcool/gofy/support/db"
     "github.com/bingcool/gofy/support"
     "go.uber.org/zap"
@@ -317,7 +316,7 @@ type Middleware = support.Middleware
 type Responder = support.Responder
 type CORSConfig = support.CORSConfig
 type DatabaseConfig = gofydb.Config
-type LogConfig = logging.Config
+type LogConfig = logger.Config
 
 // App 是一次应用运行的容器。
 // 它持有配置、logger、DB、HTTP Server、模块、脚本与命令。
@@ -1276,10 +1275,10 @@ if errors.Is(err, gorm.ErrRecordNotFound) {
 return nil, apperr.Internal("get order failed").WithCause(err)
 ```
 
-### 3.6 `logging`
+### 3.6 `logger`
 
 ```go
-package logging
+package logger
 
 type Config struct {
     Level              string            `yaml:"level" default:"info"`        // debug|info|warn|error
@@ -1565,7 +1564,7 @@ SQLite 连接包，API 与 `support/db`、`support/pg` 对齐（`Config` 字段�
 - 主连接最多尝试 `retryTimes` 次（默认 3、间隔 150ms）；耗尽后回调
   `WithErrorHandler`，再依次尝试备用连接各一次；全部失败返回包裹
   `ErrUnavailable` 的错误，`ctx` 取消时返回 `context.Canceled`。
-- 不依赖 `logging`，也不引入根包；与 PHP 版的差异是没有 Channel 池和定时
+- 不依赖 `logger`，也不引入根包；与 PHP 版的差异是没有 Channel 池和定时
   预热（一次 `GetBatch` 一次 Redis 往返），由业务自行决定是否缓存批号。
 - demo 通过 `app/io/uuidint` 在启动时发布 `uuidint.Default`（实例别名来自
   `uuidint.redis_instance_name`），脚本模式用 `script gen-uuid` 按同一配置验证。
@@ -1647,8 +1646,10 @@ names := reg.Names()                          // 排序副本，供启动日志
 - 注册表是普通对象而非全局：每次装配（启动 / `Reload`）新建一份，随依赖显式传递；
 - 所有方法并发安全；`Lookup`/`Names`/`Get` 对 nil 注册表安全；
 - 名字由使用方定义为常量，应用层建议 `<module>.<aggregate>`，注册表不校验格式；
+- `Get[T]` 的 `T` 就是注册进去的具体类型；demo 的 repository 不声明接口，直接注册
+  `*productrepo.ProductRepository`，消费方也按这个类型取用；
 - 与 `support/middleware.Registry` 分工：后者强类型、只存中间件，由 Router 解析
-  契约别名；通用注册表存任意跨模块实例，由应用组合层和 service 使用，两者不合并。
+  契约别名；通用注册表存任意跨模块实例，由模块工厂登记、service 取用，两者不合并。
 
 ### 3.8 `script`
 
@@ -1803,7 +1804,7 @@ func RawJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any
 `gofytest.New` 的内部行为：
 
 - 调用 `gofy.New`；
-- 强制 `WithPIDFile("")`、`WithAccessLog(false)`、`WithRecovery(true)`、`WithLogger(logging.Nop())`；
+- 强制 `WithPIDFile("")`、`WithAccessLog(false)`、`WithRecovery(true)`、`WithLogger(logger.Nop())`；
 - 使用 `app.Handler(ctx)` 获取 `http.Handler`；
 - 不调用 `Module.Start`，因此测试中的模块应把后台逻辑放在显式方法里。
 
@@ -2111,7 +2112,7 @@ import (
 
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
-    "github.com/bingcool/gofy/logging"
+    "github.com/bingcool/gofy/logger"
     "github.com/yourorg/demo-service/app/io/redis"
     "github.com/yourorg/demo-service/app/middleware"
 )
@@ -2119,7 +2120,7 @@ import (
 type Config struct {
     Env     string              `yaml:"env" default:"dev"`
     HTTP    gofy.HTTPConfig     `yaml:"http"`
-    Log     logging.Config      `yaml:"log"`
+    Log     logger.Config      `yaml:"log"`
     DB      map[string]gofy.DatabaseConfig `yaml:"db"` // 按实例名分组
     Redis   redis.Config `yaml:"redis"`             // 多实例，按名字索引
     PIDFile string              `yaml:"pid_file"`
@@ -2525,25 +2526,23 @@ demo-service/
 │   │   ├── auth.go         # Auth + JWTConfig（调用框架 JWTAuth）
 │   │   ├── audit.go        # Audit + NameAudit / NameOrderAudit
 │   │   └── registry_middleware.go  # Register：集中注册应用层别名
-│   ├── repository/         # 组合层：Provider、装配、名字常量与类型化 accessor
-│   │   ├── provider.go
-│   │   ├── assemble.go
-│   │   ├── names.go
-│   │   └── accessors.go
 │   └── module/
 │       ├── order/
-│       │   ├── module.go
+│       │   ├── module.go       # 每次装配新建注册表，登记跨模块仓库并注入 service
 │       │   ├── controller/
 │       │   │   └── order_controller.go
 │       │   ├── service/
+│       │   │   ├── a_init_repository.go  # RepositoryDeps + Deps（直接注入，不登记）
 │       │   │   └── order_service.go
 │       │   ├── repository/
 │       │   │   └── order_repository.go
 │       │   └── model/
 │       │       └── order.go
 │       └── product/
+│           ├── controller/
+│           │   └── product_controller.go
 │           ├── repository/
-│           │   └── product_repository.go
+│           │   └── product_repository.go  # NameProducts + 契约 + 只读视图
 │           └── model/
 │               └── product.go
 ├── script/
@@ -2577,7 +2576,6 @@ import (
     "github.com/yourorg/demo-service/app/config"
     appio "github.com/yourorg/demo-service/app/io"
     "github.com/yourorg/demo-service/app/module/order"
-    apprepository "github.com/yourorg/demo-service/app/repository"
     appscript "github.com/yourorg/demo-service/script"
 )
 
@@ -2596,8 +2594,7 @@ func main() {
         log.Fatalf("load config: %v", err)
     }
 
-    // 每次装配一份 repository Provider；Reload 会重新执行工厂列表。
-    repos := apprepository.NewProvider()
+    // 注册表由模块工厂在每次装配时新建；Reload 会重新执行这份工厂列表。
     app, err := gofy.New(
         gofy.WithName("demo-service"),
         gofy.WithEnv(cfg.Env),
@@ -2611,7 +2608,7 @@ func main() {
         gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
         gofy.WithModuleFactories(
             appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP),
-            order.NewModuleFactory(repos),
+            order.NewModuleFactory(),
         ),
         gofy.WithScripts(appscript.Register(cfg)...),
         gofy.WithVersionInfo(gofy.VersionInfo{
@@ -2651,7 +2648,7 @@ import (
 
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
-    "github.com/bingcool/gofy/logging"
+    "github.com/bingcool/gofy/logger"
     "github.com/yourorg/demo-service/app/io/redis"
     "github.com/yourorg/demo-service/app/middleware"
 )
@@ -2659,7 +2656,7 @@ import (
 type Config struct {
     Env     string              `yaml:"env" default:"dev"`
     HTTP    gofy.HTTPConfig     `yaml:"http"`
-    Log     logging.Config      `yaml:"log"`
+    Log     logger.Config      `yaml:"log"`
     DB      map[string]gofy.DatabaseConfig `yaml:"db"` // 按实例名分组
     Redis   redis.Config `yaml:"redis"`             // 多实例，按名字索引
     PIDFile string              `yaml:"pid_file"`
@@ -2730,10 +2727,10 @@ import (
 
     "github.com/bingcool/gofy"
     "github.com/bingcool/gofy/support"
+    "github.com/bingcool/gofy/support/registry"
     "github.com/yourorg/demo-service/app/module/order/controller"
-    "github.com/yourorg/demo-service/app/module/order/repository"
     "github.com/yourorg/demo-service/app/module/order/service"
-    apprepository "github.com/yourorg/demo-service/app/repository"
+    productrepo "github.com/yourorg/demo-service/app/module/product/repository"
     "go.uber.org/zap"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
     "gofy/gofy-interface-service/appinterface/demoservice/orderroute"
@@ -2745,29 +2742,20 @@ type Module struct {
     logger *zap.Logger
 }
 
-// OrderRepositoryDeps 汇总订单模块的 repository 契约，由模块工厂装配。
-type OrderRepositoryDeps struct {
-    Orders repository.OrderRepositoryInterface
-}
-
-func NewModuleFactory(repos *apprepository.Provider) gofy.ModuleFactory {
+// NewModuleFactory 每次装配新建一份注册表，只登记订单服务跨模块读取的产品仓库；
+// 本模块仓库由 service.Deps 直接注入。启动和每次 Reload 都重新执行工厂，新旧
+// 两代注册表互不影响。
+func NewModuleFactory() gofy.ModuleFactory {
     return func(rt *gofy.Runtime) (support.Module, error) {
         if rt.DB == nil {
             return nil, errors.New("order module requires database")
         }
-        reg, err := repos.Repositories(rt)
-        if err != nil {
-            return nil, err
-        }
-        deps := OrderRepositoryDeps{}
-        if deps.Orders, err = apprepository.OrderOrders(reg); err != nil {
+        reg := registry.NewRegistry()
+        // 产品仓库的名字和实现归产品模块，订单模块作为消费方负责登记。
+        if err := reg.Register(productrepo.NameProducts, &productrepo.ProductRepository{}); err != nil {
             return nil, fmt.Errorf("order module: %w", err)
         }
-        // 模式 B：启动期校验产品仓库存在且类型正确，service 再按需取用。
-        if _, err := apprepository.ProductProducts(reg); err != nil {
-            return nil, fmt.Errorf("order module: %w", err)
-        }
-        svc := service.NewOrderService(deps.Orders, reg, rt.Logger)
+        svc := service.NewOrderService(service.Deps.Orders, reg, rt.Logger)
         return NewModule(svc, rt.Logger), nil
     }
 }
@@ -2795,9 +2783,23 @@ func (m *Module) Register(r *support.Router) error {
 }
 ```
 
-`NewFromHandle` 把 `db.Db` 的读取推迟到每次查询：模块工厂执行时 `app/io` 尚未
-`Start`，句柄还是 nil；等 `Start` 安装连接后仓库自动使用新句柄，热更新也会切到新
-连接。脚本模式没有模块生命周期，改用 `repository.New(rt.DB, rt.Logger)` 显式传连接。
+仓库不持有连接和日志：每次查询从 `app/io` 安装的 `db.Db` 解析连接（ctx 事务优先），
+模块工厂执行时 `app/io` 尚未 `Start`、句柄还是 nil 也没关系，等 `Start` 安装连接后
+仓库自动使用新句柄，热更新也会切到新连接。脚本模式没有模块生命周期，
+`script/fix_order.go` 调用前把 `rt.DB` 临时发布到 `appdb.Db`，结束后恢复。
+
+仓库集合不在 `module.go`，而在 `service/a_init_repository.go`：`RepositoryDeps`
+（字段即本模块全部仓库）和包级默认 `Deps` 归 service 包，因为 service 已经 import
+本模块 repository，不会形成 `service → order → service` 的环。本模块仓库没有名字、
+不登记注册表，由模块工厂把 `service.Deps.Orders` 直接传给构造函数；`Deps` 是零值
+构造的无状态仓库（`RepositoryDeps{Orders: &repository.OrderRepository{}}`），跨装配
+复用安全。仓库日志由 service/module 用 `rt.Logger` 记录，仓库本身只包装并返回错误。
+注册表由工厂每次装配新建，只用来放真正被跨模块按名取用的仓库；测试直接构造
+`RepositoryDeps` 注入自己的实例，不改包级变量。跨模块仓库（`productrepo.NameProducts`）
+的名字常量归产品 repository 包，登记由消费方工厂负责。repository 只导出具体类型
+（`*OrderRepository` / `*ProductRepository`），不声明接口：只有一种 GORM 实现，
+接口除了让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑真实 SQL。完整取舍见
+[repository-composition-design.md](./repository-composition-design.md) §5.3–§5.6、§5.10、§11.2–§11.5。
 
 `BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：`AuthRequired` 只用于 OpenAPI 标记，契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`）。
 
@@ -2840,7 +2842,7 @@ replace gofy/gofy-interface-service => ../../../gofy-interface-service
 | --- | --- | --- |
 | controller | 契约 `orderrequest` / `orderresponse` / `orderdto` | 只做协议转换与错误映射，不导入 `model` |
 | service | 普通值入参，返回 `orderdto.OrderDTO` | 只在 `toDTO` 中接触 `model` |
-| repository | 返回 `model.Order` | 定义持久化接口并持有 `model`，是唯一直接操作 `model` 的层 |
+| repository | 返回 `model.Order` | 导出具体类型（不声明接口）并持有 `model`，是唯一直接操作 `model` 的层；跨模块读取返回只读视图 |
 | model | 仅 repository 内部使用 | 不得出现在 handler、module 或 script 中 |
 
 维护脚本同样通过 repository 访问数据，不直接拼 GORM 查询。
@@ -2935,7 +2937,7 @@ import (
     "github.com/bingcool/gofy/support/registry"
     "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/repository"
-    apprepository "github.com/yourorg/demo-service/app/repository"
+    productrepo "github.com/yourorg/demo-service/app/module/product/repository"
     "go.uber.org/zap"
     "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
     "gofy/gofy-interface-service/appinterface/demoservice/orderenum"
@@ -2950,15 +2952,15 @@ type CreateItem struct {
 }
 
 type OrderService struct {
-    orders repository.OrderRepositoryInterface
-    // repos 用于按需取用 product.products（模式 B）。
+    orders *repository.OrderRepository
+    // repos 用于按需取用 product.products（模式 B）；实例由模块工厂在装配期登记。
     repos  *registry.Registry
     logger *zap.Logger
 }
 
 // NewOrderService 接收本模块必需的 orders 和装配级注册表；跨模块依赖在用例中
-// 按需取用，模块工厂负责启动期校验。
-func NewOrderService(orders repository.OrderRepositoryInterface, repos *registry.Registry, logger *zap.Logger) *OrderService {
+// 按需取用，模块工厂负责在装配期登记对应名字。
+func NewOrderService(orders *repository.OrderRepository, repos *registry.Registry, logger *zap.Logger) *OrderService {
     if logger == nil {
         logger = zap.NewNop()
     }
@@ -2994,7 +2996,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 
 // validateItems 按 SKU 批量查产品仓库，确认全部存在且上架。
 func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([]string, error) {
-    products, err := apprepository.ProductProducts(s.repos)
+    products, err := registry.Get[*productrepo.ProductRepository](s.repos, productrepo.NameProducts)
     if err != nil {
         return nil, err
     }
@@ -3048,9 +3050,11 @@ func toDTO(o *model.Order) *orderdto.OrderDTO {
 }
 ```
 
-service 的依赖集中在 `Deps`：要组合多个 repository 时只加字段（`Orders`、`Users`…），
-构造函数签名不变，调用方按字段名注入；跨模块接口由 `module.go` 装配后传入，service
-不 import 其他模块的 GORM 实现。`Logger` 为 nil 时退化为 `zap.NewNop()`（节选省略）。
+本模块仓库集中在 `service.RepositoryDeps`（`a_init_repository.go`）：要加仓库只加字段
+并由工厂传给构造函数，不登记名字；包级 `Deps` 是零值构造的默认集合，工厂直接注入。
+跨模块仓库由消费方工厂登记进本次装配的注册表，service 用 `registry.Get[T]` 按需取用，
+只依赖对方 repository 的导出方法和只读视图，不 import 其他模块的 `model`。`Logger`
+为 nil 时退化为 `zap.NewNop()`（节选省略）。
 
 ### 9.8 `app/module/order/repository/order_repository.go`（节选）
 
@@ -3066,22 +3070,13 @@ import (
     "gorm.io/gorm"
 )
 
-// OrderRepositoryInterface is the persistence contract used by the order
-// service. Tests provide their own implementation.
-type OrderRepositoryInterface interface {
-    FindByID(ctx context.Context, id uint64) (*model.Order, error)
-    Create(ctx context.Context, o *model.Order) (*model.Order, error)
-    ListByUser(ctx context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error)
-    UpdateStatus(ctx context.Context, id uint64, status string) error
-}
-
 var ErrNotFound = errors.New("order not found")
 
+// OrderRepository 是唯一实现，直接导出具体类型；service、脚本都依赖它，
+// 不再声明 OrderRepositoryInterface。
 type OrderRepository struct {
     db *gorm.DB
 }
-
-var _ OrderRepositoryInterface = (*OrderRepository)(nil)
 
 func New(db *gorm.DB) *OrderRepository {
     return &OrderRepository{db: db}
@@ -3408,7 +3403,8 @@ next steps:
 
 - 不读取工作目录下的 `config.yaml`；
 - 不监听固定端口（用 `httptest` 或 `net.Listen("tcp", "127.0.0.1:0")`）；
-- 不依赖真实 MySQL；需要 DB 的测试用 `sqlmock` 或业务注入的 fake；
+- 不依赖真实 MySQL；需要 DB 的测试用 `sqlmock`，业务仓库测试用纯 Go SQLite
+  （`support/sqlite`）内存库跑真实 SQL，cgo-free 且不连外部数据库；
 - 所有测试支持 `-race` 与 `-count=1`。
 
 ### 11.2 业务方测试
@@ -3551,7 +3547,7 @@ jobs:
       - name: no init in public packages
         run: |
           if grep -rn "func init()" --include="*.go" \
-            *.go apperr core logging support script command config gofytest; then
+            *.go apperr core logger support script command config gofytest; then
             echo "public packages must not use init()"
             exit 1
           fi
@@ -3573,7 +3569,7 @@ jobs:
 #!/usr/bin/env bash
 set -euo pipefail
 
-pkgs=(apperr core logging support/... script command config)
+pkgs=(apperr core logger support/... script command config)
 for pkg in "${pkgs[@]}"; do
   if go list -deps "./$pkg" | grep -qx 'github.com/bingcool/gofy'; then
     echo "import cycle: $pkg must not depend on the root package"
@@ -3621,7 +3617,7 @@ fi
 | `src/cmd/daemon-stop.go` | 删除 | 同上 |
 | `src/cmd/command/cmd.go` | 删除 | 命令常量与运行模式不再需要 |
 | `src/conf/yaml.go` | `config/load.go` | 去掉 viper、`init()`、全局配置 |
-| `src/log/logger.go` | `logging/logging.go` | 去掉 `init()`、包级 logger、切日协程；修正 `Compress` 读取 `MaxAge` 的 bug |
+| `src/log/logger.go` | `logger/logger.go` | 去掉 `init()`、包级 logger、切日协程；修正 `Compress` 读取 `MaxAge` 的 bug |
 | `src/request/requestLog.go` | `support/middleware/accesslog.go` | 改为显式 logger；不再单独初始化 |
 | `src/system/system_env.go` | 删除 | `Env` 放 `Runtime`；`WorkDir` 放 Option |
 | `src/timelocal/timezone.go` | 删除 | 不在库内修改 `time.Local`；时区由 DSN `loc` 或业务 `main` 决定 |
@@ -3659,8 +3655,8 @@ fi
 
 #### Phase 1：建立 library 骨架（不改变行为）
 
-- 新建 `core`、`apperr`、`support`、`logging`、`support/db`、`script`、`command`、`config`；
-- 先实现最小可编译版本：`Runtime`、`Router`、`Responder`、`logging.New`、`db.New`；
+- 新建 `core`、`apperr`、`support`、`logger`、`support/db`、`script`、`command`、`config`；
+- 先实现最小可编译版本：`Runtime`、`Router`、`Responder`、`logger.New`、`db.New`；
 - 保持 `examples/demo-service` 能跑通；
 - 此时旧 `src/` 仍在，CI 同时编译两者。
 
@@ -3701,7 +3697,7 @@ gofy/
 ├── apperr/
 ├── core/
 ├── support/
-├── logging/
+├── logger/
 ├── support/db/
 ├── support/pg/
 ├── support/sqlite/
@@ -3730,7 +3726,7 @@ gofy/
 - [ ] `go build ./...` 通过；
 - [ ] `go vet ./...` 通过；
 - [ ] `go test -race -count=1 ./...` 通过；
-- [ ] 公共包（`apperr`、`core`、`support`、`logging`、`script`、`command`、`config`、`gofytest`）中不存在 `func init()`；
+- [ ] 公共包（`apperr`、`core`、`support`、`logger`、`script`、`command`、`config`、`gofytest`）中不存在 `func init()`；
 - [ ] 公共包中不存在包级可变 `var`（常量、哨兵错误、类型别名除外）；
 - [ ] 公共包中不存在 `os.Exit`、`log.Fatal`、`panic`（`Recovery` 内部的 `recover` 除外）；
 - [ ] `go list -deps` 检查通过：子包不依赖根包，根包不依赖 `gofytest`；
@@ -3885,7 +3881,7 @@ type ModuleFactory = support.ModuleFactory
 type Middleware = support.Middleware
 type Responder = support.Responder
 type DatabaseConfig = gofydb.Config
-type LogConfig = logging.Config
+type LogConfig = logger.Config
 type TelemetryConfig = otel.Config
 ```
 
@@ -3985,7 +3981,7 @@ func Unavailable(string) *Error
 func As(error) (*Error, bool)
 ```
 
-### A.6 `logging`
+### A.6 `logger`
 
 ```text
 type Config
@@ -4719,7 +4715,7 @@ var ErrInvalidImage, ErrTooLarge, ErrInvalidConfig, ErrUnsupportedFormat
 
 | 旧行为 | 新行为 | 迁移建议 |
 | --- | --- | --- |
-| `import src/log` 自动读配置、建 logger | `import logging` 无副作用；`logging.New(cfg)` 显式创建 | 在 `main` 中创建并 `WithLogger` |
+| `import src/log` 自动读配置、建 logger | `import logger` 无副作用；`logger.New(cfg)` 显式创建 | 在 `main` 中创建并 `WithLogger` |
 | `src/conf` 在 `init()` 读 `config.yaml` | 业务自己加载 | 使用 `config.Load` 或自有加载器 |
 | `GOFY_ENV` 隐式环境 | `WithEnv(cfg.Env)` 显式传入 | 在配置中读取环境变量 |
 | `system.GetWorkRootDir()` 依赖配置 | `WithWorkDir` 显式指定 | 迁移机器相关配置 |

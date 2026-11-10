@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 )
 
 // App wraps an application handler for in-process HTTP tests.
@@ -31,7 +31,7 @@ func New(t *testing.T, opts ...gofy.Option) *App {
 		gofy.WithPIDFile(""),
 		gofy.WithAccessLog(false),
 		gofy.WithRecovery(true),
-		gofy.WithLogger(logging.Nop()),
+		gofy.WithLogger(logger.Nop()),
 	)
 	app, err := gofy.New(all...)
 	if err != nil {

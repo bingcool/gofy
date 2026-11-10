@@ -8,9 +8,13 @@ import (
 	gofydb "github.com/bingcool/gofy/support/db"
 	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/module/product/model"
-	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
+
+// NameProducts 是产品仓库在装配注册表里的名字（"<module>.<aggregate>"）。
+// 名字由产品模块拥有，登记由消费方模块工厂负责；订单服务按这个名字跨模块
+// 取用产品仓库。重命名属于破坏性变更。
+const NameProducts = "product.products"
 
 // ErrNotFound is returned when a product does not exist.
 var ErrNotFound = errors.New("product not found")
@@ -32,65 +36,23 @@ type ProductView struct {
 // OnSale reports whether the product can be ordered.
 func (v ProductView) OnSale() bool { return v.Status == StatusOnSale }
 
-// ProductRepositoryInterface is the persistence contract used by other modules.
-// Tests provide their own implementation.
-type ProductRepositoryInterface interface {
-	// FindByID returns one product or ErrNotFound.
-	FindByID(ctx context.Context, id uint64) (*ProductView, error)
-	// ListByIDs returns the products that exist, keyed by id. Missing ids are
-	// simply absent from the result.
-	ListByIDs(ctx context.Context, ids []uint64) (map[uint64]ProductView, error)
-	// DecreaseStock deducts num when the product is on sale and stock is
-	// sufficient, returning the affected row count. Zero means the product is
-	// missing, off sale or short of stock; the caller maps it to a business error.
-	DecreaseStock(ctx context.Context, id uint64, num int) (int64, error)
-}
+// ProductRepository reads and updates products with GORM. 其他模块直接依赖这个
+// 具体类型和只读视图 ProductView，不再声明接口：跨模块契约由导出的方法和
+// ProductView 承担，持久化模型 model.Product 仍留在本模块内。
+//
+// 仓库不持有连接和日志：每次查询按需解析 app/io 安装的 db.Db，装配早于
+// app/io.Start 也安全，Reload 换连接后自动生效；日志由调用方 service 用
+// rt.Logger 记录。
+type ProductRepository struct{}
 
-// ProductRepository reads products with GORM.
-type ProductRepository struct {
-	db     *gorm.DB
-	logger *zap.Logger
-}
-
-var _ ProductRepositoryInterface = (*ProductRepository)(nil)
-
-// New builds a GORM-backed product repository on an explicit connection.
-// Scripts and callers without the app/io lifecycle use this form. A nil logger
-// disables logs.
-func New(db *gorm.DB, logger *zap.Logger) *ProductRepository {
-	return newRepository(db, logger)
-}
-
-// NewFromHandle builds a repository backed by db.Db. Module factories run
-// before app/io installs the handle, so the lookup happens per query instead of
-// at construction; a reload also picks up the replacement connection.
-func NewFromHandle(logger *zap.Logger) *ProductRepository {
-	return newRepository(nil, logger)
-}
-
-func newRepository(db *gorm.DB, logger *zap.Logger) *ProductRepository {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-	return &ProductRepository{
-		db:     db,
-		logger: logger.With(zap.String("component", "product.repository")),
-	}
-}
-
-// conn 优先使用 ctx 中的事务；没有事务时用显式注入的连接，其次用 app/io
-// 安装的 db.Db。跨模块调用因此自动共享最外层 service 开启的事务。
+// conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
+// 因此自动共享最外层 service 开启的事务。
 func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
-	fallback := r.db
-	if fallback == nil {
-		fallback = appdb.Db
-	}
-	return gofydb.FromContext(ctx, fallback)
+	return gofydb.FromContext(ctx, appdb.Db)
 }
 
 // FindByID returns one product or ErrNotFound.
 func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*ProductView, error) {
-	r.logger.Debug("find product", zap.Uint64("product_id", id))
 	var p model.Product
 	err := r.conn(ctx).WithContext(ctx).First(&p, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -128,10 +90,6 @@ func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[ui
 			Status: item.Status,
 		}
 	}
-	r.logger.Debug("list products",
-		zap.Int("requested", len(ids)),
-		zap.Int("rows", len(views)),
-	)
 	return views, nil
 }
 
@@ -149,10 +107,5 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 	if res.Error != nil {
 		return 0, fmt.Errorf("decrease product %d stock: %w", id, res.Error)
 	}
-	r.logger.Debug("product stock decreased",
-		zap.Uint64("product_id", id),
-		zap.Int("num", num),
-		zap.Int64("rows", res.RowsAffected),
-	)
 	return res.RowsAffected, nil
 }

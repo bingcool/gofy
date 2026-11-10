@@ -24,7 +24,7 @@ if err := reg.Register(nameProductRepository, productRepository); err != nil {
 }
 
 // 装配期取用（推荐）：一次取出，显式传给 service 构造函数
-products, err := registry.Get[ProductRepositoryInterface](reg, nameProductRepository)
+products, err := registry.Get[*productrepo.ProductRepository](reg, nameProductRepository)
 if err != nil {
     return fmt.Errorf("order module: %w", err)
 }
@@ -38,7 +38,7 @@ type OrderService struct {
 }
 
 func (s *OrderService) productNames(ctx context.Context, ids []uint64) (map[uint64]string, error) {
-    products, err := registry.Get[ProductRepositoryInterface](s.repos, nameProductRepository)
+    products, err := registry.Get[*productrepo.ProductRepository](s.repos, nameProductRepository)
     if err != nil {
         return nil, err
     }
@@ -46,8 +46,9 @@ func (s *OrderService) productNames(ctx context.Context, ids []uint64) (map[uint
 }
 ```
 
-使用模式 B 时，模块工厂仍应在启动期调用一次 `Get` 校验名字和类型，把缺失依赖
-提前到启动失败，而不是请求期才报错。
+`Get[T]` 的 `T` 就是注册进去的具体类型（demo 里 repository 不声明接口，直接注册
+`*ProductRepository`）。消费方模块工厂负责登记它 service 会取用的每个名字，登记
+失败即启动失败，不会拖到请求期才暴露。
 
 ## API
 
@@ -76,6 +77,6 @@ func (s *OrderService) productNames(ctx context.Context, ids []uint64) (map[uint
 | --- | --- | --- |
 | 存放内容 | 任意跨模块实例 | 只存 `support.Middleware` |
 | 类型 | `any` + 泛型 `Get[T]` | 强类型 |
-| 使用方 | 应用装配层、service | Router / adapter 解析契约中间件名 |
+| 使用方 | 模块工厂登记、service 取用 | Router / adapter 解析契约中间件名 |
 
 两者都遵循「显式注册、按名解析、启动失败」，但职责不同，不合并。

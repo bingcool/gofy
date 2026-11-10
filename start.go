@@ -15,7 +15,7 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/internal/process"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/middleware"
@@ -709,9 +709,9 @@ func (a *App) cleanup() error {
 			}
 		}
 		if a.ownLogger {
-			_ = logging.Sync(a.logger)
+			_ = logger.Sync(a.logger)
 			if a.systemLogger != nil && a.systemLogger != a.logger {
-				_ = logging.Sync(a.systemLogger)
+				_ = logger.Sync(a.systemLogger)
 			}
 		}
 

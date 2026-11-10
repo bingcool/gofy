@@ -1,4 +1,4 @@
-package logging_test
+package logger_test
 
 import (
 	"encoding/json"
@@ -10,19 +10,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"go.uber.org/zap"
 )
 
 func TestValidateRejectsInvalidConfig(t *testing.T) {
-	cases := map[string]logging.Config{
+	cases := map[string]logger.Config{
 		"bad level":             {Level: "verbose"},
 		"bad encoding":          {Encoding: "xml"},
 		"bad color":             {Color: "rainbow"},
-		"negative rotation":     {Rotation: logging.RotationConfig{MaxSizeMB: -1}},
-		"bad rotation mode":     {Rotation: logging.RotationConfig{Mode: "weekly"}},
-		"bad date layout":       {Rotation: logging.RotationConfig{DateLayout: "2006/01/02"}},
-		"negative date dir age": {Rotation: logging.RotationConfig{DateDirMaxAgeDays: -1}},
+		"negative rotation":     {Rotation: logger.RotationConfig{MaxSizeMB: -1}},
+		"bad rotation mode":     {Rotation: logger.RotationConfig{Mode: "weekly"}},
+		"bad date layout":       {Rotation: logger.RotationConfig{DateLayout: "2006/01/02"}},
+		"negative date dir age": {Rotation: logger.RotationConfig{DateDirMaxAgeDays: -1}},
 		"empty output":          {Outputs: []string{" "}},
 	}
 	for name, cfg := range cases {
@@ -36,7 +36,7 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 
 func TestNewWritesJSONWithBaseFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
-	logger, err := logging.New(logging.Config{
+	lg, err := logger.New(logger.Config{
 		Level:      "debug",
 		Encoding:   "json",
 		Outputs:    []string{path},
@@ -45,8 +45,8 @@ func TestNewWritesJSONWithBaseFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	logger.Info("hello", zap.String("order_id", "42"))
-	if err := logging.Sync(logger); err != nil {
+	lg.Info("hello", zap.String("order_id", "42"))
+	if err := logger.Sync(lg); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
@@ -80,12 +80,12 @@ func TestNewWritesJSONWithBaseFields(t *testing.T) {
 // stacktrace 保持单行转义，方便日志采集。
 func TestColorAlwaysKeepsFileOutputPlain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
-	logger, err := logging.New(logging.Config{Color: "always", Outputs: []string{path}})
+	lg, err := logger.New(logger.Config{Color: "always", Outputs: []string{path}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	logger.Error("boom", zap.Error(errors.New("database unreachable")))
-	if err := logging.Sync(logger); err != nil {
+	lg.Error("boom", zap.Error(errors.New("database unreachable")))
+	if err := logger.Sync(lg); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
@@ -107,13 +107,13 @@ func TestColorAlwaysKeepsFileOutputPlain(t *testing.T) {
 
 func TestLevelFiltering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
-	logger, err := logging.New(logging.Config{Level: "warn", Outputs: []string{path}})
+	lg, err := logger.New(logger.Config{Level: "warn", Outputs: []string{path}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	logger.Info("dropped")
-	logger.Warn("kept")
-	if err := logging.Sync(logger); err != nil {
+	lg.Info("dropped")
+	lg.Warn("kept")
+	if err := logger.Sync(lg); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -130,11 +130,11 @@ func TestLevelFiltering(t *testing.T) {
 
 func TestRotationWritesThroughLumberjack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rotate", "app.log")
-	logger, err := logging.New(logging.Config{
+	lg, err := logger.New(logger.Config{
 		Level:    "info",
 		Encoding: "console",
 		Outputs:  []string{path},
-		Rotation: logging.RotationConfig{
+		Rotation: logger.RotationConfig{
 			Enabled:    true,
 			MaxSizeMB:  1,
 			MaxAgeDays: 1,
@@ -144,8 +144,8 @@ func TestRotationWritesThroughLumberjack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	logger.Info("rotated")
-	if err := logging.Sync(logger); err != nil {
+	lg.Info("rotated")
+	if err := logger.Sync(lg); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
@@ -163,12 +163,12 @@ func TestHourlyInfoAndSizeErrorOutputsUseDateDir(t *testing.T) {
 	dir := t.TempDir()
 	infoPath := filepath.Join(dir, "http", "info.log")
 	errorPath := filepath.Join(dir, "http", "error.log")
-	logger, err := logging.New(logging.Config{
+	lg, err := logger.New(logger.Config{
 		Level:        "info",
 		Encoding:     "json",
 		Outputs:      []string{infoPath},
 		ErrorOutputs: []string{errorPath},
-		Rotation: logging.RotationConfig{
+		Rotation: logger.RotationConfig{
 			Enabled:    true,
 			Mode:       "hourly",
 			DateDir:    true,
@@ -183,9 +183,9 @@ func TestHourlyInfoAndSizeErrorOutputsUseDateDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	logger.Info("business info")
-	logger.Error("business error")
-	if err := logging.Sync(logger); err != nil {
+	lg.Info("business info")
+	lg.Error("business error")
+	if err := logger.Sync(lg); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
@@ -203,17 +203,17 @@ func TestHourlyInfoAndSizeErrorOutputsUseDateDir(t *testing.T) {
 func TestDateTokenExpandsWithoutRotation(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "script", "{date}", "info", "fix-order.log")
-	logger, err := logging.New(logging.Config{
+	lg, err := logger.New(logger.Config{
 		Level:    "info",
 		Encoding: "json",
 		Outputs:  []string{target},
-		Rotation: logging.RotationConfig{LocalTime: true},
+		Rotation: logger.RotationConfig{LocalTime: true},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	logger.Info("script info")
-	if err := logging.Sync(logger); err != nil {
+	lg.Info("script info")
+	if err := logger.Sync(lg); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
@@ -232,17 +232,17 @@ func TestNewSystemWritesOnlyFrameworkErrors(t *testing.T) {
 	errorPath := filepath.Join(dir, "error.log")
 	systemPath := filepath.Join(dir, "system", "system_error.log")
 
-	cfg := logging.Config{
+	cfg := logger.Config{
 		Level:              "info",
 		Outputs:            []string{mainPath},
 		ErrorOutputs:       []string{errorPath},
 		SystemErrorOutputs: []string{systemPath},
 	}
-	main, err := logging.New(cfg)
+	main, err := logger.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	system, err := logging.NewSystem(cfg)
+	system, err := logger.NewSystem(cfg)
 	if err != nil {
 		t.Fatalf("NewSystem: %v", err)
 	}
@@ -250,10 +250,10 @@ func TestNewSystemWritesOnlyFrameworkErrors(t *testing.T) {
 	main.Info("business info")
 	main.Error("business error")
 	system.Error("panic recovered")
-	if err := logging.Sync(main); err != nil {
+	if err := logger.Sync(main); err != nil {
 		t.Fatalf("Sync main: %v", err)
 	}
-	if err := logging.Sync(system); err != nil {
+	if err := logger.Sync(system); err != nil {
 		t.Fatalf("Sync system: %v", err)
 	}
 
@@ -277,14 +277,14 @@ func TestNewSystemWritesOnlyFrameworkErrors(t *testing.T) {
 }
 
 func TestNewSystemWithoutOutputsIsNop(t *testing.T) {
-	logger, err := logging.NewSystem(logging.Config{})
+	lg, err := logger.NewSystem(logger.Config{})
 	if err != nil {
 		t.Fatalf("NewSystem: %v", err)
 	}
-	if logger == nil {
+	if lg == nil {
 		t.Fatal("NewSystem returned nil")
 	}
-	logger.Error("discarded")
+	lg.Error("discarded")
 }
 
 func readFile(t *testing.T, path string) string {
@@ -297,13 +297,13 @@ func readFile(t *testing.T, path string) string {
 }
 
 func TestNopAndSync(t *testing.T) {
-	if logging.Nop() == nil {
+	if logger.Nop() == nil {
 		t.Fatal("Nop returned nil")
 	}
-	if err := logging.Sync(nil); err != nil {
+	if err := logger.Sync(nil); err != nil {
 		t.Fatalf("Sync(nil) = %v", err)
 	}
-	if err := logging.Sync(logging.Nop()); err != nil {
+	if err := logger.Sync(logger.Nop()); err != nil {
 		t.Fatalf("Sync(Nop) = %v", err)
 	}
 }

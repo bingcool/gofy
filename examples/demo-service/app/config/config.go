@@ -10,7 +10,7 @@ import (
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/core/systemenv"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	appamqp "github.com/yourorg/demo-service/app/io/amqp"
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	"github.com/yourorg/demo-service/app/io/redis"
@@ -27,7 +27,7 @@ const DefaultDatabase = "default"
 type Config struct {
 	Env      string                         `yaml:"env" default:"dev"`
 	HTTP     gofy.HTTPConfig                `yaml:"http"`
-	Log      logging.Config                 `yaml:"log"`
+	Log      logger.Config                  `yaml:"log"`
 	DB       map[string]gofy.DatabaseConfig `yaml:"db"`
 	Redis    redis.Config                   `yaml:"redis"`
 	AMQP     appamqp.Config                 `yaml:"amqp"`
@@ -114,7 +114,7 @@ func Load(ctx context.Context, path string) (*Config, error) {
 // applyLogPaths 按执行模式把日志落到 storage/log/http 或 storage/log/script，
 // 与 swoolefy 的 cli/script 分目录一致。脚本模式使用
 // script/{date}/info/<脚本>.log 和 script/{date}/error/<脚本>.log，
-// 一个脚本对应一组日志文件；{date} 由 logging 按日期替换。
+// 一个脚本对应一组日志文件；{date} 由 logger 按日期替换。
 // 追加而不是覆盖，config.yaml 里的 stdout 等输出仍然保留；热更新重新 Load
 // 时会再次追加到新配置上。
 func applyLogPaths(cfg *Config) {

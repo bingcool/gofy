@@ -13,7 +13,7 @@ root_pkg="github.com/bingcool/gofy"
 # Public packages must not depend on the root package: that would be an import
 # cycle the moment the root package exposes them. gofytest is the deliberate
 # exception: it wraps the root package for tests.
-for pkg in apperr core logging support/... script command config; do
+for pkg in apperr core logger support/... script command config; do
   if go list -deps "./$pkg" | grep -qx "$root_pkg"; then
     fail "$pkg must not depend on the root package"
   fi
@@ -32,39 +32,39 @@ if go list -deps ./core | grep "$root_pkg/" | grep -qvx "$root_pkg/core"; then
   fail "core must not depend on other gofy packages"
 fi
 
-# logging is independently usable.
-if go list -deps ./logging | grep "$root_pkg/" | grep -qvx "$root_pkg/logging"; then
-  fail "logging must not depend on other gofy packages"
+# logger is independently usable.
+if go list -deps ./logger | grep "$root_pkg/" | grep -qvx "$root_pkg/logger"; then
+  fail "logger must not depend on other gofy packages"
 fi
 
-# support/db receives a *zap.Logger instead of importing logging.
-if go list -deps ./support/db | grep -q "$root_pkg/logging"; then
-  fail "support/db must not depend on logging"
+# support/db receives a *zap.Logger instead of importing logger.
+if go list -deps ./support/db | grep -q "$root_pkg/logger"; then
+  fail "support/db must not depend on logger"
 fi
 
-# support/pg receives a *zap.Logger instead of importing logging.
-if go list -deps ./support/pg | grep -q "$root_pkg/logging"; then
-  fail "support/pg must not depend on logging"
+# support/pg receives a *zap.Logger instead of importing logger.
+if go list -deps ./support/pg | grep -q "$root_pkg/logger"; then
+  fail "support/pg must not depend on logger"
 fi
 
-# support/sqlite receives a *zap.Logger instead of importing logging.
-if go list -deps ./support/sqlite | grep -q "$root_pkg/logging"; then
-  fail "support/sqlite must not depend on logging"
+# support/sqlite receives a *zap.Logger instead of importing logger.
+if go list -deps ./support/sqlite | grep -q "$root_pkg/logger"; then
+  fail "support/sqlite must not depend on logger"
 fi
 
-# support/uuidint must stay independent of the root package and logging.
-if go list -deps ./support/uuidint | grep -q "$root_pkg/logging"; then
-  fail "support/uuidint must not depend on logging"
+# support/uuidint must stay independent of the root package and logger.
+if go list -deps ./support/uuidint | grep -q "$root_pkg/logger"; then
+  fail "support/uuidint must not depend on logger"
 fi
 
-# support/phpoffice must stay independent of the root package and logging.
-if go list -deps ./support/phpoffice | grep -q "$root_pkg/logging"; then
-  fail "support/phpoffice must not depend on logging"
+# support/phpoffice must stay independent of the root package and logger.
+if go list -deps ./support/phpoffice | grep -q "$root_pkg/logger"; then
+  fail "support/phpoffice must not depend on logger"
 fi
 
-# support/image must stay independent of the root package and logging.
-if go list -deps ./support/image | grep -q "$root_pkg/logging"; then
-  fail "support/image must not depend on logging"
+# support/image must stay independent of the root package and logger.
+if go list -deps ./support/image | grep -q "$root_pkg/logger"; then
+  fail "support/image must not depend on logger"
 fi
 
 echo "import guards passed"

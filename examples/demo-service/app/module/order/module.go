@@ -4,7 +4,7 @@
 //   - controller speaks the gofy-interface-service contract and never imports model;
 //   - service accepts plain values and returns orderdto.OrderDTO, touching model
 //     only in its DTO conversion;
-//   - repository owns the persistence interface and the model type.
+//   - repository owns persistence and the model type.
 package order
 
 import (
@@ -13,10 +13,10 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/registry"
 	"github.com/yourorg/demo-service/app/module/order/controller"
-	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
-	apprepository "github.com/yourorg/demo-service/app/repository"
+	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
@@ -29,35 +29,20 @@ type Module struct {
 	logger *zap.Logger
 }
 
-// OrderRepositoryDeps 汇总订单模块自己的 repository 契约（模式 A），由模块工厂
-// 从装配注册表取出后注入 service；跨模块依赖不放在这里，由 service 通过注册表
-// 按需取用（模式 B）。新增本模块仓库时只在这里加字段。
-type OrderRepositoryDeps struct {
-	// Orders 是订单持久化契约，必填。
-	Orders repository.OrderRepositoryInterface
-}
-
-// NewModuleFactory builds the module from the assembly-scoped repository
-// provider. The order repository is resolved at startup (mode A); the product
-// repository is only checked here and fetched on demand by the service (mode
-// B), so a missing or mistyped registration still fails before serving traffic.
-func NewModuleFactory(repos *apprepository.Provider) gofy.ModuleFactory {
+// NewModuleFactory 每次装配新建一份注册表，只登记订单服务跨模块读取的产品
+// 仓库；本模块仓库由 service.Deps 直接注入，不经过注册表。启动和每次 Reload
+// 都重新执行工厂，新旧两代注册表互不影响。
+func NewModuleFactory() gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
-		reg, err := repos.Repositories(rt)
-		if err != nil {
-			return nil, err
-		}
-		deps := OrderRepositoryDeps{}
-		if deps.Orders, err = apprepository.OrderOrders(reg); err != nil {
+		reg := registry.NewRegistry()
+		// 产品仓库的名字和实现归产品模块，订单模块作为消费方负责登记。
+		if err := reg.Register(productrepo.NameProducts, &productrepo.ProductRepository{}); err != nil {
 			return nil, fmt.Errorf("order module: %w", err)
 		}
-		if _, err := apprepository.ProductProducts(reg); err != nil {
-			return nil, fmt.Errorf("order module: %w", err)
-		}
-		svc := service.NewOrderService(deps.Orders, reg, rt.Logger)
+		svc := service.NewOrderService(service.Deps.Orders, reg, rt.Logger)
 		return NewModule(svc, rt.Logger), nil
 	}
 }

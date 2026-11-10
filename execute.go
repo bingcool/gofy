@@ -12,7 +12,7 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/console"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/script"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/spf13/pflag"
@@ -140,9 +140,9 @@ func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Ru
 	a.setLogger(lg, system, ownLogger)
 	if ownLogger {
 		defer func() {
-			_ = logging.Sync(lg)
+			_ = logger.Sync(lg)
 			if system != lg {
-				_ = logging.Sync(system)
+				_ = logger.Sync(system)
 			}
 		}()
 	}

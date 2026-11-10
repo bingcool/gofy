@@ -120,7 +120,7 @@ app, err := gofy.New(
     // 应用层中间件（auth / audit / order-audit）在模块绑定路由之前注册，
     // 契约只写逻辑名，模块不再自己创建注册表。
     gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
-    gofy.WithModuleFactories(order.NewModuleFactory(apprepository.NewProvider())),
+    gofy.WithModuleFactories(order.NewModuleFactory()),
 )
 ```
 

@@ -6,6 +6,7 @@ import (
 	"github.com/bingcool/gofy/apperr"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/spf13/pflag"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"go.uber.org/zap"
 )
@@ -37,7 +38,12 @@ func FixOrder() gofyscript.Script {
 			if rt.DB == nil {
 				return apperr.Internal("database is not configured")
 			}
-			rows, err := repository.New(rt.DB, rt.Logger).CancelPending(ctx, id)
+			// 脚本模式不执行 app/io 生命周期，仓库按 app/io 句柄取连接，
+			// 因此把脚本连接发布到句柄，结束后恢复原值。
+			prev := appdb.Db
+			appdb.Db = rt.DB
+			defer func() { appdb.Db = prev }()
+			rows, err := (&repository.OrderRepository{}).CancelPending(ctx, id)
 			if err != nil {
 				return apperr.Internal("fix order failed").WithCause(err)
 			}

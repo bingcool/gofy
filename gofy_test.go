@@ -19,7 +19,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/gofytest"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
 	"github.com/gin-gonic/gin"
@@ -211,7 +211,7 @@ func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
 		gofy.WithPIDFile(""),
 		gofy.WithAccessLog(false),
 		gofy.WithRecovery(true),
-		gofy.WithLogConfig(logging.Config{
+		gofy.WithLogConfig(logger.Config{
 			Outputs:            []string{infoPath},
 			ErrorOutputs:       []string{errorPath},
 			SystemErrorOutputs: []string{systemPath},

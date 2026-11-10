@@ -8,7 +8,7 @@ import (
 	"github.com/bingcool/gofy/support/registry"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
-	apprepository "github.com/yourorg/demo-service/app/repository"
+	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
@@ -33,8 +33,8 @@ type CreateItem struct {
 
 // OrderService implements order use cases.
 type OrderService struct {
-	orders repository.OrderRepositoryInterface
-	// repos 用于按需取用 product.products（模式 B）；名字由模块工厂在启动期校验。
+	orders *repository.OrderRepository
+	// repos 用于按需取用 product.products（模式 B）；实例由模块工厂在装配期登记。
 	repos  *registry.Registry
 	logger *zap.Logger
 }
@@ -42,7 +42,7 @@ type OrderService struct {
 // NewOrderService builds an OrderService. Orders is required; repos is the
 // assembly-scoped registry used to resolve product.products on demand. A nil
 // logger falls back to zap.NewNop().
-func NewOrderService(orders repository.OrderRepositoryInterface, repos *registry.Registry, logger *zap.Logger) *OrderService {
+func NewOrderService(orders *repository.OrderRepository, repos *registry.Registry, logger *zap.Logger) *OrderService {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -67,7 +67,7 @@ func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, 
 // Create validates every SKU against the product module, then persists a
 // pending order. Product lookup goes through the assembly registry (mode B):
 // the dependency is resolved on demand rather than stored as a constructor
-// parameter, and the module factory still fails fast when it is missing.
+// parameter, and the module factory registers it before serving traffic.
 func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderdto.OrderDTO, error) {
 	names, err := s.validateItems(ctx, items)
 	if err != nil {
@@ -96,7 +96,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 	if len(items) == 0 {
 		return nil, nil
 	}
-	products, err := apprepository.ProductProducts(s.repos)
+	products, err := registry.Get[*productrepo.ProductRepository](s.repos, productrepo.NameProducts)
 	if err != nil {
 		return nil, err
 	}

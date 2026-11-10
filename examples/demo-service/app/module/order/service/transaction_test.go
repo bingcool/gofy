@@ -1,4 +1,4 @@
-package apprepository_test
+package service_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/sqlite"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	ordermodel "github.com/yourorg/demo-service/app/module/order/model"
 	orderrepo "github.com/yourorg/demo-service/app/module/order/repository"
 	productmodel "github.com/yourorg/demo-service/app/module/product/model"
@@ -15,8 +16,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// newCompositionDB 用纯 Go SQLite 建一个同时包含订单表和产品表的库，供跨模块
-// 事务用例使用；单连接默认值保证 :memory: 只有一个库。
+// 跨模块事务用例放在 service 层：service 是组合其他模块 repository 的地方，
+// 事务也由 service 开启。用纯 Go SQLite 建一个同时包含订单表和产品表的库，
+// 不依赖外部 MySQL；单连接默认值保证 :memory: 只有一个库。
 func newCompositionDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	conn, err := sqlite.New(context.Background(), sqlite.Config{
@@ -43,6 +45,9 @@ func newCompositionDB(t *testing.T) *gorm.DB {
 	}).Error; err != nil {
 		t.Fatalf("seed product: %v", err)
 	}
+	prev := appdb.Db
+	appdb.Db = conn
+	t.Cleanup(func() { appdb.Db = prev })
 	return conn
 }
 
@@ -66,8 +71,8 @@ func stockOf(t *testing.T, products *productrepo.ProductRepository) int {
 
 func TestTransactionCommitsAcrossModules(t *testing.T) {
 	conn := newCompositionDB(t)
-	products := productrepo.New(conn, nil)
-	orders := orderrepo.New(conn, nil)
+	products := &productrepo.ProductRepository{}
+	orders := &orderrepo.OrderRepository{}
 
 	err := gofydb.Transaction(context.Background(), conn, func(ctx context.Context) error {
 		affected, err := products.DecreaseStock(ctx, 90001, 3)
@@ -93,8 +98,8 @@ func TestTransactionCommitsAcrossModules(t *testing.T) {
 
 func TestTransactionRollsBackStockAndOrderTogether(t *testing.T) {
 	conn := newCompositionDB(t)
-	products := productrepo.New(conn, nil)
-	orders := orderrepo.New(conn, nil)
+	products := &productrepo.ProductRepository{}
+	orders := &orderrepo.OrderRepository{}
 	boom := errors.New("order write failed")
 
 	err := gofydb.Transaction(context.Background(), conn, func(ctx context.Context) error {
@@ -123,8 +128,8 @@ func TestTransactionRollsBackStockAndOrderTogether(t *testing.T) {
 }
 
 func TestDecreaseStockRejectsUnavailableOrInvalidRequests(t *testing.T) {
-	conn := newCompositionDB(t)
-	products := productrepo.New(conn, nil)
+	newCompositionDB(t)
+	products := &productrepo.ProductRepository{}
 	ctx := context.Background()
 
 	affected, err := products.DecreaseStock(ctx, 90001, 11)

@@ -18,16 +18,41 @@ All notable changes to this project are documented here. The format follows
   both types. Each assembly (startup or `Reload`) creates its own registry, so
   instances are never shared across generations; unlike
   `support/middleware.Registry` it is untyped and not limited to middleware.
-- `examples/demo-service`: cross-module repository composition. `app/repository`
-  assembles one `support/registry.Registry` per assembly (`order.orders`,
-  `product.products`) behind a lazy `Provider`, exposes typed accessors and is
-  rebuilt on every `Reload`. The product module gains a real `db.default`
-  repository (`ProductView`, `FindByID`, `ListByIDs`) backed by the new
-  `migrations/0002_products.sql` table and demo rows. The order service uses
-  mode B: it holds the registry and resolves `product.products` on demand to
-  validate that every requested SKU exists and is on sale before creating an
-  order (unknown/off-sale SKUs return 400), while the module factory still
-  validates the registration at startup.
+- `examples/demo-service`: cross-module repository composition without a
+  central composition layer. `order.NewModuleFactory()` takes no arguments and
+  builds a fresh `support/registry.Registry` on every assembly (startup and each
+  `Reload`); the registry holds only repositories that another module resolves
+  by name (`product.products`), while the module's own repositories are passed
+  straight to the service constructor. `reload.factories(cfg)` only returns the
+  factory list. The order module declares its repositories in `RepositoryDeps`
+  (`app/module/order/service/a_init_repository.go`); the package-level `Deps`
+  is a zero-value `var` holding `&repository.OrderRepository{}`, and there is no
+  name constant, `Register` method or `InitRepository` helper for it — adding a
+  registry entry for a repository nothing reads was pure overhead. Repositories
+  are stateless: they carry no connection or logger and resolve the `app/io`
+  `db.Db` handle on every query (ctx transaction first), so assembly before
+  `app/io.Start` and `Reload` both work, and repository logging stays at the
+  service via `rt.Logger`. Scripts do not run the module lifecycle, so
+  `script/fix_order.go` publishes `rt.DB` into the `app/io` handle for the
+  duration of the call. The product module owns `NameProducts`
+  (`product.products`) next to its real `db.default` repository (`ProductView`,
+  `FindByID`, `ListByIDs`, `DecreaseStock`) backed by the new
+  `migrations/0002_products.sql` table and demo rows; the order factory registers
+  it as the consumer. The order service uses mode B: it resolves
+  `registry.Get[*productrepo.ProductRepository](reg, productrepo.NameProducts)`
+  on demand to validate that every requested SKU exists and is on sale before
+  creating an order (unknown/off-sale SKUs return 400). The former
+  `app/repository` package (lazy `Provider`, `Assemble`, names, typed
+  `ProductProducts` accessor) and the service-owned `RepositoryRegistrar`
+  interface were removed. Repositories no longer declare interfaces either:
+  `OrderRepositoryInterface` and `ProductRepositoryInterface` (and their
+  compile-time assertions) are gone, so `RepositoryDeps`, service fields,
+  constructors and `Get[T]` all use the concrete `*OrderRepository` /
+  `*ProductRepository` — one GORM implementation per repository made the
+  interface pure overhead. Tests therefore run the real repositories on an
+  in-memory pure-Go SQLite database (still no external MySQL, still cgo-free),
+  inject panics through a `gorm.ConnPool` wrapper for the recovery case, and
+  build their own `RepositoryDeps` instead of mutating `Deps`.
 - `support/db`: context-propagated transactions. `Transaction(ctx, db, fn)`
   opens a transaction and stores it on the context passed to `fn`; nested calls
   reuse the outer transaction (no savepoint) and a nil callback or connection
@@ -38,12 +63,13 @@ All notable changes to this project are documented here. The format follows
 - `examples/demo-service`: repositories resolve connections through
   `support/db.FromContext`, and the product repository gained `DecreaseStock`
   (status/stock conditions pushed into the SQL update, 0 rows left to the
-  caller). A composition-level SQLite test proves stock decrease and order
-  create share one transaction and roll back together.
+  caller). A service-level SQLite test
+  (`app/module/order/service/transaction_test.go`) proves stock decrease and
+  order create share one transaction and roll back together.
   `scripts/check-imports.sh` enforces the layering rules (no controller →
-  repository/model, no repository → service, a package may aggregate more than
-  one other module's repository only through `app/repository`), wired into the
-  demo and root `make guards`/`make check`.
+  repository/model, no repository → service, a package may import at most one
+  other module's repository — there is no composition-layer exemption), wired
+  into the demo and root `make guards`/`make check`.
 - Root package: the App now owns the contract middleware registry. On startup
   and on every `Reload` it creates one `support/middleware.Registry`, registers
   every built-in middleware under its alias (`NameRequestID`,
@@ -276,14 +302,14 @@ All notable changes to this project are documented here. The format follows
   `signature`, ...) replaced by `***`; unparseable queries are logged as
   `***`. Controlled by `AccessLogOptions.LogQuery` and `SensitiveQuery`.
 
-- `logging`: error entries are wrapped in red when the sink is a terminal.
+- `logger`: error entries are wrapped in red when the sink is a terminal.
   Files, pipes, `NO_COLOR` and Windows stay plain, so log files never contain
   ANSI escapes.
-- `logging`: `system_error_outputs` and `NewSystem` route framework-caught
+- `logger`: `system_error_outputs` and `NewSystem` route framework-caught
   panics to a dedicated file. HTTP recovery uses that logger; when the list is
   empty panics keep going to `error_outputs`. Plain file sinks now create their
   parent directory so per-mode log directories work without setup.
-- `logging`: `rotation.date_dir` writes files under date directories such as
+- `logger`: `rotation.date_dir` writes files under date directories such as
   `20261106`, and `rotation.mode: hourly` rolls info outputs into
   `info-h0.log` ... `info-h23.log`; `mode: size` keeps lumberjack rotation
   inside the day directory. Error and system-error outputs always use size
@@ -342,7 +368,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- `logging`: colored console sinks now render `error` and above as a red
+- **Breaking:** the root logging package moved from `logging` to `logger`.
+  Import `github.com/bingcool/gofy/logger` instead of
+  `github.com/bingcool/gofy/logging`; `Config`, `New`, `NewSystem`, `Nop`,
+  `Sync`, `RotationConfig` and `GormLogger` keep their names, only the package
+  qualifier changes (`logger.Config`, `logger.New`, ...). `gofy.LogConfig` is
+  now an alias of `logger.Config`, error messages are prefixed `logger:`, and
+  the import guards check `./logger`. The package still holds no state and never
+  touches `time.Local`.
+- `logger`: colored console sinks now render `error` and above as a red
   multi-line block — a header line with time, level, caller, message and the
   remaining fields, one line per `error`/`zap.NamedError` field, and the
   stacktrace expanded frame by frame — instead of one JSON line with escaped

@@ -340,7 +340,7 @@ timeout, _ := doc.GetDuration("http.read_timeout") // 1h、30s、200ms
 （如 `servers.0.host`），同样会展开 `${ENV_VAR}`。它不做结构体默认值和校验，
 需要这些能力时继续使用 `Load[T]`。
 
-日志用 `logging`（zap）：`log.color` 控制终端着色，`auto`（默认）只在 TTY 上
+日志用 `logger`（zap）：`log.color` 控制终端着色，`auto`（默认）只在 TTY 上
 生效，`always` 供 IDE 这类非 TTY 控制台强制开启，`never` 关闭，非法值启动即报错。
 着色生效时 `error` 及以上渲染成红色多行块：首行是时间、级别、caller、消息和
 其余字段，`error` 单独成行，`stacktrace` 逐帧展开；低于 `error` 的条目和所有
@@ -744,7 +744,7 @@ gofy.go, option.go, start.go, execute.go, stop.go   App、生命周期、CLI
 apperr/        业务错误模型
 core/          共享 Runtime（叶子包）
 support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全头配置
-logging/       zap 日志构建与 GORM 适配
+logger/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
 support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、契约别名注册表
 support/registry/ 通用 name -> instance 注册表（跨模块依赖取用）

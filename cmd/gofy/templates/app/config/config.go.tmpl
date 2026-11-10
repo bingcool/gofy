@@ -5,7 +5,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 {{- if .WithDB }}
 	gofydb "github.com/bingcool/gofy/support/db"
 {{- end }}
@@ -15,7 +15,7 @@ import (
 type Config struct {
 	Env     string          `yaml:"env" default:"dev"`
 	HTTP    gofy.HTTPConfig `yaml:"http"`
-	Log     logging.Config  `yaml:"log"`
+	Log     logger.Config  `yaml:"log"`
 {{- if .WithDB }}
 	DB      gofydb.Config   `yaml:"db"`
 {{- end }}

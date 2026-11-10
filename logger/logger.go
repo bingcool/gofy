@@ -1,6 +1,6 @@
-// Package logging builds zap loggers from an explicit configuration.
+// Package logger builds zap loggers from an explicit configuration.
 // It has no package-level state and never touches time.Local.
-package logging
+package logger
 
 import (
 	"errors"
@@ -57,23 +57,23 @@ func (c Config) Validate() error {
 	switch c.Encoding {
 	case "", "json", "console":
 	default:
-		return fmt.Errorf("logging: invalid encoding %q (want json or console)", c.Encoding)
+		return fmt.Errorf("logger: invalid encoding %q (want json or console)", c.Encoding)
 	}
 	if normalizeColor(c.Color) == "" {
-		return fmt.Errorf("logging: invalid color %q (want auto, always or never)", c.Color)
+		return fmt.Errorf("logger: invalid color %q (want auto, always or never)", c.Color)
 	}
 	if c.Rotation.MaxSizeMB < 0 || c.Rotation.MaxAgeDays < 0 || c.Rotation.MaxBackups < 0 || c.Rotation.DateDirMaxAgeDays < 0 {
-		return errors.New("logging: rotation values must not be negative")
+		return errors.New("logger: rotation values must not be negative")
 	}
 	if mode := normalizeRotationMode(c.Rotation.Mode); mode != rotationModeSize && mode != rotationModeHourly {
-		return fmt.Errorf("logging: invalid rotation mode %q (want size or hourly)", c.Rotation.Mode)
+		return fmt.Errorf("logger: invalid rotation mode %q (want size or hourly)", c.Rotation.Mode)
 	}
 	if strings.ContainsAny(c.Rotation.DateLayout, `/\`) {
-		return fmt.Errorf("logging: invalid date_layout %q (must not contain path separators)", c.Rotation.DateLayout)
+		return fmt.Errorf("logger: invalid date_layout %q (must not contain path separators)", c.Rotation.DateLayout)
 	}
 	for _, out := range append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...) {
 		if strings.TrimSpace(out) == "" {
-			return errors.New("logging: output path must not be empty")
+			return errors.New("logger: output path must not be empty")
 		}
 	}
 	return nil
@@ -180,7 +180,7 @@ func parseLevel(level string) (zapcore.Level, error) {
 	case "error":
 		return zap.ErrorLevel, nil
 	default:
-		return zap.InfoLevel, fmt.Errorf("logging: invalid level %q (want debug, info, warn or error)", level)
+		return zap.InfoLevel, fmt.Errorf("logger: invalid level %q (want debug, info, warn or error)", level)
 	}
 }
 
@@ -244,11 +244,11 @@ func openSink(target string, rotation RotationConfig, fallback *os.File, mode st
 	// 按启动模式分目录时，storage/log/http 等目录可能还不存在；lumberjack
 	// 会自己建目录，这里补齐直接写文件的分支。
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return nil, nil, fmt.Errorf("logging: create dir for %s: %w", target, err)
+		return nil, nil, fmt.Errorf("logger: create dir for %s: %w", target, err)
 	}
 	f, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, nil, fmt.Errorf("logging: open %s: %w", target, err)
+		return nil, nil, fmt.Errorf("logger: open %s: %w", target, err)
 	}
 	return zapcore.AddSync(f), nil, nil
 }

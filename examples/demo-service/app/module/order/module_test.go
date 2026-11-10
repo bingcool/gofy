@@ -4,148 +4,106 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/registry"
+	"github.com/bingcool/gofy/support/sqlite"
+	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	productmodel "github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
-	apprepository "github.com/yourorg/demo-service/app/repository"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
 	"gofy/gofy-interface-service/contracts/common/paging"
+	"gorm.io/gorm"
 )
 
-type fakeRepository struct {
-	mu     sync.Mutex
-	nextID uint64
-	orders map[uint64]*model.Order
-}
-
-func newFakeRepository() *fakeRepository {
-	return &fakeRepository{nextID: 1, orders: map[uint64]*model.Order{
-		1: {ID: 1, UserID: 100, Amount: 9900, Status: "paid"},
-	}}
-}
-
-func (f *fakeRepository) FindByID(_ context.Context, id uint64) (*model.Order, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if id == 9999 {
-		panic("boom: database password is hunter2")
+// newTestDB 用纯 Go SQLite 建一个含订单表和产品表的内存库，并塞入 HTTP 用例
+// 需要的固定数据：订单 1（用户 100、已支付）、产品 90001 上架 / 90002 下架。
+// repository 不再声明接口，测试直接跑真实 SQL，不连外部 MySQL。
+func newTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	conn, err := sqlite.New(context.Background(), sqlite.Config{
+		DSN:      ":memory:",
+		LogLevel: "silent",
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
 	}
-	o, ok := f.orders[id]
-	if !ok {
-		return nil, repository.ErrNotFound
+	// 先取出 *sql.DB 再包连接池：包装后的 ConnPool 不再是 *sql.DB，
+	// sqlite.Close 会取不到底层连接。
+	sqlDB, err := conn.DB()
+	if err != nil {
+		t.Fatalf("get sql.DB: %v", err)
 	}
-	cp := *o
-	return &cp, nil
-}
-
-func (f *fakeRepository) Create(_ context.Context, o *model.Order) (*model.Order, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	o.ID = f.nextID
-	f.nextID++
-	cp := *o
-	f.orders[o.ID] = &cp
-	return o, nil
-}
-
-func (f *fakeRepository) ListByUser(_ context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var all []model.Order
-	for _, o := range f.orders {
-		if o.UserID == userID {
-			all = append(all, *o)
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
+	if err := conn.AutoMigrate(&model.Order{}, &productmodel.Product{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	seeds := []any{
+		&model.Order{ID: 1, UserID: 100, Amount: 9900, Status: string(orderenum.OrderStatusPaid)},
+		&productmodel.Product{ID: 90001, Name: "Gofy Demo SKU", Price: 1000, Stock: 999, Status: productrepo.StatusOnSale},
+		&productmodel.Product{ID: 90002, Name: "Retired SKU", Price: 500, Stock: 0, Status: 0},
+	}
+	for _, seed := range seeds {
+		if err := conn.Create(seed).Error; err != nil {
+			t.Fatalf("seed %T: %v", seed, err)
 		}
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].ID > all[j].ID })
-	total := int64(len(all))
-	if offset >= len(all) {
-		return []model.Order{}, total, nil
-	}
-	end := offset + limit
-	if end > len(all) {
-		end = len(all)
-	}
-	return all[offset:end], total, nil
+	return conn
 }
 
-func (f *fakeRepository) UpdateStatus(_ context.Context, id uint64, status string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	o, ok := f.orders[id]
-	if !ok {
-		return repository.ErrNotFound
-	}
-	o.Status = status
-	return nil
+// panicPool 在驱动层对 id=9999 的查询 panic，用来验证 Recovery 中间件返回 500
+// 且不泄漏内部信息。repository 是具体类型，panic 只能从连接池注入。
+type panicPool struct {
+	gorm.ConnPool
 }
 
-// fakeProductRepository 提供订单服务跨模块读取的产品视图：90001 上架，
-// 90002 下架，其余 SKU 不存在。
-type fakeProductRepository struct {
-	products map[uint64]productrepo.ProductView
-}
-
-func newFakeProductRepository() *fakeProductRepository {
-	return &fakeProductRepository{products: map[uint64]productrepo.ProductView{
-		90001: {ID: 90001, Name: "Gofy Demo SKU", Price: 1000, Stock: 999, Status: productrepo.StatusOnSale},
-		90002: {ID: 90002, Name: "Retired SKU", Price: 500, Stock: 0, Status: 0},
-	}}
-}
-
-func (f *fakeProductRepository) FindByID(_ context.Context, id uint64) (*productrepo.ProductView, error) {
-	view, ok := f.products[id]
-	if !ok {
-		return nil, productrepo.ErrNotFound
-	}
-	return &view, nil
-}
-
-func (f *fakeProductRepository) ListByIDs(_ context.Context, ids []uint64) (map[uint64]productrepo.ProductView, error) {
-	out := make(map[uint64]productrepo.ProductView, len(ids))
-	for _, id := range ids {
-		if view, ok := f.products[id]; ok {
-			out[id] = view
+func (p panicPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	for _, arg := range args {
+		if fmt.Sprint(arg) == "9999" {
+			panic("boom: database password is hunter2")
 		}
 	}
-	return out, nil
+	return p.ConnPool.QueryContext(ctx, query, args...)
 }
 
-func (f *fakeProductRepository) DecreaseStock(_ context.Context, id uint64, num int) (int64, error) {
-	view, ok := f.products[id]
-	if !ok || !view.OnSale() || view.Stock < num {
-		return 0, nil
-	}
-	view.Stock -= num
-	f.products[id] = view
-	return 1, nil
-}
-
-// newTestService 装配一个持有 fake 注册表的订单服务，产品仓库通过模式 B 取用。
-func newTestService() *service.OrderService {
+// newTestService 装配一个跑在 SQLite 上的订单服务，产品仓库通过模式 B 取用。
+// 仓库从 app/io 句柄取连接，测试把内存库发布成当前句柄，结束后恢复。
+func newTestService(t *testing.T) *service.OrderService {
+	t.Helper()
+	conn := newTestDB(t)
+	// GORM 执行 SQL 用的是 Statement.ConnPool（Open 时从 Config 复制一份），
+	// 只改 Config.ConnPool 不会生效，两处都要替换。
+	pool := panicPool{ConnPool: conn.ConnPool}
+	conn.ConnPool = pool
+	conn.Statement.ConnPool = pool
+	prev := appdb.Db
+	appdb.Db = conn
+	t.Cleanup(func() { appdb.Db = prev })
 	reg := registry.NewRegistry()
-	reg.MustRegister(apprepository.NameProductProducts, newFakeProductRepository())
-	return service.NewOrderService(newFakeRepository(), reg, zap.NewNop())
+	reg.MustRegister(productrepo.NameProducts, &productrepo.ProductRepository{})
+	return service.NewOrderService(&repository.OrderRepository{}, reg, zap.NewNop())
 }
 
 func newTestApp(t *testing.T) *gofytest.App {
@@ -157,7 +115,7 @@ func newTestApp(t *testing.T) *gofytest.App {
 // 应用层中间件通过 WithMiddlewareRegistrar 注册进框架创建的共享注册表。
 func newTestAppWithConfig(t *testing.T, jwtCfg middleware.JWTConfig) *gofytest.App {
 	t.Helper()
-	svc := newTestService()
+	svc := newTestService(t)
 	module := order.NewModule(svc, zap.NewNop())
 	return gofytest.New(t,
 		gofy.WithName("demo-service-test"),
@@ -389,7 +347,7 @@ func TestCancelWithJWT(t *testing.T) {
 
 func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := newTestService()
+	svc := newTestService(t)
 	module := order.NewModule(svc, zap.New(core))
 	app := gofytest.New(t,
 		gofy.WithName("demo-service-test"),
@@ -427,7 +385,7 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 // App 都新建一份注册表并重新执行 registrar，因此不会撞上「别名已注册」错误。
 func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := newTestService()
+	svc := newTestService(t)
 	module := order.NewModule(svc, zap.New(core))
 
 	for i := 0; i < 2; i++ {
@@ -440,6 +398,25 @@ func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	}
 	if got := len(logs.FilterMessage("order audit").All()); got != 2 {
 		t.Fatalf("audit entries = %d, want one per assembly", got)
+	}
+}
+
+// 模块工厂每次装配新建注册表并登记跨模块的产品仓库：连续装配两次不会撞
+// 名字，缺数据库时在登记之前就失败。
+func TestModuleFactoryBuildsFreshRegistryPerAssembly(t *testing.T) {
+	factory := order.NewModuleFactory()
+	rt := &gofy.Runtime{DB: &gorm.DB{}, Logger: zap.NewNop()}
+	for i := 0; i < 2; i++ {
+		module, err := factory(rt)
+		if err != nil {
+			t.Fatalf("assembly %d: %v", i, err)
+		}
+		if module.Name() != "order" {
+			t.Fatalf("module name = %q, want order", module.Name())
+		}
+	}
+	if _, err := factory(&gofy.Runtime{Logger: zap.NewNop()}); err == nil {
+		t.Fatal("a runtime without database should fail")
 	}
 }
 

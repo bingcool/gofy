@@ -11,7 +11,7 @@ import (
 
 	"github.com/bingcool/gofy/command"
 	"github.com/bingcool/gofy/core"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
@@ -50,7 +50,7 @@ type options struct {
 	hasVer  bool
 
 	logger    *zap.Logger
-	logConfig logging.Config
+	logConfig logger.Config
 
 	http      HTTPConfig
 	apiPrefix string
@@ -101,7 +101,7 @@ func defaultOptions() options {
 	return options{
 		name: "app",
 		env:  "dev",
-		logConfig: logging.Config{
+		logConfig: logger.Config{
 			Level:    "info",
 			Encoding: "console",
 			Outputs:  []string{"stdout"},
@@ -154,7 +154,7 @@ func WithLogger(logger *zap.Logger) Option {
 
 // WithLogConfig configures the logger built by the App when no logger is
 // injected.
-func WithLogConfig(cfg logging.Config) Option {
+func WithLogConfig(cfg logger.Config) Option {
 	return func(o *options) error {
 		if err := cfg.Validate(); err != nil {
 			return err

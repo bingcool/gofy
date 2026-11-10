@@ -12,7 +12,8 @@ module="github.com/yourorg/demo-service"
 module_prefix="$module/app/module/"
 
 # 只检查非测试文件的 import（go list 的 .Imports 不含 _test.go），测试可以
-# 同时引用多个模块的 fake。包依赖成环由 go build 直接报错，这里不重复检查。
+# 同时引用多个模块的 model 和 repository 来建 SQLite 库。包依赖成环由
+# go build 直接报错，这里不重复检查。
 go list -f '{{.ImportPath}}|{{join .Imports " "}}' ./app/... |
 while IFS='|' read -r pkg imports; do
   case "$pkg" in
@@ -24,9 +25,6 @@ while IFS='|' read -r pkg imports; do
           # controller 只依赖本模块 service，使用契约类型；不碰持久化。
           for imp in $imports; do
             case "$imp" in
-              "$module/app/repository"|"$module/app/repository/"*)
-                fail "$pkg must not import $imp: controllers depend on their own service only"
-                ;;
               "$module_prefix"*)
                 dep=${imp#"$module_prefix"}
                 dep_owner=${dep%%/*}
@@ -61,11 +59,8 @@ while IFS='|' read -r pkg imports; do
       ;;
   esac
 
-  # 只有 app/repository 可以聚合多个模块的 repository；其他包最多 import
-  # 一个“其他模块”的 repository，本模块的不计入。
-  case "$pkg" in
-    "$module/app/repository") continue ;;
-  esac
+  # 没有集中组合层：一个包最多 import 一个“其他模块”的 repository，本模块的
+  # 不计入。需要多个跨模块仓库时，把读取点拆到各自的 service。
   own=""
   case "$pkg" in
     "$module_prefix"*)
@@ -94,7 +89,7 @@ while IFS='|' read -r pkg imports; do
     esac
   done
   if [ "$count" -gt 1 ]; then
-    fail "$pkg imports repositories from multiple other modules:$seen; only $module/app/repository may aggregate them"
+    fail "$pkg imports repositories from multiple other modules:$seen; a package may depend on at most one"
   fi
 done
 

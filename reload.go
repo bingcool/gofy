@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/core"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"go.uber.org/zap"
@@ -48,7 +48,7 @@ type ReloadSpec struct {
 
 	// Log replaces the logger. A logger injected with WithLogger is replaced
 	// too and is not synced afterwards, because the App does not own it.
-	Log *logging.Config
+	Log *logger.Config
 
 	// Database reconnects the MySQL pool. When set, the App owns the new
 	// connection and closes the previous one after the old modules stop.
@@ -160,13 +160,13 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	// owned by the App and released by discard on a later failure.
 	rebuiltLogger := false
 	if spec.Log != nil {
-		newLogger, err := logging.New(*spec.Log)
+		newLogger, err := logger.New(*spec.Log)
 		if err != nil {
 			return fmt.Errorf("gofy: reload logger: %w", err)
 		}
-		newSystem, err := logging.NewSystem(*spec.Log)
+		newSystem, err := logger.NewSystem(*spec.Log)
 		if err != nil {
-			_ = logging.Sync(newLogger)
+			_ = logger.Sync(newLogger)
 			return fmt.Errorf("gofy: reload system logger: %w", err)
 		}
 		if len(spec.Log.SystemErrorOutputs) == 0 {
@@ -282,9 +282,9 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		}
 	}
 	if oldOwnLogger && oldLogger != lg {
-		_ = logging.Sync(oldLogger)
+		_ = logger.Sync(oldLogger)
 		if oldSystemLogger != nil && oldSystemLogger != oldLogger {
-			_ = logging.Sync(oldSystemLogger)
+			_ = logger.Sync(oldSystemLogger)
 		}
 	}
 
@@ -304,9 +304,9 @@ func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, syst
 		_ = gofydb.Close(db)
 	}
 	if rebuiltLogger {
-		_ = logging.Sync(lg)
+		_ = logger.Sync(lg)
 		if system != nil && system != lg {
-			_ = logging.Sync(system)
+			_ = logger.Sync(system)
 		}
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/core"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/nacos"
@@ -36,7 +36,7 @@ type CORSConfig = support.CORSConfig
 type DatabaseConfig = gofydb.Config
 
 // LogConfig is the logger configuration passed to WithLogConfig.
-type LogConfig = logging.Config
+type LogConfig = logger.Config
 
 // NacosConfig is the Nacos connection and service settings passed to
 // WithNacosRegistration.

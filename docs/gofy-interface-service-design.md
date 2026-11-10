@@ -132,7 +132,7 @@
 | 27 | 限流与限流响应头 | `RateLimit/*`、`AbstractRateLimiterMiddleware` | 无 | `Limiter` 接口 + 内存滑窗实现；Redis 适配器独立模块；`X-RateLimit-*`、429 信封 | `support/ratelimit` | P2 |
 | 28 | 健康检查（DB/Redis/文件存储） | `src/Http/Health/*` | `/healthz`、`/readyz` 仅 DB ping | `health.Registry` + `Check` 接口；并发检查、超时、详情开关、路径别名；内置 DB Check | `support/health` | P2 |
 | 29 | 进程健康检查 | `Health/Check/ProcessHealthCheck.php` | 无 | 不移植：进程管理不在范围 | — | 不移植 |
-| 30 | 日志参数脱敏 | `src/Http/LogParamSanitizer.php` | 无 | 新增 `logging.Sanitize`：password/token/secret/cookie/authorization 等 | `logging` | P2 |
+| 30 | 日志参数脱敏 | `src/Http/LogParamSanitizer.php` | 无 | 新增 `logger.Sanitize`：password/token/secret/cookie/authorization 等 | `logger` | P2 |
 | 31 | 忽略路径配置 | `src/Http/IgnoreRouteConfig.php` | accesslog 只有精确 `SkipPaths` | 新增 `routematch.Matcher`：精确、前缀 `/*`、`:param`；供 accesslog/auth/ratelimit 共用 | `support/routematch` | P2 |
 | 32 | OpenTelemetry | `src/Http/OpenTelemetry/*` | 无 | 可选模块：trace id 注入响应头与日志；不进入核心依赖 | `contrib/otel` | P3 |
 | 33 | API 文档注解与生成 | `src/Annotation/Api*`、`src/Script/ApiDoc` | 无 | 契约描述符 + struct tag + 反射生成 OpenAPI 3.0.3；Swagger UI 内嵌 | 新仓库 `docgen` | P0 |
@@ -181,7 +181,7 @@ gofy/
       check_db.go        # GORM DB Check
     routematch/
       matcher.go         # 忽略路径匹配
-  logging/
+  logger/
     sanitize.go          # 日志脱敏
   contrib/otel/
     middleware.go        # 可选 OpenTelemetry
@@ -2958,7 +2958,7 @@ func (r *Registry) Handler() http.Handler
 ### 8.12 日志脱敏
 
 ```go
-package logging
+package logger
 
 type SanitizeOptions struct {
 	Keys       []string // 默认 password/token/secret/authorization/cookie/access_token/refresh_token
@@ -3226,7 +3226,7 @@ go.work
 | gofy `auth` | bearer、optional、invalid、principal |
 | gofy `ratelimit` | 允许/拒绝、窗口重置、headers |
 | gofy `health` | 并发、超时、详情开关、503 |
-| gofy `logging` | 脱敏 key、嵌套、截断、不修改原对象 |
+| gofy `logger` | 脱敏 key、嵌套、截断、不修改原对象 |
 
 ### 10.2 黄金文件测试
 

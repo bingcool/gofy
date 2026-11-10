@@ -15,7 +15,7 @@ import (
 	"github.com/bingcool/gofy/command"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/version"
-	"github.com/bingcool/gofy/logging"
+	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
@@ -121,7 +121,7 @@ func New(opts ...Option) (*App, error) {
 	}
 	a.logger = o.logger
 	if a.logger == nil {
-		a.logger = logging.Nop()
+		a.logger = logger.Nop()
 	}
 	// 未单独配置 system_error_outputs 时，框架错误沿用主 logger，保持
 	// panic 仍然写入 error_outputs 的既有行为。
@@ -162,7 +162,7 @@ func (a *App) Logger() *zap.Logger {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.logger == nil {
-		a.logger = logging.Nop()
+		a.logger = logger.Nop()
 	}
 	return a.logger
 }
@@ -236,13 +236,13 @@ func (a *App) buildLoggers() (lg, system *zap.Logger, own bool, err error) {
 	if a.opts.logger != nil {
 		return a.opts.logger, a.opts.logger, false, nil
 	}
-	lg, err = logging.New(a.opts.logConfig)
+	lg, err = logger.New(a.opts.logConfig)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("gofy: build logger: %w", err)
 	}
-	system, err = logging.NewSystem(a.opts.logConfig)
+	system, err = logger.NewSystem(a.opts.logConfig)
 	if err != nil {
-		_ = logging.Sync(lg)
+		_ = logger.Sync(lg)
 		return nil, nil, false, fmt.Errorf("gofy: build system logger: %w", err)
 	}
 	if len(a.opts.logConfig.SystemErrorOutputs) == 0 {

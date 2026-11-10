@@ -1,4 +1,4 @@
-package logging
+package logger
 
 import (
 	"fmt"
@@ -170,7 +170,7 @@ func isPathSeparator(c byte) bool { return c == '/' || c == '\\' }
 
 func (s *rotatingFileSink) open(path string) (io.WriteCloser, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("logging: create dir for %s: %w", path, err)
+		return nil, fmt.Errorf("logger: create dir for %s: %w", path, err)
 	}
 	if s.mode == rotationModeSize {
 		// lumberjack 在当天目录内按大小轮转，跨天后由本 sink 换到新目录。
@@ -185,7 +185,7 @@ func (s *rotatingFileSink) open(path string) (io.WriteCloser, error) {
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("logging: open %s: %w", path, err)
+		return nil, fmt.Errorf("logger: open %s: %w", path, err)
 	}
 	return f, nil
 }
