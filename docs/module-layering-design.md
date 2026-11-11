@@ -124,7 +124,8 @@ examples/demo-service/app/
 │   ├── product.go                  # ProductService 访问器
 │   ├── order.go                    # OrderConfigService / OrderService 访问器
 │   ├── module_factories.go         # ProductModuleFactory / OrderModuleFactory
-│   └── repository_declare.go       # RepositoryDeclare{OrdersRepo, ProductsRepo}
+│   ├── repository_declare.go       # RepositoryDeclare{OrdersRepo, ProductsRepo}
+│   └── service_declare.go          # ServiceDeclare{ProductService, OrderConfigService, OrderService}
 └── module/
     ├── order/
     │   ├── module.go               # 模块根：NewModule + Register（service 由容器注入）
@@ -302,14 +303,11 @@ func (s *ProductService) DecreaseStock(ctx context.Context, id uint64, num int) 
 ```go
 // app/container/container.go
 type Container struct {
-    repos RepositoryDeclare
+    repos    RepositoryDeclare
+    services ServiceDeclare
 
-    loggerMu sync.Mutex
-    logger   *zap.Logger
-
-    productService     lazyValue[*productservice.ProductService]
-    orderConfigService lazyValue[*orderservice.OrderConfigService]
-    orderService       lazyValue[*orderservice.OrderService]
+    loggerMu  sync.Mutex
+    zapLogger *zap.Logger
 }
 
 func (c *Container) Init(logger *zap.Logger) { /* 记录本代 logger，首次生效 */ }
@@ -318,7 +316,7 @@ func (c *Container) Init(logger *zap.Logger) { /* 记录本代 logger，首次�
 ```go
 // app/container/product.go / order.go
 func (c *Container) ProductService() *productservice.ProductService {
-    return c.productService.Get(func() *productservice.ProductService {
+    return c.services.ProductService.Get(func() *productservice.ProductService {
         return productservice.NewProductService(productservice.Dependencies{
             Products: c.repos.ProductsRepo, Logger: c.logger(),
         })
@@ -326,7 +324,7 @@ func (c *Container) ProductService() *productservice.ProductService {
 }
 
 func (c *Container) OrderService() *orderservice.OrderService {
-    return c.orderService.Get(func() *orderservice.OrderService {
+    return c.services.OrderService.Get(func() *orderservice.OrderService {
         return orderservice.NewOrderService(orderservice.Dependencies{
             OrderRepository: c.repos.OrdersRepo,
             ProductAPI:      c.ProductService(), // 按需构建产品子树
@@ -651,9 +649,9 @@ repository 的取用；P7 回滚即恢复模块级工厂（但不恢复包级单
 7. **`Dependencies` 取代包级 `RepoDeps`**：显式声明本模块仓库、跨模块接口（以及
    可能存在的同包协作 service）与 Logger，由 `app/container` 的访问器构造注入；
    删除全局可变默认集合和运行期查找。
-8. **仓库声明与 service 实例化集中在 `app/container`**：`RepositoryDeclare` 一次
-   声明装配用到的全部仓库，访问器按依赖链惰性构造 service 并拆到各模块文件；
-   模块根只保留 `NewModule` / `Register`。Go 的 import 方向是
+8. **仓库与 service 声明集中在 `app/container`**：`RepositoryDeclare` 声明装配
+   用到的全部仓库，`ServiceDeclare` 声明全部 service 构造槽；访问器按依赖链惰性
+   构造 service 并拆到各模块文件；模块根只保留 `NewModule` / `Register`。Go 的 import 方向是
    `container → module → service`，service 不能反向 import 容器或模块根，所以组合
    只能在装配期完成。
 9. **事务由发起用例的 service 开启**：跨模块传同一 ctx，被调用方不另开事务。

@@ -13,7 +13,7 @@ func TestProductAccessBuildsOnlyProduct(t *testing.T) {
 	if c.ProductService() == nil {
 		t.Fatal("nil product service")
 	}
-	if c.orderService.value != nil || c.orderConfigService.value != nil {
+	if c.services.OrderService.value != nil || c.services.OrderConfigService.value != nil {
 		t.Fatal("product access built order-side services")
 	}
 }
@@ -25,10 +25,10 @@ func TestOrderAccessBuildsProductDependency(t *testing.T) {
 	if c.OrderService() == nil {
 		t.Fatal("nil order service")
 	}
-	if c.productService.value == nil {
+	if c.services.ProductService.value == nil {
 		t.Fatal("order service built without its product dependency")
 	}
-	if c.orderConfigService.value != nil {
+	if c.services.OrderConfigService.value != nil {
 		t.Fatal("order accessor built the unrelated config service")
 	}
 }

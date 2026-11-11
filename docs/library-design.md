@@ -2543,6 +2543,7 @@ demo-service/
 │   │   ├── order.go            # OrderConfigService / OrderService 访问器
 │   │   ├── module_factories.go # ProductModuleFactory / OrderModuleFactory
 │   │   ├── repository_declare.go    # RepositoryDeclare{OrdersRepo, ProductsRepo}
+│   │   ├── service_declare.go       # ServiceDeclare{ProductService, OrderConfigService, OrderService}
 │   │   └── *_test.go
 │   └── module/
 │       ├── order/
@@ -2782,27 +2783,45 @@ func NewRepositoryDeclare() RepositoryDeclare {
 
 ```go
 type Container struct {
-    repos RepositoryDeclare
+    repos    RepositoryDeclare
+    services ServiceDeclare
 
-    loggerMu sync.Mutex
-    logger   *zap.Logger
-
-    productService     lazyValue[*productservice.ProductService]
-    orderConfigService lazyValue[*orderservice.OrderConfigService]
-    orderService       lazyValue[*orderservice.OrderService]
+    loggerMu  sync.Mutex
+    zapLogger *zap.Logger
 }
 
 func NewContainer() *Container {
     return &Container{
-        repos:              NewRepositoryDeclare(),
-        productService:     newLazyValue[*productservice.ProductService]("product service"),
-        orderConfigService: newLazyValue[*orderservice.OrderConfigService]("order config service"),
-        orderService:       newLazyValue[*orderservice.OrderService]("order service"),
+        repos:    NewRepositoryDeclare(),
+        services: NewServiceDeclare(),
     }
 }
 
 // Init 记录本代 Runtime 的 logger；重复调用保留第一次的值，nil 退化为 Nop。
 func (c *Container) Init(logger *zap.Logger) { ... }
+
+// logger 返回本代 logger；尚未 Init 时退化为 Nop。
+func (c *Container) logger() *zap.Logger { ... }
+```
+
+`app/container/service_declare.go` 集中声明本代全部 service 构造槽，与
+`repository_declare.go` 同构：新增 service 时在这里补字段，再到模块访问器文件里
+写构造逻辑。
+
+```go
+type ServiceDeclare struct {
+    ProductService     lazyValue[*productservice.ProductService]
+    OrderConfigService lazyValue[*orderservice.OrderConfigService]
+    OrderService       lazyValue[*orderservice.OrderService]
+}
+
+func NewServiceDeclare() ServiceDeclare {
+    return ServiceDeclare{
+        ProductService:     newLazyValue[*productservice.ProductService]("product service"),
+        OrderConfigService: newLazyValue[*orderservice.OrderConfigService]("order config service"),
+        OrderService:       newLazyValue[*orderservice.OrderService]("order service"),
+    }
+}
 ```
 
 `app/container/lazy_value.go` 是构造槽本身：首次 `Get` 执行 build，之后返回同一
@@ -2844,7 +2863,7 @@ func (l *lazyValue[T]) Get(build func() T) T {
 
 ```go
 func (c *Container) ProductService() *productservice.ProductService {
-    return c.productService.Get(func() *productservice.ProductService {
+    return c.services.ProductService.Get(func() *productservice.ProductService {
         return productservice.NewProductService(productservice.Dependencies{
             Products: c.repos.ProductsRepo,
             Logger:   c.logger(),
@@ -2853,7 +2872,7 @@ func (c *Container) ProductService() *productservice.ProductService {
 }
 
 func (c *Container) OrderService() *orderservice.OrderService {
-    return c.orderService.Get(func() *orderservice.OrderService {
+    return c.services.OrderService.Get(func() *orderservice.OrderService {
         return orderservice.NewOrderService(orderservice.Dependencies{
             OrderRepository: c.repos.OrdersRepo,
             ProductAPI:      c.ProductService(), // 按需构建产品子树

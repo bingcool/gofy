@@ -8,22 +8,17 @@ package container
 import (
 	"sync"
 
-	orderservice "github.com/yourorg/demo-service/app/module/order/service"
-	productservice "github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
 )
 
-// Container 持有本代仓库、logger 与各服务的惰性构造槽。它不是包级全局：装配方
-// 每代新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
+// Container 持有本代仓库、service 构造槽与 logger。它不是包级全局：装配方每代
+// 新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
 type Container struct {
-	repos RepositoryDeclare
+	repos    RepositoryDeclare
+	services ServiceDeclare
 
 	loggerMu  sync.Mutex
 	zapLogger *zap.Logger
-
-	productService     lazyValue[*productservice.ProductService]
-	orderConfigService lazyValue[*orderservice.OrderConfigService]
-	orderService       lazyValue[*orderservice.OrderService]
 }
 
 // NewContainer 创建一个尚未构建任何 service 的容器。
@@ -34,10 +29,8 @@ type Container struct {
 // 当次 App。因此每代各有一套仓库与构造槽，旧代实例只服务在途请求。
 func NewContainer() *Container {
 	return &Container{
-		repos:              NewRepositoryDeclare(),
-		productService:     newLazyValue[*productservice.ProductService]("product service"),
-		orderConfigService: newLazyValue[*orderservice.OrderConfigService]("order config service"),
-		orderService:       newLazyValue[*orderservice.OrderService]("order service"),
+		repos:    NewRepositoryDeclare(),
+		services: NewServiceDeclare(),
 	}
 }
 

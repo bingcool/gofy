@@ -34,8 +34,10 @@ All notable changes to this project are documented here. The format follows
   interface. Dependency acquisition is a single
   composition root, `app/container`, instantiated once per generation
   (`container.NewContainer()` in `reload.go`). It owns
-  `RepositoryDeclare{OrdersRepo, ProductsRepo}` and one lazy slot per service
-  (`lazy_value.go`): `Init(rt.Logger)` records the generation logger, and
+  `RepositoryDeclare{OrdersRepo, ProductsRepo}` and
+  `ServiceDeclare{ProductService, OrderConfigService, OrderService}` — the
+  latter one lazy slot per service (`lazy_value.go`): `Init(rt.Logger)` records
+  the generation logger, and
   `ProductService()` / `OrderConfigService()` / `OrderService()` build their
   dependency subtree on first access, so a module factory only constructs its own
   module and unused capabilities stay unbuilt. Each slot uses its own `sync.Once`
