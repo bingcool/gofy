@@ -69,7 +69,7 @@ RequestID
 3. 写入 request context 的两层 key：
    - `support.ContextWithRequestID`：业务用
      `support.RequestIDFromContext(ctx)` 读取；
-   - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-service/client` 会从
+   - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-service/apicore/client` 会从
      同一个 context key 自动注入下游请求，不需要手工调用
      `client.ContextWithRequestID`。
 

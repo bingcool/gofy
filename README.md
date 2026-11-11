@@ -585,7 +585,7 @@ NACOS_DATA_ID=gofy-service NACOS_GROUP=GO_GROUP go run . start
 ## Nacos 服务注册与发现
 
 `support/nacos` 同时实现了 Naming API：`App` 在监听端口可用后把自身注册到 Nacos，
-退出时注销。客户端侧（`gofy-interface-service/client/nacos`）按服务名解析实例并
+退出时注销。客户端侧（`gofy-interface-service/apicore/client/nacos`）按服务名解析实例并
 做负载均衡。
 
 **服务注册**
@@ -658,7 +658,7 @@ app, err := gofy.New(
 import (
     "gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
     "gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-    resolvernacos "gofy/gofy-interface-service/client/nacos"
+    resolvernacos "gofy/gofy-interface-service/apicore/client/nacos"
 )
 
 resolver, err := resolvernacos.NewFromFiles("nacos.yaml", "application.yaml")

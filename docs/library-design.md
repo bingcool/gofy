@@ -983,7 +983,7 @@ signature 等，大小写不敏感），匹配到的值替换为 `***` 后重新
 - 同时写入 request context：
   - `support.ContextWithRequestID`：业务用
     `support.RequestIDFromContext(ctx)` 直接读取；
-  - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-service/client` 会从
+  - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-service/apicore/client` 会从
     同一个 context key 读取并注入下游请求，因此无需手工调用
     `client.ContextWithRequestID`；上游已有 `X-Trace-ID` 时传递的就是原值。
 
@@ -998,7 +998,7 @@ signature 等，大小写不敏感），匹配到的值替换为 `***` 后重新
 - `X-Trace-Id` 缺失时用 `RequestID` 的 `req_id` 补齐，保证下游始终有 trace；
 - 结果写入 request context，key 为 `gofy.header_propagation.headers`，
   handler 用 `support/headerpropagation.HeadersFromContext(ctx)` 读取；
-- `gofy-interface-service/client` 用同一个字符串 key 读取并注入下游请求，
+- `gofy-interface-service/apicore/client` 用同一个字符串 key 读取并注入下游请求，
   两个模块互不 import。合并顺序为「透传头 < Request `header` tag < `CallOption`」，
   单次调用可以覆盖；`X-User-Agent` 无透传值时默认 `gofy-api-sdk`；
 - 认证中间件在 handler 前解析出用户后，应通过 `frameworkcontext.WithUser`
@@ -2972,7 +2972,7 @@ GET    /api/v1/order/config
 | --- | --- | --- |
 | 请求 | `appinterface/demoservice/orderrequest` | `GetOrderRequest`、`ListOrdersRequest`、`CreateOrderRequest`、`CancelOrderRequest` |
 | 响应 | `appinterface/demoservice/orderresponse` | `GetOrderResponse`、`CreateOrderResponse` |
-| 列表 | `contracts/common/paging` | `ListData[orderdto.OrderDTO]` |
+| 列表 | `apicore/contracts/common/paging` | `ListData[orderdto.OrderDTO]` |
 | DTO | `appinterface/demoservice/orderdto` | `OrderDTO` |
 | 枚举 | `appinterface/demoservice/orderenum` | `OrderStatus`、`PayType` |
 | 错误 | `appinterface/demoservice` | `ErrOrderNotFound`（40401）、`ErrOrderClosed`（40402） |
@@ -3015,14 +3015,14 @@ import (
     "github.com/bingcool/gofy/apperr"
     "github.com/yourorg/demo-service/app/module/order/service"
     "go.uber.org/zap"
-    gofyadapter "gofy/gofy-interface-service/adapter/gofy"
+    gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
     "gofy/gofy-interface-service/appinterface/demoservice"
     "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
     "gofy/gofy-interface-service/appinterface/demoservice/orderenum"
     "gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
     "gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-    "gofy/gofy-interface-service/contracts/common/paging"
-    "gofy/gofy-interface-service/contracts/common/types"
+    "gofy/gofy-interface-service/apicore/contracts/common/paging"
+    "gofy/gofy-interface-service/apicore/contracts/common/types"
 )
 
 var _ demoservice.OrdersService = (*OrderController)(nil)

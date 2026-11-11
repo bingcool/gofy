@@ -8,14 +8,14 @@ import (
 	"github.com/bingcool/gofy/apperr"
 	"github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
-	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/contracts/common/types"
 	"gofy/gofy-interface-service/appinterface/demoservice"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/contracts/common/paging"
-	"gofy/gofy-interface-service/contracts/common/types"
 )
 
 var _ demoservice.OrdersService = (*OrderController)(nil)

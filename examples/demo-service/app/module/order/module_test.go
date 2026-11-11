@@ -26,10 +26,10 @@ import (
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/contracts/common/paging"
 	"gorm.io/gorm"
 )
 

@@ -416,6 +416,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `gofy-interface-service`: the shared contract core now lives under `apicore/`
+  — `apicore/contracts`, `apicore/client`, `apicore/adapter` and `apicore/cmd`
+  — so the directory name marks code that business definitions must not edit;
+  `appinterface/` stays the only extensible layer. Import paths, the `refcheck`
+  layer prefixes and default directory, the Makefile, CI workflow and README
+  moved with it. The demo controller now binds through
+  `gofy/gofy-interface-service/apicore/adapter/gofy` and imports
+  `apicore/contracts/common/{paging,types}`.
 - `examples/demo-service`: the order module binds each contract route group to
   its own handler. `demoservice.Service` gained the narrow `OrdersService` and
   `ConfigService` interfaces (`Service` embeds both), `GetConfig` moved from

@@ -41,14 +41,14 @@
 | D1 | `gofy-interface-service` 的定位 | **契约 + SDK + 文档工具仓库**，不是新的业务服务，也不是网关/BFF |
 | D2 | 服务端实现位置 | 仍由各业务服务实现；契约仓库只提供接口、DTO、路由描述符、客户端和 OpenAPI |
 | D3 | 契约来源 | 以 Go 结构体、接口、`endpoint.Route` 描述符为唯一事实来源；不维护 PHP 式注解 |
-| D4 | 服务端路由 | 由 `adapter/gofy.BindAll` 根据契约描述符注册，路径/方法/鉴权元数据不再手写第二份 |
+| D4 | 服务端路由 | 由 `apicore/adapter/gofy.BindAll` 根据契约描述符注册，路径/方法/鉴权元数据不再手写第二份 |
 | D5 | DTO / Request / Response | 参考 InterfaceApi 的 `Request`、`Response`、`Dto`、`Const`、`Enum` 分层；Go 用 struct + tag 表达 |
 | D6 | 响应信封 | 沿用 gofy：`{code,msg,data,req_id,details}`；`code == 0` 为成功，`req_id/details` 是兼容性扩展 |
 | D7 | 列表/分页 | 列表 `data = {total,list}`；分页 `data = {total,list,page,page_size}` |
 | D8 | 客户端 | 由契约仓库提供泛型 `client.Call`，并为每个契约生成强类型 Client |
 | D9 | OpenAPI | 自研反射式生成器输出 OpenAPI 3.0.3 YAML/JSON；用 `kin-openapi` 校验；CI 做 golden diff |
 | D10 | Swagger UI | 内嵌 `swaggest/swgui/v5emb`，不依赖 CDN；由业务服务挂载 `/docs`，默认仅非生产环境 |
-| D11 | 契约纯净性 | `contracts/**` 只允许标准库和本模块包；`appinterface/**` 额外允许 `client/**`；两者都禁止导入 gin/gorm/gofy/zap 等运行时 |
+| D11 | 契约纯净性 | `apicore/contracts/**` 只允许标准库和本模块包；`appinterface/**` 额外允许 `apicore/client/**`；两者都禁止导入 gin/gorm/gofy/zap 等运行时 |
 | D12 | 版本 | Go module 语义化版本；业务契约集中在 `appinterface/{domain}service`，目录不带 `vN`；破坏性变更提升 module 主版本 |
 | D13 | 不在本期范围 | cron、worker/process 管理、process pool、Swoole 协程运行时、daemon 管理 |
 | D14 | 首个落地服务 | `examples/demo-service`，用它验证契约、Client、OpenAPI 和迁移路径 |
@@ -80,8 +80,8 @@
 | 校验 | `#[ValidationRule]` | `go-playground/validator` tag |
 | 响应 | `BaseResponse` 子类声明 `data` | Response struct 即 `data`，信封由 gofy Responder 生成 |
 | 客户端 | 生成 `*Api` 继承 `BaseClientApi` | 泛型 `client.Call` + 生成强类型方法 |
-| 文档 | `generate-openapi.php` | 反射式 `cmd/gofy-openapi` |
-| 引用边界 | 只允许 `InterfaceApi\` + PHP 内建 | 公共层只允许标准库 + 本模块 `contracts/**`；业务层额外允许 `client/**`、`appinterface/**` |
+| 文档 | `generate-openapi.php` | 反射式 `apicore/cmd/gofy-openapi` |
+| 引用边界 | 只允许 `InterfaceApi\` + PHP 内建 | 公共层只允许标准库 + 本模块 `apicore/contracts/**`；业务层额外允许 `apicore/client/**`、`appinterface/**` |
 | 服务发现 | Nacos | `client.Resolver` 接口，Nacos 适配器后置 |
 | 版本 | 仓库版本 + 目录 | module semver；业务契约目录不带 `vN` |
 
@@ -149,7 +149,7 @@
 | Swoole 协程与连接 fd | Go 用 goroutine + `context.Context` |
 | 动态 Controller/Action 分发、denyActions | Go 静态路由，不存在反射任意方法调用 |
 | 路由元数据缓存 | 启动期注册，天然只解析一次 |
-| PHP `ArrayDto` 魔术访问 | Go 用显式字段；反射填充只存在于 client/docgen |
+| PHP `ArrayDto` 魔术访问 | Go 用显式字段；反射填充只存在于 apicore/client/docgen |
 | `dump()`、previousUrl、isMobile、getBrowser | Swoole/PHP 场景专用或价值低 |
 | 811 行 MIME 静态表 | 标准库 + `mimetype` 已覆盖 |
 | 进程健康检查 | 进程管理不在范围；容器探针由编排系统负责 |
@@ -200,11 +200,11 @@ gofy/
 - 存放所有跨服务契约：DTO、Request、Response、Const、Enum、错误码、路由描述符、Service 接口。
 - 存放生成的强类型 Client。
 - 存放 OpenAPI 生成器、Swagger UI 包、引用边界检查器。
-- **不存放业务实现**；业务服务通过 `adapter/gofy` 把契约绑定到自己的 gofy 应用。
+- **不存放业务实现**；业务服务通过 `apicore/adapter/gofy` 把契约绑定到自己的 gofy 应用。
 
 **公共层与业务层的修改边界：**
 
-本仓库会被新项目作为依赖下载使用。下载后只有 `appinterface/**` 允许增改；`contracts/**`、`client/**`、`adapter/**`、`docgen/**`、`docsui/**`、`cmd/**`、`openapi/**` 属于共享实现，保持只读，随 module 版本升级。新增服务时在 `appinterface/` 下建目录（如 `demoservice`、`productservice`），在该目录内定义 DTO、枚举、常量、请求、响应、路由和 Service 接口，并在 `{domain}serviceclient/` 子包内定义强类型客户端。
+本仓库会被新项目作为依赖下载使用。`apicore/` 是契约核心，目录名即约束：业务侧定义契约时不得修改。下载后只有 `appinterface/**` 允许增改；`apicore/contracts/**`、`apicore/client/**`、`apicore/adapter/**`、`apicore/cmd/**`、`docgen/**`、`docsui/**`、`openapi/**` 属于共享实现，保持只读，随 module 版本升级。新增服务时在 `appinterface/` 下建目录（如 `demoservice`、`productservice`），在该目录内定义 DTO、枚举、常量、请求、响应、路由和 Service 接口，并在 `{domain}serviceclient/` 子包内定义强类型客户端。
 
 契约仓库只描述线上协议；Redis、锁、对象存储、短信等运行时能力不属于契约层，业务在 service 层使用自己的实现并把结果映射为契约 DTO。禁止为了让 DTO 复用某个运行时类型而把这类依赖引入契约仓库。
 
@@ -224,23 +224,47 @@ gofy-interface-service/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml
-├── contracts/                      # 公共契约层（不可修改）：只依赖标准库和 contracts/**
-│   └── common/
-│       ├── envelope/
-│       │   └── envelope.go         # Envelope[T]、ErrorEnvelope
-│       ├── paging/
-│       │   └── paging.go           # PageRequest、ListData[T]、PageData[T]
-│       ├── errcode/
-│       │   ├── errcode.go          # Code、Fault、公共错误码
-│       │   └── ranges.go           # 业务码段分配表
-│       ├── types/
-│       │   ├── int64_string.go     # Int64String / Uint64String
-│       │   ├── date.go             # Date（yyyy-MM-dd）
-│       │   └── decimal.go          # Decimal（字符串定点数，可选）
-│       ├── endpoint/
-│       │   └── endpoint.go         # Spec、Route[Req,Res]、Descriptor、New()
-│       └── enum/
-│           └── enum.go             # 枚举辅助：Values、Labels、校验
+├── apicore/                        # 契约核心（业务侧只读，随 module 版本升级）
+│   ├── contracts/                  # 公共契约层（不可修改）：只依赖标准库和 apicore/contracts/**
+│   │   └── common/
+│   │       ├── envelope/
+│   │       │   └── envelope.go         # Envelope[T]、ErrorEnvelope
+│   │       ├── paging/
+│   │       │   └── paging.go           # PageRequest、ListData[T]、PageData[T]
+│   │       ├── errcode/
+│   │       │   ├── errcode.go          # Code、Fault、公共错误码
+│   │       │   └── ranges.go           # 业务码段分配表
+│   │       ├── types/
+│   │       │   ├── int64_string.go     # Int64String / Uint64String
+│   │       │   ├── date.go             # Date（yyyy-MM-dd）
+│   │       │   └── decimal.go          # Decimal（字符串定点数，可选）
+│   │       ├── endpoint/
+│   │       │   └── endpoint.go         # Spec、Route[Req,Res]、Descriptor、New()
+│   │       └── enum/
+│   │           └── enum.go             # 枚举辅助：Values、Labels、校验
+│   ├── adapter/
+│   │   └── gofy/
+│   │       ├── bind.go                 # Bind、BindGroup、BindAll、BindSSE、BindDownload、BindChunked
+│   │       ├── errors.go               # errcode.Fault -> *apperr.Error
+│   │       └── options.go              # BindOptions、MiddlewareRegistry、路由级中间件
+│   ├── client/
+│   │   ├── client.go                   # Client、Config
+│   │   ├── call.go                     # Call[Req,Res]
+│   │   ├── encode.go                   # path/query/json/multipart 构造
+│   │   ├── decode.go                   # 信封解析
+│   │   ├── errors.go                   # APIError、HTTPError、ProtocolError
+│   │   ├── retry.go                    # 重试与退避
+│   │   ├── sse.go                      # SSE / 下载 / 分块客户端
+│   │   ├── resolver.go                 # Resolver 接口、StaticResolver
+│   │   └── nacos/
+│   │       └── resolver.go             # Nacos 服务发现、缓存/陈旧回退、负载均衡
+│   └── cmd/
+│       ├── gofy-openapi/
+│       │   └── main.go                 # 生成/校验 OpenAPI
+│       ├── gofy-client/
+│       │   └── main.go                 # 生成/检查强类型 Client
+│       └── refcheck/
+│           └── main.go                 # 契约引用边界检查
 ├── appinterface/                      # 业务契约层（唯一可扩展目录）
 │   ├── routes.go                   # 显式聚合所有服务 Routes()，无 init()
 │   └── demoservice/
@@ -270,22 +294,6 @@ gofy-interface-service/
 │       │   └── request.go          # GetOrderRequest、CreateOrderRequest、ListOrdersRequest、GetConfigRequest
 │       └── orderresponse/          # package orderresponse
 │           └── response.go         # GetOrderResponse、CreateOrderResponse、GetConfigResponse
-├── adapter/
-│   └── gofy/
-│       ├── bind.go                 # Bind、BindGroup、BindAll、BindSSE、BindDownload、BindChunked
-│       ├── errors.go               # errcode.Fault -> *apperr.Error
-│       └── options.go              # BindOptions、MiddlewareRegistry、路由级中间件
-├── client/
-│   ├── client.go                   # Client、Config
-│   ├── call.go                     # Call[Req,Res]
-│   ├── encode.go                   # path/query/json/multipart 构造
-│   ├── decode.go                   # 信封解析
-│   ├── errors.go                   # APIError、HTTPError、ProtocolError
-│   ├── retry.go                    # 重试与退避
-│   ├── sse.go                      # SSE / 下载 / 分块客户端
-│   ├── resolver.go                 # Resolver 接口、StaticResolver
-│   └── nacos/
-│       └── resolver.go             # Nacos 服务发现、缓存/陈旧回退、负载均衡
 ├── docgen/
 │   ├── openapi.go                  # 文档构建入口
 │   ├── operation.go                # Operation 生成
@@ -300,13 +308,6 @@ gofy-interface-service/
 │   ├── embed.go                    # //go:embed *.yaml
 │   ├── demoservice.yaml            # 生成物
 │   └── demoservice.json            # 生成物
-├── cmd/
-│   ├── gofy-openapi/
-│   │   └── main.go                 # 生成/校验 OpenAPI
-│   ├── gofy-client/
-│   │   └── main.go                 # 生成/检查强类型 Client
-│   └── refcheck/
-│       └── main.go                 # 契约引用边界检查
 ├── internal/
 │   ├── testserver/                 # httptest 服务端
 │   └── lint/                       # tag/枚举一致性检查
@@ -321,23 +322,23 @@ gofy-interface-service/
 **依赖方向：**
 
 ```text
-contracts/**           -> 标准库 + contracts/**
-appinterface/**           -> 标准库 + contracts/** + client/** + appinterface/**
-adapter/gofy           -> appinterface/** + contracts/** + github.com/bingcool/gofy
-client                 -> contracts/** + 标准库（net/http、encoding/json）
-docgen                 -> appinterface/** + contracts/** + kin-openapi（仅工具链）
+apicore/contracts/**   -> 标准库 + apicore/contracts/**
+appinterface/**           -> 标准库 + apicore/contracts/** + apicore/client/** + appinterface/**
+apicore/adapter/gofy   -> appinterface/** + apicore/contracts/** + github.com/bingcool/gofy
+apicore/client         -> apicore/contracts/** + 标准库（net/http、encoding/json）
+docgen                 -> appinterface/** + apicore/contracts/** + kin-openapi（仅工具链）
 docsui                 -> 标准库 + swgui +（可选）gofy
-cmd/*                  -> 上述包
+apicore/cmd/*          -> 上述包
 ```
 
 **硬性规则：**
 
-1. `contracts/**` 不得导入 `github.com/gin-gonic/gin`、`gorm.io/gorm`、`github.com/bingcool/gofy`、`go.uber.org/zap`、任何第三方包。
-2. `appinterface/**` 只允许标准库、本模块 `contracts/**`、`client/**`、`appinterface/**`；不得导入 gin/gorm/gofy、`adapter/gofy`、`docgen`、`docsui`。
-3. `contracts/**` 不得包含业务实现、数据库访问、日志、HTTP 客户端；业务契约集中在 `appinterface/{domain}service/`。
-4. `adapter/gofy` 是唯一把契约接到 gofy 路由的包。
-5. `client` 不依赖 gofy；它只依赖 `net/http` 和契约。
-6. `docgen` / `docsui` / `cmd` 是工具链，不被业务服务 import。
+1. `apicore/contracts/**` 不得导入 `github.com/gin-gonic/gin`、`gorm.io/gorm`、`github.com/bingcool/gofy`、`go.uber.org/zap`、任何第三方包。
+2. `appinterface/**` 只允许标准库、本模块 `apicore/contracts/**`、`apicore/client/**`、`appinterface/**`；不得导入 gin/gorm/gofy、`apicore/adapter/gofy`、`docgen`、`docsui`。
+3. `apicore/contracts/**` 不得包含业务实现、数据库访问、日志、HTTP 客户端；业务契约集中在 `appinterface/{domain}service/`。
+4. `apicore/adapter/gofy` 是唯一把契约接到 gofy 路由的包。
+5. `apicore/client` 不依赖 gofy；它只依赖 `net/http` 和契约。
+6. `docgen` / `docsui` / `apicore/cmd` 是工具链，不被业务服务 import。
 7. 两层都禁止 `init()` 副作用；契约聚合使用显式 `Routes()`。
 8. 只有 `appinterface/**` 是业务方可编辑区域，其余目录只随 module 版本升级。
 
@@ -352,21 +353,21 @@ cmd/*                  -> 上述包
 
 | 包 | 职责 | 不做什么 |
 | --- | --- | --- |
-| `contracts/common/envelope` | 定义成功/错误信封、泛型容器 | 不负责序列化策略 |
-| `contracts/common/paging` | 分页请求、列表/分页 data | 不做数据库分页 |
-| `contracts/common/errcode` | 公共错误码、业务码段、`Fault` | 不依赖 `apperr` |
-| `contracts/common/types` | 大整数、日期、定点数等 JSON/表单类型 | 不做业务校验 |
-| `contracts/common/endpoint` | 路由描述符、请求/响应类型反射入口 | 不导入 gofy/gin |
-| `contracts/common/enum` | 枚举值/标签辅助 | 不生成代码 |
-| `contracts/common/*` | 公共契约原语（信封、分页、错误码、类型、路由描述符、枚举辅助） | 不写业务逻辑 |
+| `apicore/contracts/common/envelope` | 定义成功/错误信封、泛型容器 | 不负责序列化策略 |
+| `apicore/contracts/common/paging` | 分页请求、列表/分页 data | 不做数据库分页 |
+| `apicore/contracts/common/errcode` | 公共错误码、业务码段、`Fault` | 不依赖 `apperr` |
+| `apicore/contracts/common/types` | 大整数、日期、定点数等 JSON/表单类型 | 不做业务校验 |
+| `apicore/contracts/common/endpoint` | 路由描述符、请求/响应类型反射入口 | 不导入 gofy/gin |
+| `apicore/contracts/common/enum` | 枚举值/标签辅助 | 不生成代码 |
+| `apicore/contracts/common/*` | 公共契约原语（信封、分页、错误码、类型、路由描述符、枚举辅助） | 不写业务逻辑 |
 | `appinterface/{domain}service` | 业务 DTO、Request、Response、枚举、常量、Service 接口、路由描述符；强类型客户端在其 `{domain}serviceclient` 子包 | 不写业务逻辑 |
-| `adapter/gofy` | 注册路由、映射错误、安装中间件、特殊响应 | 不定义业务类型 |
+| `apicore/adapter/gofy` | 注册路由、映射错误、安装中间件、特殊响应 | 不定义业务类型 |
 | `client` | HTTP 调用、编码/解码、重试、错误 | 不做服务端校验 |
 | `docgen` | 反射生成 OpenAPI | 不运行服务 |
 | `docsui` | 挂载 Swagger UI | 不生成规范 |
-| `cmd/refcheck` | contracts/appinterface 引用边界检查 | 不改代码 |
-| `cmd/gofy-client` | 生成强类型客户端 | 不手写业务客户端 |
-| `cmd/gofy-openapi` | 生成/校验 OpenAPI | 不启动 HTTP 服务 |
+| `apicore/cmd/refcheck` | apicore/contracts/appinterface 引用边界检查 | 不改代码 |
+| `apicore/cmd/gofy-client` | 生成强类型客户端 | 不手写业务客户端 |
+| `apicore/cmd/gofy-openapi` | 生成/校验 OpenAPI | 不启动 HTTP 服务 |
 
 ### 3.5 构建与工具链
 
@@ -382,19 +383,19 @@ vet:
 	go vet ./...
 
 lint:
-	gofmt -l . && go run ./cmd/refcheck
+	gofmt -l . && go run ./apicore/cmd/refcheck
 
 refcheck:
-	go run ./cmd/refcheck
+	go run ./apicore/cmd/refcheck
 
 generate:
-	go run ./cmd/gofy-openapi -all -out ./openapi
+	go run ./apicore/cmd/gofy-openapi -all -out ./openapi
 
 generate-client:
-	go run ./cmd/gofy-client -all
+	go run ./apicore/cmd/gofy-client -all
 
 docs:
-	go run ./cmd/gofy-openapi -all -out ./openapi -serve :8090
+	go run ./apicore/cmd/gofy-openapi -all -out ./openapi -serve :8090
 
 check: vet refcheck generate generate-client
 	git diff --exit-code -- openapi client
@@ -426,7 +427,7 @@ require (
 | 项 | 规则 |
 | --- | --- |
 | module path | `gofy/gofy-interface-service` |
-| 公共契约层 | `contracts/**`，随 module 版本升级，业务方不得修改 |
+| 公共契约层 | `apicore/contracts/**`，随 module 版本升级，业务方不得修改 |
 | 业务契约层 | `appinterface/{domain}service/**`，唯一可扩展目录，如 `appinterface/demoservice` |
 | Go 包名 | `{domain}service`，如 `demoservice` |
 | 载荷子包 | `appinterface/{domain}service/{domain}dto`、`{domain}enum`、`{domain}request`、`{domain}response`、`{domain}const`，包名带领域前缀（如 `orderdto`），禁止使用 `dto`、`request`、`const` 等通用包名 |
@@ -465,7 +466,7 @@ import (
 	"time"
 
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-	"gofy/gofy-interface-service/contracts/common/types"
+	"gofy/gofy-interface-service/apicore/contracts/common/types"
 )
 
 // OrderDTO 订单详情。
@@ -513,8 +514,8 @@ package orderrequest
 
 import (
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-	"gofy/gofy-interface-service/contracts/common/paging"
-	"gofy/gofy-interface-service/contracts/common/types"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/contracts/common/types"
 )
 
 // GetOrderRequest 查询订单。
@@ -702,9 +703,9 @@ type CancelOrderRequest struct {
 
 | 类型 | 位置 | 示例 |
 | --- | --- | --- |
-| 协议/框架常量 | `contracts/common` | 分页默认值、请求头名 |
+| 协议/框架常量 | `apicore/contracts/common` | 分页默认值、请求头名 |
 | 业务常量 | `appinterface/{domain}service/{domain}const/const.go` | 最大订单明细数、订单号前缀 |
-| 错误码 | `contracts/common/errcode` + 业务码段 | `ErrOrderNotFound` |
+| 错误码 | `apicore/contracts/common/errcode` + 业务码段 | `ErrOrderNotFound` |
 
 ```go
 package orderconst
@@ -838,7 +839,7 @@ PayType PayType `json:"pay_type" validate:"omitempty,oneof=1 2" doc:"支付方�
 | 30000–39999 | payment | 30401 支付失败 |
 | 90000–99999 | 平台/基础设施 | 90401 配置缺失 |
 
-`contracts/common/errcode/ranges.go` 维护该表；CI 检查同一 code 不被两个业务域声明。
+`apicore/contracts/common/errcode/ranges.go` 维护该表；CI 检查同一 code 不被两个业务域声明。
 
 **纯契约错误类型（不依赖 gofy）：**
 
@@ -863,7 +864,7 @@ func New(code Code, status int, message string) Fault {
 ```go
 package demoservice
 
-import "gofy/gofy-interface-service/contracts/common/errcode"
+import "gofy/gofy-interface-service/apicore/contracts/common/errcode"
 
 const (
 	ErrCodeOrderNotFound errcode.Code = 40401
@@ -883,7 +884,7 @@ package gofyadapter
 
 import (
 	"github.com/bingcool/gofy/apperr"
-	"gofy/gofy-interface-service/contracts/common/errcode"
+	"gofy/gofy-interface-service/apicore/contracts/common/errcode"
 )
 
 func Error(f errcode.Fault) *apperr.Error {
@@ -1031,7 +1032,7 @@ import (
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 // Service 是订单契约的服务端接口。业务实现必须满足该接口。
@@ -1054,8 +1055,8 @@ import (
 	"gofy/gofy-interface-service/appinterface/demoservice/ordererror"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/contracts/common/endpoint"
-	"gofy/gofy-interface-service/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/contracts/common/endpoint"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 var (
@@ -1122,7 +1123,7 @@ package orderroute
 import (
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/contracts/common/endpoint"
+	"gofy/gofy-interface-service/apicore/contracts/common/endpoint"
 )
 
 // GetConfig GET /config
@@ -1566,7 +1567,7 @@ import (
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 type Handler struct {
@@ -1684,7 +1685,7 @@ func BindChunked[Req any](
 ```
 
 > **实现状态（gofy v0.1）：** gofy 的 `support` 尚未提供 `sse.Stream`、`support.Download`、`chunked.Writer`。
-> `adapter/gofy.BindAll` 对 `KindSSE`/`KindDownload`/`KindChunked` 会在启动时返回聚合错误
+> `apicore/adapter/gofy.BindAll` 对 `KindSSE`/`KindDownload`/`KindChunked` 会在启动时返回聚合错误
 > （`response kind ... is not supported by the gofy adapter`），不会静默降级为 JSON。
 > 客户端 `client.StreamSSE`/`DownloadFile`/`StreamChunked` 已实现，可用于调用其他服务的这类路由；
 > 服务端绑定待 gofy 补齐传输原语后再提供。
@@ -1856,8 +1857,8 @@ import (
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
-	"gofy/gofy-interface-service/client"
-	"gofy/gofy-interface-service/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/client"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 type Client struct {
@@ -1890,7 +1891,7 @@ func (c *Client) GetConfig(ctx context.Context, req *orderrequest.GetConfigReque
 }
 ```
 
-> 以上方法由 `cmd/gofy-client` 生成，文件头写 `// Code generated by gofy-client. DO NOT EDIT.`。手写等价代码也允许，但 CI 的 `-check` 会以生成结果为准。
+> 以上方法由 `apicore/cmd/gofy-client` 生成，文件头写 `// Code generated by gofy-client. DO NOT EDIT.`。手写等价代码也允许，但 CI 的 `-check` 会以生成结果为准。
 
 ### 6.3 请求构造规则
 
@@ -2082,8 +2083,8 @@ func (r StaticResolver) Resolve(context.Context, string) (string, error) {
 - Resolver 结果按 `Service` 缓存，默认 TTL 30s。
 - 连接错误时主动失效缓存，并在下一次重试前重新解析（`send` 在循环内取 base URL），
   因此重试可能落到另一个实例。
-- 内置 `StaticResolver`（固定地址）与 `client/nacos`（Nacos 命名服务发现）。
-- `client/nacos.Resolver` 调用 `instance/list`，按 `cache_ttl` 缓存实例列表；Nacos
+- 内置 `StaticResolver`（固定地址）与 `apicore/client/nacos`（Nacos 命名服务发现）。
+- `apicore/client/nacos.Resolver` 调用 `instance/list`，按 `cache_ttl` 缓存实例列表；Nacos
   不可达时在 `stale_ttl` 内继续使用最后一次成功结果。负载均衡在 Resolver 内完成：
   `random`（默认）、`round_robin`、`weight`。
 - 注册信息（`service_register` / `discovery_service_client`）由
@@ -2092,9 +2093,9 @@ func (r StaticResolver) Resolve(context.Context, string) (string, error) {
 
 ### 6.8 生成强类型客户端
 
-`cmd/gofy-client`：
+`apicore/cmd/gofy-client`：
 
-1. 用 `golang.org/x/tools/go/packages` 加载 `./contracts/...`。
+1. 用 `golang.org/x/tools/go/packages` 加载 `./apicore/contracts/...`。
 2. 找到每个模块的 `Service` 接口和 `Routes()` 返回的路由描述符。
 3. 按 `OperationID` 匹配接口方法和路由。
 4. 生成到 `appinterface/{domain}service/{domain}serviceclient/`（不带版本目录，例如 `appinterface/demoservice/demoserviceclient/`）：`client.go` 放 `Client` 类型和三种寻址方式，每个路由文件生成一个 `*_client.go`（`order_route.go` → `order_client.go`、`config_route.go` → `config_client.go`）。
@@ -2118,7 +2119,7 @@ func (r StaticResolver) Resolve(context.Context, string) (string, error) {
 - 同一 `OperationID` 出现多次。
 - 生成目录已存在手写文件（非 generated 标记）且内容不同。
 
-> **实现状态（v0.1）：** `cmd/gofy-client` 尚未实现。`appinterface/demoservice/demoserviceclient/` 目前是按相同规则手写的等价包装
+> **实现状态（v0.1）：** `apicore/cmd/gofy-client` 尚未实现。`appinterface/demoservice/demoserviceclient/` 目前是按相同规则手写的等价包装
 > （每个方法一行 `client.Call`，并提供 `IsOrderNotFound`/`IsOrderClosed` 便捷判断）。
 > 通用 `client.Call[Req,Res]`/`StreamSSE`/`DownloadFile`/`StreamChunked` 均已可直接使用；
 > 后续加入生成器时，手写文件需带 generated 标记或迁移到生成目录。
@@ -2142,7 +2143,7 @@ func (r StaticResolver) Resolve(context.Context, string) (string, error) {
 ### 7.2 生成器架构
 
 ```text
-cmd/gofy-openapi
+apicore/cmd/gofy-openapi
   -> appinterface.Routes()          // 显式聚合
   -> docgen.Build(options)           // 纯函数
        -> operation.Build(route)     // 路径、参数、body、响应
@@ -2165,16 +2166,16 @@ cmd/gofy-openapi
 
 ```bash
 # 生成全量
-go run ./cmd/gofy-openapi -all -out ./openapi
+go run ./apicore/cmd/gofy-openapi -all -out ./openapi
 
 # 只生成订单模块，并声明部署前缀
-go run ./cmd/gofy-openapi -service demoservice -prefix demoservice=/api/v1/order -out ./openapi
+go run ./apicore/cmd/gofy-openapi -service demoservice -prefix demoservice=/api/v1/order -out ./openapi
 
 # 校验已有规范
-go run ./cmd/gofy-openapi -validate ./openapi/demoservice.yaml
+go run ./apicore/cmd/gofy-openapi -validate ./openapi/demoservice.yaml
 
 # 本地预览（内嵌 Swagger UI）
-go run ./cmd/gofy-openapi -all -serve :8090
+go run ./apicore/cmd/gofy-openapi -all -serve :8090
 ```
 
 **输出：**
@@ -2234,7 +2235,7 @@ go run ./cmd/gofy-openapi -all -serve :8090
 - 组件名稳定算法：
   ```text
   schemaName(t):
-    基础名 = PascalCase(包名去掉 contracts/ 前缀) + PascalCase(类型名)
+    基础名 = PascalCase(包名去掉 apicore/contracts/ 前缀) + PascalCase(类型名)
     泛型实例 = 基础名 + "Of" + 每个类型参数名，用 "And" 连接
     非法字符替换为 "_"
     冲突时追加 8 位 FNV hash
@@ -2439,7 +2440,7 @@ mux.Handle("/docs/", docs)
 mux.Handle("/openapi.json", docs)
 ```
 
-作为 gofy 模块（放在 `adapter/gofy/docs.go`，避免 `docsui` 依赖 gin/gofy）。注册模块本身就是显式开启，
+作为 gofy 模块（放在 `apicore/adapter/gofy/docs.go`，避免 `docsui` 依赖 gin/gofy）。注册模块本身就是显式开启，
 因此 `DocsModule` 会强制把 `cfg.Enabled` 置为 true：
 
 ```go
@@ -2483,19 +2484,19 @@ func (m *docsModule) Register(r *support.Router) error {
 
 ```bash
 # 1. 生成
-go run ./cmd/gofy-openapi -all -out ./openapi
+go run ./apicore/cmd/gofy-openapi -all -out ./openapi
 
 # 2. 校验 YAML/JSON 合法、无未解析 $ref
-go run ./cmd/gofy-openapi -validate ./openapi/demoservice.yaml
+go run ./apicore/cmd/gofy-openapi -validate ./openapi/demoservice.yaml
 
 # 3. 确认生成物与仓库一致
 git diff --exit-code -- openapi/
 
 # 4. 契约引用边界
-go run ./cmd/refcheck
+go run ./apicore/cmd/refcheck
 
 # 5. 客户端生成物一致
-go run ./cmd/gofy-client -all -check
+go run ./apicore/cmd/gofy-client -all -check
 ```
 
 **可选：** 用 `oasdiff` 做破坏性变更检测：
@@ -3058,7 +3059,7 @@ replace gofy/gofy-interface-service => ../gofy-interface-service
 
 **2. 删除本地重复 DTO：**
 
-`app/module/order/dto/order.go` 删除，改用 `appinterface/demoservice/orderdto` 和 `contracts/common/paging`。
+`app/module/order/dto/order.go` 删除，改用 `appinterface/demoservice/orderdto` 和 `apicore/contracts/common/paging`。
 
 **3. 实现契约接口：**
 
@@ -3117,8 +3118,8 @@ curl -s localhost:8080/openapi.json | jq '.paths | keys'
 import (
 	"gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/client"
-	"gofy/gofy-interface-service/contracts/common/types"
+	"gofy/gofy-interface-service/apicore/client"
+	"gofy/gofy-interface-service/apicore/contracts/common/types"
 )
 
 c, err := client.New(client.Config{
@@ -3189,9 +3190,9 @@ go.work
 | `StreamResponse` | `Spec.ResponseKind=KindSSE` | 专用绑定 |
 | `ChunkedResponse` | `Spec.ResponseKind=KindChunked` | 专用绑定 |
 | `DownloadResponse` | `Spec.ResponseKind=KindDownload` | 专用绑定 |
-| `generate-client.php` | `cmd/gofy-client` | 生成强类型方法 |
-| `generate-openapi.php` | `cmd/gofy-openapi` | 反射生成 |
-| `reference-check.php` | `cmd/refcheck` | 导入边界检查 |
+| `generate-client.php` | `apicore/cmd/gofy-client` | 生成强类型方法 |
+| `generate-openapi.php` | `apicore/cmd/gofy-openapi` | 反射生成 |
+| `reference-check.php` | `apicore/cmd/refcheck` | 导入边界检查 |
 | `interface-api.json` serviceName | `Config.Service` / `Resolver` | 服务名 |
 
 **行为差异：**
@@ -3211,10 +3212,10 @@ go.work
 | 包 | 测试重点 |
 | --- | --- |
 | `endpoint` | `Spec` 校验、泛型类型反射、重复路由 |
-| `adapter/gofy` | `BindAll` 方法映射、签名不符、NoContent、中间件名缺失、错误映射 |
-| `client/encode` | path 替换、query 编码、slice 重复 key、multipart |
-| `client/decode` | 成功/错误信封、空 body、非法 JSON、未知字段、大整数 |
-| `client/retry` | 幂等/非幂等、429/503、退避、context 取消 |
+| `apicore/adapter/gofy` | `BindAll` 方法映射、签名不符、NoContent、中间件名缺失、错误映射 |
+| `apicore/client/encode` | path 替换、query 编码、slice 重复 key、multipart |
+| `apicore/client/decode` | 成功/错误信封、空 body、非法 JSON、未知字段、大整数 |
+| `apicore/client/retry` | 幂等/非幂等、429/503、退避、context 取消 |
 | `docgen/schema` | 所有类型映射、指针、嵌套、泛型、递归、嵌入 |
 | `docgen/naming` | 稳定组件名、冲突 hash |
 | `docgen/constraints` | validate tag 映射 |
@@ -3234,8 +3235,8 @@ go.work
 ### 10.2 黄金文件测试
 
 - `docgen/testdata/*.golden.yaml`：固定契约 -> 固定 OpenAPI。
-- `cmd/gofy-openapi -update` 更新 golden；review diff。
-- `cmd/gofy-client -check` 校验生成物。
+- `apicore/cmd/gofy-openapi -update` 更新 golden；review diff。
+- `apicore/cmd/gofy-client -check` 校验生成物。
 - CI 中 `git diff --exit-code`。
 
 ### 10.3 契约测试
@@ -3267,8 +3268,8 @@ go.work
 - 路由分组 `Prefix` 写**完整部署前缀**，如 `orderroute.RoutePrefix = "/api/v1/order"`；组内 `Spec.Path` 只写相对路径，如 `/orders`、`/orders/{id}`、`/config`。
 - 完整路由 = 分组 `Prefix` + `Spec.Path`。order-service 的 `order` 模块 `Prefix()` 返回 `""`，App 不设置 `WithAPIPrefix`，也不再叠加模块名，因此最终是 `/api/v1/order/orders`，与迁移前一致。
 - 契约即部署契约：同一份路由描述符挂到其他服务时，需要改分组 `Prefix` 才能换前缀；契约层不再依赖 gofy 的 `apiPrefix`。
-- OpenAPI 生成时用 `cmd/gofy-openapi -prefix demoservice=/api/v1/order`，或 `docgen.Options.PathPrefixes`，值与分组 `Prefix` 保持一致。生成出的 `paths` 是完整服务端路径，`servers` 只写协议/域名。
-- `contracts/README.md` 固定该规则；`internal/lint` 检查组内 `Spec.Path` 不以 `/api/` 开头、不包含模块名，保证前缀只出现在分组声明处。
+- OpenAPI 生成时用 `apicore/cmd/gofy-openapi -prefix demoservice=/api/v1/order`，或 `docgen.Options.PathPrefixes`，值与分组 `Prefix` 保持一致。生成出的 `paths` 是完整服务端路径，`servers` 只写协议/域名。
+- `apicore/contracts/README.md` 固定该规则；`internal/lint` 检查组内 `Spec.Path` 不以 `/api/` 开头、不包含模块名，保证前缀只出现在分组声明处。
 
 **order-service 迁移前后对照：**
 
@@ -3320,10 +3321,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - run: go run ./cmd/refcheck
-      - run: go run ./cmd/gofy-openapi -all -out ./openapi
-      - run: go run ./cmd/gofy-openapi -validate ./openapi/demoservice.yaml
-      - run: go run ./cmd/gofy-client -all -check
+      - run: go run ./apicore/cmd/refcheck
+      - run: go run ./apicore/cmd/gofy-openapi -all -out ./openapi
+      - run: go run ./apicore/cmd/gofy-openapi -validate ./openapi/demoservice.yaml
+      - run: go run ./apicore/cmd/gofy-client -all -check
       - run: git diff --exit-code -- openapi client
 
   build:
@@ -3369,11 +3370,11 @@ jobs:
 
 | 阶段 | 内容 | 产出 | 预估 |
 | --- | --- | --- | --- |
-| P0-1 | 创建仓库骨架、`contracts/common`、`endpoint`、`appinterface/demoservice` | 可编译的契约包 | 2 天 |
+| P0-1 | 创建仓库骨架、`apicore/contracts/common`、`endpoint`、`appinterface/demoservice` | 可编译的契约包 | 2 天 |
 | P0-2 | `client` 泛型调用、错误、重试、编码/解码 | Client 单测通过 | 3 天 |
-| P0-3 | `adapter/gofy` BindAll + order-service 迁移 | order-service 使用契约，e2e 通过 | 3 天 |
-| P0-4 | `docgen` + `docsui` + `cmd/gofy-openapi` | OpenAPI 3.0.3 + Swagger UI | 4 天 |
-| P0-5 | `cmd/gofy-client`、`refcheck`、CI、golden | CI 全绿 | 3 天 |
+| P0-3 | `apicore/adapter/gofy` BindAll + order-service 迁移 | order-service 使用契约，e2e 通过 | 3 天 |
+| P0-4 | `docgen` + `docsui` + `apicore/cmd/gofy-openapi` | OpenAPI 3.0.3 + Swagger UI | 4 天 |
+| P0-5 | `apicore/cmd/gofy-client`、`refcheck`、CI、golden | CI 全绿 | 3 天 |
 | P1-1 | gofy：上传、下载、重定向、Raw、SSE、Chunked | 新包 + 测试 | 4 天 |
 | P1-2 | gofy：安全头、Bearer 鉴权、header/cookie 绑定 | 中间件 + 测试 | 2 天 |
 | P2-1 | gofy：CORS 增强、Locale、限流、健康检查、日志脱敏、routematch | 中间件 + 测试 | 5 天 |
@@ -3401,9 +3402,9 @@ jobs:
 - [ ] `go test -race ./...` 全绿。
 - [ ] `go vet ./...` 无输出。
 - [ ] `gofmt -l .` 无输出。
-- [ ] `go run ./cmd/refcheck` 通过；故意引入 gin 导入时失败。
-- [ ] `go run ./cmd/gofy-openapi -all` 生成成功，`kin-openapi` 校验通过。
-- [ ] `go run ./cmd/gofy-client -all -check` 通过。
+- [ ] `go run ./apicore/cmd/refcheck` 通过；故意引入 gin 导入时失败。
+- [ ] `go run ./apicore/cmd/gofy-openapi -all` 生成成功，`kin-openapi` 校验通过。
+- [ ] `go run ./apicore/cmd/gofy-client -all -check` 通过。
 - [ ] `git diff --exit-code -- openapi client` 为空。
 - [ ] `appinterface/demoservice` 覆盖 order-service 现有 4 个接口。
 - [ ] 每个业务 Handler 有编译期断言：整体实现断言 `demoservice.Service`，按分组拆分则断言对应的窄接口（`OrdersService` / `ConfigService`）。
@@ -3451,7 +3452,7 @@ jobs:
 | R7 | 文档暴露内部接口 | 安全风险 | 默认仅非生产挂载；BasicAuth/网关保护 |
 | R8 | 工具链依赖进入业务二进制 | 体积增大 | 契约包纯净；`docgen/docsui` 不被业务 import |
 | R9 | SSE 长连接与超时 | 连接被网关断开 | 心跳；`X-Accel-Buffering: no`；文档说明 WriteTimeout |
-| R10 | Path 前缀策略混用 | 路由不一致 | 在 `contracts/README.md` 固定一种；lint 检查 |
+| R10 | Path 前缀策略混用 | 路由不一致 | 在 `apicore/contracts/README.md` 固定一种；lint 检查 |
 | R11 | 删除/改字段破坏旧客户端 | 线上故障 | 版本策略；兼容性检查；灰度 |
 | R12 | Redis 限流未内置 | 多实例限流失效 | 核心只提供接口；生产必须接共享存储 |
 
@@ -3478,19 +3479,19 @@ jobs:
 
 | 包 | 导出符号 |
 | --- | --- |
-| `contracts/common/envelope` | `Envelope[T]`、`ErrorEnvelope` |
-| `contracts/common/paging` | `PageRequest`、`Offset()`、`ListData[T]`、`PageData[T]` |
-| `contracts/common/errcode` | `Code`、`Fault`、`New`、公共码常量 |
-| `contracts/common/types` | `Int64String`、`Uint64String`、`Date`、`Decimal` |
-| `contracts/common/endpoint` | `Spec`、`Route[Req,Res]`、`Descriptor`、`New`、`NewRouteGroup`、`Group`、`Get`/`Post`/`Put`/`Patch`/`Delete`、`NoBody`、`AuthMode`、`RateKey`、`ResponseKind`、`ErrorSpec` |
-| `contracts/common/enum` | `Values`、`Labels`、`Valid` 辅助 |
+| `apicore/contracts/common/envelope` | `Envelope[T]`、`ErrorEnvelope` |
+| `apicore/contracts/common/paging` | `PageRequest`、`Offset()`、`ListData[T]`、`PageData[T]` |
+| `apicore/contracts/common/errcode` | `Code`、`Fault`、`New`、公共码常量 |
+| `apicore/contracts/common/types` | `Int64String`、`Uint64String`、`Date`、`Decimal` |
+| `apicore/contracts/common/endpoint` | `Spec`、`Route[Req,Res]`、`Descriptor`、`New`、`NewRouteGroup`、`Group`、`Get`/`Post`/`Put`/`Patch`/`Delete`、`NoBody`、`AuthMode`、`RateKey`、`ResponseKind`、`ErrorSpec` |
+| `apicore/contracts/common/enum` | `Values`、`Labels`、`Valid` 辅助 |
 | `appinterface/{domain}service` | `Service`、DTO、Request、Response、Const、Enum、`Routes()` |
 | `appinterface/{domain}service/{domain}serviceclient` | `Client`、`New`、`NewWithBaseURL`、`NewWithResolver`、各路由方法 |
-| `adapter/gofy` | `Bind`、`BindGroup`、`BindAll`、`BindSSE`、`BindDownload`、`BindChunked`、`BindOptions`、`MiddlewareRegistry`、`Error` |
+| `apicore/adapter/gofy` | `Bind`、`BindGroup`、`BindAll`、`BindSSE`、`BindDownload`、`BindChunked`、`BindOptions`、`MiddlewareRegistry`、`Error` |
 | `client` | `New`、`Config`、`Call`、`StreamSSE`、`DownloadFile`、`StreamChunked`、`APIError`、`CodeOf`、`RequestIDOf`、`Resolver`、`StaticResolver`、`CallOption`、`WithTimeout`、`WithConnectTimeout`、`WithHTTPClient`、`WithHeader(s)` |
 | `docgen` | `Build`、`Options`、`Validate` |
 | `docsui` | `Handler`、`Config`、`BasicAuth` |
-| `cmd/*` | CLI |
+| `apicore/cmd/*` | CLI |
 
 ### 附录 B：OpenAPI 生成规则速查
 
