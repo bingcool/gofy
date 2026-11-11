@@ -13,9 +13,9 @@ type Config struct {
 	AuthRequired bool
 }
 
-// OrderConfigService 拥有订单模块的配置读取用例。它是 OrderService 的同包协作
-// service：装配根 app/container 先构造它，再通过 Dependencies 注入 OrderService。
-// 同包协作用具体类型，不走 innerapi——那是跨模块的缝。
+// OrderConfigService 拥有订单模块的配置读取用例。装配根 app/container 构造它，
+// 模块根把它注入 OrderConfigController；消费方直接依赖具体类型，不走 innerapi
+// ——那是跨模块的缝。
 type OrderConfigService struct {
 	logger *zap.Logger
 }

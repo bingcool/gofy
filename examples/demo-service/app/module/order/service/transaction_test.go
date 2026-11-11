@@ -158,10 +158,9 @@ func newOrderService(t *testing.T) *service.OrderService {
 		Logger:   zap.NewNop(),
 	})
 	return service.NewOrderService(service.Dependencies{
-		Orders:   &orderrepo.OrderRepository{},
-		Products: products,
-		Config:   service.NewOrderConfigService(nil),
-		Logger:   zap.NewNop(),
+		OrderRepository: &orderrepo.OrderRepository{},
+		ProductAPI:      products,
+		Logger:          zap.NewNop(),
 	})
 }
 

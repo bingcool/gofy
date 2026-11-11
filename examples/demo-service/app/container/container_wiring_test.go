@@ -18,14 +18,17 @@ func TestProductAccessBuildsOnlyProduct(t *testing.T) {
 	}
 }
 
-// 订单访问器按依赖链解析产品和配置 service。
-func TestOrderAccessBuildsDependencies(t *testing.T) {
+// 订单访问器只按依赖链解析产品 service；配置 service 由模块工厂单独取用。
+func TestOrderAccessBuildsProductDependency(t *testing.T) {
 	c := NewContainer()
 	c.Init(zap.NewNop())
 	if c.OrderService() == nil {
 		t.Fatal("nil order service")
 	}
-	if c.productService.value == nil || c.orderConfigService.value == nil {
-		t.Fatal("order service built without its dependencies")
+	if c.productService.value == nil {
+		t.Fatal("order service built without its product dependency")
+	}
+	if c.orderConfigService.value != nil {
+		t.Fatal("order accessor built the unrelated config service")
 	}
 }

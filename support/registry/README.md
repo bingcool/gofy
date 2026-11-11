@@ -12,7 +12,7 @@
 // app/container/container.go（每次装配执行一次）
 products := productservice.NewProductService(...)
 orders := orderservice.NewOrderService(orderservice.Dependencies{
-    Products: products, // 以 productapi.ProductAPI 接口注入
+    ProductAPI: products, // 以 productapi.ProductAPI 接口注入
     ...
 })
 ```

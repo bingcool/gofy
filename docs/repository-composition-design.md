@@ -320,8 +320,7 @@ products, err := registry.Get[*productrepo.ProductRepository](s.repos, productre
 
 > **已被取代**：模式 A/B 与包级 `RepoDeps` / `a_init_repository.go` 均已删除。
 > 跨模块依赖由 `app/container.Build` 构造产品 service 并按 `ProductAPI` 接口注入
-> `OrderService`；`service.Dependencies` 声明本模块仓库、同包协作 service、
-> 跨模块接口与 `Logger`。见
+> `OrderService`；`service.Dependencies` 声明本模块仓库、跨模块接口与 `Logger`。见
 > [module-layering-design.md](./module-layering-design.md) §5–§6。
 
 **模式 A：装配期取用（默认，推荐）**

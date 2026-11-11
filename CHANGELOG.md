@@ -29,9 +29,9 @@ All notable changes to this project are documented here. The format follows
   `OrderAPI` / `ProductAPI`, plain views `Order` / `Product` and sentinel errors)
   with no dependency on GORM, the HTTP contract or `app/io`; it carries no
   package-level singleton, publish hook or lookup function.
-  `service.Dependencies` is `{Orders, Products, Config, Logger}`: repositories and
-  same-module collaborators arrive as concrete types, cross-module capacity as
-  the `productapi.ProductAPI` interface. Dependency acquisition is a single
+  `service.Dependencies` is `{OrderRepository, ProductAPI, Logger}`: repositories
+  arrive as concrete types, cross-module capacity as the `productapi.ProductAPI`
+  interface. Dependency acquisition is a single
   composition root, `app/container`, instantiated once per generation
   (`container.NewContainer()` in `reload.go`). It owns
   `RepositoryDeclare{OrdersRepo, ProductsRepo}` and one lazy slot per service
@@ -86,17 +86,15 @@ All notable changes to this project are documented here. The format follows
   / `ErrInsufficientStock`; covered by pure-Go SQLite tests.
 - `examples/demo-service`: extracted `OrderConfigService`
   (`app/module/order/service/order_config_service.go`) to own the order config
-  read use case (currently a fixed sample) and a `Config` domain view. It is an
-  intra-module collaborator of `OrderService`: the container's
-  `OrderConfigService()` accessor constructs it and injects it through
-  `Dependencies` (concrete type, same package), and
-  `OrderService.GetConfig` delegates to it. This demonstrates same-module
-  service→service composition — no `innerapi` and no registry, which are reserved
-  for cross-module calls; config has no cross-module consumer so it is not
-  published to `innerapi`. The controller's `GetConfig` now maps the service view
-  to `GetConfigResponse` instead of hardcoding the sample. Covered by
-  `order_config_service_test.go` (sample + delegation) and the existing
-  controller/contract tests.
+  read use case (currently a fixed sample) and a `Config` domain view. It is a
+  standalone service in the same package: the container's
+  `OrderConfigService()` accessor constructs it and the module root injects the
+  concrete type into `OrderConfigController`, whose `GetConfig` maps the service
+  view to `GetConfigResponse` instead of hardcoding the sample. `OrderService`
+  does not hold it — no `innerapi` and no registry for intra-module types, which
+  are reserved for cross-module calls; config has no cross-module consumer so it
+  is not published to `innerapi`. Covered by `order_config_service_test.go` and
+  the existing controller/contract tests.
 - `support/db`: context-propagated transactions. `Transaction(ctx, db, fn)`
   opens a transaction and stores it on the context passed to `fn`; nested calls
   reuse the outer transaction (no savepoint) and a nil callback or connection

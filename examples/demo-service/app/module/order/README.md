@@ -18,10 +18,10 @@ order/
 │   └── order_status_test.go   # service.Status* ↔ orderenum 状态一致性测试
 ├── service/
 │   ├── order_service.go       # 业务用例，实现 innerapi.OrderAPI，返回领域视图
-│   ├── order_config_service.go # OrderConfigService（同包协作 service）+ Config 视图
+│   ├── order_config_service.go # OrderConfigService + Config 视图
 │   ├── order_view.go          # 领域状态常量 + 订单域哨兵错误 + CreateItem 别名
-│   ├── deps.go                # Dependencies（仓库 + 产品接口 + Config + Logger）
-│   ├── order_config_service_test.go # 配置样例 + OrderService 委托测试
+│   ├── dependencies.go        # Dependencies（仓库 + 产品接口 + Logger）
+│   ├── order_config_service_test.go # 配置样例测试
 │   └── transaction_test.go    # 跨模块事务用例（内存 SQLite）
 ├── innerapi/
 │   └── innerapi.go            # 订单对外纯契约：OrderAPI 接口 + Order 视图 + CreateItem + 错误
@@ -140,10 +140,10 @@ factories = append(factories, ctr.ModuleFactories()...)
 子树：
 
 1. `ProductService`（使用本模块仓库 `ProductsRepo`，只被产品访问器或订单访问器触发）；
-2. `OrderConfigService`（同包协作 service，无外部依赖）；
-3. `OrderService`：首次取用时解析 `Dependencies{Orders, Products, Config, Logger}`，
-   其中 `Products` 是本代容器按需构造的产品 service，以 `productapi.ProductAPI`
-   接口传入。
+2. `OrderConfigService`（无外部依赖，由模块根直接注入 `OrderConfigController`）；
+3. `OrderService`：首次取用时解析
+   `Dependencies{OrderRepository, ProductAPI, Logger}`，其中 `ProductAPI` 是本代
+   容器按需构造的产品 service，以 `productapi.ProductAPI` 接口传入。
 
 `ModuleFactories()` 返回 `ProductModuleFactory()` 与 `OrderModuleFactory()`；
 每个工厂检查 `rt.DB`，调用 `c.Init(rt.Logger)` 记录本代 logger，再取本模块
@@ -215,46 +215,42 @@ app := gofytest.New(t,
 
 ## 服务依赖
 
-`service/deps.go` 用一个 `Dependencies` 结构显式声明订单 service 的全部输入，
+`service/dependencies.go` 用一个 `Dependencies` 结构显式声明订单 service 的全部输入，
 构造函数 `NewOrderService(deps Dependencies)` 接收它，实例由 `app/container` 的
 `OrderService()` 访问器按需构造：
 
 ```go
-// app/module/order/service/deps.go
+// app/module/order/service/dependencies.go
 type Dependencies struct {
-    Orders   *repository.OrderRepository // 本模块仓库，来自 RepositoryDeclare
-    Products productapi.ProductAPI       // 跨模块产品契约，由容器注入本代产品 service
-    Config   *OrderConfigService         // 同包协作 service，容器先构造后注入
-    Logger   *zap.Logger                 // 允许 nil，退化为 zap.NewNop()
+    OrderRepository *repository.OrderRepository // 本模块仓库，来自 RepositoryDeclare
+    ProductAPI      productapi.ProductAPI       // 跨模块产品契约，由容器注入本代产品 service
+    Logger          *zap.Logger                 // 允许 nil，退化为 zap.NewNop()
 }
 ```
 
-- **本模块仓库（Orders）**：`*repository.OrderRepository` 具体类型，由
+- **本模块仓库（OrderRepository）**：`*repository.OrderRepository` 具体类型，由
   `container.RepositoryDeclare` 零值构造后传入。repository 不声明接口——只有一种
   GORM 实现，接口除了让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑
   真实 SQL；
-- **跨模块依赖（Products）**：通过 `Dependencies.Products` 以
+- **跨模块依赖（ProductAPI）**：通过 `Dependencies.ProductAPI` 以
   `productapi.ProductAPI` **接口**注入。容器把本代刚构造的 `ProductService`
   直接传进来，service 不 import 产品的 service/repository/model，也不在构造期做
-  运行期查找。`Create` 里调 `s.products.ListByIDs` /
-  `s.products.DecreaseStock`。
-- **同包协作 service（Config）**：`*OrderConfigService` 具体类型，拥有订单模块
-  配置读取用例（当前是固定样例）。容器先构造它，再分别注入 `OrderService` 的
-  `Dependencies.Config` 和模块根的 `NewModule`。`OrderConfigController` 直接依赖
-  `OrderConfigService`，不经过 `OrderService`；`OrderService.GetConfig` 作为
-  service 层的委托保留，当前 HTTP 路径已不使用它。**不走 innerapi**——那是跨模块
-  的缝；同包协作用具体类型即可，与 repository 不声明接口的取舍一致。配置没有
-  跨模块消费方，因此不发布到 innerapi；若将来别的模块要读订单配置，才把能力加进
+  运行期查找。`Create` 里调 `s.productAPI.ListByIDs` /
+  `s.productAPI.DecreaseStock`。
+- **配置 service（不经过 `OrderService`）**：`OrderConfigService` 是 service 包内
+  的独立类型，拥有订单模块配置读取用例（当前是固定样例），由容器构造后交给模块根
+  注入 `OrderConfigController`；`OrderService` 不持有它。消费方直接依赖具体类型，
+  **不走 innerapi**——那是跨模块的缝。配置没有跨模块消费方，因此不发布到
+  innerapi；若将来别的模块要读订单配置，才把能力加进
   `order/innerapi.OrderAPI`。
 
 service 内部：
 
 ```go
 type OrderService struct {
-    orders   *repository.OrderRepository
-    products productapi.ProductAPI
-    config   *OrderConfigService
-    logger   *zap.Logger
+    orderRepository *repository.OrderRepository
+    productAPI      productapi.ProductAPI
+    logger          *zap.Logger
 }
 ```
 
@@ -265,7 +261,8 @@ type OrderService struct {
 
 约定：
 
-- 字段按聚合命名（`Orders` 而不是 `Repo`），service 内部对应 `s.orders`；
+- 字段按角色命名：`OrderRepository` / `ProductAPI`，service 内部对应
+  `s.orderRepository` / `s.productAPI`；
 - repository 不声明接口，service 直接依赖 `*repository.OrderRepository`；
 - 跨模块只依赖对方 `innerapi` 的接口与只读视图（`productapi.Product`），不
   import 对方的 service/repository/model；持久化模型仍留在属主模块内；
@@ -274,8 +271,7 @@ type OrderService struct {
   `app/io`。它是模块间唯一合法的耦合点；
 - 依赖只在构造期由 `app/container` 注入：service 不持有包级状态，也不在运行期
   查找其他 service；代际切换由新建容器完成；
-- 必填依赖（`Orders`、`Products`、`Config`）由容器保证非 nil；`Logger` 允许为
-  nil；
+- 必填依赖（`Orders`、`Products`）由容器保证非 nil；`Logger` 允许为 nil；
 - 测试用纯 Go 内存 SQLite 跑真实仓库（零值构造，内存库发布成 `appdb.Db`），
   通过 `container.NewContainer()` + `Init` 按需装配 service，不连外部 MySQL
   （见 `module_test.go` 与 `app/container/*_test.go`）。
@@ -337,11 +333,11 @@ func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
 ```go
 err := gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
     for _, it := range items {
-        if err := s.products.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
+        if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
             return translateProductErr(it.SkuID, err)
         }
     }
-    o, err := s.orders.Create(ctx, &model.Order{
+    o, err := s.orderRepository.Create(ctx, &model.Order{
         UserID: userID, Amount: amount, Status: StatusPending,
     })
     if err != nil {

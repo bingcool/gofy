@@ -22,21 +22,29 @@ var _ orderapi.OrderAPI = (*OrderService)(nil)
 
 // OrderService implements order use cases.
 type OrderService struct {
-	orders   *repository.OrderRepository
-	products productapi.ProductAPI
-	config   *OrderConfigService
-	logger   *zap.Logger
+	orderRepository *repository.OrderRepository
+	productAPI      productapi.ProductAPI
+	logger          *zap.Logger
 }
 
-// GetConfig 返回订单模块配置视图，委托给同包协作的 OrderConfigService。配置不
-// 发布到 innerapi（无跨模块消费方），controller 负责把视图映射成契约响应。
-func (s *OrderService) GetConfig(ctx context.Context) *Config {
-	return s.config.GetConfig(ctx)
+// NewOrderService builds an OrderService from explicit dependencies.
+// OrderRepository and ProductAPI are required; a nil logger falls back to
+// zap.NewNop().
+func NewOrderService(deps Dependencies) *OrderService {
+	logger := deps.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &OrderService{
+		orderRepository: deps.OrderRepository,
+		productAPI:      deps.ProductAPI,
+		logger:          logger.With(zap.String("component", "order.service")),
+	}
 }
 
 // Get returns one order view or ErrOrderNotFound.
 func (s *OrderService) Get(ctx context.Context, id uint64) (*orderapi.Order, error) {
-	o, err := s.orders.FindByID(ctx, id)
+	o, err := s.orderRepository.FindByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, ErrOrderNotFound
@@ -58,11 +66,11 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 	var created *model.Order
 	err = gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
 		for _, it := range items {
-			if err := s.products.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
+			if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
 				return translateProductErr(it.SkuID, err)
 			}
 		}
-		o, err := s.orders.Create(ctx, &model.Order{
+		o, err := s.orderRepository.Create(ctx, &model.Order{
 			UserID: userID,
 			Amount: amount,
 			Status: StatusPending,
@@ -100,7 +108,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 		seen[item.SkuID] = struct{}{}
 		ids = append(ids, item.SkuID)
 	}
-	views, err := s.products.ListByIDs(ctx, ids)
+	views, err := s.productAPI.ListByIDs(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +128,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 
 // List returns one page of order views plus the total count.
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderapi.Order, int64, error) {
-	items, total, err := s.orders.ListByUser(ctx, userID, (page-1)*size, size)
+	items, total, err := s.orderRepository.ListByUser(ctx, userID, (page-1)*size, size)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -139,7 +147,7 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 
 // Cancel marks an order as cancelled.
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-	if err := s.orders.UpdateStatus(ctx, id, StatusCancelled); err != nil {
+	if err := s.orderRepository.UpdateStatus(ctx, id, StatusCancelled); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			// 预期内的业务结果，HTTP 层会映射为 404，不按错误级别记录。
 			s.logger.Debug("cancel order: not found", zap.Uint64("order_id", id))

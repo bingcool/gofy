@@ -2553,9 +2553,9 @@ demo-service/
 │       │   │   └── order_status_test.go       # 领域状态↔契约枚举一致性
 │       │   ├── service/
 │       │   │   ├── order_service.go  # 实现 innerapi.OrderAPI，返回领域视图
-│       │   │   ├── order_config_service.go # OrderConfigService（同包协作）+ Config 视图
+│       │   │   ├── order_config_service.go # OrderConfigService + Config 视图
 │       │   │   ├── order_view.go     # 领域状态常量 + 订单域哨兵错误 + CreateItem 别名
-│       │   │   ├── deps.go           # Dependencies（Orders + Products + Config + Logger）
+│       │   │   ├── dependencies.go   # Dependencies（OrderRepository + ProductAPI + Logger）
 │       │   │   └── transaction_test.go
 │       │   ├── innerapi/
 │       │   │   └── innerapi.go       # OrderAPI 接口 + Order 视图 + CreateItem + 错误
@@ -2855,10 +2855,9 @@ func (c *Container) ProductService() *productservice.ProductService {
 func (c *Container) OrderService() *orderservice.OrderService {
     return c.orderService.Get(func() *orderservice.OrderService {
         return orderservice.NewOrderService(orderservice.Dependencies{
-            Orders:   c.repos.OrdersRepo,
-            Products: c.ProductService(), // 按需构建产品子树
-            Config:   c.OrderConfigService(),
-            Logger:   c.loggerOrNop(),
+            OrderRepository: c.repos.OrdersRepo,
+            ProductAPI:      c.ProductService(), // 按需构建产品子树
+            Logger:          c.loggerOrNop(),
         })
     })
 }
@@ -2915,12 +2914,12 @@ func (m *Module) Register(r *support.Router) error {
 `script/fix_order.go` 调用前把 `rt.DB` 临时发布到 `appdb.Db`，结束后恢复。
 
 装配关系收敛为三层：`app/container`（仓库 + service + 模块工厂）→ 模块根
-（`NewModule` + `Register`）→ 各层实现。`service/deps.go` 的 `Dependencies` 显式
-列出本模块仓库 `Orders`、跨模块 `Products productapi.ProductAPI`、同包协作的
-`Config *OrderConfigService` 和 `Logger`（nil 退化为 `zap.NewNop()`）；
-`OrderService()` 首次取用时按需解析产品与配置 service，产品实现直接以接口传给
-订单 service。模块工厂的排列顺序不承载依赖顺序：订单工厂单独执行时也会先构造
-产品 service。一个构造槽只构建自己的子树，未挂载的能力不会因为别的模块启动而
+（`NewModule` + `Register`）→ 各层实现。`service/dependencies.go` 的 `Dependencies`
+显式列出本模块仓库 `OrderRepository`、跨模块 `ProductAPI productapi.ProductAPI`
+和 `Logger`（nil 退化为 `zap.NewNop()`）；`OrderService()` 首次取用时按需解析产品
+service，产品实现直接以接口传给订单 service。`OrderConfigService` 不进入
+`OrderService`，由访问器单独构造后交给模块根注入 `OrderConfigController`。模块
+工厂的排列顺序不承载依赖顺序：订单工厂单独执行时也会先构造产品 service。一个构造槽只构建自己的子树，未挂载的能力不会因为别的模块启动而
 被构建；加新服务时只需在对应模块文件里加一个访问器，不会扩大全量装配的面。
 没有名字注册表、没有包级 `RepoDeps`、没有 module getter，也没有 innerapi 单例槽；
 `innerapi` 是纯契约（接口 + 只读视图 + 入参 + 哨兵错误），只允许标准库（必要时
@@ -3127,13 +3126,13 @@ import (
 var _ orderapi.OrderAPI = (*OrderService)(nil)
 
 type OrderService struct {
-    orders   *repository.OrderRepository
-    products productapi.ProductAPI
-    logger   *zap.Logger
+    orderRepository *repository.OrderRepository
+    productAPI      productapi.ProductAPI
+    logger          *zap.Logger
 }
 
 func (s *OrderService) Get(ctx context.Context, id uint64) (*orderapi.Order, error) {
-    o, err := s.orders.FindByID(ctx, id)
+    o, err := s.orderRepository.FindByID(ctx, id)
     if err != nil {
         if errors.Is(err, repository.ErrNotFound) {
             return nil, ErrOrderNotFound
@@ -3154,11 +3153,11 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
     var created *model.Order
     err = gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
         for _, it := range items {
-            if err := s.products.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
+            if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
                 return translateProductErr(it.SkuID, err)
             }
         }
-        o, err := s.orders.Create(ctx, &model.Order{
+        o, err := s.orderRepository.Create(ctx, &model.Order{
             UserID: userID,
             Amount: amount,
             Status: StatusPending,
@@ -3196,7 +3195,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
         seen[item.SkuID] = struct{}{}
         ids = append(ids, item.SkuID)
     }
-    views, err := s.products.ListByIDs(ctx, ids)
+    views, err := s.productAPI.ListByIDs(ctx, ids)
     if err != nil {
         return nil, err
     }
@@ -3215,7 +3214,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 }
 
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderapi.Order, int64, error) {
-    items, total, err := s.orders.ListByUser(ctx, userID, (page-1)*size, size)
+    items, total, err := s.orderRepository.ListByUser(ctx, userID, (page-1)*size, size)
     if err != nil {
         return nil, 0, err
     }
@@ -3227,7 +3226,7 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 }
 
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-    if err := s.orders.UpdateStatus(ctx, id, StatusCancelled); err != nil {
+    if err := s.orderRepository.UpdateStatus(ctx, id, StatusCancelled); err != nil {
         if errors.Is(err, repository.ErrNotFound) {
             return ErrOrderNotFound
         }
@@ -3264,17 +3263,15 @@ func translateProductErr(sku uint64, err error) error {
 }
 ```
 
-构造函数 `NewOrderService(deps Dependencies)` 在 `service/deps.go`：`Dependencies`
-显式列出本模块仓库 `Orders`、跨模块 `Products productapi.ProductAPI`、同包协作的
-`Config *OrderConfigService` 和 `Logger`（nil 退化为 `zap.NewNop()`）。它们全部由
-`app/container` 的 `OrderService()` 访问器按需构造后注入：产品实现直接以接口传入，
-不登记名字、没有包级 `RepoDeps`、没有运行期查找；service 不 import 其他模块的
-service/repository/model。`Config` 则是**模块内** service→service 组合：
-`OrderConfigService` 与 `OrderService` 同包，访问器先解析配置 service、再分别注入
-`OrderService` 的 `Dependencies` 和模块根的 `NewModule`（供 `OrderConfigController`
-直接使用）。`OrderService.GetConfig` 保留为 service 层的委托，当前 HTTP 路径已不
-经过它；同包协作用具体类型，不走 innerapi、注册表或工厂（Go 的 import 方向也不
-允许 service 反向 import 模块根或容器）。
+构造函数 `NewOrderService(deps Dependencies)` 在 `service/order_service.go`，
+`Dependencies` 显式列出本模块仓库 `OrderRepository`、跨模块
+`ProductAPI productapi.ProductAPI` 和 `Logger`（nil 退化为 `zap.NewNop()`）。它们全部由 `app/container` 的 `OrderService()`
+访问器按需构造后注入：产品实现直接以接口传入，不登记名字、没有包级 `RepoDeps`、
+没有运行期查找；service 不 import 其他模块的 service/repository/model。
+`OrderConfigService` 与 `OrderService` 同包但互不依赖：访问器单独构造配置 service
+并交给模块根 `NewModule`，`OrderConfigController` 直接用它取得领域视图再映射契约。
+同包协作用具体类型，不走 innerapi、注册表或工厂（Go 的 import 方向也不允许
+service 反向 import 模块根或容器）。
 领域状态常量（`StatusPending` 等）、订单域哨兵错误
 （`ErrOrderNotFound` / `ErrProductNotFound` / `ErrProductUnavailable` /
 `ErrInsufficientStock`）和 `CreateItem` 别名都在 `service/order_view.go`，不 import
