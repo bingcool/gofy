@@ -12,12 +12,12 @@
 > **本文的跨模块耦合方式已被 [module-layering-design.md](./module-layering-design.md) 取代（2026-11-11）。**
 > 原方案让 `service → service` / `service → repository` 直接调用（决策 D2、§4 方案选型、
 > §5.1 目录、§5.3–§5.6 的模式 A/B、§6 示例、§8 import 规则）。新方案改为
-> **`service → 对方 innerapi`**：每个模块新增 `innerapi` 纯契约包（接口 + 视图 + 哨兵错误 +
-> `Name` 常量），属主模块的 service 实现该接口，由组合根 `reload.factories` 建的**共享注册表**
-> 登记，消费方在构造期用 `registry.Get[T]` 取接口，不再 import 其他模块的
-> repository / model / service。
+> **`service → 对方 innerapi`**：每个模块新增 `innerapi` 纯契约包（接口 + 视图 + 哨兵错误），
+> 由应用层 `app/container` 在构造期把实现按接口注入消费方，不再 import 其他模块的
+> repository / model / service。demo 不使用 `support/registry`（单跨模块实现不需要名字索引）；
+> 本文 §5.2 的通用注册表契约仍在，作为需要按名字索引时的**可选**库能力保留。
 >
-> **仍然有效、本文继续作为权威的部分**：§5.2 通用注册表契约、§5.7 事务上下文传播、
+> **仍然有效、本文继续作为权威的部分**：§5.2 通用注册表契约（可选工具）、§5.7 事务上下文传播、
 > §5.8 生命周期与热更新，以及 §5.10「用纯 Go SQLite 跑真实 SQL、异常路径在驱动层注入」的测试取向。
 > 下文被取代的小节保留原文供追溯，阅读时以 module-layering-design.md 为准。
 
@@ -55,7 +55,7 @@
   等句柄，因此模块工厂执行时这些包级句柄仍是 `nil`
   （[io_runtime.go](../examples/demo-service/app/io/io_runtime.go)、
   [db.go](../examples/demo-service/app/io/db/db.go)）。
-- 现有 repository 不持连接，每次查询用 `support/db.FromContext` 回落到 `appdb.Db`
+- 现有 repository 不持连接，每次查询用 `support/db.WithContext` 回落到 `appdb.Db`
   （[order_repository.go](../examples/demo-service/app/module/order/repository/order_repository.go)）。
 - 虽然 `app/io` 还维护 `db.order`、`db.product` 等命名实例，按本方案 D1，
   order / product 等业务模块统一使用框架托管的 `db.default`，命名实例只服务于
@@ -228,9 +228,10 @@ func Get[T any](r *Registry, name string) (T, error)
 
 ### 5.3 装配注册表与时序
 
-> **已被取代**：注册表改由组合根 `reload.factories` 建一份**共享**实例传给各模块工厂，
-> 属主模块登记自己的 innerapi service（不再是消费方登记对方 repository）。
-> 见 [module-layering-design.md](./module-layering-design.md) §6.4–§6.6。下文保留原文供追溯。
+> **已被取代**：跨模块依赖不再用注册表，改为 innerapi 契约——应用层 `app/container`
+> 的 `OrderService()` 访问器按需解析产品 service 并按 `ProductAPI` 接口注入，模块根
+> 只保留 `NewModule` / `Register` 绑定路由。见
+> [module-layering-design.md](./module-layering-design.md) §6.4–§6.6。下文保留原文供追溯。
 
 每个装配周期（启动一次、每次 `Reload` 一次）由模块工厂新建一份注册表，只登记
 它跨模块按名字读取的仓库；本模块仓库直接传给 service：
@@ -290,8 +291,9 @@ App.buildHTTPWith
 
 ### 5.4 类型化取用与命名
 
-> **已被取代**：名字常量归 innerapi 包（`product.innerapi.Name`），`Get[T]` 的 `T` 是
-> innerapi **接口**而非具体 repository。见 [module-layering-design.md](./module-layering-design.md) §6。
+> **已被取代**：跨模块不再按名字取用，改为 innerapi 契约；实现由应用层
+> `app/container` 在构造期按接口注入，不依赖名字常量。见
+> [module-layering-design.md](./module-layering-design.md) §6。
 
 名字常量只给“会被其他模块读取”的仓库，格式统一为 `<module>.<aggregate>`：
 
@@ -317,8 +319,10 @@ products, err := registry.Get[*productrepo.ProductRepository](s.repos, productre
 ### 5.5 两种取用模式
 
 > **已被取代**：模式 A/B 与包级 `RepoDeps` / `a_init_repository.go` 均已删除。
-> 跨模块依赖统一在构造期由工厂用 `registry.Get[productapi.ProductAPI]` 取接口，注入
-> `service.Dependencies`。见 [module-layering-design.md](./module-layering-design.md) §5–§6。
+> 跨模块依赖由 `app/container.Build` 构造产品 service 并按 `ProductAPI` 接口注入
+> `OrderService`；`service.Dependencies` 声明本模块仓库、同包协作 service、
+> 跨模块接口与 `Logger`。见
+> [module-layering-design.md](./module-layering-design.md) §5–§6。
 
 **模式 A：装配期取用（默认，推荐）**
 
@@ -467,8 +471,8 @@ type ProductView struct {
 // Transaction 在 db 上开启事务，把事务放入 ctx 后执行 fn；嵌套调用复用已有事务。
 func Transaction(ctx context.Context, db *gorm.DB, fn func(ctx context.Context) error) error
 
-// FromContext 优先返回 ctx 中的事务，否则返回 fallback。
-func FromContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
+// WithContext 返回本次调用应使用的连接：ctx 中有事务时返回事务，否则返回 fallback。
+func WithContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
 ```
 
 repository 的连接解析统一改为：
@@ -479,7 +483,7 @@ func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
     if fallback == nil {
         fallback = appdb.Db // 单库：所有业务 repository 共用 db.default
     }
-    return gofydb.FromContext(ctx, fallback)
+    return gofydb.WithContext(ctx, fallback)
 }
 ```
 
@@ -490,7 +494,7 @@ func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
 - 事务由调用方 service 开启，跨模块调用的 repository/service 只消费 ctx，不自行提交；
 - 嵌套 `Transaction` 直接复用外层事务，不创建 savepoint：内层返回错误会冒泡到外层，
   内层成功也不会提前提交；
-- `FromContext` 优先返回 ctx 中的事务，没有事务时才用 repository 的显式连接或
+- `WithContext` 优先返回 ctx 中的事务，没有事务时才用 repository 的显式连接或
   `appdb.Db`；显式连接不会覆盖事务；
 - 单库事务是本文范围；如果某个 repository 确实使用独立命名实例（`db.order` /
   `db.product`），该调用不参与 `db.default` 的事务，需要在设计上避开或拆成补偿流程；
@@ -565,8 +569,9 @@ cgo-free）建内存库跑真实 SQL，不连外部 MySQL：
 
 ## 6. 示例：订单服务读取产品名称
 
-> **已被取代**：订单服务不再持注册表按需取产品 repository，而是在构造期注入
-> `productapi.ProductAPI` 接口；产品视图为 `product/innerapi.Product`。
+> **已被取代**：订单服务不再持注册表按需取产品 repository，而是在构造期接收
+> `app/container` 注入的 `ProductAPI` 接口实现；产品视图为
+> `product/innerapi.Product`。
 > 最新示例见 [module-layering-design.md](./module-layering-design.md) §7–§9 与
 > [library-design.md](./library-design.md) §9。下文保留原文供追溯。
 
@@ -828,7 +833,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
 11. **repository 不注入连接和日志**：删除 `New(db, logger)`、`NewFromHandle(logger)`、
     `newRepository` 以及 struct 的 `db` / `logger` 字段，`OrderRepository` /
     `ProductRepository` 变成零值可用的空结构体；`conn(ctx)` 固定为
-    `gofydb.FromContext(ctx, appdb.Db)`。理由：仓库只有一种连接来源（`app/io` 句柄）
+    `gofydb.WithContext(ctx, appdb.Db)`。理由：仓库只有一种连接来源（`app/io` 句柄）
     和一种日志来源（service 的 `rt.Logger`），构造函数只是把包级依赖再传一遍。
     删除后 `RepoDeps`、工厂、测试都直接用 `&repository.OrderRepository{}`；脚本模式没有
     `app/io` 生命周期，`script/fix_order.go` 调用前把 `rt.DB` 发布到 `appdb.Db`

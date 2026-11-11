@@ -149,8 +149,8 @@ func TestDecreaseStockRejectsUnavailableOrInvalidRequests(t *testing.T) {
 	}
 }
 
-// newOrderService 在组合库上装配真实订单 service，跨模块依赖注入真实产品
-// service（实现 innerapi.ProductAPI），验证 service 层开启的跨模块事务。
+// newOrderService 在组合库上装配真实订单 service：产品 service 显式构造后以
+// innerapi 接口注入，验证 service 层开启的跨模块事务。
 func newOrderService(t *testing.T) *service.OrderService {
 	t.Helper()
 	products := productservice.NewProductService(productservice.Dependencies{
@@ -160,7 +160,7 @@ func newOrderService(t *testing.T) *service.OrderService {
 	return service.NewOrderService(service.Dependencies{
 		Orders:   &orderrepo.OrderRepository{},
 		Products: products,
-		Config:   service.NewOrderConfigService(zap.NewNop()),
+		Config:   service.NewOrderConfigService(nil),
 		Logger:   zap.NewNop(),
 	})
 }

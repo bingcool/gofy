@@ -16,11 +16,9 @@ import (
 	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/support/registry"
 	"github.com/yourorg/demo-service/app/config"
+	"github.com/yourorg/demo-service/app/container"
 	appio "github.com/yourorg/demo-service/app/io"
-	"github.com/yourorg/demo-service/app/module/order"
-	"github.com/yourorg/demo-service/app/module/product"
 )
 
 // reloader rebuilds the modules from a freshly loaded config and applies them
@@ -48,16 +46,14 @@ type reloader struct {
 // Reload starts this set before stopping the previous one, so a change briefly
 // runs two watchers; the old watcher is cancelled once the swap completes.
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
-	// 组合根每次装配新建一份共享注册表，传给所有模块工厂：属主模块（product）
-	// 自登记 innerapi，消费方（order）构造期按接口取用。启动和每次 Reload 都
-	// 重新执行这份工厂列表，新旧两代注册表互不影响。工厂顺序即依赖顺序，被
-	// 依赖方在前。
-	reg := registry.NewRegistry()
+	// 每个装配代新建一个容器：启动和每次 Reload 各得到一套仓库与 service，
+	// 旧的模块实例继续服务在途请求。容器内部固定按 产品 → 订单 构建，模块
+	// 工厂的排列顺序不再承载依赖顺序。
+	ctr := container.NewContainer()
 	factories := []gofy.ModuleFactory{
 		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt),
-		product.NewModuleFactory(reg),
-		order.NewModuleFactory(reg),
 	}
+	factories = append(factories, ctr.ModuleFactories()...)
 	if r.watch {
 		factories = append(factories, func(rt *core.Runtime) (support.Module, error) {
 			return &nacosWatchModule{

@@ -17,26 +17,45 @@ All notable changes to this project are documented here. The format follows
   `Get[T]` performs the type assertion with errors that include the name and
   both types. Each assembly (startup or `Reload`) creates its own registry, so
   instances are never shared across generations; unlike
-  `support/middleware.Registry` it is untyped and not limited to middleware.
+  `support/middleware.Registry` it is untyped and not limited to middleware. It
+  is an optional tool for name-indexed or multi-instance wiring — the demo's
+  single cross-module service is injected by `app/container` instead.
 - `examples/demo-service`: five-package module layering with `innerapi` as the
   only cross-module seam. Every module now has `controller / service / innerapi /
   repository / model`; the intra-module chain is `controller → service →
   repository → model`, and cross-module calls go `order.service →
   product.innerapi` — never service→service or into another module's
   repository/model. `innerapi` is a pure contract package (an interface
-  `OrderAPI` / `ProductAPI`, plain views `Order` / `Product`, sentinel errors and
-  a `Name` constant) with no dependency on GORM, the HTTP contract or `app/io`.
-  The owner module's service implements its own `innerapi` interface
-  (`var _ productapi.ProductAPI = (*ProductService)(nil)`), and the composition
-  root `reload.factories(cfg)` builds **one shared** `registry.NewRegistry()` per
-  assembly (startup and each `Reload`), passing it to `product.NewModuleFactory(reg)`
-  then `order.NewModuleFactory(reg)`. Each owner self-registers its service
-  (`reg.Register(innerapi.Name, svc)`); the consumer resolves it at construction
-  with `registry.Get[productapi.ProductAPI](reg, productapi.Name)` and injects it
-  into `service.Dependencies{Orders, Products, Logger}`. The former mode A/B
-  repository resolution, package-level `RepoDeps` / `RepositoryDeps` /
-  `a_init_repository.go`, `NameProducts`, the `app/repository` composition layer
-  and the `RepositoryRegistrar` interface are all gone. Repositories stay
+  `OrderAPI` / `ProductAPI`, plain views `Order` / `Product` and sentinel errors)
+  with no dependency on GORM, the HTTP contract or `app/io`; it carries no
+  package-level singleton, publish hook or lookup function.
+  `service.Dependencies` is `{Orders, Products, Config, Logger}`: repositories and
+  same-module collaborators arrive as concrete types, cross-module capacity as
+  the `productapi.ProductAPI` interface. Dependency acquisition is a single
+  composition root, `app/container`, instantiated once per generation
+  (`container.NewContainer()` in `reload.go`). It owns
+  `RepositoryDeclare{OrdersRepo, ProductsRepo}` and one lazy slot per service
+  (`lazy_value.go`): `Init(rt.Logger)` records the generation logger, and
+  `ProductService()` / `OrderConfigService()` / `OrderService()` build their
+  dependency subtree on first access, so a module factory only constructs its own
+  module and unused capabilities stay unbuilt. Each slot uses its own `sync.Once`
+  plus a `building` flag: re-entering a slot during its own construction means
+  the wiring graph has a cycle, which panics with the service name instead of
+  deadlocking in `sync.Once`. Wiring is split per module (`product.go`,
+  `order.go`, `module_factories.go`), so the file touched by a new dependency
+  stays small as the app grows. Module roots keep only `NewModule` / `Register`
+  (route binding); per-generation containers replace the former package-level
+  singletons, so services are never shared between test cases or reload
+  generations, and the order accessor resolves product first, removing the
+  factory ordering constraint. Go's import direction (`container → module →
+  service`) means the service package cannot reach the composition root, so all
+  wiring happens at construction time. The former innerapi service singletons
+  (`SetProductService` / `GetProductService`), module-level `RepositoryDeclare`,
+  `GetOrderService` / `GetOrderConfigService` getters, `NewModuleFactory` /
+  `newModuleFactory`, mode A/B repository resolution, package-level `RepoDeps` /
+  `RepositoryDeps` / `a_init_repository.go`, `NameProducts`, the
+  `app/repository` composition layer and the `RepositoryRegistrar` interface are
+  all gone. Repositories stay
   stateless concrete types (no `OrderRepositoryInterface` /
   `ProductRepositoryInterface`): they carry no connection or logger and resolve
   the `app/io` `db.Db` handle on every query (ctx transaction first), so assembly
@@ -52,23 +71,25 @@ All notable changes to this project are documented here. The format follows
   `migrations/0002_products.sql`; `DecreaseStock` pushes the status/stock
   conditions into the SQL update and leaves 0 rows to the service to classify.
   Scripts do not run the module lifecycle, so `script/fix_order.go` publishes
-  `rt.DB` into the `app/io` handle for the duration of the call. Tests inject the
-  real product service and run the real repositories on an in-memory pure-Go
-  SQLite database (still no external MySQL, still cgo-free), and inject panics
-  through a `gorm.ConnPool` wrapper (delegating `BeginTx` to `gorm.TxBeginner`)
-  for the recovery case.
+  `rt.DB` into the `app/io` handle for the duration of the call. Tests build a
+  per-test container over the real repositories on an in-memory pure-Go SQLite
+  database (still no external MySQL, still cgo-free), and inject panics through a
+  `gorm.ConnPool` wrapper (delegating `BeginTx` to `gorm.TxBeginner`) for the
+  recovery case.
 - `examples/demo-service`: the product module gained a `ProductService`
   (`app/module/product/service`) that implements `product/innerapi.ProductAPI`
-  (get, list-by-ids and stock-decrease), wraps the concrete `ProductRepository`,
-  keeps logging at the service boundary, and self-registers under
-  `productapi.Name` so other modules resolve it through the shared registry.
+  (get, list-by-ids and stock-decrease), wraps the concrete `ProductRepository`
+  and keeps logging at the service boundary. `app/container` passes the instance
+  to `OrderService` as the `productapi.ProductAPI` interface, so the order module
+  never imports the product implementation.
   `DecreaseStock` classifies a 0-row update into `ErrNotFound` / `ErrUnavailable`
   / `ErrInsufficientStock`; covered by pure-Go SQLite tests.
 - `examples/demo-service`: extracted `OrderConfigService`
   (`app/module/order/service/order_config_service.go`) to own the order config
   read use case (currently a fixed sample) and a `Config` domain view. It is an
-  intra-module collaborator of `OrderService`: the factory builds it first and
-  injects it via `Dependencies.Config` (concrete type, same package), and
+  intra-module collaborator of `OrderService`: the container's
+  `OrderConfigService()` accessor constructs it and injects it through
+  `Dependencies` (concrete type, same package), and
   `OrderService.GetConfig` delegates to it. This demonstrates same-module
   service→service composition — no `innerapi` and no registry, which are reserved
   for cross-module calls; config has no cross-module consumer so it is not
@@ -79,12 +100,12 @@ All notable changes to this project are documented here. The format follows
 - `support/db`: context-propagated transactions. `Transaction(ctx, db, fn)`
   opens a transaction and stores it on the context passed to `fn`; nested calls
   reuse the outer transaction (no savepoint) and a nil callback or connection
-  returns `ErrTxFuncRequired`/`ErrTxDBRequired`. `FromContext(ctx, fallback)`
+  returns `ErrTxFuncRequired`/`ErrTxDBRequired`. `WithContext(ctx, fallback)`
   resolves the transaction first and only then the explicit connection or app
   handle, so one request can span repositories from several modules. Covered by
   pure-Go SQLite tests for commit, rollback and nested reuse.
 - `examples/demo-service`: repositories resolve connections through
-  `support/db.FromContext`, and the product repository gained `DecreaseStock`
+  `support/db.WithContext`, and the product repository gained `DecreaseStock`
   (status/stock conditions pushed into the SQL update, 0 rows left to the
   caller). A service-level SQLite test
   (`app/module/order/service/transaction_test.go`) proves stock decrease and
@@ -94,8 +115,9 @@ All notable changes to this project are documented here. The format follows
   contract, cross-module only the other module's `innerapi`; `innerapi` →
   stdlib/`support` pure types only; `repository` → own `model` only, no contract;
   `model` → no `app/module`/contract/`app/io`), with the module root `module.go`
-  exempt as the wiring layer and `_test.go` files excluded. Wired into the demo
-  and root `make guards`/`make check`.
+  exempt as the route-binding layer and `_test.go` files excluded. Wired into the
+  demo and root `make guards`/`make check`. `app/container` sits outside
+  `app/module`, so it is the only place that imports several modules at once.
 - Root package: the App now owns the contract middleware registry. On startup
   and on every `Reload` it creates one `support/middleware.Registry`, registers
   every built-in middleware under its alias (`NameRequestID`,

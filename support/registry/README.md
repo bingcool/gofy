@@ -1,11 +1,24 @@
 # support/registry
 
 显式的**名字 → 实例**注册表，供应用在启动装配时登记跨模块共享的实例
-（repository、client、service 等），再按名字取用。它解决的是「service 如何
-即取即用地拿到其他模块的依赖」，同时避免包级单例：注册表是普通对象，
-每次装配（启动 / 热更新）新建一份，随依赖显式传递。
+（client、配置好的第三方客户端、多个同类型实现等），再按名字取用。注册表是
+普通对象而非全局：每次装配（启动 / 热更新）新建一份，随依赖显式传递。
 
-包只依赖标准库，不持有全局状态，所有方法都可并发调用。
+它是一个**可选工具**：需要按名字索引、或存在多份同类型实例时才划算。只有一个
+跨模块实现时，在应用层装配根（demo 的 `app/container`）构造实例、按对方
+`innerapi` 的接口注入消费方更简单：
+
+```go
+// app/container/container.go（每次装配执行一次）
+products := productservice.NewProductService(...)
+orders := orderservice.NewOrderService(orderservice.Dependencies{
+    Products: products, // 以 productapi.ProductAPI 接口注入
+    ...
+})
+```
+
+不需要名字，也不需要把注册表传进模块工厂。包只依赖标准库，不持有全局状态，
+所有方法都可并发调用。
 
 ## 快速开始
 
@@ -14,35 +27,25 @@ import (
     "fmt"
 
     "github.com/bingcool/gofy/support/registry"
-    productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
 )
 
-// 组合根（reload.factories）每次装配新建一份共享注册表，传给各模块工厂。
+// 组合根每次装配新建一份注册表，随依赖显式传递。
 reg := registry.NewRegistry()
 
-// 属主模块工厂登记自己实现 innerapi 接口的 service；名字常量归 innerapi 包。
-if err := reg.Register(productapi.Name, productSvc); err != nil {
+if err := reg.Register("sms.primary", primaryClient); err != nil {
     return err
 }
+reg.MustRegister("sms.backup", backupClient) // 启动期装配，失败 panic
 
-// 消费方模块工厂在构造期按接口取用，显式注入 service 构造函数。
-products, err := registry.Get[productapi.ProductAPI](reg, productapi.Name)
+// 消费方按名字做类型化取用。
+client, err := registry.Get[*sms.Client](reg, "sms.primary")
 if err != nil {
-    return fmt.Errorf("order module: %w", err)
+    return fmt.Errorf("sms: %w", err)
 }
-svc := service.NewOrderService(service.Dependencies{
-    Orders:   orders,
-    Products: products,
-    Logger:   logger,
-})
 ```
 
-`Get[T]` 的 `T` 是属主模块发布的 **innerapi 接口**（demo 里是
-`productapi.ProductAPI`），注册进去的是实现该接口的 service。名字常量归 innerapi
-包（`productapi.Name = "product.innerapi"`）。组合根建共享注册表，属主模块工厂
-自登记、消费方工厂构造期取用；登记或取用失败即启动失败，不会拖到请求期才暴露。
-service 不把注册表缓存到包级变量，也不在请求期按需取用——跨模块依赖在装配期就
-固定下来，依赖可见、测试可换实例。
+名字常量建议由提供方包导出（例如 `const PrimaryName = "sms.primary"`），消费方
+引用常量而不是手写字符串。登记或取用失败即启动失败，不会拖到请求期才暴露。
 
 ## API
 
@@ -57,13 +60,14 @@ service 不把注册表缓存到包级变量，也不在请求期按需取用—
 
 ## 约定
 
-- **名字是契约**：使用方用常量定义，demo 里归 innerapi 包，格式 `<module>.innerapi`，
-  例如 `product.innerapi`；注册表本身不校验格式。
+- **名字是契约**：使用方用常量定义，提供方包导出；注册表本身不校验格式。
 - **显式注册**：没有默认实现、没有兜底。缺依赖就是错误，启动期失败优于请求期失败。
 - **不覆盖**：同一名字重复注册返回错误，避免两个实现抢同一个名字。
 - **按装配隔离**：每次启动 / `Reload` 新建注册表，旧实例不会跨代复用。
 - **不放基础设施全局**：logger、db 句柄等如无跨模块取用需求，不要塞进注册表。
 - **不要手写断言**：调用处统一使用 `Get[T]`，错误信息会带上名字和类型。
+- **一个实现别上注册表**：单实现的跨模块依赖在装配根按 `innerapi` 接口注入，
+  少一层名字与传递参数。
 
 ## 与 support/middleware.Registry 的区别
 
@@ -71,6 +75,6 @@ service 不把注册表缓存到包级变量，也不在请求期按需取用—
 | --- | --- | --- |
 | 存放内容 | 任意跨模块实例 | 只存 `support.Middleware` |
 | 类型 | `any` + 泛型 `Get[T]` | 强类型 |
-| 使用方 | 属主模块工厂登记、消费方构造期取用 | Router / adapter 解析契约中间件名 |
+| 使用方 | 应用装配期登记，按名取用 | Router / adapter 解析契约中间件名 |
 
 两者都遵循「显式注册、按名解析、启动失败」，但职责不同，不合并。

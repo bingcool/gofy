@@ -166,7 +166,7 @@ db:
 ## 事务上下文
 
 `Transaction(ctx, db, fn)` 在 `db` 上开启事务，并把事务放进传给 `fn` 的
-context；repository 用 `FromContext(ctx, fallback)` 取连接，同一次请求内多个
+context；repository 用 `WithContext(ctx, fallback)` 取连接，同一次请求内多个
 模块的调用就会共享同一个事务：
 
 ```go
@@ -181,12 +181,12 @@ err := gofydb.Transaction(ctx, rt.DB, func(ctx context.Context) error {
 
 ```go
 func Transaction(ctx context.Context, db *gorm.DB, fn func(ctx context.Context) error) error
-func FromContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
+func WithContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
 ```
 
 - 嵌套调用复用外层事务，不创建 savepoint；内层返回错误会冒泡到外层并导致整体
   回滚，内层成功也不会提前提交；
-- `FromContext` 优先返回 ctx 中的事务，没有事务时才返回 `fallback`；repository
+- `WithContext` 优先返回 ctx 中的事务，没有事务时才返回 `fallback`；repository
   的显式连接不会覆盖事务，内层只消费最外层开启的事务；
 - `fn` 为 nil 返回 `ErrTxFuncRequired`；ctx 无事务且 `db` 为 nil 返回
   `ErrTxDBRequired`；`ctx` 为 nil 时按 `context.Background()` 处理；

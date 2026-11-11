@@ -1,17 +1,13 @@
-// Package innerapi 是产品模块对其它模块发布的内部 API 契约：只含接口、只读
-// 视图、哨兵错误与注册名，不 import 本模块 service/repository/model，也不
-// import HTTP 契约。消费方（如订单 service）只依赖这个包，提供方内部如何
-// 实现对其完全透明。
+// Package innerapi 是产品模块对其它模块发布的内部 API 契约：接口、只读视图和
+// 哨兵错误。不 import 本模块 service/repository/model，也不 import HTTP 契约。
+// 消费方（如订单 service）只依赖这个包，实现由装配根在构造期注入，提供方
+// 内部如何实现对其完全透明。
 package innerapi
 
 import (
 	"context"
 	"errors"
 )
-
-// Name 是产品 innerapi 在装配注册表里的名字，归属主模块。重命名属于破坏性
-// 变更：消费方按这个名字取用接口。
-const Name = "product.innerapi"
 
 // Product 是跨模块只读视图：plain struct，不含 model / gorm / 契约类型。
 // OnSale 由 service 从持久化状态换算，消费方不感知产品的状态码定义。

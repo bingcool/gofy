@@ -1,7 +1,7 @@
-// Package innerapi 是订单模块对其它模块发布的内部 API 契约：只含接口、只读
-// 视图、入参、哨兵错误与注册名，不 import 本模块 service/repository/model，
-// 也不 import HTTP 契约。本轮订单暂无跨模块消费方，契约先行预留，保持与产品
-// 模块对称，供后续模块取用。
+// Package innerapi 是订单模块对其它模块发布的内部 API 契约：接口、只读视图、
+// 入参和哨兵错误。不 import 本模块 service/repository/model，也不 import HTTP
+// 契约。本轮订单暂无跨模块消费方，契约先行预留，保持与产品模块对称，供后续
+// 模块取用。
 package innerapi
 
 import (
@@ -9,9 +9,6 @@ import (
 	"errors"
 	"time"
 )
-
-// Name 是订单 innerapi 在装配注册表里的名字，归属主模块。
-const Name = "order.innerapi"
 
 // Order 是跨模块只读视图：plain struct，不含 model / gorm / 契约类型。
 // Status 是领域状态字符串（pending/paid/cancelled），契约枚举只在 controller

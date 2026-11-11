@@ -1,7 +1,7 @@
 // Package controller exposes product handlers for the demo. The in-memory
 // samples here are not wired to HTTP routes yet; real product persistence lives
 // in app/module/product/repository (products table, db.default) and is consumed
-// by the order service through the assembly registry.
+// by the order service through product.innerapi.
 package controller
 
 import (

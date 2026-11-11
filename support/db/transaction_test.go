@@ -52,12 +52,12 @@ func TestTransactionCommits(t *testing.T) {
 	ctx := context.Background()
 
 	err := db.Transaction(ctx, conn, func(ctx context.Context) error {
-		tx := db.FromContext(ctx, nil)
+		tx := db.WithContext(ctx, nil)
 		if tx == nil {
-			t.Fatal("FromContext returned nil inside a transaction")
+			t.Fatal("WithContext returned nil inside a transaction")
 		}
 		if tx == conn {
-			t.Fatal("inside a transaction FromContext should not return the base connection")
+			t.Fatal("inside a transaction WithContext should not return the base connection")
 		}
 		return tx.Create(&txItem{Name: "committed"}).Error
 	})
@@ -67,8 +67,8 @@ func TestTransactionCommits(t *testing.T) {
 	if got := countItems(t, conn); got != 1 {
 		t.Fatalf("count = %d, want 1 after commit", got)
 	}
-	if got := db.FromContext(ctx, conn); got != conn {
-		t.Fatal("outside a transaction FromContext should return the fallback")
+	if got := db.WithContext(ctx, conn); got != conn {
+		t.Fatal("outside a transaction WithContext should return the fallback")
 	}
 }
 
@@ -77,7 +77,7 @@ func TestTransactionRollsBack(t *testing.T) {
 	boom := errors.New("boom")
 
 	err := db.Transaction(context.Background(), conn, func(ctx context.Context) error {
-		if err := db.FromContext(ctx, conn).Create(&txItem{Name: "rolled back"}).Error; err != nil {
+		if err := db.WithContext(ctx, conn).Create(&txItem{Name: "rolled back"}).Error; err != nil {
 			return err
 		}
 		return boom
@@ -95,7 +95,7 @@ func TestTransactionNestedReusesOuterTx(t *testing.T) {
 	outerErr := errors.New("outer rollback")
 
 	err := db.Transaction(context.Background(), conn, func(ctx context.Context) error {
-		outer := db.FromContext(ctx, nil)
+		outer := db.WithContext(ctx, nil)
 		if outer == nil {
 			t.Fatal("outer transaction is missing from ctx")
 		}
@@ -104,7 +104,7 @@ func TestTransactionNestedReusesOuterTx(t *testing.T) {
 		}
 
 		err := db.Transaction(ctx, nil, func(inner context.Context) error {
-			innerTx := db.FromContext(inner, conn)
+			innerTx := db.WithContext(inner, conn)
 			if innerTx != outer {
 				t.Fatal("nested Transaction did not reuse the outer transaction")
 			}
@@ -123,16 +123,16 @@ func TestTransactionNestedReusesOuterTx(t *testing.T) {
 	}
 }
 
-func TestFromContextFallback(t *testing.T) {
+func TestWithContextFallback(t *testing.T) {
 	conn := newTxDB(t)
 
-	if got := db.FromContext(nil, conn); got != conn {
+	if got := db.WithContext(nil, conn); got != conn {
 		t.Fatal("nil ctx should return the fallback")
 	}
-	if got := db.FromContext(context.Background(), conn); got != conn {
+	if got := db.WithContext(context.Background(), conn); got != conn {
 		t.Fatal("ctx without a transaction should return the fallback")
 	}
-	if got := db.FromContext(context.Background(), nil); got != nil {
+	if got := db.WithContext(context.Background(), nil); got != nil {
 		t.Fatal("nil fallback should stay nil")
 	}
 }

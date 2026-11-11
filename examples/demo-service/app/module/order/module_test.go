@@ -15,18 +15,15 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
-	"github.com/bingcool/gofy/support/registry"
 	"github.com/bingcool/gofy/support/sqlite"
+	"github.com/yourorg/demo-service/app/container"
 	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
 	"github.com/yourorg/demo-service/app/module/order/model"
-	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
-	product "github.com/yourorg/demo-service/app/module/product"
 	productmodel "github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
-	productservice "github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
@@ -98,9 +95,9 @@ func (p panicPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, e
 	return p.ConnPool.(gorm.TxBeginner).BeginTx(ctx, opts)
 }
 
-// newTestService 装配一个跑在 SQLite 上的订单服务，跨模块依赖注入真实产品
-// service（它实现 innerapi.ProductAPI）。仓库从 app/io 句柄取连接，测试把内存库
-// 发布成当前句柄，结束后恢复。
+// newTestService 通过装配根在 SQLite 上构建订单服务：容器同时构造产品与订单
+// service，并把产品能力以 innerapi 接口注入订单 service。仓库从 app/io 句柄
+// 取连接，测试把内存库发布成当前句柄，结束后恢复。
 func newTestService(t *testing.T) *service.OrderService {
 	t.Helper()
 	conn := newTestDB(t)
@@ -112,16 +109,9 @@ func newTestService(t *testing.T) *service.OrderService {
 	prev := appdb.Db
 	appdb.Db = conn
 	t.Cleanup(func() { appdb.Db = prev })
-	products := productservice.NewProductService(productservice.Dependencies{
-		Products: &productrepo.ProductRepository{},
-		Logger:   zap.NewNop(),
-	})
-	return service.NewOrderService(service.Dependencies{
-		Orders:   &repository.OrderRepository{},
-		Products: products,
-		Config:   service.NewOrderConfigService(zap.NewNop()),
-		Logger:   zap.NewNop(),
-	})
+	ctr := container.NewContainer()
+	ctr.Init(zap.NewNop())
+	return ctr.OrderService()
 }
 
 func newTestApp(t *testing.T) *gofytest.App {
@@ -416,33 +406,6 @@ func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	}
 	if got := len(logs.FilterMessage("order audit").All()); got != 2 {
 		t.Fatalf("audit entries = %d, want one per assembly", got)
-	}
-}
-
-// 组合根每次装配新建共享注册表，产品工厂先登记 innerapi、订单工厂构造期取用：
-// 连续装配两次不撞名字，缺登记或缺数据库时启动失败。
-func TestModuleFactoryBuildsFreshRegistryPerAssembly(t *testing.T) {
-	rt := &gofy.Runtime{DB: &gorm.DB{}, Logger: zap.NewNop()}
-	for i := 0; i < 2; i++ {
-		reg := registry.NewRegistry()
-		if _, err := product.NewModuleFactory(reg)(rt); err != nil {
-			t.Fatalf("assembly %d product: %v", i, err)
-		}
-		module, err := order.NewModuleFactory(reg)(rt)
-		if err != nil {
-			t.Fatalf("assembly %d order: %v", i, err)
-		}
-		if module.Name() != "order" {
-			t.Fatalf("module name = %q, want order", module.Name())
-		}
-	}
-	// 缺产品 innerapi 登记时，订单工厂构造期取用失败。
-	if _, err := order.NewModuleFactory(registry.NewRegistry())(rt); err == nil {
-		t.Fatal("order factory should fail when product innerapi is not registered")
-	}
-	// 缺数据库时直接失败。
-	if _, err := order.NewModuleFactory(registry.NewRegistry())(&gofy.Runtime{Logger: zap.NewNop()}); err == nil {
-		t.Fatal("a runtime without database should fail")
 	}
 }
 

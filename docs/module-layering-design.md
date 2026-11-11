@@ -1,11 +1,12 @@
 # 模块分层与跨模块 InnerAPI 调用设计
 
-- 状态：已确认（2026-11-11）；P1–P6 已落地（2026-11-11）。引入 InnerAPI 作为跨模块
-  调用层：每个模块固定 `controller / service / innerapi / repository / model`，跨模块
-  只走对方 innerapi 接口，共享注册表由组合根每次装配新建、属主自登记、消费方构造期取用。
+- 状态：已确认（2026-11-11）；P1–P7 已落地（2026-11-11）。装配方式于 2026-11-11
+  收敛到 `app/container`：每代新建容器，构造期显式注入仓库与 service，跨模块只传
+  innerapi 接口；不再有包级服务单例、module getter 或工厂顺序约束。每个模块固定
+  `controller / service / innerapi / repository / model`，跨模块只走对方 innerapi。
 - 范围：`examples/demo-service/app/module/{order,product}` 的分层（新增 `innerapi`）、
   装配方式、跨模块调用；`examples/demo-service/scripts/check-imports.sh` 规则；
-  `gofy/support/registry` 的使用约定（不改框架 API）
+  `gofy/support/registry` 仍作为可选的「名字 → 实例」工具存在，demo 不再使用
 - 关联：[repository-composition-design.md](./repository-composition-design.md)（本文取代其
   §5.3–§5.6 的取用模式与 §8 的 import 规则）、[library-design.md](./library-design.md) §9
 - 一句话目标：每个模块固定 `controller / service / innerapi / repository / model`，
@@ -13,7 +14,7 @@
   通过对方的 `innerapi` 调用，不再直接依赖对方 service**（`order.service →
   product.innerapi`）。repository 与 model 永远不出模块。
 
-## 1. 现状问题（带证据）
+## 1. 改造前问题（带证据，2026-11-11 之前）
 
 四包目录本身没问题，问题出在「装配错位」「层间类型泄漏」和「跨模块没有稳定契约」：
 
@@ -73,13 +74,14 @@
 | --- | --- | --- | --- | --- |
 | `controller` | 契约 ↔ service 映射、错误→HTTP 码、记录意外错误 | 契约 request | 契约 response/DTO | import model / repository / innerapi / 其他模块任何包 |
 | `service` | 业务规则、用例编排、事务边界、日志；实现本模块 innerapi | 本模块 model + plain 入参 + 其他模块 innerapi | 本模块 innerapi 视图 | import HTTP 契约；import 其他模块 service / repository / model |
-| `innerapi` | **模块对外发布的内部 API 契约**：接口 + 只读视图 + 哨兵错误 + 注册名 | — | — | import 任何模块的 service / repository / model / controller、HTTP 契约、app/io |
+| `innerapi` | **模块对外发布的内部 API 契约**：接口 + 只读视图 + 哨兵错误 | — | — | import 任何模块的 service / repository / model / controller、HTTP 契约、app/io |
 | `repository` | 单聚合数据访问（GORM） | 本模块 model | 本模块 model | import service / innerapi / 契约 / 其他模块任何包 |
 | `model` | 表结构定义 | — | — | 任何业务依赖（仅 `time` / gorm tag） |
 
-`innerapi` 是**纯契约包**：只有接口、plain 视图、错误和名字常量，不 import 本模块
-service/repository/model，也不 import HTTP 契约。消费方 import 它时不会牵连提供方的
-实现细节。本模块 service 实现 innerapi 接口（service → innerapi 单向依赖）。
+`innerapi` 是**纯契约包**：只有接口、plain 视图和哨兵错误，不 import 本模块
+service/repository/model，也不 import HTTP 契约。消费方 import 它时不会牵连提供方
+的实现细节。本模块 service 实现 innerapi 接口，由装配根（`app/container`）以接口
+注入消费方（service → innerapi 单向依赖）。
 
 ### 3.2 import 矩阵（√ 允许，× 禁止）
 
@@ -115,38 +117,47 @@ SQLite 测试（沿用既有决策）。innerapi 不同：它是**模块间的�
 ## 4. 目标目录
 
 ```text
-examples/demo-service/app/module/
-├── order/
-│   ├── module.go                 # 装配本模块 service + 注册路由；从共享注册表取 product.innerapi
-│   ├── controller/
-│   │   └── order_controller.go   # 契约映射 + 错误→HTTP 码（唯一 import HTTP 契约的层）
-│   ├── service/
-│   │   ├── order_service.go      # 用例编排、事务、日志；跨模块调 product.innerapi
-│   │   ├── order_view.go         # 领域状态常量 + 订单域哨兵错误 + CreateItem 入参
-│   │   └── deps.go               # Dependencies（本模块仓库 + 跨模块 innerapi + Logger）
-│   ├── innerapi/
-│   │   └── innerapi.go           # 订单对外契约：OrderAPI 接口 + Order 视图 + 错误 + Name
-│   ├── repository/
-│   │   └── order_repository.go   # GORM，返回 model；状态由参数传入
-│   └── model/
-│       └── order.go              # 表结构
-└── product/
-    ├── module.go                 # 新增：装配 service 并登记 product.innerapi（本轮无路由）
-    ├── controller/               # 暂保留内存示例，后续接契约时改为依赖 service
-    ├── service/
-    │   ├── product_service.go    # 实现 innerapi.ProductAPI；读取 + 扣库存；0 行分类
-    │   └── deps.go               # Dependencies（本模块仓库 + Logger）
-    ├── innerapi/
-    │   └── innerapi.go           # ProductAPI 接口 + Product 视图 + 错误 + Name
-    ├── repository/
-    │   └── product_repository.go # GORM，返回 model（ProductView 迁出）
-    └── model/
-        └── product.go
+examples/demo-service/app/
+├── container/                      # 装配根（不在 module 目录内）
+│   ├── container.go                # Container：NewContainer / Init / logger
+│   ├── lazy_value.go               # lazyValue[T]：惰性构造槽 + 成环检测
+│   ├── product.go                  # ProductService 访问器
+│   ├── order.go                    # OrderConfigService / OrderService 访问器
+│   ├── module_factories.go         # ProductModuleFactory / OrderModuleFactory
+│   └── repository_declare.go       # RepositoryDeclare{OrdersRepo, ProductsRepo}
+└── module/
+    ├── order/
+    │   ├── module.go               # 模块根：NewModule + Register（service 由容器注入）
+    │   ├── controller/
+    │   │   └── order_controller.go # 契约映射 + 错误→HTTP 码（唯一 import HTTP 契约的层）
+    │   ├── service/
+    │   │   ├── order_service.go    # 用例编排、事务、日志；跨模块调 product.innerapi
+    │   │   ├── order_view.go       # 领域状态常量 + 订单域哨兵错误 + CreateItem 入参
+    │   │   └── deps.go             # Dependencies（仓库 + 产品接口 + Config + Logger）
+    │   ├── innerapi/
+    │   │   └── innerapi.go         # 订单对外契约：OrderAPI 接口 + Order 视图 + 错误
+    │   ├── repository/
+    │   │   └── order_repository.go # GORM，返回 model；状态由参数传入
+    │   └── model/
+    │       └── order.go            # 表结构
+    └── product/
+        ├── module.go               # 模块根：NewModule/Register（本轮无路由）
+        ├── controller/             # 暂保留内存示例，后续接契约时改为依赖 service
+        ├── service/
+        │   ├── product_service.go  # 实现 innerapi.ProductAPI；读取 + 扣库存；0 行分类
+        │   └── deps.go             # Dependencies（本模块仓库 + Logger）
+        ├── innerapi/
+        │   └── innerapi.go         # ProductAPI 接口 + Product 视图 + 错误
+        ├── repository/
+        │   └── product_repository.go # GORM，返回 model（ProductView 迁出）
+        └── model/
+            └── product.go
 ```
 
 `a_init_repository.go` / 包级 `RepoDeps` 删除，由 `service/deps.go` 的 `Dependencies`
-结构取代。每个模块都拥有自己的 `innerapi`（即使本轮只有 product 被跨模块调用，order
-也预留契约，保持对称）。
+结构取代。仓库与 service 的实例化集中在 `app/container`，模块根只保留
+`NewModule` / `Register`。每个模块都拥有自己的 `innerapi`（即使本轮只有 product
+被跨模块调用，order 也预留契约，保持对称）。
 
 ## 5. 调用链详解
 
@@ -179,19 +190,24 @@ func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.Cre
 ```
 
 service 编排用例、开事务、记日志；repository 只做数据访问、返回 model；service 把
-model 转成 innerapi 视图上抛。`conn(ctx)` 维持 `gofydb.FromContext(ctx, appdb.Db)`，
+model 转成 innerapi 视图上抛。`conn(ctx)` 维持 `gofydb.WithContext(ctx, appdb.Db)`，
 repository 无状态、零值可用。
 
 **模块内 service → service（同包协作）**：同一个 `service` 包里可以有多个 service
 结构体互相调用，例如 `OrderService` 委托 `OrderConfigService` 读配置。这是**模块内
-组合**，用具体类型 + 构造函数注入即可，**不走 innerapi、也不走注册表**——innerapi 与
-共享注册表是跨模块的缝，同包结构体本就能直接互相引用（连 import 都不需要）。接法与
-注入 repository 一致：`Dependencies` 加一个 `Config *OrderConfigService` 字段，工厂
-先构造被依赖方再注入消费方，消费方方法里直接 `s.config.GetConfig(ctx)` 并传同一个
-ctx。取舍与 repository 相同：只有一种实现，不声明接口；若出现双向依赖，应抽出共享
-逻辑或改单向，而不是用注册表/全局变量硬解。只有当**别的模块**也要调这个能力时，才把
-它加进本模块 innerapi 登记出去（如 `OrderConfigService` 的配置当前无跨模块消费方，
-就不发布到 innerapi，controller 经 `OrderService.GetConfig` 取领域视图再映射契约）。
+组合**，由装配根 `app/container` 统一实例化：`OrderService()` 首次取用时先解析
+`OrderConfigService`，再经 `Dependencies` 把具体类型注入。
+**不走 innerapi**——innerapi 是跨模块的缝。消费方方法里直接
+`s.config.GetConfig(ctx)` 并传同一个 ctx。
+
+Go 的 import 方向是 `container → order(module) → service`，`service` 包不能反向
+import 模块根或容器（会成环），因此 service 之间的组合只能在装配期由容器完成；
+同包内若确需直接构造，也只能用 `service` 包自己的构造函数。取舍与 repository
+相同：只有一种实现，不声明接口；若出现双向依赖，应抽出共享逻辑或改单向，而不是
+靠包级单例硬解。只有当**别的模块**也要调这个能力时，才把它加进本模块 innerapi，
+并在容器装配新消费方时以接口注入（如 `OrderConfigService` 的配置当前无跨模块
+消费方，就不发布到 innerapi，controller 经 `OrderService.GetConfig` 取领域视图
+再映射契约）。
 
 ### 5.2 模块间：service → 对方 innerapi
 
@@ -205,17 +221,14 @@ ctx。取舍与 repository 相同：只有一种实现，不声明接口；若�
 
 ```go
 // product/innerapi/innerapi.go
-// Package innerapi 是产品模块对其它模块发布的内部 API 契约：只含接口、只读视图、
-// 哨兵错误与注册名，不 import 本模块 service/repository/model，也不 import HTTP 契约。
+// Package innerapi 是产品模块对其它模块发布的内部 API 契约：接口、只读视图、
+// 哨兵错误，不 import 本模块 service/repository/model，也不 import HTTP 契约。
 package innerapi
 
 import (
     "context"
     "errors"
 )
-
-// Name 是产品 innerapi 在装配注册表里的名字，归属主模块。
-const Name = "product.innerapi"
 
 // Product 是跨模块只读视图：plain struct，不含 model / gorm / 契约类型。
 type Product struct {
@@ -240,6 +253,9 @@ type ProductAPI interface {
 }
 ```
 
+`innerapi` 只保存接口、视图和哨兵错误；实现由装配根 `app/container` 构造后以接口
+注入消费方。发布时机归容器，消费方不感知实现类型，也没有包级可变状态。
+
 ### 6.2 service 实现契约
 
 本模块 service 实现 innerapi 接口，出参即 innerapi 视图；业务规则仍留在 service，
@@ -256,6 +272,8 @@ type Dependencies struct {
     Products *repository.ProductRepository // 本模块仓库，必填
     Logger   *zap.Logger                   // 允许 nil
 }
+
+// 返回前不发布任何全局状态：实例由 app/container 持有并注入消费方。
 func NewProductService(deps Dependencies) *ProductService
 
 func (s *ProductService) Get(ctx context.Context, id uint64) (*productapi.Product, error)
@@ -269,94 +287,134 @@ func (s *ProductService) DecreaseStock(ctx context.Context, id uint64, num int) 
 
 | 方案 | 消费方依赖 | 类型安全 | 装配失败时机 | 结论 |
 | --- | --- | --- | --- | --- |
-| 取对方 repository（现状） | 持久化实现 | `Get[T]` | 请求期/装配期 | 废弃：绕过业务层 |
+| 取对方 repository（更早） | 持久化实现 | 运行期断言 | 请求期/装配期 | 废弃：绕过业务层 |
 | 取对方 service（上一版） | 具体 service 包 | 编译期 | 装配期 | 废弃：耦合实现包 |
-| **取对方 innerapi（本方案）** | **纯契约接口** | `Get[T]` 编译期 | 装配期 | **推荐** |
+| 名字注册表 + `Get[T]` | 纯契约接口 | `Get[T]` 编译期 | 装配期 | 可选：名字是字符串，样板偏多 |
+| **app/container 构造期注入（当前）** | **纯契约接口** | **编译期接口** | **装配期** | **采用：无包级状态、顺序无关** |
 
-推荐：**注册表只登记跨模块可见的 innerapi，属主模块自登记，消费方构造期 `Get[T]`
-取用并持有接口**。运行期调用是普通方法调用，无字符串、无每请求查找。
+当前做法：`app/container` 每代新建容器，每个 service 一个惰性构造槽，首次取用时
+按依赖链构建，产品实现以 `ProductAPI` 接口直接传给订单 service。运行期调用仍是普通
+方法调用，无字符串、无每请求查找；也不需要名字常量、注册表、单例槽或工厂排序。该
+容器是 demo 业务代码，不是框架内建的 DI；框架本身仍只提供 `Runtime` 与工厂/钩子。
 
-### 6.4 共享注册表由组合根创建
+### 6.4 装配根每代新建容器
 
-每个工厂各建一份注册表会让属主自登记后消费方看不到。改为：**组合根
-（`reload.factories`）每次装配新建一份共享注册表，传给所有模块工厂**。不新增包、
-不向 `Runtime` 塞业务对象。
+```go
+// app/container/container.go
+type Container struct {
+    repos RepositoryDeclare
+
+    loggerMu sync.Mutex
+    logger   *zap.Logger
+
+    productService     lazyValue[*productservice.ProductService]
+    orderConfigService lazyValue[*orderservice.OrderConfigService]
+    orderService       lazyValue[*orderservice.OrderService]
+}
+
+func (c *Container) Init(logger *zap.Logger) { /* 记录本代 logger，首次生效 */ }
+```
+
+```go
+// app/container/product.go / order.go
+func (c *Container) ProductService() *productservice.ProductService {
+    return c.productService.Get(func() *productservice.ProductService {
+        return productservice.NewProductService(productservice.Dependencies{
+            Products: c.repos.ProductsRepo, Logger: c.loggerOrNop(),
+        })
+    })
+}
+
+func (c *Container) OrderService() *orderservice.OrderService {
+    return c.orderService.Get(func() *orderservice.OrderService {
+        return orderservice.NewOrderService(orderservice.Dependencies{
+            Orders:   c.repos.OrdersRepo,
+            Products: c.ProductService(), // 按需构建产品子树
+            Config:   c.OrderConfigService(),
+            Logger:   c.loggerOrNop(),
+        })
+    })
+}
+```
+
+`app/container/lazy_value.go` 的 `lazyValue[T]` 负责“首次构建、之后复用”：每个槽
+自己持有一个 `sync.Once` 和一个 `building` 标记；构建期间再次取用同一个槽说明
+装配图成环，直接 panic 并带上服务名，而不是让 `sync.Once` 静默死锁。装配只在启动
+期串行执行，不支持并发的首次取用，因此成环检测不需要 goroutine 标识。
 
 ```go
 // reload.go
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
-    reg := registry.NewRegistry() // 每次装配一份，跨模块共享；启动与 Reload 都走这里
+    ctr := container.NewContainer()
     factories := []gofy.ModuleFactory{
         appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt),
-        product.NewModuleFactory(reg), // 先：登记 product.innerapi
-        order.NewModuleFactory(reg),   // 后：取用 product.innerapi
     }
+    factories = append(factories, ctr.ModuleFactories()...)
     if r.watch { /* 追加 watcher 模块，不变 */ }
     return factories
 }
 ```
 
-工厂顺序即依赖顺序：被依赖方在前。顺序写错时消费方构造期 `Get` 失败、启动即报错。
-
-### 6.5 属主装配并登记自己的 innerapi
+启动和每次 `Reload` 各执行一次 `factories(cfg)`，也就是各新建一个容器。service 在
+模块工厂首次取用时按依赖链构建，产品实现直接作为 `Dependencies.Products` 传入；
+模块工厂的排列顺序不承载依赖顺序，未被挂载的能力也不会因为别的模块启动而被构建。
+旧模块继续服务在途请求，代际之间没有共享的包级状态。仓库声明也归容器：
 
 ```go
-// product/module.go
-func NewModuleFactory(reg *registry.Registry) gofy.ModuleFactory {
-    return func(rt *gofy.Runtime) (support.Module, error) {
-        if rt.DB == nil {
-            return nil, errors.New("product module requires database")
-        }
-        svc := service.NewProductService(service.Dependencies{
-            Products: &repository.ProductRepository{},
-            Logger:   rt.Logger,
-        })
-        // svc 满足 innerapi.ProductAPI；按契约名字登记，消费方按接口取用。
-        if err := reg.Register(innerapi.Name, svc); err != nil {
-            return nil, fmt.Errorf("product module: %w", err)
-        }
-        return NewModule(svc, rt.Logger), nil // 本轮 Register 无路由
-    }
+// app/container/repository_declare.go
+type RepositoryDeclare struct {
+    OrdersRepo   *orderrepo.OrderRepository
+    ProductsRepo *productrepo.ProductRepository
 }
 ```
 
-### 6.6 消费方构造期取用并持有接口
-
-```go
-// order/module.go
-func NewModuleFactory(reg *registry.Registry) gofy.ModuleFactory {
-    return func(rt *gofy.Runtime) (support.Module, error) {
-        if rt.DB == nil {
-            return nil, errors.New("order module requires database")
-        }
-        products, err := registry.Get[productapi.ProductAPI](reg, productapi.Name)
-        if err != nil {
-            return nil, fmt.Errorf("order module: %w", err) // 缺登记/顺序错 → 启动失败
-        }
-        svc := service.NewOrderService(service.Dependencies{
-            Orders:   &repository.OrderRepository{},
-            Products: products, // innerapi.ProductAPI 接口
-            Logger:   rt.Logger,
-        })
-        return NewModule(svc, rt.Logger), nil
-    }
-}
-```
+### 6.5 消费方通过 `Dependencies` 接收接口
 
 ```go
 // order/service/deps.go
-import productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
-
 type Dependencies struct {
-    Orders   *repository.OrderRepository // 本模块仓库，必填
-    Products productapi.ProductAPI       // 跨模块只依赖契约接口，必填
+    Orders   *repository.OrderRepository // 本模块仓库
+    Products productapi.ProductAPI       // 跨模块接口，由容器注入本代产品 service
+    Config   *OrderConfigService         // 同包协作 service，容器先构造后注入
     Logger   *zap.Logger                 // 允许 nil
 }
-func NewOrderService(deps Dependencies) *OrderService
+
+func NewOrderService(deps Dependencies) *OrderService {
+    return &OrderService{
+        orders:   deps.Orders,
+        products: deps.Products,
+        config:   deps.Config,
+        logger:   ...,
+    }
+}
 ```
 
-`order/service` 只 import `product/innerapi`。order 自己的 `innerapi`（OrderAPI）本轮
-暂无消费方，但同样由 order 工厂登记，保持对称、供后续模块取用。
+`OrderService` 只 import `product/innerapi` 的接口与视图，不 import 产品的
+service/repository/model；运行期调用 `s.products.ListByIDs/DecreaseStock` 是普通
+接口方法调用。
+
+### 6.6 模块根只绑定路由
+
+```go
+// order/module.go
+type Module struct {
+    svc    *service.OrderService
+    logger *zap.Logger
+}
+
+func NewModule(svc *service.OrderService, logger *zap.Logger) *Module { ... }
+func (m *Module) Name() string { return "order" }
+func (m *Module) Register(r *support.Router) error { /* BindGroup */ }
+```
+
+`app/container.ModuleFactories()` 返回的工厂检查 `rt.DB`、调用 `Init(rt.Logger)`
+记录日志器，再用 `order.NewModule(ctr.OrderService(), rt.Logger)` 包装；订单 service
+的取用会先解析产品与配置 service。模块根不再声明仓库、不提供
+service getter、不创建模块工厂。order 自己的 `innerapi`（OrderAPI）本轮暂无消费方，
+保留纯契约供后续模块使用：将来由容器把订单 service 以接口注入新的消费方，不需要
+恢复单例槽。Go 的 import 方向是 `container → order(module) → service`，service 包
+不可能反向 import 模块根或容器，依赖只能在构造期注入。`order/service` 只 import
+`product/innerapi`。
 
 ## 7. 事务与一致性
 
@@ -501,6 +559,10 @@ HTTP POST /api/v1/order/orders
 6. 删除「一个包最多 import 一个其他模块 repository」旧规则，由规则 2 取代；
 7. 包依赖成环仍由 `go build` 兜底（innerapi 无回边，天然无环）。
 
+规则按 `app/module/<name>/<layer>/...` 匹配：模块根（`app/module/<name>`）只做路由
+绑定，`app/container` 只做装配，两者都不在分层检查范围内。容器是唯一允许同时
+import 多个模块的包，跨模块依赖只在它里面解析。
+
 根仓库 `make guards` 的「公开包不得写 `func init()`」只约束 gofy 框架包，demo
 `app/**` 不在范围内；本方案 demo 侧也不使用 `init()`。
 
@@ -510,8 +572,9 @@ HTTP POST /api/v1/order/orders
 
 - repository：纯 Go 内存 SQLite（`support/sqlite`，cgo-free）跑真实 SQL，发布
   `appdb.Db`，`t.Cleanup` 恢复；
-- service：构造 `Dependencies` 注入真实仓库；跨模块依赖注入 **真实 product service**
-  （它实现 innerapi 接口，同库 SQLite），不塞 fake、不连外部 MySQL；
+- service：构造 `Dependencies` 注入真实仓库与产品服务；测试用
+  `container.NewContainer()` + `Init`（同库 SQLite）按需装配 service，或直接
+  构造真实 product service 后作为 `Products` 传入，不塞 fake、不连外部 MySQL；
 - controller：用真实 service（SQLite）验证契约映射与错误码。
 
 ### 11.2 innerapi 契约测试
@@ -527,8 +590,10 @@ HTTP POST /api/v1/order/orders
 
 ### 11.4 装配与状态映射
 
-- 装配测试：共享注册表下连续装配两次不撞名字；product 先登记、order 构造期取用成功；
-  缺登记或 `rt.DB == nil` 时启动失败；
+- 装配测试：每个装配代用独立容器，得到不同 service 实例；访问器幂等；产品访问器
+  只构建产品子树，订单访问器按链解析产品与配置；缺数据库时
+  模块工厂启动失败；订单工厂先于产品工厂执行也能工作；
+  `lazyValue` 的成环检测由单测覆盖（`app/container/*_test.go`）；
 - 状态一致性：controller 测试遍历 `orderenum.AllOrderStatus`，断言每个契约状态都有
   对应 `service.Status*` 且往返映射一致，防漂移。
 
@@ -537,19 +602,20 @@ HTTP POST /api/v1/order/orders
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | P0（本文） | 评审分层、innerapi 契约、取用机制、事务/错误边界、guard 规则 | 文档确认 |
-| P1 | product：新增 `innerapi`（ProductAPI + Product 视图 + 错误 + Name）；`ProductView` 从 repository 迁出，repository 返回 model；service 实现 ProductAPI；新增 `module.go` 装配并登记 `product.innerapi`；`Dependencies` 取代构造参数 | product 单测通过；契约断言通过；`product.innerapi` 可被取用 |
+| P1 | product：新增 `innerapi`（ProductAPI + Product 视图 + 错误）；`ProductView` 从 repository 迁出，repository 返回 model；service 实现 ProductAPI；新增模块根；`Dependencies` 取代构造参数 | product 单测通过；契约断言通过 |
 | P2 | order：新增 `innerapi`（OrderAPI + Order 视图）、`order_view.go`（状态常量 + 订单域错误 + CreateItem）、`deps.go`；service 去掉 HTTP 契约 import，返回 innerapi 视图；repository 去掉 `orderenum`，状态改参数 | order 单测通过；service 不再 import 契约 |
 | P3 | controller：契约 ↔ view 映射 + 状态映射 + 错误码；补状态一致性测试 | HTTP 行为/错误码/契约不变；一致性测试通过 |
-| P4 | 跨模块切换：order service 改依赖 `product.innerapi.ProductAPI`（ListByIDs/DecreaseStock），删除对 product repository/service 的 import；组合根建共享注册表，工厂加 `reg` 参数，product 先于 order | 跨模块事务用例通过；缺登记启动失败 |
+| P4 | 跨模块切换：order service 改依赖 `product.innerapi.ProductAPI`（ListByIDs/DecreaseStock），删除对 product repository/service 的 import；产品实现由装配根以接口注入 | 跨模块事务用例通过 |
 | P5 | 删除 `a_init_repository.go` / `RepoDeps`；更新 import guard 为 §10 规则 | `make check` 与三仓库回归通过 |
 | P6 | 同步 README / library-design / repository-composition-design / CHANGELOG | 文档与代码一致 |
+| P7（2026-11-11） | 装配收敛：新增 `app/container`（`RepositoryDeclare` + 惰性访问器 + 模块工厂）；删除 innerapi 单例槽、module getter 与模块级工厂；`reload` 每代新建容器 | `make check` 与三仓库回归通过；容器测试覆盖幂等、按需构建、代际隔离、缺库失败、工厂顺序无关与成环检测 |
 
-P0 已确认，P1–P6 已于 2026-11-11 全部落地：根仓库 `make check` 与 demo / interface-service
-三仓库回归通过，HTTP 行为、错误码与契约不变。
+P0 已确认，P1–P7 已于 2026-11-11 全部落地：根仓库 `make check` 与 demo /
+interface-service 三仓库回归通过，HTTP 行为、错误码与契约不变。
 
 回滚点：P1–P3 不改 HTTP 行为与表结构，可独立回滚；P4 回滚即恢复 order 对 product
-repository 的取用与「各工厂自建注册表」；P5 回滚即恢复 `RepoDeps` 与旧 guard。全程
-不动 `migrations/`、HTTP 契约与框架 API。
+repository 的取用；P7 回滚即恢复模块级工厂（但不恢复包级单例）。全程不动
+`migrations/`、HTTP 契约与框架 API。
 
 ## 13. 风险与取舍
 
@@ -557,10 +623,11 @@ repository 的取用与「各工厂自建注册表」；P5 回滚即恢复 `Repo
 | --- | --- | --- |
 | 多一层 innerapi | 每个模块多一个契约包 | 纯契约、无实现，维护成本低；换来模块间稳定边界与可替换性 |
 | 接口与项目「少用接口」倾向 | repository 不用接口，innerapi 用 | 场景不同：innerapi 是发布契约/防腐层，接口是解耦缝（§3.4） |
-| 工厂顺序耦合 | 共享注册表要求被依赖方工厂先执行 | 顺序集中在 `reload.factories`；构造期 Get 失败即启动报错；装配测试覆盖 |
+| 装配根成为单点 | 所有仓库/service 构造集中到 `app/container` | 访问器按模块拆文件；新增依赖只改对应模块文件与 `RepositoryDeclare`；模块工厂顺序不承载依赖 |
+| 惰性构建隐藏依赖关系 | 服务在首次取用时才构造，依赖顺序不再集中可见 | 访问器内直接写 `c.XxxService()`，依赖图即代码；`lazyValue` 检测成环并 panic 出服务名；容器测试断言子树范围 |
+| 并发首次取用 | `building` 标记按“串行装配”假设设计 | 取用只发生在模块工厂装配期；服务一旦构建完成，运行期只读字段 |
 | 状态常量双份 | 领域常量与契约枚举各一份 | controller 映射 + 一致性测试（§11.4） |
 | 0 行分类多一次查询 | 失败路径补 FindByID | 仅失败路径，正常路径单条 SQL；不影响原子性 |
-| 注册表仍是字符串名 | 名字写错编译期不报 | 名字常量归属主 + `Get[T]` 类型校验 + 构造期失败即报错 |
 | 产品 controller 暂为内存示例 | 未接契约 | 本轮只装配 innerapi；接路由时改为依赖 service |
 
 ## 14. 决策记录
@@ -568,31 +635,43 @@ repository 的取用与「各工厂自建注册表」；P5 回滚即恢复 `Repo
 1. **模块内四包 + innerapi，调用链单向向下**：`controller → service → repository →
    model`，层间类型边界由 import guard 强制。
 2. **跨模块一律走 innerapi**：`order.service → product.innerapi`；不再直接依赖对方
-   service / repository / model。innerapi 是纯契约包（接口 + 视图 + 错误 + 名字）。
+   service / repository / model。innerapi 是纯契约包（接口 + 视图 + 错误），不含
+   任何发布/查找机制。
 3. **innerapi 用接口、service 提供实现**：接口是模块间发布契约/防腐层（与 repository
    用具体类型的决策不冲突）；业务规则留在 service，innerapi 不重复实现。
-4. **注册表只登记 innerapi，属主自登记**：共享注册表由组合根每次装配新建并传入工厂；
-   消费方构造期 `Get[T]` 取用并持有接口。
+4. **装配根每代新建容器，构造期显式注入**：`app/container` 每个 service 一个
+   惰性构造槽，首次取用时按依赖链构建，跨模块实现以 innerapi 接口传给消费方；
+   `reload` 每代新建容器，代际隔离、测试互不影响。没有包级单例、module getter
+   或工厂顺序约束；装配图成环时 panic 报出服务名，不会静默死锁。
 5. **service 脱离 HTTP 契约**：service 返回 innerapi 视图、领域状态常量归 service；
    契约 DTO/枚举只在 controller，映射 + 一致性测试保证不漂移。
 6. **repository 统一返回 model**：产品 `ProductView` 迁到 innerapi；repository 不再
    import 契约枚举，状态由参数传入。
-7. **`Dependencies` 取代包级 `RepoDeps`**：本模块仓库 + 跨模块 innerapi + Logger
-   显式声明，工厂构造注入，删除全局可变默认集合。
-8. **事务由发起用例的 service 开启**：跨模块传同一 ctx，被调用方不另开事务。
-9. **错误逐层翻译**：product innerapi 哨兵 → order 域哨兵 → controller HTTP 码；
-   controller 不 import 其他模块。
-10. **模块内 service → service 用具体类型组合**：同包协作 service（如
-    `OrderService` 委托 `OrderConfigService`）经 `Dependencies` 注入具体类型，不走
-    innerapi / 注册表（那是跨模块的缝）；只有别的模块也要调时才发布到 innerapi。
+7. **`Dependencies` 取代包级 `RepoDeps`**：显式声明本模块仓库、跨模块接口、同包
+   协作 service 与 Logger，由 `app/container` 的访问器构造注入；删除全局可变默认
+   集合和运行期查找。
+8. **仓库声明与 service 实例化集中在 `app/container`**：`RepositoryDeclare` 一次
+   声明装配用到的全部仓库，访问器按依赖链惰性构造 service 并拆到各模块文件；
+   模块根只保留 `NewModule` / `Register`。Go 的 import 方向是
+   `container → module → service`，service 不能反向 import 容器或模块根，所以组合
+   只能在装配期完成。
+9. **事务由发起用例的 service 开启**：跨模块传同一 ctx，被调用方不另开事务。
+10. **错误逐层翻译**：product innerapi 哨兵 → order 域哨兵 → controller HTTP 码；
+    controller 不 import 其他模块。
+11. **模块内 service → service 用具体类型组合**：同包协作 service（如
+    `OrderService` 委托 `OrderConfigService`）由容器先构造、经 `Dependencies` 注入
+    具体类型，不走 innerapi（那是跨模块的缝）；只有别的模块也要调时，才加进
+    innerapi 并由容器以接口注入新消费方。
 
 ## 15. 对现有文档的影响
 
 - [repository-composition-design.md](./repository-composition-design.md)：§5.3–§5.6
   的「模式 A/B 取 repository」与 §8 import 规则由本文取代；保留其事务上下文（§5.7）、
-  生命周期（§5.8）与注册表契约（§5.2）；新增指向本文的说明；
-- [library-design.md](./library-design.md) §9：模块装配示例改为「组合根建共享注册表 +
-  属主登记 innerapi + 消费方构造期取用接口」，service/repository 片段去掉契约 import；
+  生命周期（§5.8），`support/registry` 降级为可选工具；新增指向本文的说明；
+- [library-design.md](./library-design.md) §9：模块装配示例改为「`app/container`
+  每代构造仓库与 service，跨模块实现以 innerapi 接口注入」，service/repository
+  片段去掉契约 import；
 - `examples/demo-service/app/module/order/README.md`：分层表、装配步骤、跨模块示例
-  改为 service→innerapi；新增 product 模块装配与 innerapi 说明；
-- `CHANGELOG.md`：记录分层重构、InnerAPI 跨模块调用、guard 规则变更。
+  改为 container 装配；新增 product 模块装配与 innerapi 说明；
+- `CHANGELOG.md`：记录分层重构、InnerAPI 跨模块调用、container 装配与 guard 规则
+  变更。

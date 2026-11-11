@@ -26,7 +26,7 @@ type OrderRepository struct{}
 // conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
-	return gofydb.FromContext(ctx, appdb.Db)
+	return gofydb.WithContext(ctx, appdb.Db)
 }
 
 // FindByID returns one order or ErrNotFound.

@@ -9,7 +9,7 @@ import (
 )
 
 func TestGetConfigOutput(t *testing.T) {
-	// GetConfig 只用到注入的 OrderConfigService，Orders/Products 留空即可。
+	// GetConfig 只用同包协作的 OrderConfigService，Orders 留空即可。
 	svc := service.NewOrderService(service.Dependencies{
 		Config: service.NewOrderConfigService(nil),
 	})

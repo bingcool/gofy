@@ -12,8 +12,8 @@ type Dependencies struct {
 	Logger   *zap.Logger
 }
 
-// NewProductService builds a ProductService. Products is required; a nil logger
-// falls back to zap.NewNop().
+// NewProductService builds a ProductService. Products is required; a nil
+// logger falls back to zap.NewNop().
 func NewProductService(deps Dependencies) *ProductService {
 	logger := deps.Logger
 	if logger == nil {

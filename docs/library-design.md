@@ -83,15 +83,13 @@
 ### 1.4 迁移后的使用方式（一句话）
 
 ```go
-reg := registry.NewRegistry() // 组合根每次装配新建，传给所有模块工厂
 app, _ := gofy.New(
     gofy.WithName("demo-service"),
     gofy.WithHTTP(gofy.HTTPConfig{Port: 8080}),
     gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
-    gofy.WithModuleFactories(
-        product.NewModuleFactory(reg), // 属主先登记 innerapi
-        order.NewModuleFactory(reg),   // 消费方构造期取用
-    ),
+    // app/container 每代新建：各 service 惰性构造，取订单 service 时按依赖
+    // 链先构造产品 service，因此模块工厂的排列顺序不承载依赖顺序。
+    gofy.WithModuleFactories(container.NewContainer().ModuleFactories()...),
 )
 if err := app.Execute(ctx); err != nil {
     os.Exit(gofy.ExitCode(err))
@@ -1394,8 +1392,8 @@ func (c Config) Validate() error
 
 // Transaction 在 db 上开启事务，并把事务放进传给 fn 的 context。
 func Transaction(ctx context.Context, db *gorm.DB, fn func(ctx context.Context) error) error
-// FromContext 优先返回 ctx 中的事务，没有时返回 fallback。
-func FromContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
+// WithContext 返回本次调用应使用的连接：ctx 中有事务时返回事务，否则返回 fallback。
+func WithContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
 ```
 
 行为：
@@ -1409,12 +1407,12 @@ func FromContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
 - 不使用 `sync.Once`、不提供包级 `GetDb()`。
 
 事务上下文用于“同一次请求内多个 repository 共用同一个事务”：`Transaction`
-把 `*gorm.DB` 事务存进 context，repository 通过 `FromContext(ctx, fallback)`
+把 `*gorm.DB` 事务存进 context，repository 通过 `WithContext(ctx, fallback)`
 取连接。约定：
 
 - 嵌套 `Transaction` 复用外层事务，不创建 savepoint；内层错误冒泡到外层统一
   回滚，内层成功也不会提前提交；
-- `FromContext` 优先返回事务，没有事务时才返回 fallback；显式连接不会覆盖事务；
+- `WithContext` 优先返回事务，没有事务时才返回 fallback；显式连接不会覆盖事务；
 - `fn` 为 nil 返回 `ErrTxFuncRequired`；ctx 无事务且 `db` 为 nil 返回
   `ErrTxDBRequired`；`ctx` 为 nil 时按 `context.Background()` 处理；
 - 事务由调用方 service 开启，repository 只消费 ctx；context 不存放 repository /
@@ -1632,9 +1630,10 @@ Excel（.xlsx）导出/导入，移植自 swoolefy PHP `PhpOffice\Excel`，底�
 
 ### 3.7.8 `support/registry`
 
-通用「名字 → 实例」注册表，供应用在启动装配时登记跨模块共享的实例
-（实现 `innerapi` 接口的 service、client 等），再按名字取用。它解决模块如何拿到
-其他模块共享依赖的问题，同时避免包级单例。
+通用「名字 → 实例」注册表，应用可在启动装配时登记跨模块共享的实例（client、
+配置好的第三方客户端等），再按名字取用。它是**可选工具**：需要按名字索引、存在
+多份同类型实例时才划算；只有一个跨模块实现时，在装配根把实例直接注入消费方更
+直接（demo 采用后者，见 §9.4）。
 
 ```go
 reg := registry.NewRegistry()
@@ -1649,13 +1648,13 @@ names := reg.Names()                          // 排序副本，供启动日志
   重复注册不覆盖；
 - 注册表是普通对象而非全局：每次装配（启动 / `Reload`）新建一份，随依赖显式传递；
 - 所有方法并发安全；`Lookup`/`Names`/`Get` 对 nil 注册表安全；
-- 名字由属主模块的 `innerapi` 包定义为常量（如 `product.innerapi`），注册表不校验格式；
-- `Get[T]` 的 `T` 就是注册进去的类型；demo 的跨模块依赖注册的是实现 `innerapi`
-  接口的 service（产品 service 实现 `productapi.ProductAPI`），消费方按接口
-  `registry.Get[productapi.ProductAPI](reg, productapi.Name)` 取用，不接触对方实现；
-  本模块 repository 不声明接口、也不登记注册表，由工厂零值构造后直接注入；
+- 名字由调用方约定（属主模块可导出常量或写死字符串），注册表不校验格式；
+- `Get[T]` 的 `T` 就是注册进去的类型，注册值类型不匹配直接报错；
+- demo 的跨模块依赖不用注册表：`app/container` 按需构造产品 service 后，直接以
+  `productapi.ProductAPI` 接口注入订单 service 的 `Dependencies`，既不需要名字
+  也不接触对方实现（详见 §9.4）；
 - 与 `support/middleware.Registry` 分工：后者强类型、只存中间件，由 Router 解析
-  契约别名；通用注册表存任意跨模块实例，由属主模块工厂登记、消费方工厂构造期取用，两者不合并。
+  契约别名；通用注册表存任意实例，两者不合并。
 
 ### 3.8 `script`
 
@@ -2532,9 +2531,17 @@ demo-service/
 │   │   ├── auth.go         # Auth + JWTConfig（调用框架 JWTAuth）
 │   │   ├── audit.go        # Audit + NameAudit / NameOrderAudit
 │   │   └── registry_middleware.go  # Register：集中注册应用层别名
+│   ├── container/              # 装配根：仓库声明 + 代内 service + 模块工厂
+│   │   ├── container.go        # Container：NewContainer / Init / logger
+│   │   ├── lazy_value.go       # lazyValue[T]：惰性构造槽 + 成环检测
+│   │   ├── product.go          # ProductService 访问器
+│   │   ├── order.go            # OrderConfigService / OrderService 访问器
+│   │   ├── module_factories.go # ProductModuleFactory / OrderModuleFactory
+│   │   ├── repository_declare.go    # RepositoryDeclare{OrdersRepo, ProductsRepo}
+│   │   └── *_test.go
 │   └── module/
 │       ├── order/
-│       │   ├── module.go       # 装配：取 product.innerapi，登记 order.innerapi，绑定路由
+│       │   ├── module.go       # 模块根：NewModule + Register（service 由 container 注入）
 │       │   ├── controller/
 │       │   │   ├── order_controller.go        # 契约适配 + 视图↔DTO/状态/错误码映射
 │       │   │   ├── order_config_controller.go # GetConfig 契约实现
@@ -2543,23 +2550,23 @@ demo-service/
 │       │   │   ├── order_service.go  # 实现 innerapi.OrderAPI，返回领域视图
 │       │   │   ├── order_config_service.go # OrderConfigService（同包协作）+ Config 视图
 │       │   │   ├── order_view.go     # 领域状态常量 + 订单域哨兵错误 + CreateItem 别名
-│       │   │   ├── deps.go           # Dependencies（本模块仓库 + 跨模块 innerapi + 同包 Config + Logger）
+│       │   │   ├── deps.go           # Dependencies（Orders + Products + Config + Logger）
 │       │   │   └── transaction_test.go
 │       │   ├── innerapi/
-│       │   │   └── innerapi.go       # OrderAPI 接口 + Order 视图 + CreateItem + 错误 + Name
+│       │   │   └── innerapi.go       # OrderAPI 接口 + Order 视图 + CreateItem + 错误
 │       │   ├── repository/
 │       │   │   └── order_repository.go
 │       │   └── model/
 │       │       └── order.go
 │       └── product/
-│           ├── module.go       # 装配 service，自登记 product.innerapi；本轮无路由
+│           ├── module.go       # 模块根：NewModule/Register（无路由）
 │           ├── controller/
 │           │   └── product_controller.go  # 预留内存示例，本轮不绑定路由
 │           ├── service/
 │           │   ├── product_service.go  # 实现 innerapi.ProductAPI：读取 + 扣库存
 │           │   └── deps.go             # Dependencies{Products, Logger}
 │           ├── innerapi/
-│           │   └── innerapi.go       # ProductAPI 接口 + Product 视图 + 错误 + Name
+│           │   └── innerapi.go       # ProductAPI 接口 + Product 视图 + 错误
 │           ├── repository/
 │           │   └── product_repository.go  # 具体类型 + DecreaseStock 条件更新
 │           └── model/
@@ -2592,11 +2599,9 @@ import (
     "go.uber.org/zap"
 
     "github.com/bingcool/gofy"
-    "github.com/bingcool/gofy/support/registry"
     "github.com/yourorg/demo-service/app/config"
+    "github.com/yourorg/demo-service/app/container"
     appio "github.com/yourorg/demo-service/app/io"
-    "github.com/yourorg/demo-service/app/module/order"
-    "github.com/yourorg/demo-service/app/module/product"
     appscript "github.com/yourorg/demo-service/script"
 )
 
@@ -2615,10 +2620,14 @@ func main() {
         log.Fatalf("load config: %v", err)
     }
 
-    // 组合根每次装配新建一份共享注册表，传给所有模块工厂：属主模块（product）
-    // 自登记 innerapi，消费方（order）构造期按接口取用。工厂顺序即依赖顺序，
-    // 被依赖方在前。实际 wiring 在 reload.go 的 factories(cfg)，启动与 Reload 共用。
-    reg := registry.NewRegistry()
+    // app/container 每代新建：service 惰性构造，订单访问器按依赖链先解析
+    // 产品 service，模块工厂的排列顺序不承载依赖顺序。实际 wiring 在
+    // reload.go 的 factories(cfg)，启动与 Reload 共用。
+    ctr := container.NewContainer()
+    factories := append(
+        []gofy.ModuleFactory{appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP)},
+        ctr.ModuleFactories()...,
+    )
     app, err := gofy.New(
         gofy.WithName("demo-service"),
         gofy.WithEnv(cfg.Env),
@@ -2630,11 +2639,7 @@ func main() {
         // middlewareRegistrar 定义在 options.go，把 app/middleware 的别名注册进
         // App 共享注册表（见 §9.10）。
         gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
-        gofy.WithModuleFactories(
-            appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP),
-            product.NewModuleFactory(reg),
-            order.NewModuleFactory(reg),
-        ),
+        gofy.WithModuleFactories(factories...),
         gofy.WithScripts(appscript.Register(cfg)...),
         gofy.WithVersionInfo(gofy.VersionInfo{
             Version:   version,
@@ -2741,74 +2746,156 @@ Redis、AMQP、Kafka、RocketMQ 实例并 `Install` 到句柄，`Stop` 关闭并
 提供同名薄包装，避免业务再 import 一次 support 包。RocketMQ 的 `app/io` 只发布
 producer 句柄；需要消费时业务用配置里的 `Config` 调用 `rocketmq.NewConsumer`。
 
-### 9.4 `app/module/order/module.go`
+### 9.4 `app/container` 与 `app/module/order/module.go`
+
+装配根是 `app/container`。每代装配（启动 / `Reload`）新建一个容器，仓库和
+service 都在这里显式构造，模块根只负责把 service 接到路由上。service 不是一次性
+全量构建：每个服务一个惰性构造槽，首次取用时按依赖链构建，模块工厂只触发本模块
+子树。
+
+`app/container/repository_declare.go`：
 
 ```go
-package order
+package container
 
-import (
-    "errors"
-    "fmt"
+// RepositoryDeclare 集中声明一次装配用到的全部仓库。仓库无状态、每次查询
+// 自行解析连接，零值构造后可在本代容器内复用；新增仓库时在这里补字段，
+// 再到对应模块的访问器文件（product.go / order.go）注入。
+type RepositoryDeclare struct {
+    OrdersRepo   *orderrepo.OrderRepository
+    ProductsRepo *productrepo.ProductRepository
+}
 
-    "github.com/bingcool/gofy"
-    "github.com/bingcool/gofy/support"
-    "github.com/bingcool/gofy/support/registry"
-    "github.com/yourorg/demo-service/app/module/order/controller"
-    orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
-    "github.com/yourorg/demo-service/app/module/order/repository"
-    "github.com/yourorg/demo-service/app/module/order/service"
-    productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
-    "go.uber.org/zap"
-    gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-    "gofy/gofy-interface-service/appinterface/demoservice/orderroute"
-    "gofy/gofy-interface-service/contracts/common/endpoint"
-)
+func NewRepositoryDeclare() RepositoryDeclare {
+    return RepositoryDeclare{
+        OrdersRepo:   &orderrepo.OrderRepository{},
+        ProductsRepo: &productrepo.ProductRepository{},
+    }
+}
+```
 
+`app/container/container.go` 只保留容器骨架与 logger：
+
+```go
+type Container struct {
+    repos RepositoryDeclare
+
+    loggerMu sync.Mutex
+    logger   *zap.Logger
+
+    productService     lazyValue[*productservice.ProductService]
+    orderConfigService lazyValue[*orderservice.OrderConfigService]
+    orderService       lazyValue[*orderservice.OrderService]
+}
+
+func NewContainer() *Container {
+    return &Container{
+        repos:              NewRepositoryDeclare(),
+        productService:     newLazyValue[*productservice.ProductService]("product service"),
+        orderConfigService: newLazyValue[*orderservice.OrderConfigService]("order config service"),
+        orderService:       newLazyValue[*orderservice.OrderService]("order service"),
+    }
+}
+
+// Init 记录本代 Runtime 的 logger；重复调用保留第一次的值，nil 退化为 Nop。
+func (c *Container) Init(logger *zap.Logger) { ... }
+```
+
+`app/container/lazy_value.go` 是构造槽本身：首次 `Get` 执行 build，之后返回同一
+实例；build 期间再次取用同一个槽说明装配图成环，直接 panic 并带上服务名，避免
+`sync.Once` 静默死锁。装配在启动期串行执行，不支持并发的首次取用。
+
+```go
+type lazyValue[T any] struct {
+    name     string
+    mu       sync.Mutex
+    building bool
+    once     sync.Once
+    value    T
+}
+
+func (l *lazyValue[T]) Get(build func() T) T {
+    l.mu.Lock()
+    building := l.building
+    l.mu.Unlock()
+    if building {
+        panic(fmt.Sprintf("container: circular dependency detected while building %q", l.name))
+    }
+    l.once.Do(func() {
+        l.mu.Lock()
+        l.building = true
+        l.mu.Unlock()
+        defer func() {
+            l.mu.Lock()
+            l.building = false
+            l.mu.Unlock()
+        }()
+        l.value = build()
+    })
+    return l.value
+}
+```
+
+`app/container/product.go` 与 `app/container/order.go` 按模块放置访问器：
+
+```go
+func (c *Container) ProductService() *productservice.ProductService {
+    return c.productService.Get(func() *productservice.ProductService {
+        return productservice.NewProductService(productservice.Dependencies{
+            Products: c.repos.ProductsRepo,
+            Logger:   c.loggerOrNop(),
+        })
+    })
+}
+
+func (c *Container) OrderService() *orderservice.OrderService {
+    return c.orderService.Get(func() *orderservice.OrderService {
+        return orderservice.NewOrderService(orderservice.Dependencies{
+            Orders:   c.repos.OrdersRepo,
+            Products: c.ProductService(), // 按需构建产品子树
+            Config:   c.OrderConfigService(),
+            Logger:   c.loggerOrNop(),
+        })
+    })
+}
+```
+
+`app/container/module_factories.go`：
+
+```go
+func (c *Container) ProductModuleFactory() gofy.ModuleFactory {
+    return func(rt *gofy.Runtime) (support.Module, error) {
+        if rt.DB == nil {
+            return nil, errors.New("product module requires database")
+        }
+        c.Init(rt.Logger)
+        return product.NewModule(c.ProductService(), rt.Logger), nil
+    }
+}
+
+// OrderModuleFactory 同构：检查 rt.DB、Init，再返回 order.NewModule(...)。
+// OrderService 取用时按依赖链先构造产品 service，订单工厂无需排在产品工厂之后。
+func (c *Container) OrderModuleFactory() gofy.ModuleFactory { ... }
+
+func (c *Container) ModuleFactories() []gofy.ModuleFactory {
+    return []gofy.ModuleFactory{c.ProductModuleFactory(), c.OrderModuleFactory()}
+}
+```
+
+`app/module/order/module.go` 只剩模块根：
+
+```go
 type Module struct {
     svc    *service.OrderService
     logger *zap.Logger
 }
 
-// NewModuleFactory 从组合根传入的共享注册表取用产品 innerapi，构造订单 service
-// 并登记订单自己的 innerapi。注册表每次装配由 reload.factories 新建，产品工厂
-// 先于本工厂执行；缺登记或顺序错时构造期 Get 失败、启动即报错。
-func NewModuleFactory(reg *registry.Registry) gofy.ModuleFactory {
-    return func(rt *gofy.Runtime) (support.Module, error) {
-        if rt.DB == nil {
-            return nil, errors.New("order module requires database")
-        }
-        products, err := registry.Get[productapi.ProductAPI](reg, productapi.Name)
-        if err != nil {
-            return nil, fmt.Errorf("order module: %w", err)
-        }
-        svc := service.NewOrderService(service.Dependencies{
-            Orders:   &repository.OrderRepository{},
-            Products: products,
-            Config:   service.NewOrderConfigService(rt.Logger),
-            Logger:   rt.Logger,
-        })
-        // 登记订单自己的 innerapi，保持与产品模块对称（本轮无跨模块消费方）。
-        if err := reg.Register(orderapi.Name, svc); err != nil {
-            return nil, fmt.Errorf("order module: %w", err)
-        }
-        return NewModule(svc, rt.Logger), nil
-    }
-}
-
-func NewModule(svc *service.OrderService, logger *zap.Logger) *Module {
-    if logger == nil {
-        logger = zap.NewNop()
-    }
-    return &Module{svc: svc, logger: logger}
-}
+func NewModule(svc *service.OrderService, logger *zap.Logger) *Module { ... }
 
 func (m *Module) Name() string { return "order" }
 
 func (m *Module) Register(r *support.Router) error {
     h := controller.NewOrderController(m.svc, m.logger)
-    // 契约只声明别名（分组 "audit"/"auth"、CreateOrder 的 "order-audit"）。
-    // 这些实例由 App 启动时通过 WithMiddlewareRegistrar 注册进 Router 携带的
-    // 共享注册表，模块不再创建或注入注册表；未注册的名字在启动期报错。
     for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
         if err := gofyadapter.BindGroup(r, group, h, gofyadapter.BindOptions{}); err != nil {
             return err
@@ -2819,24 +2906,27 @@ func (m *Module) Register(r *support.Router) error {
 ```
 
 仓库不持有连接和日志：每次查询从 `app/io` 安装的 `db.Db` 解析连接（ctx 事务优先），
-模块工厂执行时 `app/io` 尚未 `Start`、句柄还是 nil 也没关系，等 `Start` 安装连接后
+容器构建时 `app/io` 尚未 `Start`、句柄还是 nil 也没关系，等 `Start` 安装连接后
 仓库自动使用新句柄，热更新也会切到新连接。脚本模式没有模块生命周期，
 `script/fix_order.go` 调用前把 `rt.DB` 临时发布到 `appdb.Db`，结束后恢复。
 
-依赖声明不在 `module.go`，而在 `service/deps.go`：`Dependencies` 结构显式列出本模块
-仓库（`Orders *repository.OrderRepository`）、跨模块产品契约（`Products productapi.ProductAPI`）、
-同包协作 service（`Config *OrderConfigService`）和 `Logger`，构造函数
-`NewOrderService(deps Dependencies)` 接收它。本模块仓库在工厂里
-零值构造（`&repository.OrderRepository{}`）后直接注入，没有名字、不登记注册表，也没有
-包级默认 `RepoDeps`（已删除）。跨模块依赖只持有产品 `innerapi` 接口：实例由产品工厂在
-装配期自登记进共享注册表，订单工厂构造期用 `registry.Get[productapi.ProductAPI](reg,
-productapi.Name)` 取出后注入。共享注册表由组合根（`reload.factories`）每次装配新建并
-传给所有工厂，service 不得把它缓存到包级变量或跨请求保存。仓库日志由 service/module 用
-`rt.Logger` 记录，仓库本身只包装并返回错误。repository 只导出具体类型
-（`*OrderRepository` / `*ProductRepository`），不声明接口：只有一种 GORM 实现，接口除了
-让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑真实 SQL。`innerapi` 则是模块间
-唯一合法的耦合点——纯契约包（接口 + 只读视图 + 入参 + 哨兵错误 + `Name`），只允许标准库
-（必要时 `support` 纯类型），名字常量归各自模块的 `innerapi` 包。完整取舍见
+装配关系收敛为三层：`app/container`（仓库 + service + 模块工厂）→ 模块根
+（`NewModule` + `Register`）→ 各层实现。`service/deps.go` 的 `Dependencies` 显式
+列出本模块仓库 `Orders`、跨模块 `Products productapi.ProductAPI`、同包协作的
+`Config *OrderConfigService` 和 `Logger`（nil 退化为 `zap.NewNop()`）；
+`OrderService()` 首次取用时按需解析产品与配置 service，产品实现直接以接口传给
+订单 service。模块工厂的排列顺序不承载依赖顺序：订单工厂单独执行时也会先构造
+产品 service。一个构造槽只构建自己的子树，未挂载的能力不会因为别的模块启动而
+被构建；加新服务时只需在对应模块文件里加一个访问器，不会扩大全量装配的面。
+没有名字注册表、没有包级 `RepoDeps`、没有 module getter，也没有 innerapi 单例槽；
+`innerapi` 是纯契约（接口 + 只读视图 + 入参 + 哨兵错误），只允许标准库（必要时
+`support` 纯类型）。Go 的 import 方向是 `container → order(module) → service`，
+`service` 包不可能反向 import 模块根或容器，依赖只能在构造期注入——这正是把
+仓库/service 装配集中到容器的原因。仓库日志由 service/module 用 `rt.Logger`
+记录，仓库本身只包装并返回错误。repository 只导出具体类型
+（`*OrderRepository` / `*ProductRepository`），不声明接口：只有一种 GORM 实现，
+接口除了让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑真实 SQL。
+完整取舍见
 [module-layering-design.md](./module-layering-design.md) §3–§6、§10，以及
 [repository-composition-design.md](./repository-composition-design.md) §5.2、§5.7–§5.8。
 
@@ -3171,13 +3261,15 @@ func translateProductErr(sku uint64, err error) error {
 ```
 
 构造函数 `NewOrderService(deps Dependencies)` 在 `service/deps.go`：`Dependencies`
-显式列出本模块仓库 `Orders`、跨模块产品契约 `Products productapi.ProductAPI`、同包协作
-service `Config *OrderConfigService` 和 `Logger`（nil 退化为 `zap.NewNop()`）。本模块仓库由工厂零值构造后注入，不登记名字、
-没有包级 `RepoDeps`。跨模块依赖只持有产品 `innerapi` 接口，实例由产品工厂自登记进
-共享注册表、订单工厂构造期 `registry.Get` 取出后注入；service 不 import 其他模块的
-service/repository/model。`Config` 则是**模块内** service→service 组合：`OrderConfigService`
-与 `OrderService` 同包，工厂先构造它再注入具体类型，`OrderService.GetConfig` 直接委托，
-不走 innerapi / 注册表（配置无跨模块消费方，不发布到 innerapi）。领域状态常量（`StatusPending` 等）、订单域哨兵错误
+显式列出本模块仓库 `Orders`、跨模块 `Products productapi.ProductAPI`、同包协作的
+`Config *OrderConfigService` 和 `Logger`（nil 退化为 `zap.NewNop()`）。它们全部由
+`app/container` 的 `OrderService()` 访问器按需构造后注入：产品实现直接以接口传入，
+不登记名字、没有包级 `RepoDeps`、没有运行期查找；service 不 import 其他模块的
+service/repository/model。`Config` 则是**模块内** service→service 组合：
+`OrderConfigService` 与 `OrderService` 同包，访问器先解析配置 service、再注入具体
+类型，`OrderService.GetConfig` 直接委托；同包协作用具体类型，不走 innerapi、注册表
+或工厂（Go 的 import 方向也不允许 service 反向 import 模块根或容器）。
+领域状态常量（`StatusPending` 等）、订单域哨兵错误
 （`ErrOrderNotFound` / `ErrProductNotFound` / `ErrProductUnavailable` /
 `ErrInsufficientStock`）和 `CreateItem` 别名都在 `service/order_view.go`，不 import
 HTTP 契约枚举；契约 DTO/枚举的映射留在 controller。`Create` 用
@@ -3209,7 +3301,7 @@ type OrderRepository struct{}
 // conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
-    return gofydb.FromContext(ctx, appdb.Db)
+    return gofydb.WithContext(ctx, appdb.Db)
 }
 
 func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order, error) {
@@ -3982,7 +4074,7 @@ gofy/
 | 2026-11-03 | 错误响应使用真实 HTTP 状态码 | 更符合 HTTP 语义；`WithAlwaysOK` 兼容旧行为 |
 | 2026-11-03 | 不提供依赖注入容器 | 业务依赖用闭包/构造函数注入；`Runtime` 只放框架依赖 |
 | 2026-11-11 | 模块按 controller/service/innerapi/repository/model 五包分层，跨模块只走对方 `innerapi` 契约 | 模块间稳定接缝，避免 service→service 与跨模块 repository 耦合；详见 [module-layering-design.md](./module-layering-design.md) |
-| 2026-11-11 | 组合根每次装配新建共享 `support/registry`，属主模块自登记 innerapi、消费方构造期取用 | 装配期解析依赖、启动即报错，避免包级单例与 service 缓存注册表 |
+| 2026-11-11 | 跨模块依赖由 `app/container` 在构造期显式注入：每代新建容器，各 service 惰性构造，产品实现以 `innerapi` 接口传给订单 service | 去掉包级单例、module getter 与工厂顺序约束；按需构建、reload 代际隔离、测试互不影响；框架本身仍不提供 DI 容器，该容器是 demo 业务代码 |
 | 2026-11-11 | demo repository 无状态、不声明接口，连接每次查询从 `app/io` 句柄解析 | 只有一种 GORM 实现，接口无替换价值；装配早于 `app/io.Start`、Reload 换连接自动生效 |
 
 ---
