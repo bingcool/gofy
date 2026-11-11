@@ -8,7 +8,7 @@ import (
 // 直接注入 OrderConfigController，不经 innerapi。
 func (c *Container) OrderConfigService() *orderservice.OrderConfigService {
 	return c.orderConfigService.Get(func() *orderservice.OrderConfigService {
-		return orderservice.NewOrderConfigService(c.loggerOrNop())
+		return orderservice.NewOrderConfigService(c.logger())
 	})
 }
 
@@ -19,7 +19,7 @@ func (c *Container) OrderService() *orderservice.OrderService {
 		return orderservice.NewOrderService(orderservice.Dependencies{
 			OrderRepository: c.repos.OrdersRepo,
 			ProductAPI:      c.ProductService(),
-			Logger:          c.loggerOrNop(),
+			Logger:          c.logger(),
 		})
 	})
 }

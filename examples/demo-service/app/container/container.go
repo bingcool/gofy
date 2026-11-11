@@ -18,8 +18,8 @@ import (
 type Container struct {
 	repos RepositoryDeclare
 
-	loggerMu sync.Mutex
-	logger   *zap.Logger
+	loggerMu  sync.Mutex
+	zapLogger *zap.Logger
 
 	productService     lazyValue[*productservice.ProductService]
 	orderConfigService lazyValue[*orderservice.OrderConfigService]
@@ -46,20 +46,20 @@ func NewContainer() *Container {
 func (c *Container) Init(logger *zap.Logger) {
 	c.loggerMu.Lock()
 	defer c.loggerMu.Unlock()
-	if c.logger != nil {
+	if c.zapLogger != nil {
 		return
 	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	c.logger = logger
+	c.zapLogger = logger
 }
 
-func (c *Container) loggerOrNop() *zap.Logger {
+func (c *Container) logger() *zap.Logger {
 	c.loggerMu.Lock()
 	defer c.loggerMu.Unlock()
-	if c.logger == nil {
+	if c.zapLogger == nil {
 		return zap.NewNop()
 	}
-	return c.logger
+	return c.zapLogger
 }

@@ -320,7 +320,7 @@ func (c *Container) Init(logger *zap.Logger) { /* 记录本代 logger，首次�
 func (c *Container) ProductService() *productservice.ProductService {
     return c.productService.Get(func() *productservice.ProductService {
         return productservice.NewProductService(productservice.Dependencies{
-            Products: c.repos.ProductsRepo, Logger: c.loggerOrNop(),
+            Products: c.repos.ProductsRepo, Logger: c.logger(),
         })
     })
 }
@@ -330,7 +330,7 @@ func (c *Container) OrderService() *orderservice.OrderService {
         return orderservice.NewOrderService(orderservice.Dependencies{
             OrderRepository: c.repos.OrdersRepo,
             ProductAPI:      c.ProductService(), // 按需构建产品子树
-            Logger:          c.loggerOrNop(),
+            Logger:          c.logger(),
         })
     })
 }
