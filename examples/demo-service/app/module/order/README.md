@@ -10,11 +10,11 @@ controller / service / innerapi / repository / model 的五包分层边界。HTT
 
 ```
 order/
-├── module.go                  # 模块根：NewModule 包装 service + Register 绑定路由
+├── module.go                  # 模块根：NewModule 包装订单/配置 service + Register 绑定路由
 ├── module_test.go             # 基于 gofytest 的接口测试 + 装配测试
 ├── controller/
-│   ├── order_controller.go    # 适配 demoservice.Service 契约，视图↔DTO 映射 + 错误码
-│   ├── order_config_controller.go  # GetConfig 契约实现
+│   ├── order_controller.go    # 适配 demoservice.OrdersService 契约，视图↔DTO 映射 + 错误码
+│   ├── order_config_controller.go  # 适配 demoservice.ConfigService 契约（OrderConfigController）
 │   └── order_status_test.go   # service.Status* ↔ orderenum 状态一致性测试
 ├── service/
 │   ├── order_service.go       # 业务用例，实现 innerapi.OrderAPI，返回领域视图
@@ -61,6 +61,12 @@ order/
 路由描述符定义在 `gofy-interface-service` 的
 `appinterface/demoservice/orderroute`，本模块通过
 `gofyadapter.BindGroup` 按分组绑定，不在业务代码里重复写路径和参数校验。
+
+`BindGroup` 把一个实现按 `OperationID` 反射绑定到分组的全部路由，因此
+`Register` 给 `Orders` 和 `Config` 各传自己的处理器：`OrderController` 实现
+`demoservice.OrdersService` 的四个方法，`OrderConfigController` 只实现
+`demoservice.ConfigService.GetConfig`。两个分组共享 `RoutePrefix`，但处理器
+与依赖互不复用。
 
 测试与线上使用同一套契约分组，因此路径同样是 `/api/v1/order/...`；模块名
 `order` 不再参与路由前缀。
@@ -200,7 +206,7 @@ security 标记，adapter 不会因此自动附加认证中间件。审计中间
 `gofy.WithMiddlewareRegistrar` 安装与 main 相同的 registrar：
 
 ```go
-module := order.NewModule(myService, zap.NewNop())
+module := order.NewModule(myService, myConfigService, zap.NewNop())
 app := gofytest.New(t,
     gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), middleware.JWTConfig{})),
     gofy.WithModules(module),
@@ -233,11 +239,13 @@ type Dependencies struct {
   运行期查找。`Create` 里调 `s.products.ListByIDs` /
   `s.products.DecreaseStock`。
 - **同包协作 service（Config）**：`*OrderConfigService` 具体类型，拥有订单模块
-  配置读取用例（当前是固定样例）。容器先构造它，再通过 `Dependencies` 注入；
-  `OrderService.GetConfig` 委托 `s.config.GetConfig(ctx)`。**不走 innerapi**——那是
-  跨模块的缝；同包协作用具体类型即可，与 repository 不声明接口的取舍一致。配置
-  没有跨模块消费方，因此不发布到 innerapi；若将来别的模块要读订单配置，才把能力
-  加进 `order/innerapi.OrderAPI`。
+  配置读取用例（当前是固定样例）。容器先构造它，再分别注入 `OrderService` 的
+  `Dependencies.Config` 和模块根的 `NewModule`。`OrderConfigController` 直接依赖
+  `OrderConfigService`，不经过 `OrderService`；`OrderService.GetConfig` 作为
+  service 层的委托保留，当前 HTTP 路径已不使用它。**不走 innerapi**——那是跨模块
+  的缝；同包协作用具体类型即可，与 repository 不声明接口的取舍一致。配置没有
+  跨模块消费方，因此不发布到 innerapi；若将来别的模块要读订单配置，才把能力加进
+  `order/innerapi.OrderAPI`。
 
 service 内部：
 
@@ -526,8 +534,8 @@ go test ./app/module/order/...
 测试不需要外部数据库：repository 不声明接口，`module_test.go` 用纯 Go 的内存
 SQLite（`support/sqlite`，`DSN: ":memory:"`）建订单表和产品表并塞入固定数据
 （订单 1、产品 90001 上架 / 90002 下架），把内存库发布成 `appdb.Db`（测试结束
-恢复）。`newTestService` 通过 `container.NewContainer()` + `Init` 按需构造
-产品与订单 service，再用 `gofytest.New` 启动一个只挂载 order 模块的测试应用。
+恢复）。`newTestServices` 通过 `container.NewContainer()` + `Init` 按需构造
+产品、订单与配置 service，再用 `gofytest.New` 启动一个只挂载 order 模块的测试应用。
 panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id = 9999`
 的查询抛出，验证 Recovery 不泄漏内部信息；`panicPool` 还补了 `BeginTx` 委托给
 底层连接池——内嵌的窄接口 `gorm.ConnPool` 不含 `BeginTx`，不补会让走事务的
@@ -545,8 +553,8 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
   （`TestCreateOrderRejectsUnknownOrOffSaleProduct`）；
 - 领域状态常量与契约枚举一一对应、往返一致
   （`controller/order_status_test.go` 的 `TestStatusMappingConsistency`）；
-- 配置样例由 `OrderConfigService` 拥有、`OrderService.GetConfig` 委托构造期创建
-  的协作 service（`service/order_config_service_test.go`），controller 只映射视图
+- 配置样例由 `OrderConfigService` 拥有（`service/order_config_service_test.go`），
+  `OrderConfigController` 直接读取它并只做视图↔DTO 映射
   （`controller/order_config_controller_test.go`）；
 - 跨模块事务：SQLite 上提交、回滚与库存不足分支
   （`service/transaction_test.go`，覆盖“扣库存 + 建订单”一起回滚）；

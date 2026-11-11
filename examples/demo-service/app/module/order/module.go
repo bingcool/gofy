@@ -12,28 +12,38 @@
 package order
 
 import (
+	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
+	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
+
 	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/module/order/controller"
 	"github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
-	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
-	"gofy/gofy-interface-service/contracts/common/endpoint"
 )
 
 // Module wires the order HTTP routes.
 type Module struct {
-	svc    *service.OrderService
-	logger *zap.Logger
+	orderService       *service.OrderService
+	orderConfigService *service.OrderConfigService
+	logger             *zap.Logger
 }
 
-// NewModule builds a module around an existing service. A nil logger disables
-// logs. 装配根（app/container）或测试直接构造 service 后调用。
-func NewModule(svc *service.OrderService, logger *zap.Logger) *Module {
+// NewModule builds a module around existing services. A nil logger disables
+// logs. 装配根（app/container）或测试直接构造 service 后调用；配置 service
+// 单独传入，Config 分组只依赖它。
+func NewModule(
+	orderService *service.OrderService,
+	orderConfigService *service.OrderConfigService,
+	logger *zap.Logger,
+) *Module {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Module{svc: svc, logger: logger}
+	return &Module{
+		orderService:       orderService,
+		orderConfigService: orderConfigService,
+		logger:             logger,
+	}
 }
 
 // Name is the module identity used for deduplication and error messages.
@@ -43,16 +53,19 @@ func (m *Module) Name() string { return "order" }
 // /api/v1/order），模块必须挂在根 Router 上，避免再叠加模块名或 API 前缀。
 func (m *Module) Prefix() string { return "" }
 
-// Register binds every demoservice contract route to the handler. 契约只声明
+// Register binds each demoservice route group to its own handler. 契约只声明
 // 中间件别名（分组 "audit"、CreateOrder 的 "order-audit"、认证 "auth"），
 // App 启动时已把这些实例注册进 Router 携带的共享注册表，BindGroup 直接按
 // 名字解析，模块不再创建或注入注册表。
+//
+// BindGroup 把一个实现绑定到分组的全部路由（按 OperationID 反射找方法），
+// 所以 Orders 与 Config 必须各传自己的处理器：订单处理器没有 GetConfig，
+// 配置处理器也不实现订单读写。
 func (m *Module) Register(r *support.Router) error {
-	h := controller.NewOrderController(m.svc, m.logger)
-	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
-		if err := gofyadapter.BindGroup(r, group, h, gofyadapter.BindOptions{}); err != nil {
-			return err
-		}
+	orderHandler := controller.NewOrderController(m.orderService, m.logger)
+	if err := gofyadapter.BindGroup(r, orderroute.Orders, orderHandler, gofyadapter.BindOptions{}); err != nil {
+		return err
 	}
-	return nil
+	configHandler := controller.NewOrderConfigController(m.orderConfigService)
+	return gofyadapter.BindGroup(r, orderroute.Config, configHandler, gofyadapter.BindOptions{})
 }

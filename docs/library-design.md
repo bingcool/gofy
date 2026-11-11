@@ -2890,22 +2890,22 @@ func (c *Container) ModuleFactories() []gofy.ModuleFactory {
 
 ```go
 type Module struct {
-    svc    *service.OrderService
-    logger *zap.Logger
+    orderService       *service.OrderService
+    orderConfigService *service.OrderConfigService
+    logger             *zap.Logger
 }
 
-func NewModule(svc *service.OrderService, logger *zap.Logger) *Module { ... }
+func NewModule(orderService *service.OrderService, orderConfigService *service.OrderConfigService, logger *zap.Logger) *Module { ... }
 
 func (m *Module) Name() string { return "order" }
 
 func (m *Module) Register(r *support.Router) error {
-    h := controller.NewOrderController(m.svc, m.logger)
-    for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
-        if err := gofyadapter.BindGroup(r, group, h, gofyadapter.BindOptions{}); err != nil {
-            return err
-        }
+    orderHandler := controller.NewOrderController(m.orderService, m.logger)
+    if err := gofyadapter.BindGroup(r, orderroute.Orders, orderHandler, gofyadapter.BindOptions{}); err != nil {
+        return err
     }
-    return nil
+    configHandler := controller.NewOrderConfigController(m.orderConfigService)
+    return gofyadapter.BindGroup(r, orderroute.Config, configHandler, gofyadapter.BindOptions{})
 }
 ```
 
@@ -3007,7 +3007,7 @@ import (
     "gofy/gofy-interface-service/contracts/common/types"
 )
 
-var _ demoservice.Service = (*OrderController)(nil)
+var _ demoservice.OrdersService = (*OrderController)(nil)
 
 type OrderController struct {
     orderService *service.OrderService
@@ -3102,7 +3102,7 @@ func toOrderDTO(id, userID uint64, amount int64, status string, createdAt time.T
 
 方法名必须与契约 `OperationID` 一致（`GetOrder`、`ListOrders`、`CreateOrder`、`CancelOrder`），签名在 `BindAll` 启动时校验。业务错误通过 `gofyadapter.Error(demoservice.ErrOrderNotFound)` 映射为 `40401`，与 OpenAPI 声明保持一致；`CancelOrder` 由契约声明为 `NoContent`，适配器写入 `204`。
 
-controller 只做协议转换与视图↔DTO 映射，不接触 `model`，也不 import `innerapi`（视图类型由 service 方法返回值推断，按字段映射）；`service` 返回 `innerapi` 领域视图，`model` 仅在 `repository` 内部使用。`GetConfig` 在同包的 `order_config_controller.go` 实现，委托 `OrderService.GetConfig`（再委托同包 `OrderConfigService`）取领域视图后映射成契约响应。领域状态常量与契约枚举的一致性由 `order_status_test.go` 保证。
+controller 只做协议转换与视图↔DTO 映射，不接触 `model`，也不 import `innerapi`（视图类型由 service 方法返回值推断，按字段映射）；`service` 返回 `innerapi` 领域视图，`model` 仅在 `repository` 内部使用。`GetConfig` 在同包的 `order_config_controller.go` 由独立的 `OrderConfigController` 实现：它直接依赖 `OrderConfigService`，取领域视图后映射成契约响应，不经过 `OrderService`。领域状态常量与契约枚举的一致性由 `order_status_test.go` 保证。
 
 ### 9.7 `app/module/order/service/order_service.go`（节选）
 
@@ -3270,9 +3270,11 @@ func translateProductErr(sku uint64, err error) error {
 `app/container` 的 `OrderService()` 访问器按需构造后注入：产品实现直接以接口传入，
 不登记名字、没有包级 `RepoDeps`、没有运行期查找；service 不 import 其他模块的
 service/repository/model。`Config` 则是**模块内** service→service 组合：
-`OrderConfigService` 与 `OrderService` 同包，访问器先解析配置 service、再注入具体
-类型，`OrderService.GetConfig` 直接委托；同包协作用具体类型，不走 innerapi、注册表
-或工厂（Go 的 import 方向也不允许 service 反向 import 模块根或容器）。
+`OrderConfigService` 与 `OrderService` 同包，访问器先解析配置 service、再分别注入
+`OrderService` 的 `Dependencies` 和模块根的 `NewModule`（供 `OrderConfigController`
+直接使用）。`OrderService.GetConfig` 保留为 service 层的委托，当前 HTTP 路径已不
+经过它；同包协作用具体类型，不走 innerapi、注册表或工厂（Go 的 import 方向也不
+允许 service 反向 import 模块根或容器）。
 领域状态常量（`StatusPending` 等）、订单域哨兵错误
 （`ErrOrderNotFound` / `ErrProductNotFound` / `ErrProductUnavailable` /
 `ErrInsufficientStock`）和 `CreateItem` 别名都在 `service/order_view.go`，不 import

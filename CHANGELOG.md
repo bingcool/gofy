@@ -416,6 +416,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: the order module binds each contract route group to
+  its own handler. `demoservice.Service` gained the narrow `OrdersService` and
+  `ConfigService` interfaces (`Service` embeds both), `GetConfig` moved from
+  `OrderController` to a dedicated `OrderConfigController` backed directly by
+  `service.OrderConfigService`, and `order.NewModule` now takes that config
+  service too. `BindGroup` resolves methods per group by `OperationID`, so
+  `Register` makes two explicit `BindGroup` calls instead of binding both
+  groups to one handler. Existing single-handler implementations are unchanged:
+  asserting `demoservice.Service` still works.
 - **Breaking:** `WithAPIPrefix` now defaults to empty, so the framework no longer
   prepends `/api/v1` to module routes. A contract route group carries the full
   deployment prefix instead: `orderroute.Orders` and `orderroute.Config` both

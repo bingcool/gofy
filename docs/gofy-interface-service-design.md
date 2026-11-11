@@ -443,7 +443,7 @@ require (
 - 一个文件里同时引入 `demoservice` 和 `productservice` 时，若子包都叫 `dto`/`request`，就必须起 import 别名；带领域前缀的 `orderdto`/`productdto` 不会冲突，调用处也不需要别名。
 - 子包主要承载载荷类型；路由描述符放在 `{domain}route` 子包（如 `orderroute`），每新增一组业务路由就新增一个文件，并在该子包的 `Routes()` 中登记。
 - 业务常量放在 `{domain}const` 子包（如 `orderconst`），不要留在 `{domain}service` 顶层，避免多个服务的 `const.go` 语义混乱。
-- `{domain}service` 保留 `Service` 接口和聚合用的 `Routes()`，因此 `demoservice.Service`、`demoservice.Routes()` 仍是服务端唯一入口；强类型客户端单独放在 `{domain}serviceclient`，见 `demoserviceclient.New()`。
+- `{domain}service` 保留聚合的 `Service` 接口和 `Routes()`，因此 `demoservice.Service`、`demoservice.Routes()` 仍是服务端统一入口；强类型客户端单独放在 `{domain}serviceclient`，见 `demoserviceclient.New()`。路由分组各自有窄接口（如 `OrdersService`、`ConfigService`，`Service` 内嵌二者），handler 可以整体实现 `Service`，也可以按分组拆分、各自断言窄接口后用 `BindGroup` 分别绑定。
 - 错误码与 Fault 放在 `{domain}error` 叶子包（如 `ordererror`），避免 `{domain}route` 反向依赖 `{domain}service`；`demoservice/errors.go` 转发这些值，对外 API 不变。
 - docgen 以 `appinterface/<service>/` 为锚点生成组件名，嵌套子包不改变对外 schema 名：`orderdto.OrderDTO` 仍然是 `DemoserviceOrderDTO`。
 
@@ -1236,7 +1236,7 @@ InterfaceApi 的服务端路由仍写在 PHP `Router` 文件里，接口注解�
 - **路由描述符是唯一事实来源**：路径、方法、鉴权、限流、文档、Client 都从它派生。
 - **服务端绑定由适配器完成**：避免“契约写 `/orders/{id}`，路由写 `/orders/:id`”的漂移。
 - **不需要代码生成路由文件**：`BindAll` 反射调用实现方法，启动期一次完成。
-- **编译期仍有类型检查**：业务实现声明 `var _ demoservice.Service = (*Handler)(nil)`。
+- **编译期仍有类型检查**：业务实现声明 `var _ demoservice.Service = (*Handler)(nil)`；按路由分组拆成多个 handler 时，各自断言窄接口（`demoservice.OrdersService`、`demoservice.ConfigService`）。
 
 ### 5.2 endpoint 包 API
 
@@ -3240,7 +3240,7 @@ go.work
 
 ### 10.3 契约测试
 
-1. **编译期契约**：每个业务 Handler 声明 `var _ demoservice.Service = (*Handler)(nil)`。
+1. **编译期契约**：每个业务 Handler 声明编译期断言——整体实现用 `var _ demoservice.Service = (*Handler)(nil)`，按分组拆分用 `var _ demoservice.OrdersService = (*OrdersHandler)(nil)` 等窄接口。
 2. **路由一致性**：`BindAll` 启动期校验，测试用无效实现验证失败信息。
 3. **OpenAPI 一致性**：生成器从 `Routes()` 读取，不存在第二份路径。
 4. **Client/Server 回环**：
@@ -3406,7 +3406,7 @@ jobs:
 - [ ] `go run ./cmd/gofy-client -all -check` 通过。
 - [ ] `git diff --exit-code -- openapi client` 为空。
 - [ ] `appinterface/demoservice` 覆盖 order-service 现有 4 个接口。
-- [ ] 每个业务 Handler 有 `var _ demoservice.Service = (*Handler)(nil)`。
+- [ ] 每个业务 Handler 有编译期断言：整体实现断言 `demoservice.Service`，按分组拆分则断言对应的窄接口（`OrdersService` / `ConfigService`）。
 - [ ] 枚举 tag 与常量一致。
 - [ ] 错误码无重复、无越界。
 

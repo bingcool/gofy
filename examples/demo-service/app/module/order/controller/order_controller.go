@@ -18,7 +18,7 @@ import (
 	"gofy/gofy-interface-service/contracts/common/types"
 )
 
-var _ demoservice.Service = (*OrderController)(nil)
+var _ demoservice.OrdersService = (*OrderController)(nil)
 
 // OrderController adapts the demoservice contract to OrderService.
 type OrderController struct {

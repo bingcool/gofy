@@ -206,8 +206,8 @@ import 模块根或容器（会成环），因此 service 之间的组合只能�
 相同：只有一种实现，不声明接口；若出现双向依赖，应抽出共享逻辑或改单向，而不是
 靠包级单例硬解。只有当**别的模块**也要调这个能力时，才把它加进本模块 innerapi，
 并在容器装配新消费方时以接口注入（如 `OrderConfigService` 的配置当前无跨模块
-消费方，就不发布到 innerapi，controller 经 `OrderService.GetConfig` 取领域视图
-再映射契约）。
+消费方，就不发布到 innerapi；`OrderConfigController` 直接依赖 `OrderConfigService`
+取领域视图再映射契约，`OrderService.GetConfig` 只是 service 层的委托）。
 
 ### 5.2 模块间：service → 对方 innerapi
 
@@ -398,18 +398,22 @@ service/repository/model；运行期调用 `s.products.ListByIDs/DecreaseStock` 
 ```go
 // order/module.go
 type Module struct {
-    svc    *service.OrderService
-    logger *zap.Logger
+    orderService       *service.OrderService
+    orderConfigService *service.OrderConfigService
+    logger             *zap.Logger
 }
 
-func NewModule(svc *service.OrderService, logger *zap.Logger) *Module { ... }
+func NewModule(orderService *service.OrderService, orderConfigService *service.OrderConfigService, logger *zap.Logger) *Module { ... }
 func (m *Module) Name() string { return "order" }
-func (m *Module) Register(r *support.Router) error { /* BindGroup */ }
+func (m *Module) Register(r *support.Router) error { /* 每个分组 BindGroup 到自己的 handler */ }
 ```
 
 `app/container.ModuleFactories()` 返回的工厂检查 `rt.DB`、调用 `Init(rt.Logger)`
-记录日志器，再用 `order.NewModule(ctr.OrderService(), rt.Logger)` 包装；订单 service
-的取用会先解析产品与配置 service。模块根不再声明仓库、不提供
+记录日志器，再用 `order.NewModule(ctr.OrderService(), ctr.OrderConfigService(), rt.Logger)`
+包装；订单 service 的取用会先解析产品与配置 service。`BindGroup` 把一个实现绑定到
+分组的全部路由（按 `OperationID` 反射找方法），所以 `Orders` 与 `Config` 各用自己
+的 handler：`OrderController` 实现 `demoservice.OrdersService`，`OrderConfigController`
+只实现 `demoservice.ConfigService`。模块根不再声明仓库、不提供
 service getter、不创建模块工厂。order 自己的 `innerapi`（OrderAPI）本轮暂无消费方，
 保留纯契约供后续模块使用：将来由容器把订单 service 以接口注入新的消费方，不需要
 恢复单例槽。Go 的 import 方向是 `container → order(module) → service`，service 包

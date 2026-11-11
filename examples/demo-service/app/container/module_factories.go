@@ -29,7 +29,7 @@ func (c *Container) OrderModuleFactory() gofy.ModuleFactory {
 			return nil, errors.New("order module requires database")
 		}
 		c.Init(rt.Logger)
-		return order.NewModule(c.OrderService(), rt.Logger), nil
+		return order.NewModule(c.OrderService(), c.OrderConfigService(), rt.Logger), nil
 	}
 }
 

@@ -95,10 +95,10 @@ func (p panicPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, e
 	return p.ConnPool.(gorm.TxBeginner).BeginTx(ctx, opts)
 }
 
-// newTestService 通过装配根在 SQLite 上构建订单服务：容器同时构造产品与订单
-// service，并把产品能力以 innerapi 接口注入订单 service。仓库从 app/io 句柄
-// 取连接，测试把内存库发布成当前句柄，结束后恢复。
-func newTestService(t *testing.T) *service.OrderService {
+// newTestServices 通过装配根在 SQLite 上构建订单与配置 service：容器同时构造
+// 产品与订单 service，并把产品能力以 innerapi 接口注入订单 service。仓库从
+// app/io 句柄取连接，测试把内存库发布成当前句柄，结束后恢复。
+func newTestServices(t *testing.T) (*service.OrderService, *service.OrderConfigService) {
 	t.Helper()
 	conn := newTestDB(t)
 	// GORM 执行 SQL 用的是 Statement.ConnPool（Open 时从 Config 复制一份），
@@ -111,7 +111,7 @@ func newTestService(t *testing.T) *service.OrderService {
 	t.Cleanup(func() { appdb.Db = prev })
 	ctr := container.NewContainer()
 	ctr.Init(zap.NewNop())
-	return ctr.OrderService()
+	return ctr.OrderService(), ctr.OrderConfigService()
 }
 
 func newTestApp(t *testing.T) *gofytest.App {
@@ -123,8 +123,8 @@ func newTestApp(t *testing.T) *gofytest.App {
 // 应用层中间件通过 WithMiddlewareRegistrar 注册进框架创建的共享注册表。
 func newTestAppWithConfig(t *testing.T, jwtCfg middleware.JWTConfig) *gofytest.App {
 	t.Helper()
-	svc := newTestService(t)
-	module := order.NewModule(svc, zap.NewNop())
+	orderService, orderConfigService := newTestServices(t)
+	module := order.NewModule(orderService, orderConfigService, zap.NewNop())
 	return gofytest.New(t,
 		gofy.WithName("demo-service-test"),
 		gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), jwtCfg)),
@@ -355,8 +355,8 @@ func TestCancelWithJWT(t *testing.T) {
 
 func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := newTestService(t)
-	module := order.NewModule(svc, zap.New(core))
+	orderService, orderConfigService := newTestServices(t)
+	module := order.NewModule(orderService, orderConfigService, zap.New(core))
 	app := gofytest.New(t,
 		gofy.WithName("demo-service-test"),
 		gofy.WithMiddlewareRegistrar(testRegistrar(zap.New(core), middleware.JWTConfig{})),
@@ -393,8 +393,8 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 // App 都新建一份注册表并重新执行 registrar，因此不会撞上「别名已注册」错误。
 func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
-	svc := newTestService(t)
-	module := order.NewModule(svc, zap.New(core))
+	orderService, orderConfigService := newTestServices(t)
+	module := order.NewModule(orderService, orderConfigService, zap.New(core))
 
 	for i := 0; i < 2; i++ {
 		app := gofytest.New(t,
