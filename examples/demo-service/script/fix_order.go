@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/pflag"
 	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/module/order/repository"
+	orderservice "github.com/yourorg/demo-service/app/module/order/service"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +44,7 @@ func FixOrder() gofyscript.Script {
 			prev := appdb.Db
 			appdb.Db = rt.DB
 			defer func() { appdb.Db = prev }()
-			rows, err := (&repository.OrderRepository{}).CancelPending(ctx, id)
+			rows, err := (&repository.OrderRepository{}).CancelPending(ctx, id, orderservice.StatusPending, orderservice.StatusCancelled)
 			if err != nil {
 				return apperr.Internal("fix order failed").WithCause(err)
 			}

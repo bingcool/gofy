@@ -23,8 +23,10 @@ import (
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	product "github.com/yourorg/demo-service/app/module/product"
 	productmodel "github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	productservice "github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
@@ -88,8 +90,17 @@ func (p panicPool) QueryContext(ctx context.Context, query string, args ...any) 
 	return p.ConnPool.QueryContext(ctx, query, args...)
 }
 
-// newTestService 装配一个跑在 SQLite 上的订单服务，产品仓库通过模式 B 取用。
-// 仓库从 app/io 句柄取连接，测试把内存库发布成当前句柄，结束后恢复。
+// BeginTx 把开事务委托给底层连接池。内嵌的 gorm.ConnPool 接口不含 BeginTx，
+// 不显式补上会让 GORM 的 Begin 落到 default 分支报 ErrInvalidTransaction；
+// Create 走事务，因此测试池必须能开事务。事务内查询直接用返回的 *sql.Tx，
+// 不再经过本包装，panic 注入只作用于非事务查询（如 GET /orders/9999）。
+func (p panicPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return p.ConnPool.(gorm.TxBeginner).BeginTx(ctx, opts)
+}
+
+// newTestService 装配一个跑在 SQLite 上的订单服务，跨模块依赖注入真实产品
+// service（它实现 innerapi.ProductAPI）。仓库从 app/io 句柄取连接，测试把内存库
+// 发布成当前句柄，结束后恢复。
 func newTestService(t *testing.T) *service.OrderService {
 	t.Helper()
 	conn := newTestDB(t)
@@ -101,9 +112,16 @@ func newTestService(t *testing.T) *service.OrderService {
 	prev := appdb.Db
 	appdb.Db = conn
 	t.Cleanup(func() { appdb.Db = prev })
-	reg := registry.NewRegistry()
-	reg.MustRegister(productrepo.NameProducts, &productrepo.ProductRepository{})
-	return service.NewOrderService(&repository.OrderRepository{}, reg, zap.NewNop())
+	products := productservice.NewProductService(productservice.Dependencies{
+		Products: &productrepo.ProductRepository{},
+		Logger:   zap.NewNop(),
+	})
+	return service.NewOrderService(service.Dependencies{
+		Orders:   &repository.OrderRepository{},
+		Products: products,
+		Config:   service.NewOrderConfigService(zap.NewNop()),
+		Logger:   zap.NewNop(),
+	})
 }
 
 func newTestApp(t *testing.T) *gofytest.App {
@@ -401,21 +419,29 @@ func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	}
 }
 
-// 模块工厂每次装配新建注册表并登记跨模块的产品仓库：连续装配两次不会撞
-// 名字，缺数据库时在登记之前就失败。
+// 组合根每次装配新建共享注册表，产品工厂先登记 innerapi、订单工厂构造期取用：
+// 连续装配两次不撞名字，缺登记或缺数据库时启动失败。
 func TestModuleFactoryBuildsFreshRegistryPerAssembly(t *testing.T) {
-	factory := order.NewModuleFactory()
 	rt := &gofy.Runtime{DB: &gorm.DB{}, Logger: zap.NewNop()}
 	for i := 0; i < 2; i++ {
-		module, err := factory(rt)
+		reg := registry.NewRegistry()
+		if _, err := product.NewModuleFactory(reg)(rt); err != nil {
+			t.Fatalf("assembly %d product: %v", i, err)
+		}
+		module, err := order.NewModuleFactory(reg)(rt)
 		if err != nil {
-			t.Fatalf("assembly %d: %v", i, err)
+			t.Fatalf("assembly %d order: %v", i, err)
 		}
 		if module.Name() != "order" {
 			t.Fatalf("module name = %q, want order", module.Name())
 		}
 	}
-	if _, err := factory(&gofy.Runtime{Logger: zap.NewNop()}); err == nil {
+	// 缺产品 innerapi 登记时，订单工厂构造期取用失败。
+	if _, err := order.NewModuleFactory(registry.NewRegistry())(rt); err == nil {
+		t.Fatal("order factory should fail when product innerapi is not registered")
+	}
+	// 缺数据库时直接失败。
+	if _, err := order.NewModuleFactory(registry.NewRegistry())(&gofy.Runtime{Logger: zap.NewNop()}); err == nil {
 		t.Fatal("a runtime without database should fail")
 	}
 }

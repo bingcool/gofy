@@ -24,12 +24,3 @@ func TestConnResolvesInstalledHandle(t *testing.T) {
 		t.Fatal("conn did not resolve db.Db after install")
 	}
 }
-
-func TestProductViewOnSale(t *testing.T) {
-	if !(ProductView{Status: StatusOnSale}).OnSale() {
-		t.Fatal("StatusOnSale should report on sale")
-	}
-	if (ProductView{Status: 0}).OnSale() {
-		t.Fatal("status 0 should not report on sale")
-	}
-}

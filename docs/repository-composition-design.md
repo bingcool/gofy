@@ -9,6 +9,18 @@
   `examples/demo-service`（模块工厂建注册表、产品持久化、模式 B 示例）
 - 关联：[library-design.md](./library-design.md)、[gofy-interface-service-design.md](./gofy-interface-service-design.md)
 
+> **本文的跨模块耦合方式已被 [module-layering-design.md](./module-layering-design.md) 取代（2026-11-11）。**
+> 原方案让 `service → service` / `service → repository` 直接调用（决策 D2、§4 方案选型、
+> §5.1 目录、§5.3–§5.6 的模式 A/B、§6 示例、§8 import 规则）。新方案改为
+> **`service → 对方 innerapi`**：每个模块新增 `innerapi` 纯契约包（接口 + 视图 + 哨兵错误 +
+> `Name` 常量），属主模块的 service 实现该接口，由组合根 `reload.factories` 建的**共享注册表**
+> 登记，消费方在构造期用 `registry.Get[T]` 取接口，不再 import 其他模块的
+> repository / model / service。
+>
+> **仍然有效、本文继续作为权威的部分**：§5.2 通用注册表契约、§5.7 事务上下文传播、
+> §5.8 生命周期与热更新，以及 §5.10「用纯 Go SQLite 跑真实 SQL、异常路径在驱动层注入」的测试取向。
+> 下文被取代的小节保留原文供追溯，阅读时以 module-layering-design.md 为准。
+
 ## 1. 背景
 
 当前 demo-service 的组装方式是：
@@ -91,6 +103,8 @@ repository 不塞进 `Runtime`；业务依赖通过工厂闭包显式构建。§
 - **D2 跨模块调用方向**：`service → service` 与 `service → repository` 都是正式模式。
   简单数据读取/写入可以直接调对方 repository；涉及业务不变量（库存扣减、状态机）
   或多步骤写操作时优先走对方 service，但不再禁止 repository 直调。
+  > **已被取代**：跨模块只走对方 `innerapi` 接口，不再 service→service / service→repository 直调，
+  > 见 [module-layering-design.md](./module-layering-design.md) §3 / §6。D1 单库仍然有效。
 
 ## 4. 方案选型
 
@@ -138,13 +152,13 @@ examples/demo-service/
 │       │   ├── module.go               #   每次装配新建注册表，登记仓库并注入 service
 │       │   ├── repository/             #   Orders 具体仓库（不声明接口）
 │       │   └── service/
-│       │       ├── a_init_repository.go #  RepositoryDeps + Deps（直接注入，不登记）
+│       │       ├── a_init_repository.go #  RepositoryDeps + RepoDeps（直接注入，不登记）
 │       │       └── order_service.go     #  订单用例（模式 B：持注册表按需取产品仓库）
 │       └── product/
 │           ├── module.go               #   新增：产品模块工厂/路由
 │           ├── model/                  #   新增：产品持久化模型
 │           ├── repository/             #   新增：NameProducts、具体仓库、只读视图
-│           └── service/                #   新增：产品用例（写操作时）
+│           └── service/                #   产品用例：读取与扣库存
 └── migrations/
     ├── 0001_orders.sql                 #   已有
     └── 0002_products.sql               #   新增：产品表 + 演示数据
@@ -214,6 +228,10 @@ func Get[T any](r *Registry, name string) (T, error)
 
 ### 5.3 装配注册表与时序
 
+> **已被取代**：注册表改由组合根 `reload.factories` 建一份**共享**实例传给各模块工厂，
+> 属主模块登记自己的 innerapi service（不再是消费方登记对方 repository）。
+> 见 [module-layering-design.md](./module-layering-design.md) §6.4–§6.6。下文保留原文供追溯。
+
 每个装配周期（启动一次、每次 `Reload` 一次）由模块工厂新建一份注册表，只登记
 它跨模块按名字读取的仓库；本模块仓库直接传给 service：
 
@@ -229,7 +247,7 @@ func NewModuleFactory() gofy.ModuleFactory {
         if err := reg.Register(productrepo.NameProducts, &productrepo.ProductRepository{}); err != nil {
             return nil, fmt.Errorf("order module: %w", err)
         }
-        svc := service.NewOrderService(service.Deps.Orders, reg, rt.Logger)
+        svc := service.NewOrderService(service.RepoDeps.Orders, reg, rt.Logger)
         return NewModule(svc, rt.Logger), nil
     }
 }
@@ -267,10 +285,13 @@ App.buildHTTPWith
 - `Reload` 会重新执行 `factories(cfg)`，工厂再建一份新注册表；旧模块继续持有旧注册表
   直到交换完成，新旧实例不共享可变状态；
 - service 不得把注册表或取出的仓库缓存到包级变量。唯一的包级默认值是
-  `service.Deps`（§5.5）：它只放零值构造的无状态仓库，不持连接、
+  `service.RepoDeps`（§5.5）：它只放零值构造的无状态仓库，不持连接、
   不持注册表，跨装配复用是安全的。
 
 ### 5.4 类型化取用与命名
+
+> **已被取代**：名字常量归 innerapi 包（`product.innerapi.Name`），`Get[T]` 的 `T` 是
+> innerapi **接口**而非具体 repository。见 [module-layering-design.md](./module-layering-design.md) §6。
 
 名字常量只给“会被其他模块读取”的仓库，格式统一为 `<module>.<aggregate>`：
 
@@ -295,6 +316,10 @@ products, err := registry.Get[*productrepo.ProductRepository](s.repos, productre
 
 ### 5.5 两种取用模式
 
+> **已被取代**：模式 A/B 与包级 `RepoDeps` / `a_init_repository.go` 均已删除。
+> 跨模块依赖统一在构造期由工厂用 `registry.Get[productapi.ProductAPI]` 取接口，注入
+> `service.Dependencies`。见 [module-layering-design.md](./module-layering-design.md) §5–§6。
+
 **模式 A：装配期取用（默认，推荐）**
 
 模块工厂把 service 包声明的默认仓库直接传给构造函数（完整代码见 §5.3），
@@ -311,13 +336,13 @@ type RepositoryDeps struct {
     Orders *repository.OrderRepository
 }
 
-// Deps 是模块自带的默认集合。仓库无状态：不持连接和日志，连接推迟到每次查询
+// RepoDeps 是模块自带的默认集合。仓库无状态：不持连接和日志，连接推迟到每次查询
 // 才解析，因此包初始化早于 app/io.Start 也安全，Reload 换连接后自动生效。
-var Deps = RepositoryDeps{Orders: &repository.OrderRepository{}}
+var RepoDeps = RepositoryDeps{Orders: &repository.OrderRepository{}}
 ```
 
 放在 service 包而不是 `module.go`，是因为 service 已经 import 本模块 repository，
-不会形成 `service → order → service` 的环；模块工厂只负责把 `service.Deps.Orders`
+不会形成 `service → order → service` 的环；模块工厂只负责把 `service.RepoDeps.Orders`
 传进构造函数，不关心仓库怎么构造。
 
 无状态仓库的取舍（已确认）：
@@ -326,9 +351,9 @@ var Deps = RepositoryDeps{Orders: &repository.OrderRepository{}}
   因此装配早于 `app/io.Start`、`Reload` 换连接都自动生效；
 - 日志统一在 service/module 层用 `rt.Logger` 记录，仓库只包装并返回错误，
   避免同一失败被记录两次；
-- `Deps` 只放无状态仓库（不持连接、不持注册表），跨装配共享安全；它是唯一被允许的
+- `RepoDeps` 只放无状态仓库（不持连接、不持注册表），跨装配共享安全；它是唯一被允许的
   包级仓库变量；
-- 测试不改 `Deps`，而是直接给 `NewOrderService` 传自己构造的仓库实例，保持用例
+- 测试不改 `RepoDeps`，而是直接给 `NewOrderService` 传自己构造的仓库实例，保持用例
   互不污染。
 
 优点：依赖可见、测试可换实例。新增本模块仓库时在 `RepositoryDeps` 加字段，并在
@@ -376,6 +401,12 @@ demo-service 的订单服务用模式 B 读取产品仓库，用于验证“即�
 场景可以用模式 B，但每个取用名字都要在工厂校验，避免整个应用退化成 service locator。
 
 ### 5.6 跨模块调用规则
+
+> **部分被取代**：下表的 `service → service` / `service → repository` 方向已改为
+> `service → 对方 innerapi`；`ProductView` 只读视图迁到 `product/innerapi.Product`。
+> 见 [module-layering-design.md](./module-layering-design.md) §3.2 / §6。
+> **仍然有效**：repository 不声明接口（只用具体类型）、controller 不碰其他模块、
+> repository 不 import service。
 
 按决策 D2，`service → service` 与 `service → repository` 都是一等模式：
 
@@ -484,7 +515,7 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 - 每次 `Reload` 重新执行工厂并替换 `app/io` 句柄，无状态 repository 下一次查询
   自然读到新连接；旧注册表随旧模块一起淘汰；
 - 旧模块在新模块启动完成前继续服务，期间两代 repository 并存是预期行为；
-- 除 `service.Deps` 这份无状态默认集合外，任何 repository 都不允许存到包级变量、
+- 除 `service.RepoDeps` 这份无状态默认集合外，任何 repository 都不允许存到包级变量、
   `Runtime` 或全局 map；注册表本身永远不是包级变量；
 - 后台 worker / 脚本不经过模块装配时，直接构造无状态 repository；脚本没有
   `app/io` 生命周期，`script/fix_order.go` 把 `rt.DB` 临时发布到 `appdb.Db`
@@ -495,7 +526,7 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 - 注册失败（空名、nil、重复）→ 工厂返回错误 → 启动或热更新失败，保留旧实例；
 - 取用失败（名字缺失、类型不符）→ 错误包含名字、期望类型和实际类型；
 - 启动日志可输出 `reg.Names()`，按模块分组，便于确认实际注册了哪些仓库；
-- 没有兜底实现：注册表里缺名字就是错误。`service.Deps` 只是包级默认实例，由工厂
+- 没有兜底实现：注册表里缺名字就是错误。`service.RepoDeps` 只是包级默认实例，由工厂
   直接传给构造函数，不参与注册表取用，也不是取用失败时的回退。
 
 ### 5.10 测试
@@ -521,7 +552,7 @@ cgo-free）建内存库跑真实 SQL，不连外部 MySQL：
   不生效，两处都要赋值；关闭连接要在包装前取出 `conn.DB()`，因为包装后的池不再是
   `*sql.DB`，`sqlite.Close` 取不到底层连接；
 - 本模块仓库要换实例时另建 `service.RepositoryDeps{Orders: &repository.OrderRepository{}}`
-  并直接传给 `NewOrderService`；不改包级 `service.Deps`，也不需要注册表；
+  并直接传给 `NewOrderService`；不改包级 `service.RepoDeps`，也不需要注册表；
 - 模块工厂无参数，测试直接连续调用两次验证“每次装配新建注册表、不撞名字”，
   并验证 `rt.DB == nil` 时启动失败；
 - `support/registry` 自身单测覆盖：空名字、nil、重复注册、并发注册与取用、
@@ -533,6 +564,11 @@ cgo-free）建内存库跑真实 SQL，不连外部 MySQL：
   - 库存不足时 `DecreaseStock` 返回 0 行且库存不变，非正数 `num` 直接报错。
 
 ## 6. 示例：订单服务读取产品名称
+
+> **已被取代**：订单服务不再持注册表按需取产品 repository，而是在构造期注入
+> `productapi.ProductAPI` 接口；产品视图为 `product/innerapi.Product`。
+> 最新示例见 [module-layering-design.md](./module-layering-design.md) §7–§9 与
+> [library-design.md](./library-design.md) §9。下文保留原文供追溯。
 
 ### 6.1 产品表与 repository
 
@@ -639,12 +675,12 @@ func (s *OrderService) productNames(ctx context.Context, skuIDs []uint64) (map[u
 if err := reg.Register(productrepo.NameProducts, &productrepo.ProductRepository{}); err != nil {
     return nil, fmt.Errorf("order module: %w", err)
 }
-svc := service.NewOrderService(service.Deps.Orders, reg, rt.Logger)
+svc := service.NewOrderService(service.RepoDeps.Orders, reg, rt.Logger)
 ```
 
 只有被跨模块读取的仓库需要名字：产品仓库登记为 `product.products`（属主 = 产品
 repository 包，登记方 = 订单工厂），订单仓库没有名字、不进入注册表，由
-`service.Deps.Orders` 直接注入。注册表随工厂每次执行重建，`reload.go` 只写
+`service.RepoDeps.Orders` 直接注入。注册表随工厂每次执行重建，`reload.go` 只写
 `order.NewModuleFactory()`。
 
 ## 7. 迁移计划
@@ -656,10 +692,10 @@ repository 包，登记方 = 订单工厂），订单仓库没有名字、不进
 | P2 | 新增 `migrations/0002_products.sql`（产品表 + 演示数据）、产品 `model` / `repository`（基于 `db.default`）；订单 service 用模式 B 读取产品名称并校验下单 SKU；补注册表/仓库测试 | 下单校验产品存在且上架；订单 DTO/响应带产品名称；单测不连外部库 |
 | P3（已落地 2026-11-09） | 补 `support/db` 事务上下文；repository 改用 `conn(ctx)`；覆盖跨模块事务用例 | 扣库存 + 建订单可回滚 |
 | P4（已落地 2026-11-09） | 增加 import guard（controller 禁止取 repository、repository 禁止 import service、跨模块聚合上限）；更新 README / library-design / CHANGELOG | `make check` 与三仓库回归通过 |
-| P5（已落地 2026-11-09） | 删除 `app/repository`（Provider / assemble / names / accessors 及其测试）；`RepositoryDeps` + `Deps` + `init()` + `InitRepository(reg)` 落到 `order/service/a_init_repository.go`；`NameProducts` 落到 `product/repository`；注册表改由 `order.NewModuleFactory()` 每次装配新建；跨模块事务用例迁到 `order/service/transaction_test.go`；import guard 去掉组合层豁免 | 连续装配两次不撞名字；`rt.DB == nil` 启动失败；`make check` 与 demo 回归通过 |
+| P5（已落地 2026-11-09） | 删除 `app/repository`（Provider / assemble / names / accessors 及其测试）；`RepositoryDeps` + `RepoDeps` + `init()` + `InitRepository(reg)` 落到 `order/service/a_init_repository.go`；`NameProducts` 落到 `product/repository`；注册表改由 `order.NewModuleFactory()` 每次装配新建；跨模块事务用例迁到 `order/service/transaction_test.go`；import guard 去掉组合层豁免 | 连续装配两次不撞名字；`rt.DB == nil` 启动失败；`make check` 与 demo 回归通过 |
 | P6（已落地 2026-11-11） | 删除 `OrderRepositoryInterface` / `ProductRepositoryInterface` 及编译期断言；`RepositoryDeps.Orders`、`NewOrderService`、`registry.Get[T]` 全部改用具体类型；订单模块测试去掉 fake，改用 SQLite 真实仓库 + 驱动层 `panicPool`；同步 README / 设计文档 / CHANGELOG | `go vet` 与订单模块测试通过；HTTP 行为、错误码、契约不变 |
-| P7（已落地 2026-11-11） | repository 去掉 `New` / `NewFromHandle` 与 `db` / `logger` 字段，改为零值可用的无状态类型，`conn(ctx)` 固定回落 `appdb.Db`；`Deps` 改为 `var` 零值构造并删除 `init()`；`script/fix_order.go` 临时发布 `rt.DB`；测试把内存库发布成 `appdb.Db`；同步 README / 设计文档 / CHANGELOG | `go vet` 与 demo 回归通过；事务、热更新与 HTTP 行为不变 |
-| P8（已落地 2026-11-11） | 删除 `NameOrders` 及其登记链路（`RepositoryDeps.Register`、`InitRepository`、`order.orders` 注册项）；`RepositoryDeps` / `Deps` 只作为本模块仓库声明，由工厂直接传给 service；注册表只保留真正被跨模块取用的 `product.products`；同步 README / 设计文档 / CHANGELOG | 订单仓库不再登记名字；产品取用、事务与 HTTP 行为不变；demo 与根仓库 `make check` 通过 |
+| P7（已落地 2026-11-11） | repository 去掉 `New` / `NewFromHandle` 与 `db` / `logger` 字段，改为零值可用的无状态类型，`conn(ctx)` 固定回落 `appdb.Db`；`RepoDeps` 改为 `var` 零值构造并删除 `init()`；`script/fix_order.go` 临时发布 `rt.DB`；测试把内存库发布成 `appdb.Db`；同步 README / 设计文档 / CHANGELOG | `go vet` 与 demo 回归通过；事务、热更新与 HTTP 行为不变 |
+| P8（已落地 2026-11-11） | 删除 `NameOrders` 及其登记链路（`RepositoryDeps.Register`、`InitRepository`、`order.orders` 注册项）；`RepositoryDeps` / `RepoDeps` 只作为本模块仓库声明，由工厂直接传给 service；注册表只保留真正被跨模块取用的 `product.products`；同步 README / 设计文档 / CHANGELOG | 订单仓库不再登记名字；产品取用、事务与 HTTP 行为不变；demo 与根仓库 `make check` 通过 |
 
 每阶段的回滚点：P1 只新增包并迁移订单，不改变产品模块；P2 的产品仓库先从只读
 查询开始，产品表用 `IF NOT EXISTS` + `INSERT IGNORE`，可重复执行；P3 之前跨模块写
@@ -671,6 +707,11 @@ repository 接口并把字段/泛型参数改回接口类型；P7 的仓库无�
 `RepositoryDeps.Register` 和 `InitRepository`，不涉及表结构、契约和 HTTP 行为。
 
 ## 8. 约束与自动校验
+
+> **已被取代**：import guard 改为按 5 层（controller / service / innerapi / repository / model）
+> 校验，跨模块只允许 import 对方 `innerapi`，不再有「一个包最多 import 一个其他模块 repository」
+> 的上限规则。最新规则见 [module-layering-design.md](./module-layering-design.md) §10 与
+> `examples/demo-service/scripts/check-imports.sh`。下文保留原文供追溯。
 
 已在 `examples/demo-service/scripts/check-imports.sh` 落地 import guard（沿用根仓库
 `scripts/check-imports.sh` 的写法），由 demo 与根仓库的 `make guards` / `make check`
@@ -687,7 +728,7 @@ repository 接口并把字段/泛型参数改回接口类型；P7 的仓库无�
    由 `go build` 的包依赖检查兜底。
 
 根仓库的 `make guards` 另有“公开包不得写 `func init()`”一条，只约束 gofy 框架包；
-demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默认仓库集合是 `var Deps`
+demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默认仓库集合是 `var RepoDeps`
 零值构造（P7），登记链路已在 P8 删除。
 
 代码评审清单：
@@ -700,7 +741,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
 - service 的跨模块依赖是否显式声明（模式 A）或走模式 B 且在工厂登记；
 - 跨模块写是否优先走 service；直接调 repository 时是否在同一 ctx 事务内且不绕过业务不变量；
 - 事务内的跨模块调用是否传入同一 ctx；
-- 除无状态的 `service.Deps` 外，是否把 repository 或注册表缓存到包级变量或跨装配结构。
+- 除无状态的 `service.RepoDeps` 外，是否把 repository 或注册表缓存到包级变量或跨装配结构。
 
 ## 9. 对现有文档的影响
 
@@ -713,7 +754,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
 - `examples/demo-service/app/module/order/README.md` 的“跨模块依赖由 module.go 装配
   后注入”要补充两种取用模式，并把订单服务改为模式 B 示例；产品表初始化步骤写在
   该 README 的“数据表”一节；P5 后还要写明 `service/a_init_repository.go` 的职责，
-  P7/P8 后更新为“`RepositoryDeps` + `Deps` 只声明本模块仓库，不登记名字”；
+  P7/P8 后更新为“`RepositoryDeps` + `RepoDeps` 只声明本模块仓库，不登记名字”；
 - CHANGELOG 在 P1/P2 落地时新增 `support/registry` 和产品仓库条目；P5 把原
   `app/repository` 条目改写为“组合层已删除，注册表由模块工厂新建”；
 - P3 在 `support/db` README 与 `library-design.md` §3.7 补充事务上下文 API 和约定；
@@ -723,7 +764,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
   README 的 `Get[T]` 示例、demo 订单 README 的分层表和测试说明、CHANGELOG 全部改成
   具体类型，并写明测试改用 SQLite；
 - P7/P8 同步 `library-design.md`、demo 订单 README、`support/registry` README 与
-  CHANGELOG：仓库不再接连接和日志、`Deps` 是零值 `var`、注册表只登记跨模块仓库，
+  CHANGELOG：仓库不再接连接和日志、`RepoDeps` 是零值 `var`、注册表只登记跨模块仓库，
   全文不再出现 `NameOrders` / `InitRepository`。
 
 ## 10. 风险与取舍
@@ -735,7 +776,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
 | 跨模块写绕过不变量 | 直接调对方 repository 修改数据 | 简单写允许；带业务不变量时走 service；写调用必须在同一个 ctx 事务内 |
 | 事务改造面大 | 所有 repository 都要改用 `conn(ctx)` | P3 统一改造并加测试；未改造前跨模块多步写不保证原子性 |
 | 模型泄漏 | 跨模块返回 `model` 导致耦合 | 只返回 repository 包的只读视图/DTO |
-| 热更新竞争 | 旧模块仍在使用旧 repository | 工厂每次装配新建注册表；除无状态 `Deps` 外不在包级缓存；新旧交换沿用现有机制 |
+| 热更新竞争 | 旧模块仍在使用旧 repository | 工厂每次装配新建注册表；除无状态 `RepoDeps` 外不在包级缓存；新旧交换沿用现有机制 |
 | 仓库不记日志 | 仓库拿不到 `rt.Logger`，也不应重复记录错误 | 仓库只包装并返回错误；service/module 用 `rt.Logger` 记录一次（P7 已确认） |
 | 重复登记 | 多个消费方工厂登记同一个名字到各自注册表 | 注册表按工厂隔离，互不影响；实例无状态，重复构造只多一次轻量分配 |
 | 仓库无法替换实现 | repository 是具体类型，测试不能塞 fake | 测试用纯 Go SQLite 跑真实 SQL；异常路径在驱动层（`ConnPool`）注入；真出现第二实现时再按需下沉接口 |
@@ -760,7 +801,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
 6. **删除组合层**：`app/repository`（Provider / Assemble / names / accessors）整体
    删除。注册表由消费方模块工厂在每次装配时 `registry.NewRegistry()` 新建，
    `reload.factories(cfg)` 只返回工厂列表，不再持有跨工厂共享状态。
-7. **仓库集合归 service 包**：`RepositoryDeps`、包级默认 `Deps` 放在
+7. **仓库集合归 service 包**：`RepositoryDeps`、包级默认 `RepoDeps` 放在
    `order/service/a_init_repository.go`（P5 时的 `Register`、`InitRepository(reg)`
    已在 P8 删除）。连接推迟到查询时解析（P5 用 `init()` + `NewFromHandle`，P7 起
    改为零值构造并删除 `init()`）。P4 的 `RepositoryRegistrar` 接口随之删除。
@@ -770,7 +811,7 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
    `registry.Get[*productrepo.ProductRepository](reg, productrepo.NameProducts)`。
 9. **测试随层迁移**：跨模块事务用例从 `app/repository/transaction_test.go` 迁到
    `order/service/transaction_test.go`；工厂测试改为“连续装配两次不撞名字 +
-   缺数据库启动失败”，替换实例通过另建 `RepositoryDeps` 注入，不改包级 `Deps`。
+   缺数据库启动失败”，替换实例通过另建 `RepositoryDeps` 注入，不改包级 `RepoDeps`。
 
 ### 11.3 已确认（2026-11-11，P6）
 
@@ -789,14 +830,14 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
     `ProductRepository` 变成零值可用的空结构体；`conn(ctx)` 固定为
     `gofydb.FromContext(ctx, appdb.Db)`。理由：仓库只有一种连接来源（`app/io` 句柄）
     和一种日志来源（service 的 `rt.Logger`），构造函数只是把包级依赖再传一遍。
-    删除后 `Deps`、工厂、测试都直接用 `&repository.OrderRepository{}`；脚本模式没有
+    删除后 `RepoDeps`、工厂、测试都直接用 `&repository.OrderRepository{}`；脚本模式没有
     `app/io` 生命周期，`script/fix_order.go` 调用前把 `rt.DB` 发布到 `appdb.Db`
     并在结束后恢复。
 
 ### 11.5 已确认（2026-11-11，P8）
 
 12. **本模块仓库不登记名字**：删除 `NameOrders`、`RepositoryDeps.Register`、
-    `InitRepository` 以及 `order.orders` 注册项。`RepositoryDeps` / `Deps` 只回答
+    `InitRepository` 以及 `order.orders` 注册项。`RepositoryDeps` / `RepoDeps` 只回答
     “本模块有哪些仓库、默认实例是什么”，实例由模块工厂直接传给 `NewOrderService`；
     注册表只保留真正被跨模块按名取用的 `product.products`。理由：订单仓库没有任何
     跨模块消费者，登记名字只多一条无人读取的链路和一次重复注册的失败面。以后某个

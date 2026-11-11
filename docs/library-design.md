@@ -83,11 +83,15 @@
 ### 1.4 迁移后的使用方式（一句话）
 
 ```go
+reg := registry.NewRegistry() // 组合根每次装配新建，传给所有模块工厂
 app, _ := gofy.New(
     gofy.WithName("demo-service"),
     gofy.WithHTTP(gofy.HTTPConfig{Port: 8080}),
     gofy.WithMiddlewareRegistrar(demoMiddlewareRegistrar(cfg)),
-    gofy.WithModuleFactories(order.NewModuleFactory()),
+    gofy.WithModuleFactories(
+        product.NewModuleFactory(reg), // 属主先登记 innerapi
+        order.NewModuleFactory(reg),   // 消费方构造期取用
+    ),
 )
 if err := app.Execute(ctx); err != nil {
     os.Exit(gofy.ExitCode(err))
@@ -1629,8 +1633,8 @@ Excel（.xlsx）导出/导入，移植自 swoolefy PHP `PhpOffice\Excel`，底�
 ### 3.7.8 `support/registry`
 
 通用「名字 → 实例」注册表，供应用在启动装配时登记跨模块共享的实例
-（repository、client、service），再按名字取用。它解决 service 如何即取即用地
-拿到其他模块依赖的问题，同时避免包级单例。
+（实现 `innerapi` 接口的 service、client 等），再按名字取用。它解决模块如何拿到
+其他模块共享依赖的问题，同时避免包级单例。
 
 ```go
 reg := registry.NewRegistry()
@@ -1645,11 +1649,13 @@ names := reg.Names()                          // 排序副本，供启动日志
   重复注册不覆盖；
 - 注册表是普通对象而非全局：每次装配（启动 / `Reload`）新建一份，随依赖显式传递；
 - 所有方法并发安全；`Lookup`/`Names`/`Get` 对 nil 注册表安全；
-- 名字由使用方定义为常量，应用层建议 `<module>.<aggregate>`，注册表不校验格式；
-- `Get[T]` 的 `T` 就是注册进去的具体类型；demo 的 repository 不声明接口，直接注册
-  `*productrepo.ProductRepository`，消费方也按这个类型取用；
+- 名字由属主模块的 `innerapi` 包定义为常量（如 `product.innerapi`），注册表不校验格式；
+- `Get[T]` 的 `T` 就是注册进去的类型；demo 的跨模块依赖注册的是实现 `innerapi`
+  接口的 service（产品 service 实现 `productapi.ProductAPI`），消费方按接口
+  `registry.Get[productapi.ProductAPI](reg, productapi.Name)` 取用，不接触对方实现；
+  本模块 repository 不声明接口、也不登记注册表，由工厂零值构造后直接注入；
 - 与 `support/middleware.Registry` 分工：后者强类型、只存中间件，由 Router 解析
-  契约别名；通用注册表存任意跨模块实例，由模块工厂登记、service 取用，两者不合并。
+  契约别名；通用注册表存任意跨模块实例，由属主模块工厂登记、消费方工厂构造期取用，两者不合并。
 
 ### 3.8 `script`
 
@@ -2528,21 +2534,34 @@ demo-service/
 │   │   └── registry_middleware.go  # Register：集中注册应用层别名
 │   └── module/
 │       ├── order/
-│       │   ├── module.go       # 每次装配新建注册表，登记跨模块仓库并注入 service
+│       │   ├── module.go       # 装配：取 product.innerapi，登记 order.innerapi，绑定路由
 │       │   ├── controller/
-│       │   │   └── order_controller.go
+│       │   │   ├── order_controller.go        # 契约适配 + 视图↔DTO/状态/错误码映射
+│       │   │   ├── order_config_controller.go # GetConfig 契约实现
+│       │   │   └── order_status_test.go       # 领域状态↔契约枚举一致性
 │       │   ├── service/
-│       │   │   ├── a_init_repository.go  # RepositoryDeps + Deps（直接注入，不登记）
-│       │   │   └── order_service.go
+│       │   │   ├── order_service.go  # 实现 innerapi.OrderAPI，返回领域视图
+│       │   │   ├── order_config_service.go # OrderConfigService（同包协作）+ Config 视图
+│       │   │   ├── order_view.go     # 领域状态常量 + 订单域哨兵错误 + CreateItem 别名
+│       │   │   ├── deps.go           # Dependencies（本模块仓库 + 跨模块 innerapi + 同包 Config + Logger）
+│       │   │   └── transaction_test.go
+│       │   ├── innerapi/
+│       │   │   └── innerapi.go       # OrderAPI 接口 + Order 视图 + CreateItem + 错误 + Name
 │       │   ├── repository/
 │       │   │   └── order_repository.go
 │       │   └── model/
 │       │       └── order.go
 │       └── product/
+│           ├── module.go       # 装配 service，自登记 product.innerapi；本轮无路由
 │           ├── controller/
-│           │   └── product_controller.go
+│           │   └── product_controller.go  # 预留内存示例，本轮不绑定路由
+│           ├── service/
+│           │   ├── product_service.go  # 实现 innerapi.ProductAPI：读取 + 扣库存
+│           │   └── deps.go             # Dependencies{Products, Logger}
+│           ├── innerapi/
+│           │   └── innerapi.go       # ProductAPI 接口 + Product 视图 + 错误 + Name
 │           ├── repository/
-│           │   └── product_repository.go  # NameProducts + 契约 + 只读视图
+│           │   └── product_repository.go  # 具体类型 + DecreaseStock 条件更新
 │           └── model/
 │               └── product.go
 ├── script/
@@ -2573,9 +2592,11 @@ import (
     "go.uber.org/zap"
 
     "github.com/bingcool/gofy"
+    "github.com/bingcool/gofy/support/registry"
     "github.com/yourorg/demo-service/app/config"
     appio "github.com/yourorg/demo-service/app/io"
     "github.com/yourorg/demo-service/app/module/order"
+    "github.com/yourorg/demo-service/app/module/product"
     appscript "github.com/yourorg/demo-service/script"
 )
 
@@ -2594,7 +2615,10 @@ func main() {
         log.Fatalf("load config: %v", err)
     }
 
-    // 注册表由模块工厂在每次装配时新建；Reload 会重新执行这份工厂列表。
+    // 组合根每次装配新建一份共享注册表，传给所有模块工厂：属主模块（product）
+    // 自登记 innerapi，消费方（order）构造期按接口取用。工厂顺序即依赖顺序，
+    // 被依赖方在前。实际 wiring 在 reload.go 的 factories(cfg)，启动与 Reload 共用。
+    reg := registry.NewRegistry()
     app, err := gofy.New(
         gofy.WithName("demo-service"),
         gofy.WithEnv(cfg.Env),
@@ -2608,7 +2632,8 @@ func main() {
         gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
         gofy.WithModuleFactories(
             appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP),
-            order.NewModuleFactory(),
+            product.NewModuleFactory(reg),
+            order.NewModuleFactory(reg),
         ),
         gofy.WithScripts(appscript.Register(cfg)...),
         gofy.WithVersionInfo(gofy.VersionInfo{
@@ -2729,8 +2754,10 @@ import (
     "github.com/bingcool/gofy/support"
     "github.com/bingcool/gofy/support/registry"
     "github.com/yourorg/demo-service/app/module/order/controller"
+    orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
+    "github.com/yourorg/demo-service/app/module/order/repository"
     "github.com/yourorg/demo-service/app/module/order/service"
-    productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+    productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
     "go.uber.org/zap"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
     "gofy/gofy-interface-service/appinterface/demoservice/orderroute"
@@ -2742,20 +2769,28 @@ type Module struct {
     logger *zap.Logger
 }
 
-// NewModuleFactory 每次装配新建一份注册表，只登记订单服务跨模块读取的产品仓库；
-// 本模块仓库由 service.Deps 直接注入。启动和每次 Reload 都重新执行工厂，新旧
-// 两代注册表互不影响。
-func NewModuleFactory() gofy.ModuleFactory {
+// NewModuleFactory 从组合根传入的共享注册表取用产品 innerapi，构造订单 service
+// 并登记订单自己的 innerapi。注册表每次装配由 reload.factories 新建，产品工厂
+// 先于本工厂执行；缺登记或顺序错时构造期 Get 失败、启动即报错。
+func NewModuleFactory(reg *registry.Registry) gofy.ModuleFactory {
     return func(rt *gofy.Runtime) (support.Module, error) {
         if rt.DB == nil {
             return nil, errors.New("order module requires database")
         }
-        reg := registry.NewRegistry()
-        // 产品仓库的名字和实现归产品模块，订单模块作为消费方负责登记。
-        if err := reg.Register(productrepo.NameProducts, &productrepo.ProductRepository{}); err != nil {
+        products, err := registry.Get[productapi.ProductAPI](reg, productapi.Name)
+        if err != nil {
             return nil, fmt.Errorf("order module: %w", err)
         }
-        svc := service.NewOrderService(service.Deps.Orders, reg, rt.Logger)
+        svc := service.NewOrderService(service.Dependencies{
+            Orders:   &repository.OrderRepository{},
+            Products: products,
+            Config:   service.NewOrderConfigService(rt.Logger),
+            Logger:   rt.Logger,
+        })
+        // 登记订单自己的 innerapi，保持与产品模块对称（本轮无跨模块消费方）。
+        if err := reg.Register(orderapi.Name, svc); err != nil {
+            return nil, fmt.Errorf("order module: %w", err)
+        }
         return NewModule(svc, rt.Logger), nil
     }
 }
@@ -2788,18 +2823,22 @@ func (m *Module) Register(r *support.Router) error {
 仓库自动使用新句柄，热更新也会切到新连接。脚本模式没有模块生命周期，
 `script/fix_order.go` 调用前把 `rt.DB` 临时发布到 `appdb.Db`，结束后恢复。
 
-仓库集合不在 `module.go`，而在 `service/a_init_repository.go`：`RepositoryDeps`
-（字段即本模块全部仓库）和包级默认 `Deps` 归 service 包，因为 service 已经 import
-本模块 repository，不会形成 `service → order → service` 的环。本模块仓库没有名字、
-不登记注册表，由模块工厂把 `service.Deps.Orders` 直接传给构造函数；`Deps` 是零值
-构造的无状态仓库（`RepositoryDeps{Orders: &repository.OrderRepository{}}`），跨装配
-复用安全。仓库日志由 service/module 用 `rt.Logger` 记录，仓库本身只包装并返回错误。
-注册表由工厂每次装配新建，只用来放真正被跨模块按名取用的仓库；测试直接构造
-`RepositoryDeps` 注入自己的实例，不改包级变量。跨模块仓库（`productrepo.NameProducts`）
-的名字常量归产品 repository 包，登记由消费方工厂负责。repository 只导出具体类型
-（`*OrderRepository` / `*ProductRepository`），不声明接口：只有一种 GORM 实现，
-接口除了让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑真实 SQL。完整取舍见
-[repository-composition-design.md](./repository-composition-design.md) §5.3–§5.6、§5.10、§11.2–§11.5。
+依赖声明不在 `module.go`，而在 `service/deps.go`：`Dependencies` 结构显式列出本模块
+仓库（`Orders *repository.OrderRepository`）、跨模块产品契约（`Products productapi.ProductAPI`）、
+同包协作 service（`Config *OrderConfigService`）和 `Logger`，构造函数
+`NewOrderService(deps Dependencies)` 接收它。本模块仓库在工厂里
+零值构造（`&repository.OrderRepository{}`）后直接注入，没有名字、不登记注册表，也没有
+包级默认 `RepoDeps`（已删除）。跨模块依赖只持有产品 `innerapi` 接口：实例由产品工厂在
+装配期自登记进共享注册表，订单工厂构造期用 `registry.Get[productapi.ProductAPI](reg,
+productapi.Name)` 取出后注入。共享注册表由组合根（`reload.factories`）每次装配新建并
+传给所有工厂，service 不得把它缓存到包级变量或跨请求保存。仓库日志由 service/module 用
+`rt.Logger` 记录，仓库本身只包装并返回错误。repository 只导出具体类型
+（`*OrderRepository` / `*ProductRepository`），不声明接口：只有一种 GORM 实现，接口除了
+让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑真实 SQL。`innerapi` 则是模块间
+唯一合法的耦合点——纯契约包（接口 + 只读视图 + 入参 + 哨兵错误 + `Name`），只允许标准库
+（必要时 `support` 纯类型），名字常量归各自模块的 `innerapi` 包。完整取舍见
+[module-layering-design.md](./module-layering-design.md) §3–§6、§10，以及
+[repository-composition-design.md](./repository-composition-design.md) §5.2、§5.7–§5.8。
 
 `BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：`AuthRequired` 只用于 OpenAPI 标记，契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`）。
 
@@ -2840,12 +2879,16 @@ replace gofy/gofy-interface-service => ../../../gofy-interface-service
 
 | 层 | 输入/输出 | 约束 |
 | --- | --- | --- |
-| controller | 契约 `orderrequest` / `orderresponse` / `orderdto` | 只做协议转换与错误映射，不导入 `model` |
-| service | 普通值入参，返回 `orderdto.OrderDTO` | 只在 `toDTO` 中接触 `model` |
-| repository | 返回 `model.Order` | 导出具体类型（不声明接口）并持有 `model`，是唯一直接操作 `model` 的层；跨模块读取返回只读视图 |
+| controller | 契约 `orderrequest` / `orderresponse` / `orderdto` | 协议转换 + 视图↔DTO/状态/错误码映射；只 import 本模块 `service` 与契约，不导入 `model`/`repository`/`innerapi` |
+| service | 普通值入参，返回 `innerapi` 领域视图（`orderapi.Order`） | 实现本模块 `innerapi`，只在 `toOrderView` 中接触 `model`；不 import HTTP 契约 |
+| innerapi | 接口 + 只读视图 + 入参 + 哨兵错误 + `Name` | 纯契约，只允许标准库（必要时 `support` 纯类型）；模块间唯一耦合点 |
+| repository | 返回 `model.Order` | 导出具体类型（不声明接口）并持有 `model`，是唯一直接操作 `model` 的层 |
 | model | 仅 repository 内部使用 | 不得出现在 handler、module 或 script 中 |
 
-维护脚本同样通过 repository 访问数据，不直接拼 GORM 查询。
+HTTP 载荷类型来自公共契约层，跨模块只读视图来自各模块 `innerapi`，两者不混用：
+controller 把 service 返回的 `innerapi` 视图按字段映射成契约 DTO（不 import
+`innerapi`，视图类型由 service 方法返回值推断）。维护脚本同样通过 repository
+访问数据，不直接拼 GORM 查询。
 
 ### 9.6 `app/module/order/controller/order_controller.go`
 
@@ -2855,25 +2898,38 @@ package controller
 import (
     "context"
     "errors"
+    "time"
 
     "github.com/bingcool/gofy/apperr"
     "github.com/yourorg/demo-service/app/module/order/service"
+    "go.uber.org/zap"
     gofyadapter "gofy/gofy-interface-service/adapter/gofy"
     "gofy/gofy-interface-service/appinterface/demoservice"
     "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
+    "gofy/gofy-interface-service/appinterface/demoservice/orderenum"
     "gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
     "gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
     "gofy/gofy-interface-service/contracts/common/paging"
+    "gofy/gofy-interface-service/contracts/common/types"
 )
 
 var _ demoservice.Service = (*OrderController)(nil)
 
 type OrderController struct {
     orderService *service.OrderService
+    logger       *zap.Logger
 }
 
-func New(svc *service.OrderService) *OrderController {
-    return &OrderController{orderService: svc}
+// NewOrderController 注入 logger（nil 退化为 Nop）。成功请求交给访问日志，
+// controller 只记录最终映射成 500 的意外错误。
+func NewOrderController(svc *service.OrderService, logger *zap.Logger) *OrderController {
+    if logger == nil {
+        logger = zap.NewNop()
+    }
+    return &OrderController{
+        orderService: svc,
+        logger:       logger.With(zap.String("component", "order.controller")),
+    }
 }
 
 func (c *OrderController) GetOrder(ctx context.Context, req *orderrequest.GetOrderRequest) (*orderresponse.GetOrderResponse, error) {
@@ -2882,17 +2938,23 @@ func (c *OrderController) GetOrder(ctx context.Context, req *orderrequest.GetOrd
         if errors.Is(err, service.ErrOrderNotFound) {
             return nil, gofyadapter.Error(demoservice.ErrOrderNotFound)
         }
+        c.logger.Error("get order failed", zap.Uint64("order_id", req.ID.Uint64()), zap.Error(err))
         return nil, apperr.Internal("get order failed").WithCause(err)
     }
-    return &orderresponse.GetOrderResponse{Order: o}, nil
+    return &orderresponse.GetOrderResponse{Order: toOrderDTO(o.ID, o.UserID, o.Amount, o.Status, o.CreatedAt)}, nil
 }
 
 func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.ListOrdersRequest) (*paging.ListData[orderdto.OrderDTO], error) {
     items, total, err := c.orderService.List(ctx, req.UserID.Uint64(), req.Page, req.PageSize)
     if err != nil {
+        c.logger.Error("list orders failed", zap.Uint64("user_id", req.UserID.Uint64()), zap.Error(err))
         return nil, apperr.Internal("list orders failed").WithCause(err)
     }
-    return &paging.ListData[orderdto.OrderDTO]{Total: total, List: items}, nil
+    list := make([]orderdto.OrderDTO, 0, len(items))
+    for i := range items {
+        list = append(list, *toOrderDTO(items[i].ID, items[i].UserID, items[i].Amount, items[i].Status, items[i].CreatedAt))
+    }
+    return &paging.ListData[orderdto.OrderDTO]{Total: total, List: list}, nil
 }
 
 func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
@@ -2902,12 +2964,21 @@ func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.Cre
     }
     o, err := c.orderService.Create(ctx, req.UserID.Uint64(), req.Amount, items)
     if err != nil {
-        if errors.Is(err, service.ErrProductNotFound) || errors.Is(err, service.ErrProductUnavailable) {
+        switch {
+        case errors.Is(err, service.ErrProductNotFound),
+            errors.Is(err, service.ErrProductUnavailable),
+            errors.Is(err, service.ErrInsufficientStock):
             return nil, apperr.BadRequest(err.Error())
+        default:
+            c.logger.Error("create order failed",
+                zap.Uint64("user_id", req.UserID.Uint64()),
+                zap.Int64("amount", req.Amount),
+                zap.Error(err),
+            )
+            return nil, apperr.Internal("create order failed").WithCause(err)
         }
-        return nil, apperr.Internal("create order failed").WithCause(err)
     }
-    return &orderresponse.CreateOrderResponse{Order: o}, nil
+    return &orderresponse.CreateOrderResponse{Order: toOrderDTO(o.ID, o.UserID, o.Amount, o.Status, o.CreatedAt)}, nil
 }
 
 func (c *OrderController) CancelOrder(ctx context.Context, req *orderrequest.CancelOrderRequest) error {
@@ -2915,15 +2986,29 @@ func (c *OrderController) CancelOrder(ctx context.Context, req *orderrequest.Can
         if errors.Is(err, service.ErrOrderNotFound) {
             return gofyadapter.Error(demoservice.ErrOrderNotFound)
         }
+        c.logger.Error("cancel order failed", zap.Uint64("order_id", req.ID.Uint64()), zap.Error(err))
         return apperr.Internal("cancel order failed").WithCause(err)
     }
     return nil
+}
+
+// toOrderDTO 把 service 返回的领域视图字段映射成契约 DTO。controller 不 import
+// innerapi：视图类型由 service 方法返回值推断，这里只按字段映射——状态字符串
+// 转契约枚举、uint64 转 types.Uint64String。
+func toOrderDTO(id, userID uint64, amount int64, status string, createdAt time.Time) *orderdto.OrderDTO {
+    return &orderdto.OrderDTO{
+        ID:        types.Uint64String(id),
+        UserID:    types.Uint64String(userID),
+        Amount:    amount,
+        Status:    orderenum.OrderStatus(status),
+        CreatedAt: createdAt,
+    }
 }
 ```
 
 方法名必须与契约 `OperationID` 一致（`GetOrder`、`ListOrders`、`CreateOrder`、`CancelOrder`），签名在 `BindAll` 启动时校验。业务错误通过 `gofyadapter.Error(demoservice.ErrOrderNotFound)` 映射为 `40401`，与 OpenAPI 声明保持一致；`CancelOrder` 由契约声明为 `NoContent`，适配器写入 `204`。
 
-controller 只做协议转换，不接触 `model`；`service` 返回 `orderdto.OrderDTO`，`model` 仅在 `repository` 内部使用。
+controller 只做协议转换与视图↔DTO 映射，不接触 `model`，也不 import `innerapi`（视图类型由 service 方法返回值推断，按字段映射）；`service` 返回 `innerapi` 领域视图，`model` 仅在 `repository` 内部使用。`GetConfig` 在同包的 `order_config_controller.go` 实现，委托 `OrderService.GetConfig`（再委托同包 `OrderConfigService`）取领域视图后映射成契约响应。领域状态常量与契约枚举的一致性由 `order_status_test.go` 保证。
 
 ### 9.7 `app/module/order/service/order_service.go`（节选）
 
@@ -2932,79 +3017,92 @@ package service
 
 import (
     "context"
+    "errors"
     "fmt"
 
-    "github.com/bingcool/gofy/support/registry"
+    gofydb "github.com/bingcool/gofy/support/db"
+    appdb "github.com/yourorg/demo-service/app/io/db"
+    orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
     "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/repository"
-    productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+    productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
     "go.uber.org/zap"
-    "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-    "gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-    "gofy/gofy-interface-service/contracts/common/types"
 )
 
-var ErrOrderNotFound = repository.ErrNotFound
-
-type CreateItem struct {
-    SkuID uint64
-    Num   int32
-}
+// 编译期保证 OrderService 满足订单模块对外发布的契约。
+var _ orderapi.OrderAPI = (*OrderService)(nil)
 
 type OrderService struct {
-    orders *repository.OrderRepository
-    // repos 用于按需取用 product.products（模式 B）；实例由模块工厂在装配期登记。
-    repos  *registry.Registry
-    logger *zap.Logger
+    orders   *repository.OrderRepository
+    products productapi.ProductAPI
+    logger   *zap.Logger
 }
 
-// NewOrderService 接收本模块必需的 orders 和装配级注册表；跨模块依赖在用例中
-// 按需取用，模块工厂负责在装配期登记对应名字。
-func NewOrderService(orders *repository.OrderRepository, repos *registry.Registry, logger *zap.Logger) *OrderService {
-    if logger == nil {
-        logger = zap.NewNop()
-    }
-    return &OrderService{
-        orders: orders,
-        repos:  repos,
-        logger: logger.With(zap.String("component", "order.service")),
-    }
-}
-
-func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, error) {
+func (s *OrderService) Get(ctx context.Context, id uint64) (*orderapi.Order, error) {
     o, err := s.orders.FindByID(ctx, id)
+    if err != nil {
+        if errors.Is(err, repository.ErrNotFound) {
+            return nil, ErrOrderNotFound
+        }
+        return nil, err
+    }
+    s.logger.Debug("get order", zap.Uint64("order_id", id))
+    return toOrderView(o), nil
+}
+
+// Create 先按 SKU 批量校验产品（存在且上架），再在同一事务里扣库存 + 落单。
+// 跨模块调用传同一 ctx，产品仓库从 ctx 取到同一个事务，同提交同回滚。
+func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderapi.Order, error) {
+    names, err := s.validateItems(ctx, items)
     if err != nil {
         return nil, err
     }
-    return toDTO(o), nil
-}
-
-func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderdto.OrderDTO, error) {
-    if _, err := s.validateItems(ctx, items); err != nil {
-        return nil, err
-    }
-    o, err := s.orders.Create(ctx, &model.Order{
-        UserID: userID,
-        Amount: amount,
-        Status: string(orderenum.OrderStatusPending),
+    var created *model.Order
+    err = gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
+        for _, it := range items {
+            if err := s.products.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
+                return translateProductErr(it.SkuID, err)
+            }
+        }
+        o, err := s.orders.Create(ctx, &model.Order{
+            UserID: userID,
+            Amount: amount,
+            Status: StatusPending,
+        })
+        if err != nil {
+            return err
+        }
+        created = o
+        return nil
     })
     if err != nil {
         return nil, err
     }
-    return toDTO(o), nil
+    s.logger.Info("order created",
+        zap.Uint64("order_id", created.ID),
+        zap.Uint64("user_id", userID),
+        zap.Int64("amount", amount),
+        zap.Strings("products", names),
+    )
+    return toOrderView(created), nil
 }
 
-// validateItems 按 SKU 批量查产品仓库，确认全部存在且上架。
+// validateItems 按 SKU 批量查产品 innerapi，确认全部存在且上架，返回产品名称
+// 用于日志；错误使用订单域哨兵值。
 func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([]string, error) {
-    products, err := registry.Get[*productrepo.ProductRepository](s.repos, productrepo.NameProducts)
-    if err != nil {
-        return nil, err
+    if len(items) == 0 {
+        return nil, nil
     }
     ids := make([]uint64, 0, len(items))
+    seen := make(map[uint64]struct{}, len(items))
     for _, item := range items {
+        if _, ok := seen[item.SkuID]; ok {
+            continue
+        }
+        seen[item.SkuID] = struct{}{}
         ids = append(ids, item.SkuID)
     }
-    views, err := products.ListByIDs(ctx, ids)
+    views, err := s.products.ListByIDs(ctx, ids)
     if err != nil {
         return nil, err
     }
@@ -3012,49 +3110,79 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
     for _, id := range ids {
         view, ok := views[id]
         if !ok {
-            return nil, fmt.Errorf("product not found: sku %d", id)
+            return nil, fmt.Errorf("%w: sku %d", ErrProductNotFound, id)
         }
-        if !view.OnSale() {
-            return nil, fmt.Errorf("product unavailable: sku %d", id)
+        if !view.OnSale {
+            return nil, fmt.Errorf("%w: sku %d", ErrProductUnavailable, id)
         }
         names = append(names, view.Name)
     }
     return names, nil
 }
 
-func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderdto.OrderDTO, int64, error) {
+func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderapi.Order, int64, error) {
     items, total, err := s.orders.ListByUser(ctx, userID, (page-1)*size, size)
     if err != nil {
         return nil, 0, err
     }
-    list := make([]orderdto.OrderDTO, 0, len(items))
+    list := make([]orderapi.Order, 0, len(items))
     for i := range items {
-        list = append(list, *toDTO(&items[i]))
+        list = append(list, *toOrderView(&items[i]))
     }
     return list, total, nil
 }
 
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-    return s.orders.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled))
+    if err := s.orders.UpdateStatus(ctx, id, StatusCancelled); err != nil {
+        if errors.Is(err, repository.ErrNotFound) {
+            return ErrOrderNotFound
+        }
+        return err
+    }
+    s.logger.Info("order cancelled", zap.Uint64("order_id", id))
+    return nil
 }
 
-// toDTO is the only place service touches the persistence model.
-func toDTO(o *model.Order) *orderdto.OrderDTO {
-    return &orderdto.OrderDTO{
-        ID:        types.Uint64String(o.ID),
-        UserID:    types.Uint64String(o.UserID),
+// toOrderView 把持久化模型换算成跨模块只读视图，model 不出 service 边界。
+func toOrderView(o *model.Order) *orderapi.Order {
+    return &orderapi.Order{
+        ID:        o.ID,
+        UserID:    o.UserID,
         Amount:    o.Amount,
-        Status:    orderenum.OrderStatus(o.Status),
+        Status:    o.Status,
         CreatedAt: o.CreatedAt,
+    }
+}
+
+// translateProductErr 把产品 innerapi 哨兵错误翻译成订单域哨兵错误，保留 SKU
+// 上下文。controller 只认订单域错误，产品错误语义的变化被 service 吸收。
+func translateProductErr(sku uint64, err error) error {
+    switch {
+    case errors.Is(err, productapi.ErrNotFound):
+        return fmt.Errorf("%w: sku %d", ErrProductNotFound, sku)
+    case errors.Is(err, productapi.ErrUnavailable):
+        return fmt.Errorf("%w: sku %d", ErrProductUnavailable, sku)
+    case errors.Is(err, productapi.ErrInsufficientStock):
+        return fmt.Errorf("%w: sku %d", ErrInsufficientStock, sku)
+    default:
+        return err
     }
 }
 ```
 
-本模块仓库集中在 `service.RepositoryDeps`（`a_init_repository.go`）：要加仓库只加字段
-并由工厂传给构造函数，不登记名字；包级 `Deps` 是零值构造的默认集合，工厂直接注入。
-跨模块仓库由消费方工厂登记进本次装配的注册表，service 用 `registry.Get[T]` 按需取用，
-只依赖对方 repository 的导出方法和只读视图，不 import 其他模块的 `model`。`Logger`
-为 nil 时退化为 `zap.NewNop()`（节选省略）。
+构造函数 `NewOrderService(deps Dependencies)` 在 `service/deps.go`：`Dependencies`
+显式列出本模块仓库 `Orders`、跨模块产品契约 `Products productapi.ProductAPI`、同包协作
+service `Config *OrderConfigService` 和 `Logger`（nil 退化为 `zap.NewNop()`）。本模块仓库由工厂零值构造后注入，不登记名字、
+没有包级 `RepoDeps`。跨模块依赖只持有产品 `innerapi` 接口，实例由产品工厂自登记进
+共享注册表、订单工厂构造期 `registry.Get` 取出后注入；service 不 import 其他模块的
+service/repository/model。`Config` 则是**模块内** service→service 组合：`OrderConfigService`
+与 `OrderService` 同包，工厂先构造它再注入具体类型，`OrderService.GetConfig` 直接委托，
+不走 innerapi / 注册表（配置无跨模块消费方，不发布到 innerapi）。领域状态常量（`StatusPending` 等）、订单域哨兵错误
+（`ErrOrderNotFound` / `ErrProductNotFound` / `ErrProductUnavailable` /
+`ErrInsufficientStock`）和 `CreateItem` 别名都在 `service/order_view.go`，不 import
+HTTP 契约枚举；契约 DTO/枚举的映射留在 controller。`Create` 用
+`gofydb.Transaction(ctx, appdb.Db, fn)` 把扣库存与建订单包进同一事务，产品 innerapi
+错误经 `translateProductErr` 翻译成订单域错误。
 
 ### 9.8 `app/module/order/repository/order_repository.go`（节选）
 
@@ -3066,6 +3194,8 @@ import (
     "errors"
     "fmt"
 
+    gofydb "github.com/bingcool/gofy/support/db"
+    appdb "github.com/yourorg/demo-service/app/io/db"
     "github.com/yourorg/demo-service/app/module/order/model"
     "gorm.io/gorm"
 )
@@ -3073,18 +3203,18 @@ import (
 var ErrNotFound = errors.New("order not found")
 
 // OrderRepository 是唯一实现，直接导出具体类型；service、脚本都依赖它，
-// 不再声明 OrderRepositoryInterface。
-type OrderRepository struct {
-    db *gorm.DB
-}
+// 不再声明接口。仓库不持有连接和日志：每次查询按需解析 app/io 安装的 db.Db。
+type OrderRepository struct{}
 
-func New(db *gorm.DB) *OrderRepository {
-    return &OrderRepository{db: db}
+// conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
+// 因此自动共享最外层 service 开启的事务。
+func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
+    return gofydb.FromContext(ctx, appdb.Db)
 }
 
 func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order, error) {
     var o model.Order
-    err := r.db.WithContext(ctx).First(&o, id).Error
+    err := r.conn(ctx).WithContext(ctx).First(&o, id).Error
     if errors.Is(err, gorm.ErrRecordNotFound) {
         return nil, ErrNotFound
     }
@@ -3095,7 +3225,7 @@ func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order
 }
 
 func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Order, error) {
-    if err := r.db.WithContext(ctx).Create(o).Error; err != nil {
+    if err := r.conn(ctx).WithContext(ctx).Create(o).Error; err != nil {
         return nil, fmt.Errorf("create order: %w", err)
     }
     return o, nil
@@ -3106,18 +3236,20 @@ func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset,
         items []model.Order
         total int64
     )
-    q := r.db.WithContext(ctx).Model(&model.Order{}).Where("user_id = ?", userID)
-    if err := q.Count(&total).Error; err != nil {
+    q := func() *gorm.DB {
+        return r.conn(ctx).WithContext(ctx).Model(&model.Order{}).Where("user_id = ?", userID)
+    }
+    if err := q().Count(&total).Error; err != nil {
         return nil, 0, fmt.Errorf("count orders: %w", err)
     }
-    if err := q.Order("id DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
+    if err := q().Order("id DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
         return nil, 0, fmt.Errorf("list orders: %w", err)
     }
     return items, total, nil
 }
 
 func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status string) error {
-    res := r.db.WithContext(ctx).Model(&model.Order{}).Where("id = ?", id).Update("status", status)
+    res := r.conn(ctx).WithContext(ctx).Model(&model.Order{}).Where("id = ?", id).Update("status", status)
     if res.Error != nil {
         return fmt.Errorf("update order %d: %w", id, res.Error)
     }
@@ -3125,6 +3257,19 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status st
         return ErrNotFound
     }
     return nil
+}
+
+// CancelPending 把订单从 from 状态改成 to 状态并返回受影响行数。状态由调用方
+// 传入（service 的领域常量），仓库不 import HTTP 契约枚举。
+func (r *OrderRepository) CancelPending(ctx context.Context, id uint64, from, to string) (int64, error) {
+    res := r.conn(ctx).WithContext(ctx).
+        Model(&model.Order{}).
+        Where("id = ? AND status = ?", id, from).
+        Update("status", to)
+    if res.Error != nil {
+        return 0, fmt.Errorf("cancel pending order %d: %w", id, res.Error)
+    }
+    return res.RowsAffected, nil
 }
 ```
 
@@ -3154,6 +3299,9 @@ import (
     "github.com/bingcool/gofy/apperr"
     gofyscript "github.com/bingcool/gofy/script"
     "github.com/spf13/pflag"
+    appdb "github.com/yourorg/demo-service/app/io/db"
+    "github.com/yourorg/demo-service/app/module/order/repository"
+    orderservice "github.com/yourorg/demo-service/app/module/order/service"
     "go.uber.org/zap"
 )
 
@@ -3163,7 +3311,7 @@ func FixOrder() gofyscript.Script {
         Short: "fix inconsistent order data",
         Flags: func(fs *pflag.FlagSet) {
             fs.Uint64("order-id", 0, "order id")
-            fs.Bool("dry-run", true, "only print what would be changed")
+            fs.Bool("dry-run", false, "only print what would be changed")
         },
         Run: func(ctx context.Context, rt *gofyscript.Runtime, fs *pflag.FlagSet) error {
             id, _ := fs.GetUint64("order-id")
@@ -3175,7 +3323,23 @@ func FixOrder() gofyscript.Script {
                 zap.Uint64("order_id", id),
                 zap.Bool("dry_run", dryRun),
             )
-            // 使用 rt.DB 执行数据修复
+            if dryRun {
+                rt.Logger.Info("fix order dry-run, no data changed", zap.Uint64("order_id", id))
+                return nil
+            }
+            if rt.DB == nil {
+                return apperr.Internal("database is not configured")
+            }
+            // 脚本模式不执行 app/io 生命周期，仓库按 app/io 句柄取连接，
+            // 因此把脚本连接发布到句柄，结束后恢复原值。
+            prev := appdb.Db
+            appdb.Db = rt.DB
+            defer func() { appdb.Db = prev }()
+            rows, err := (&repository.OrderRepository{}).CancelPending(ctx, id, orderservice.StatusPending, orderservice.StatusCancelled)
+            if err != nil {
+                return apperr.Internal("fix order failed").WithCause(err)
+            }
+            rt.Logger.Info("order fixed", zap.Uint64("order_id", id), zap.Int64("rows", rows))
             return nil
         },
     }
@@ -3817,6 +3981,9 @@ gofy/
 | 2026-11-03 | 框架不隐式注册信号 | 生命周期由调用方通过 `ctx` 控制；`SignalContext` 只是辅助 |
 | 2026-11-03 | 错误响应使用真实 HTTP 状态码 | 更符合 HTTP 语义；`WithAlwaysOK` 兼容旧行为 |
 | 2026-11-03 | 不提供依赖注入容器 | 业务依赖用闭包/构造函数注入；`Runtime` 只放框架依赖 |
+| 2026-11-11 | 模块按 controller/service/innerapi/repository/model 五包分层，跨模块只走对方 `innerapi` 契约 | 模块间稳定接缝，避免 service→service 与跨模块 repository 耦合；详见 [module-layering-design.md](./module-layering-design.md) |
+| 2026-11-11 | 组合根每次装配新建共享 `support/registry`，属主模块自登记 innerapi、消费方构造期取用 | 装配期解析依赖、启动即报错，避免包级单例与 service 缓存注册表 |
+| 2026-11-11 | demo repository 无状态、不声明接口，连接每次查询从 `app/io` 句柄解析 | 只有一种 GORM 实现，接口无替换价值；装配早于 `app/io.Start`、Reload 换连接自动生效 |
 
 ---
 

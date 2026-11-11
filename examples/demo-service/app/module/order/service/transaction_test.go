@@ -10,8 +10,10 @@ import (
 	appdb "github.com/yourorg/demo-service/app/io/db"
 	ordermodel "github.com/yourorg/demo-service/app/module/order/model"
 	orderrepo "github.com/yourorg/demo-service/app/module/order/repository"
+	"github.com/yourorg/demo-service/app/module/order/service"
 	productmodel "github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	productservice "github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -144,5 +146,58 @@ func TestDecreaseStockRejectsUnavailableOrInvalidRequests(t *testing.T) {
 	}
 	if _, err := products.DecreaseStock(ctx, 90001, 0); err == nil {
 		t.Fatal("non-positive num should be rejected")
+	}
+}
+
+// newOrderService 在组合库上装配真实订单 service，跨模块依赖注入真实产品
+// service（实现 innerapi.ProductAPI），验证 service 层开启的跨模块事务。
+func newOrderService(t *testing.T) *service.OrderService {
+	t.Helper()
+	products := productservice.NewProductService(productservice.Dependencies{
+		Products: &productrepo.ProductRepository{},
+		Logger:   zap.NewNop(),
+	})
+	return service.NewOrderService(service.Dependencies{
+		Orders:   &orderrepo.OrderRepository{},
+		Products: products,
+		Config:   service.NewOrderConfigService(zap.NewNop()),
+		Logger:   zap.NewNop(),
+	})
+}
+
+func TestCreateCommitsStockAndOrderAcrossModules(t *testing.T) {
+	conn := newCompositionDB(t)
+	svc := newOrderService(t)
+
+	created, err := svc.Create(context.Background(), 100, 3000, []service.CreateItem{{SkuID: 90001, Num: 3}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.Status != service.StatusPending {
+		t.Fatalf("status = %q, want pending", created.Status)
+	}
+	if got := stockOf(t, &productrepo.ProductRepository{}); got != 7 {
+		t.Fatalf("stock = %d, want 7 after commit", got)
+	}
+	if got := orderCount(t, conn); got != 1 {
+		t.Fatalf("orders = %d, want 1 after commit", got)
+	}
+}
+
+func TestCreateRollsBackWhenStockInsufficient(t *testing.T) {
+	conn := newCompositionDB(t)
+	svc := newOrderService(t)
+
+	// 产品上架但库存只有 10，请求 11：validateItems 通过，扣库存阶段返回
+	// ErrInsufficientStock，事务回滚，不落单、库存不变。
+	_, err := svc.Create(context.Background(), 100, 3000, []service.CreateItem{{SkuID: 90001, Num: 11}})
+	if !errors.Is(err, service.ErrInsufficientStock) {
+		t.Fatalf("Create error = %v, want ErrInsufficientStock", err)
+	}
+	if got := stockOf(t, &productrepo.ProductRepository{}); got != 10 {
+		t.Fatalf("stock = %d, want 10 unchanged", got)
+	}
+	if got := orderCount(t, conn); got != 0 {
+		t.Fatalf("orders = %d, want 0 after rollback", got)
 	}
 }

@@ -1,3 +1,6 @@
+// Package service implements order use cases. 它实现本模块 innerapi.OrderAPI，
+// 跨模块只依赖产品 innerapi 契约，出入参用领域视图与普通值，不 import HTTP
+// 契约；契约 DTO/枚举的映射留在 controller。
 package service
 
 import (
@@ -5,100 +8,88 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bingcool/gofy/support/registry"
+	gofydb "github.com/bingcool/gofy/support/db"
+	appdb "github.com/yourorg/demo-service/app/io/db"
+	orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
-	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
 	"go.uber.org/zap"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-	"gofy/gofy-interface-service/contracts/common/types"
 )
 
-var (
-	// ErrOrderNotFound is returned when an order does not exist.
-	ErrOrderNotFound = repository.ErrNotFound
-	// ErrProductNotFound is returned when a requested SKU does not exist.
-	ErrProductNotFound = errors.New("product not found")
-	// ErrProductUnavailable is returned when a requested SKU is not on sale.
-	ErrProductUnavailable = errors.New("product unavailable")
-)
-
-// CreateItem is one SKU line of a create-order request. The controller maps
-// the contract type to this plain value so the service never imports it.
-type CreateItem struct {
-	SkuID uint64
-	Num   int32
-}
+// 编译期保证 OrderService 满足订单模块对外发布的契约。
+var _ orderapi.OrderAPI = (*OrderService)(nil)
 
 // OrderService implements order use cases.
 type OrderService struct {
-	orders *repository.OrderRepository
-	// repos 用于按需取用 product.products（模式 B）；实例由模块工厂在装配期登记。
-	repos  *registry.Registry
-	logger *zap.Logger
+	orders   *repository.OrderRepository
+	products productapi.ProductAPI
+	config   *OrderConfigService
+	logger   *zap.Logger
 }
 
-// NewOrderService builds an OrderService. Orders is required; repos is the
-// assembly-scoped registry used to resolve product.products on demand. A nil
-// logger falls back to zap.NewNop().
-func NewOrderService(orders *repository.OrderRepository, repos *registry.Registry, logger *zap.Logger) *OrderService {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-	logger.Debug("order service initialized", zap.String("component", "order.service"))
-	return &OrderService{
-		orders: orders,
-		repos:  repos,
-		logger: logger.With(zap.String("component", "order.service")),
-	}
+// GetConfig 返回订单模块配置视图，委托给同包协作的 OrderConfigService。配置不
+// 发布到 innerapi（无跨模块消费方），controller 负责把视图映射成契约响应。
+func (s *OrderService) GetConfig(ctx context.Context) *Config {
+	return s.config.GetConfig(ctx)
 }
 
-// Get returns one order as a DTO.
-func (s *OrderService) Get(ctx context.Context, id uint64) (*orderdto.OrderDTO, error) {
+// Get returns one order view or ErrOrderNotFound.
+func (s *OrderService) Get(ctx context.Context, id uint64) (*orderapi.Order, error) {
 	o, err := s.orders.FindByID(ctx, id)
 	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrOrderNotFound
+		}
 		return nil, err
 	}
 	s.logger.Debug("get order", zap.Uint64("order_id", id))
-	return toDTO(o), nil
+	return toOrderView(o), nil
 }
 
-// Create validates every SKU against the product module, then persists a
-// pending order. Product lookup goes through the assembly registry (mode B):
-// the dependency is resolved on demand rather than stored as a constructor
-// parameter, and the module factory registers it before serving traffic.
-func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderdto.OrderDTO, error) {
+// Create 先按 SKU 批量校验产品（存在且上架），再在同一事务里扣库存 + 落单。
+// 跨模块调用传同一 ctx，产品仓库从 ctx 取到同一个事务，扣库存与建订单同提交
+// 同回滚。产品 innerapi 错误在这里翻译成订单域哨兵错误。
+func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*orderapi.Order, error) {
 	names, err := s.validateItems(ctx, items)
 	if err != nil {
 		return nil, err
 	}
-	o, err := s.orders.Create(ctx, &model.Order{
-		UserID: userID,
-		Amount: amount,
-		Status: string(orderenum.OrderStatusPending),
+	var created *model.Order
+	err = gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
+		for _, it := range items {
+			if err := s.products.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
+				return translateProductErr(it.SkuID, err)
+			}
+		}
+		o, err := s.orders.Create(ctx, &model.Order{
+			UserID: userID,
+			Amount: amount,
+			Status: StatusPending,
+		})
+		if err != nil {
+			return err
+		}
+		created = o
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.logger.Info("order created",
-		zap.Uint64("order_id", o.ID),
+		zap.Uint64("order_id", created.ID),
 		zap.Uint64("user_id", userID),
 		zap.Int64("amount", amount),
 		zap.Strings("products", names),
 	)
-	return toDTO(o), nil
+	return toOrderView(created), nil
 }
 
-// validateItems 按 SKU 批量查产品仓库，确认全部存在且上架。返回产品名称用于
-// 日志；错误使用哨兵值，HTTP 层据此映射业务错误码。
+// validateItems 按 SKU 批量查产品 innerapi，确认全部存在且上架。返回产品名称
+// 用于日志；错误使用订单域哨兵值，HTTP 层据此映射业务错误码。
 func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([]string, error) {
 	if len(items) == 0 {
 		return nil, nil
-	}
-	products, err := registry.Get[*productrepo.ProductRepository](s.repos, productrepo.NameProducts)
-	if err != nil {
-		return nil, err
 	}
 	ids := make([]uint64, 0, len(items))
 	seen := make(map[uint64]struct{}, len(items))
@@ -109,7 +100,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 		seen[item.SkuID] = struct{}{}
 		ids = append(ids, item.SkuID)
 	}
-	views, err := products.ListByIDs(ctx, ids)
+	views, err := s.products.ListByIDs(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +110,7 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 		if !ok {
 			return nil, fmt.Errorf("%w: sku %d", ErrProductNotFound, id)
 		}
-		if !view.OnSale() {
+		if !view.OnSale {
 			return nil, fmt.Errorf("%w: sku %d", ErrProductUnavailable, id)
 		}
 		names = append(names, view.Name)
@@ -127,15 +118,15 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 	return names, nil
 }
 
-// List returns one page of DTOs plus the total count.
-func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderdto.OrderDTO, int64, error) {
+// List returns one page of order views plus the total count.
+func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderapi.Order, int64, error) {
 	items, total, err := s.orders.ListByUser(ctx, userID, (page-1)*size, size)
 	if err != nil {
 		return nil, 0, err
 	}
-	list := make([]orderdto.OrderDTO, 0, len(items))
+	list := make([]orderapi.Order, 0, len(items))
 	for i := range items {
-		list = append(list, *toDTO(&items[i]))
+		list = append(list, *toOrderView(&items[i]))
 	}
 	s.logger.Debug("list orders",
 		zap.Uint64("user_id", userID),
@@ -148,10 +139,11 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 
 // Cancel marks an order as cancelled.
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
-	if err := s.orders.UpdateStatus(ctx, id, string(orderenum.OrderStatusCancelled)); err != nil {
-		if errors.Is(err, ErrOrderNotFound) {
+	if err := s.orders.UpdateStatus(ctx, id, StatusCancelled); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
 			// 预期内的业务结果，HTTP 层会映射为 404，不按错误级别记录。
 			s.logger.Debug("cancel order: not found", zap.Uint64("order_id", id))
+			return ErrOrderNotFound
 		}
 		return err
 	}
@@ -159,13 +151,28 @@ func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// toDTO converts the persistence model at the service boundary.
-func toDTO(o *model.Order) *orderdto.OrderDTO {
-	return &orderdto.OrderDTO{
-		ID:        types.Uint64String(o.ID),
-		UserID:    types.Uint64String(o.UserID),
+// toOrderView 把持久化模型换算成跨模块只读视图，model 不出 service 边界。
+func toOrderView(o *model.Order) *orderapi.Order {
+	return &orderapi.Order{
+		ID:        o.ID,
+		UserID:    o.UserID,
 		Amount:    o.Amount,
-		Status:    orderenum.OrderStatus(o.Status),
+		Status:    o.Status,
 		CreatedAt: o.CreatedAt,
+	}
+}
+
+// translateProductErr 把产品 innerapi 哨兵错误翻译成订单域哨兵错误，保留 SKU
+// 上下文。controller 只认订单域错误，产品错误语义的变化被 service 吸收。
+func translateProductErr(sku uint64, err error) error {
+	switch {
+	case errors.Is(err, productapi.ErrNotFound):
+		return fmt.Errorf("%w: sku %d", ErrProductNotFound, sku)
+	case errors.Is(err, productapi.ErrUnavailable):
+		return fmt.Errorf("%w: sku %d", ErrProductUnavailable, sku)
+	case errors.Is(err, productapi.ErrInsufficientStock):
+		return fmt.Errorf("%w: sku %d", ErrInsufficientStock, sku)
+	default:
+		return err
 	}
 }

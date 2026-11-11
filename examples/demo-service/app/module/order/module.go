@@ -1,10 +1,13 @@
 // Package order wires the demo order module.
 //
 // Layering convention:
-//   - controller speaks the gofy-interface-service contract and never imports model;
-//   - service accepts plain values and returns orderdto.OrderDTO, touching model
-//     only in its DTO conversion;
+//   - controller speaks the gofy-interface-service contract and never imports
+//     model / repository / innerapi;
+//   - service implements innerapi.OrderAPI, accepts plain values and returns
+//     innerapi views, touching model only in its view conversion;
 //   - repository owns persistence and the model type.
+//
+// 跨模块只依赖产品 innerapi 契约，由组合根创建的共享注册表在装配期取用。
 package order
 
 import (
@@ -15,8 +18,10 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/registry"
 	"github.com/yourorg/demo-service/app/module/order/controller"
+	orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
+	"github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
-	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
 	"go.uber.org/zap"
 	gofyadapter "gofy/gofy-interface-service/adapter/gofy"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
@@ -29,20 +34,31 @@ type Module struct {
 	logger *zap.Logger
 }
 
-// NewModuleFactory 每次装配新建一份注册表，只登记订单服务跨模块读取的产品
-// 仓库；本模块仓库由 service.Deps 直接注入，不经过注册表。启动和每次 Reload
-// 都重新执行工厂，新旧两代注册表互不影响。
-func NewModuleFactory() gofy.ModuleFactory {
+// NewModuleFactory 从组合根传入的共享注册表取用产品 innerapi，构造订单 service
+// 并登记订单自己的 innerapi。注册表每次装配由 reload.factories 新建，产品工厂
+// 先于本工厂执行；缺登记或顺序错时构造期 Get 失败、启动即报错。
+func NewModuleFactory(reg *registry.Registry) gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
-		reg := registry.NewRegistry()
-		// 产品仓库的名字和实现归产品模块，订单模块作为消费方负责登记。
-		if err := reg.Register(productrepo.NameProducts, &productrepo.ProductRepository{}); err != nil {
+		products, err := registry.Get[productapi.ProductAPI](reg, productapi.Name)
+		if err != nil {
 			return nil, fmt.Errorf("order module: %w", err)
 		}
-		svc := service.NewOrderService(service.Deps.Orders, reg, rt.Logger)
+		// 同包协作 service 先构造，再经 Dependencies 注入 OrderService（模块内
+		// 组合用具体类型，不走 innerapi / 注册表）。
+		cfgSvc := service.NewOrderConfigService(rt.Logger)
+		svc := service.NewOrderService(service.Dependencies{
+			Orders:   &repository.OrderRepository{},
+			Products: products,
+			Config:   cfgSvc,
+			Logger:   rt.Logger,
+		})
+		// 登记订单自己的 innerapi，保持与产品模块对称（本轮无跨模块消费方）。
+		if err := reg.Register(orderapi.Name, svc); err != nil {
+			return nil, fmt.Errorf("order module: %w", err)
+		}
 		return NewModule(svc, rt.Logger), nil
 	}
 }

@@ -10,87 +10,124 @@ fail() {
 
 module="github.com/yourorg/demo-service"
 module_prefix="$module/app/module/"
+appio_prefix="$module/app/io"
+contract_prefix="gofy/gofy-interface-service"
+support_prefix="github.com/bingcool/gofy/support"
+framework_prefix="github.com/bingcool/gofy"
 
-# 只检查非测试文件的 import（go list 的 .Imports 不含 _test.go），测试可以
-# 同时引用多个模块的 model 和 repository 来建 SQLite 库。包依赖成环由
-# go build 直接报错，这里不重复检查。
+# 标准库集合：innerapi 是纯契约，只允许标准库（必要时 support 的纯类型），
+# 用它把标准库与第三方依赖区分开。
+stdlib_list="$(go list std)"
+is_stdlib() {
+  printf '%s\n' "$stdlib_list" | grep -qx "$1"
+}
+
+# 只检查非测试文件的 import（go list 的 .Imports 不含 _test.go）：测试可以同时
+# 引用多个模块的 model/repository 建 SQLite 库。按层校验，规则见
+# docs/module-layering-design.md §10。包依赖成环由 go build 兜底（innerapi 无回边，
+# 天然无环），这里不重复检查。
 go list -f '{{.ImportPath}}|{{join .Imports " "}}' ./app/... |
 while IFS='|' read -r pkg imports; do
   case "$pkg" in
-    "$module_prefix"*)
-      rest=${pkg#"$module_prefix"}
-      owner=${rest%%/*}
-      case "$rest" in
-        */controller|*/controller/*)
-          # controller 只依赖本模块 service，使用契约类型；不碰持久化。
-          for imp in $imports; do
-            case "$imp" in
-              "$module_prefix"*)
-                dep=${imp#"$module_prefix"}
-                dep_owner=${dep%%/*}
-                case "$dep" in
-                  */model|*/model/*)
-                    fail "$pkg must not import $imp: controllers use contract types, not persistence models"
-                    ;;
-                  */repository|*/repository/*)
-                    fail "$pkg must not import $imp: controllers must not reach the persistence layer"
-                    ;;
-                  */service|*/service/*)
-                    if [ "$dep_owner" != "$owner" ]; then
-                      fail "$pkg must not import $imp: controllers depend on their own service only"
-                    fi
-                    ;;
-                esac
-                ;;
-            esac
-          done
-          ;;
-        */repository)
-          # repository 只做本聚合的数据访问，不能反向依赖 service。
-          for imp in $imports; do
-            case "$imp" in
-              "$module_prefix"*/service|"$module_prefix"*/service/*)
-                fail "$pkg must not import $imp: repositories never depend on services"
-                ;;
-            esac
-          done
-          ;;
-      esac
-      ;;
+    "$module_prefix"*) ;;
+    *) continue ;;
   esac
 
-  # 没有集中组合层：一个包最多 import 一个“其他模块”的 repository，本模块的
-  # 不计入。需要多个跨模块仓库时，把读取点拆到各自的 service。
-  own=""
-  case "$pkg" in
-    "$module_prefix"*)
-      rest=${pkg#"$module_prefix"}
-      own=${rest%%/*}
-      ;;
-  esac
-  seen=""
-  count=0
+  rest=${pkg#"$module_prefix"}
+  owner=${rest%%/*}
+  layer=${rest#"$owner"}
+  layer=${layer#/}
+  layer=${layer%%/*}
+
+  # 模块根包（module.go）是装配/接线层，合法 import 本模块各层、其他模块
+  # innerapi 与契约路由，不受分层规则约束。
+  [ -n "$layer" ] || continue
+
   for imp in $imports; do
+    cat=""
+    dep_owner=""
+    dep_layer=""
     case "$imp" in
-      "$module_prefix"*/repository)
-        dep=${imp#"$module_prefix"}
-        dep_owner=${dep%%/*}
-        if [ "$dep_owner" = "$own" ]; then
-          continue
-        fi
-        case " $seen " in
-          *" $dep_owner "*) ;;
+      "$module_prefix"*)
+        cat="module"
+        d=${imp#"$module_prefix"}
+        dep_owner=${d%%/*}
+        dl=${d#"$dep_owner"}
+        dl=${dl#/}
+        dep_layer=${dl%%/*}
+        ;;
+      "$contract_prefix"*) cat="contract" ;;
+      "$appio_prefix"*) cat="appio" ;;
+      "$support_prefix"*) cat="support" ;;
+      "$framework_prefix"*) cat="framework" ;;
+      *)
+        if is_stdlib "$imp"; then cat="stdlib"; else cat="other"; fi
+        ;;
+    esac
+
+    case "$layer" in
+      controller)
+        # 只依赖本模块 service 与 HTTP 契约；不碰 model/repository/innerapi/
+        # 其他模块，也不直接取 app/io 句柄。
+        case "$cat" in
+          module)
+            if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "service" ]; then
+              fail "$pkg must not import $imp: controllers depend on their own service only"
+            fi
+            ;;
+          appio)
+            fail "$pkg must not import $imp: controllers must not reach app/io handles"
+            ;;
+        esac
+        ;;
+      service)
+        # 不依赖 HTTP 契约；跨模块只走对方 innerapi，不碰其他模块
+        # service/repository/model；本模块各层与 app/io（开事务）允许。
+        case "$cat" in
+          contract)
+            fail "$pkg must not import $imp: services must not depend on HTTP contracts"
+            ;;
+          module)
+            if [ "$dep_owner" != "$owner" ] && [ "$dep_layer" != "innerapi" ]; then
+              fail "$pkg must not import $imp: cross-module calls go through innerapi only"
+            fi
+            ;;
+        esac
+        ;;
+      innerapi)
+        # 纯契约：只允许标准库与 support 纯类型，禁止任何 app/module、契约、
+        # app/io、框架与第三方依赖。
+        case "$cat" in
+          stdlib | support) ;;
           *)
-            seen="$seen $dep_owner"
-            count=$((count + 1))
+            fail "$pkg must not import $imp: innerapi is a pure contract (stdlib/support only)"
+            ;;
+        esac
+        ;;
+      repository)
+        # 只依赖本模块 model + app/io + support；不碰 service/innerapi/契约/
+        # 其他模块。
+        case "$cat" in
+          module)
+            if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "model" ]; then
+              fail "$pkg must not import $imp: repositories depend on their own model only"
+            fi
+            ;;
+          contract)
+            fail "$pkg must not import $imp: repositories must not depend on HTTP contracts"
+            ;;
+        esac
+        ;;
+      model)
+        # 表结构不依赖任何 app/module、契约或 app/io。
+        case "$cat" in
+          module | contract | appio)
+            fail "$pkg must not import $imp: models must not depend on app/module, contracts or app/io"
             ;;
         esac
         ;;
     esac
   done
-  if [ "$count" -gt 1 ]; then
-    fail "$pkg imports repositories from multiple other modules:$seen; a package may depend on at most one"
-  fi
 done
 
 echo "demo import guards passed"

@@ -8,7 +8,6 @@ import (
 	gofydb "github.com/bingcool/gofy/support/db"
 	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/module/order/model"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
 	"gorm.io/gorm"
 )
 
@@ -81,12 +80,14 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status st
 	return nil
 }
 
-// CancelPending moves a pending order to cancelled and reports affected rows.
-func (r *OrderRepository) CancelPending(ctx context.Context, id uint64) (int64, error) {
+// CancelPending moves an order from the from status to the to status and
+// reports affected rows. 状态由调用方传入（service 的领域常量），仓库不 import
+// HTTP 契约枚举。
+func (r *OrderRepository) CancelPending(ctx context.Context, id uint64, from, to string) (int64, error) {
 	res := r.conn(ctx).WithContext(ctx).
 		Model(&model.Order{}).
-		Where("id = ? AND status = ?", id, string(orderenum.OrderStatusPending)).
-		Update("status", string(orderenum.OrderStatusCancelled))
+		Where("id = ? AND status = ?", id, from).
+		Update("status", to)
 	if res.Error != nil {
 		return 0, fmt.Errorf("cancel pending order %d: %w", id, res.Error)
 	}
