@@ -419,7 +419,7 @@ type Option func(*options) error
 | `WithLogger(*zap.Logger)` | 由 `WithLogConfig` 构建 | 注入 logger；App 不负责 `Sync` | 非 nil |
 | `WithLogConfig(LogConfig)` | console + info | 未注入 logger 时使用 | `Validate()` |
 | `WithHTTP(HTTPConfig)` | 见 §3.6 | HTTP 监听与超时 | `Validate()` |
-| `WithAPIPrefix(string)` | `"/api/v1"` | 业务路由统一前缀；`""` 表示不加前缀 | 规范化后必须以 `/` 开头 |
+| `WithAPIPrefix(string)` | `""`（不追加） | 所有模块共享的前缀；契约路由分组自带完整前缀（如 `/api/v1/order`）时不要设置 | 规范化后必须以 `/` 开头 |
 | `WithMiddleware(...Middleware)` | 空 | 业务全局中间件，位于框架中间件之后 | 不允许 nil |
 | `WithMiddlewareRegistrar(MiddlewareRegistrar)` | 空 | 模块绑定路由前，把应用层中间件别名注册进 App 的共享注册表 | 不允许 nil；执行错误中止启动 / 热更新；`Reload` 可用 `ReloadSpec.MiddlewareRegistrars` 替换 |
 | `WithPIDFile(string)` | `""`（关闭） | pid 文件路径；相对路径基于 `WithWorkDir` | 路径非空；启动阶段校验父目录 |
@@ -618,18 +618,23 @@ type Stopper interface {
 路由前缀规则：
 
 ```text
-base = WithAPIPrefix()            // 默认 /api/v1
+base = WithAPIPrefix()            // 默认 ""，不追加共享前缀
 prefix = Module.Prefix()          // 未实现时 "/" + Name()
 moduleRouter = base.Group(prefix)
 ```
 
 `Prefix()` 返回值会被规范化为以 `/` 开头、不以 `/` 结尾；`Prefix() == ""` 表示直接挂在 base 根上。
 
-例如 `order` 模块注册 `"/orders/:id"`，最终路径是：
+推荐由契约路由分组携带完整前缀：`orderroute.Orders` 的分组前缀是
+`/api/v1/order`，组内 `Spec.Path` 只写相对路径，`order` 模块的 `Prefix()`
+返回 `""`，App 也不设置 `WithAPIPrefix`。绑定后完整路径是：
 
 ```text
-/api/v1/order/orders/:id
+/api/v1/order + /orders/:id = /api/v1/order/orders/:id
 ```
+
+框架不再用 `apiPrefix` 或模块名给契约补前缀；这两个机制只服务于不使用契约
+分组的普通模块。
 
 #### 3.4.2 Router
 
@@ -2055,7 +2060,7 @@ func SignalContext(parent context.Context) (context.Context, context.CancelFunc)
 | `GET /healthz` | 永远 `200 {"status":"ok"}`，不查 DB |
 | `GET /readyz` | 配置 DB 时执行 `PingContext`（1s 超时）；失败 `503` |
 
-健康检查不挂在 `/api/v1` 下，也不写访问日志（默认 `SkipPaths`）。
+健康检查挂在根路径，不经过模块前缀，也不写访问日志（默认 `SkipPaths`）。
 
 ### 5.7 优雅关停细节
 
@@ -2633,7 +2638,6 @@ func main() {
         gofy.WithEnv(cfg.Env),
         gofy.WithLogConfig(cfg.Log),
         gofy.WithHTTP(cfg.HTTP),
-        gofy.WithAPIPrefix("/api/v1"),
         gofy.WithPIDFile(cfg.PIDFile),
         gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
         // middlewareRegistrar 定义在 options.go，把 app/middleware 的别名注册进
@@ -2930,7 +2934,7 @@ func (m *Module) Register(r *support.Router) error {
 [module-layering-design.md](./module-layering-design.md) §3–§6、§10，以及
 [repository-composition-design.md](./repository-composition-design.md) §5.2、§5.7–§5.8。
 
-`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`，完整路径按分组前缀裁剪后注册。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：`AuthRequired` 只用于 OpenAPI 标记，契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`）。
+`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`；分组前缀携带完整部署前缀时 `Spec.Path` 已是组内相对路径，直接注册，分组前缀只是分组名时才按前缀裁剪。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：`AuthRequired` 只用于 OpenAPI 标记，契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`）。
 
 最终路由：
 

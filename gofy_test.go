@@ -158,7 +158,7 @@ func TestHandlerServesTypedRoutes(t *testing.T) {
 		gofy.WithModules(module),
 	)
 
-	rr := app.GET("/api/v1/order/orders/7", "X-Trace-ID", "req-7")
+	rr := app.GET("/order/orders/7", "X-Trace-ID", "req-7")
 	gofytest.Status(t, rr, http.StatusOK)
 	body := gofytest.RawJSON(t, rr)
 	if body["req_id"] != "req-7" {
@@ -169,19 +169,19 @@ func TestHandlerServesTypedRoutes(t *testing.T) {
 		t.Fatalf("data = %v", body["data"])
 	}
 
-	rr = app.GET("/api/v1/order/orders/0")
+	rr = app.GET("/order/orders/0")
 	gofytest.Status(t, rr, http.StatusBadRequest)
 	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40001) {
 		t.Fatalf("validation code = %v", code)
 	}
 
-	rr = app.POSTJSON("/api/v1/order/orders", map[string]any{})
+	rr = app.POSTJSON("/order/orders", map[string]any{})
 	gofytest.Status(t, rr, http.StatusNotFound)
 	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40400) {
 		t.Fatalf("apperr code = %v", code)
 	}
 
-	rr = app.GET("/api/v1/order/panic")
+	rr = app.GET("/order/panic")
 	gofytest.Status(t, rr, http.StatusInternalServerError)
 	if body := rr.Body.String(); contains(body, "secret") || contains(body, "panic") {
 		t.Fatalf("panic response leaked internals: %s", body)
@@ -227,7 +227,7 @@ func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/panic/boom", nil))
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/panic/boom", nil))
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d", rr.Code)
 	}
@@ -610,7 +610,7 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 	go func() { runErr <- app.Run(context.Background()) }()
 	waitForServer(t, port)
 
-	if got := getText(t, port, "/api/v1/reload/ping"); got != "v1" {
+	if got := getText(t, port, "/reload/ping"); got != "v1" {
 		t.Fatalf("before reload: %q", got)
 	}
 
@@ -621,7 +621,7 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := getText(t, port, "/api/v1/reload/ping"); got != "v2" {
+	if got := getText(t, port, "/reload/ping"); got != "v2" {
 		t.Fatalf("after reload: %q", got)
 	}
 	if got := countEvents(events, "stop:reload"); got != 1 {
@@ -636,7 +636,7 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 	if err == nil {
 		t.Fatal("Reload accepted an empty DSN")
 	}
-	if got := getText(t, port, "/api/v1/reload/ping"); got != "v2" {
+	if got := getText(t, port, "/reload/ping"); got != "v2" {
 		t.Fatalf("after rejected reload: %q", got)
 	}
 
@@ -698,7 +698,7 @@ func TestReloadRebuildsMiddlewareRegistry(t *testing.T) {
 	go func() { runErr <- app.Run(context.Background()) }()
 	waitForServer(t, port)
 
-	if got := getText(t, port, "/api/v1/reload/stamp"); got != "v1" {
+	if got := getText(t, port, "/reload/stamp"); got != "v1" {
 		t.Fatalf("before reload: %q", got)
 	}
 
@@ -707,7 +707,7 @@ func TestReloadRebuildsMiddlewareRegistry(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := getText(t, port, "/api/v1/reload/stamp"); got != "v2" {
+	if got := getText(t, port, "/reload/stamp"); got != "v2" {
 		t.Fatalf("after reload: %q", got)
 	}
 
@@ -766,7 +766,7 @@ func TestReloadKeepsInjectedModulesRunning(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got := getText(t, port, "/api/v1/embedded/key"); got != "static" {
+	if got := getText(t, port, "/embedded/key"); got != "static" {
 		t.Fatalf("injected route after reload: %q", got)
 	}
 	if got := countEvents(events, "start:embedded"); got != 1 {

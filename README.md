@@ -71,7 +71,8 @@ go run . stop                # 配置了 pid 文件时可用，需输入 yes 确
 go run . stop --force=1      # 跳过确认
 ```
 
-路由挂载在 `/api/v1/hello/greet`：
+路由挂载在 `/api/v1/hello/greet`（这里显式设置了 `WithAPIPrefix("/api/v1")`；
+该选项默认不追加前缀，契约路由通常把完整前缀写在路由分组上）：
 
 ```bash
 curl 'http://127.0.0.1:8080/api/v1/hello/greet?name=gofy'

@@ -416,6 +416,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Breaking:** `WithAPIPrefix` now defaults to empty, so the framework no longer
+  prepends `/api/v1` to module routes. A contract route group carries the full
+  deployment prefix instead: `orderroute.Orders` and `orderroute.Config` both
+  declare `/api/v1/order`, their `Spec.Path` values stay relative
+  (`/orders/{id}`, `/config`), and the demo's `order` module returns
+  `Prefix() == ""` so no module name is added. The full route is
+  `group.Prefix + Spec.Path`. Applications that relied on the implicit prefix
+  must declare it on the route group (preferred) or pass
+  `WithAPIPrefix("/api/v1")`; tests and documentation were updated to
+  `/api/v1/order/...` for the demo and to unprefixed module paths elsewhere.
 - **Breaking:** the root logging package moved from `logging` to `logger`.
   Import `github.com/bingcool/gofy/logger` instead of
   `github.com/bingcool/gofy/logging`; `Config`, `New`, `NewSystem`, `Nop`,

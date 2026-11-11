@@ -36,8 +36,12 @@ func NewModule(svc *service.OrderService, logger *zap.Logger) *Module {
 	return &Module{svc: svc, logger: logger}
 }
 
-// Name returns the route prefix of the module.
+// Name is the module identity used for deduplication and error messages.
 func (m *Module) Name() string { return "order" }
+
+// Prefix 返回模块挂载前缀。契约分组已携带完整前缀（RoutePrefix =
+// /api/v1/order），模块必须挂在根 Router 上，避免再叠加模块名或 API 前缀。
+func (m *Module) Prefix() string { return "" }
 
 // Register binds every demoservice contract route to the handler. 契约只声明
 // 中间件别名（分组 "audit"、CreateOrder 的 "order-audit"、认证 "auth"），

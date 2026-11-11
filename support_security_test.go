@@ -64,7 +64,7 @@ func TestAppFallbacksAndSecurityOptions(t *testing.T) {
 		gofy.WithModules(module),
 	)
 
-	rr := app.GET("/api/v1/nope")
+	rr := app.GET("/nope")
 	gofytest.Status(t, rr, http.StatusNotFound)
 	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40400) {
 		t.Fatalf("unknown route code = %v, want 40400", code)
@@ -76,7 +76,7 @@ func TestAppFallbacksAndSecurityOptions(t *testing.T) {
 		t.Fatalf("HSTS is set without HTTPS configuration: %q", got)
 	}
 
-	rr = app.POSTJSON("/api/v1/secure", nil)
+	rr = app.POSTJSON("/secure", nil)
 	gofytest.Status(t, rr, http.StatusMethodNotAllowed)
 	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40500) {
 		t.Fatalf("wrong method code = %v, want 40500", code)
@@ -89,17 +89,17 @@ func TestAppFallbacksAndSecurityOptions(t *testing.T) {
 	gofytest.Status(t, rr, http.StatusOK)
 
 	// The unauthenticated attempt is limited too: it sits in the same bucket.
-	rr = app.GET("/api/v1/secure")
+	rr = app.GET("/secure")
 	gofytest.Status(t, rr, http.StatusUnauthorized)
 
 	token := appToken(t)
-	rr = app.GET("/api/v1/secure", "Authorization", "Bearer "+token)
+	rr = app.GET("/secure", "Authorization", "Bearer "+token)
 	gofytest.Status(t, rr, http.StatusOK)
 	if got := rr.Header().Get("X-RateLimit-Remaining"); got != "0" {
 		t.Fatalf("remaining = %q, want 0", got)
 	}
 
-	rr = app.GET("/api/v1/secure", "Authorization", "Bearer "+token)
+	rr = app.GET("/secure", "Authorization", "Bearer "+token)
 	gofytest.Status(t, rr, http.StatusTooManyRequests)
 	if got := rr.Header().Get("Retry-After"); got == "" {
 		t.Fatal("429 is missing Retry-After")

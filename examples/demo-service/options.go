@@ -33,7 +33,6 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config) []g
 		gofy.WithLogConfig(cfg.Log),
 		gofy.WithTelemetry(cfg.OTel),
 		gofy.WithHTTP(cfg.HTTP),
-		gofy.WithAPIPrefix("/api/v1"),
 		gofy.WithPIDFile(cfg.PIDFile),
 		gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
 		gofy.WithNacosRegistration(nacosCfg),

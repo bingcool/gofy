@@ -45,7 +45,7 @@ func TestAppHeaderPropagationDropsIdentityFromUntrustedPeer(t *testing.T) {
 		gofy.WithModules(propagationModule(t)),
 	)
 
-	rr := app.GET("/api/v1/propagate",
+	rr := app.GET("/propagate",
 		"X-User-Id", "user-1",
 		"X-Tenant-Id", "tenant-1",
 		"X-Client-Ip", "10.9.9.9",
@@ -72,7 +72,7 @@ func TestAppHeaderPropagationTrustsProxy(t *testing.T) {
 		gofy.WithModules(propagationModule(t)),
 	)
 
-	rr := app.GET("/api/v1/propagate",
+	rr := app.GET("/propagate",
 		"X-User-Id", "user-1",
 		"X-Tenant-Id", "tenant-1",
 		"X-Client-Ip", "198.51.100.4",
@@ -95,7 +95,7 @@ func TestAppHeaderPropagationTrustsProxy(t *testing.T) {
 func TestAppHeaderPropagationIsOptIn(t *testing.T) {
 	app := gofytest.New(t, gofy.WithModules(propagationModule(t)))
 
-	rr := app.GET("/api/v1/propagate", "X-User-Id", "user-1")
+	rr := app.GET("/propagate", "X-User-Id", "user-1")
 	gofytest.Status(t, rr, http.StatusOK)
 	body := gofytest.JSON[headersResponse](t, rr)
 	if body.UserID != "" || body.TenantID != "" || body.ClientIP != "" {

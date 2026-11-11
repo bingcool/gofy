@@ -107,7 +107,6 @@ func defaultOptions() options {
 			Outputs:  []string{"stdout"},
 		},
 		http:            defaultHTTPConfig(),
-		apiPrefix:       "/api/v1",
 		pidPerm:         0o644,
 		shutdownTimeout: 10 * time.Second,
 		responder:       support.NewResponder(support.ResponderConfig{}),
@@ -176,8 +175,8 @@ func WithHTTP(cfg HTTPConfig) Option {
 	}
 }
 
-// WithAPIPrefix sets the prefix shared by all modules. An empty string
-// disables the prefix.
+// WithAPIPrefix 给所有模块追加一层共享前缀，默认空（不追加）。契约路由分组
+// 自带完整前缀（如 /api/v1/order）时不要再设置，否则前缀会叠加两层。
 func WithAPIPrefix(prefix string) Option {
 	return func(o *options) error {
 		o.apiPrefix = support.NormalizePrefix(prefix)

@@ -435,7 +435,7 @@ require (
 | 嵌套 | 载荷子包不得 import 上层 `{domain}service`；`demoservice` 引用子包，子包之间按 `enum <- dto <- response` 单向依赖；`orderroute` 只依赖载荷子包与 `ordererror` |
 | 版本 | 通过 module 语义化版本管理；破坏性变更提升 module 主版本，目录不按 `vN` 分层 |
 | JSON 字段 | 统一 `snake_case`，与现有 order-service 一致 |
-| URL | 契约 `Path` 只写模块内相对路径（如 `/orders`）；最终路径由 gofy `apiPrefix` + 模块前缀拼接 |
+| URL | 路由分组 `Prefix` 携带完整部署前缀（如 `/api/v1/order`），组内 `Spec.Path` 只写相对路径（如 `/orders`）；完整路由 = 分组前缀 + `Spec.Path` |
 | 枚举值 | 对外字符串值一经发布不可改名；新增值必须保证旧客户端可忽略 |
 
 **子包命名约定：**
@@ -1487,8 +1487,11 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
   分组前缀或 OperationID；
 - 手动 `router.Group(prefix, mw...)` + `BindAll` 时分组名不会被解析（分组中间件
   已直接传实例），路由级名字仍会解析；`Bind` 只安装显式传入的 `mw`；
-- `Spec.Path` 始终是完整路径（客户端/OpenAPI 使用）；`BindGroup`/`BindAll` 通过
-  `Router.GroupPrefix()` 把路径裁剪成组内相对路径后注册，避免路径写两遍或重复前缀；
+- 分组 `Prefix` 可以携带完整部署前缀（推荐，如 `/api/v1/order`），此时组内
+  `Spec.Path` 只写相对路径，完整路由 = `Prefix` + `Spec.Path`；分组 `Prefix`
+  也可以只是分组名，`BindGroup`/`BindAll` 会通过 `Router.GroupPrefix()` 把
+  完整 `Spec.Path` 裁剪成组内相对路径后注册；客户端与 OpenAPI 始终使用
+  `Spec.Path` 的相对路径，部署前缀由分组或 `docgen.Options.Prefixes` 提供；
 - 中间件顺序：分组中间件（按 `group.Use` 顺序）→ `BindOptions.Global` →
   路由中间件名（按 `spec.Middleware` 顺序）→ `Routes[OperationID]` →
   `RateLimit`（契约声明时）；
@@ -3166,7 +3169,7 @@ go.work
 | PHP 概念 | Go 对应 | 说明 |
 | --- | --- | --- |
 | `*ApiInterface` | `Service` 接口 | 方法名 = `OperationID` |
-| `#[RouteGroup(prefix)]` | `Spec.Path` 前缀 + gofy `apiPrefix` | 路径完整写在 `Spec.Path` |
+| `#[RouteGroup(prefix)]` | `endpoint.NewRouteGroup(prefix, ...)` | `prefix` 写完整部署前缀，组内 `Spec.Path` 写相对路径 |
 | `#[Route(method,path)]` | `endpoint.New(Spec{Method,Path})` | 方法/路径唯一 |
 | `#[ApiController]` | 包注释 / `Spec.Tags` | 仅文档 |
 | `#[ApiOperation]` | `Spec.Summary/Description` | 仅文档 |
@@ -3261,17 +3264,17 @@ go.work
   - 业务错误码正确。
 **路径策略（已锁定）：**
 
-- `Spec.Path` 只写**模块内相对路径**，如 `/orders`、`/orders/{id}`。
-- 服务端最终路径 = gofy `apiPrefix` + 模块前缀 + `Spec.Path`。order-service 默认 `apiPrefix=/api/v1`、模块前缀 `/order`，所以最终是 `/api/v1/order/orders`，与迁移前一致。
-- 契约不写 `/api/v1`、不写模块名；同一契约可以被不同服务挂载在不同前缀下。
-- OpenAPI 生成时需要知道部署前缀：`cmd/gofy-openapi -prefix demoservice=/api/v1/order`，或 `docgen.Options.PathPrefixes`。生成出的 `paths` 是完整服务端路径，`servers` 只写协议/域名。
-- `contracts/README.md` 固定该规则；`internal/lint` 检查 `Spec.Path` 不以 `/api/` 开头、不包含模块名。
+- 路由分组 `Prefix` 写**完整部署前缀**，如 `orderroute.RoutePrefix = "/api/v1/order"`；组内 `Spec.Path` 只写相对路径，如 `/orders`、`/orders/{id}`、`/config`。
+- 完整路由 = 分组 `Prefix` + `Spec.Path`。order-service 的 `order` 模块 `Prefix()` 返回 `""`，App 不设置 `WithAPIPrefix`，也不再叠加模块名，因此最终是 `/api/v1/order/orders`，与迁移前一致。
+- 契约即部署契约：同一份路由描述符挂到其他服务时，需要改分组 `Prefix` 才能换前缀；契约层不再依赖 gofy 的 `apiPrefix`。
+- OpenAPI 生成时用 `cmd/gofy-openapi -prefix demoservice=/api/v1/order`，或 `docgen.Options.PathPrefixes`，值与分组 `Prefix` 保持一致。生成出的 `paths` 是完整服务端路径，`servers` 只写协议/域名。
+- `contracts/README.md` 固定该规则；`internal/lint` 检查组内 `Spec.Path` 不以 `/api/` 开头、不包含模块名，保证前缀只出现在分组声明处。
 
 **order-service 迁移前后对照：**
 
 | 迁移前 | 迁移后 |
 | --- | --- |
-| `support.POST(r, "/orders", ...)` | `Spec.Path = "/orders"`，模块前缀不变 |
+| `support.POST(r, "/orders", ...)` | 分组 `Prefix = "/api/v1/order"`，`Spec.Path = "/orders"`，模块 `Prefix() = ""` |
 | 最终 `POST /api/v1/order/orders` | 最终 `POST /api/v1/order/orders` |
 | 本地 `dto.ListOrderRequest{Page, Size}` | `paging.PageRequest{Page, PageSize}` |
 

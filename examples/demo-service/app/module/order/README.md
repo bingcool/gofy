@@ -46,8 +46,9 @@ order/
 
 ## 路由
 
-模块名 `order` 会作为挂载前缀；`main.go` 里的
-`gofy.WithAPIPrefix("/api/v1")` 再套一层，因此完整路径是：
+完整前缀由契约路由分组提供：`orderroute.RoutePrefix = "/api/v1/order"`，
+组内 `Spec.Path` 只写相对路径，模块的 `Prefix()` 返回 `""`，`options.go`
+不再设置 `gofy.WithAPIPrefix`。完整路由 = 分组前缀 + `Spec.Path`：
 
 | 方法 | 路径 | OperationID | 说明 | 成功响应 |
 | --- | --- | --- | --- | --- |
@@ -61,7 +62,8 @@ order/
 `appinterface/demoservice/orderroute`，本模块通过
 `gofyadapter.BindGroup` 按分组绑定，不在业务代码里重复写路径和参数校验。
 
-只使用模块（不带 `/api/v1`）时路径是 `/order/orders...`，测试里就是这种形态。
+测试与线上使用同一套契约分组，因此路径同样是 `/api/v1/order/...`；模块名
+`order` 不再参与路由前缀。
 
 ### 请求示例
 

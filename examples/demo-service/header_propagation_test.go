@@ -61,7 +61,7 @@ func TestHeaderPropagationReachesDownstreamService(t *testing.T) {
 		gofy.WithModules(module),
 	)
 
-	rr := app.GET("/api/v1/propagate",
+	rr := app.GET("/propagate",
 		"X-User-Id", "user-1",
 		"X-Tenant-Id", "tenant-1",
 		"X-Trace-Id", "trace-1",
