@@ -750,7 +750,7 @@ defaults.Set(&req)
 | Query | GET/DELETE 的 `form:"page"` 标签 |
 | JSON | POST/PUT/PATCH 的 `json:"..."` 标签 |
 | 绑定失败 | 返回 `400` + `apperr.InvalidArgument`，不 panic |
-| 校验失败 | 返回 `400` + 字段级 `details`，不 panic |
+| 校验失败 | 返回 `400` + 可读 `msg` + 字段级 `details`，不 panic |
 | 校验器 | 每个 App 一个 `*validator.Validate`，不在每次请求里 `validator.New()` |
 | 上下文 | handler 收到 `c.Request.Context()`，请求取消可向下传递 |
 | 请求体上限 | 由 `WithMaxBodyBytes` 控制，超限返回 `413` |
@@ -765,7 +765,11 @@ type GetOrderRequest struct {
 }
 ```
 
-`message` 标签格式为 `tag:文案,tag:文案`，由框架解析；未匹配到文案时使用 validator 的默认英文消息。
+`message` 标签格式为 `tag:文案,tag:文案`，由框架解析。命中文案时，文案会同时写入
+`msg`（多个字段失败用 `; ` 拼接）和 `details[字段名]`，客户端不必解析 `details` 就能展示提示；
+未命中任何 `message` 标签时 `msg` 保持 `"invalid argument"`，`details` 使用简洁的兜底文案
+（如 `user_id failed on the 'required' rule`），不会出现 validator 的 `Key: 'X.y'` 结构体路径。
+`dive` 校验的嵌套字段同样按 `message` 标签取文案。
 
 #### 3.4.5 Responder 与响应包络
 
@@ -806,11 +810,11 @@ func NewResponder(cfg ResponderConfig) Responder
 ```json
 {
   "code": 40001,
-  "msg": "invalid argument",
+  "msg": "订单ID不能为空",
   "data": null,
   "req_id": "0b0f1f6e-...",
   "details": {
-    "id": "订单ID非法"
+    "id": "订单ID不能为空"
   }
 }
 ```
@@ -818,6 +822,7 @@ func NewResponder(cfg ResponderConfig) Responder
 约定：
 
 - `code = 0` 表示成功；非 0 表示业务错误。
+- `msg` 是对外可展示的文案；定义了 `message` 标签的校验失败直接返回该文案。
 - `details` 仅在存在字段错误时出现。
 - 堆栈**永远不进入响应体**。
 - 自定义响应格式通过 `WithResponder` 注入；框架不提供继承式扩展。
@@ -2340,19 +2345,19 @@ RequestID
 | JSON Body | `json:"..."`（POST/PUT/PATCH） | 400 / 40002 |
 | Form Body | `form:"..."`（`application/x-www-form-urlencoded`） | 400 / 40002 |
 | 默认值 | `default:"..."` | — |
-| 校验 | `validate:"..."` | 400 / 40001 + details |
+| 校验 | `validate:"..."` | 400 / 40001 + msg + details |
 | 请求体超限 | `WithMaxBodyBytes` | 413 / 41300 |
 
 实现上由 `BodyLimit` 中间件用 `http.MaxBytesReader` 包装请求体；绑定阶段通过 `errors.As(err, new(*http.MaxBytesError))` 识别并映射为 413，不把底层错误文案返回给客户端。
 
-绑定错误不暴露底层字段名和类型，只返回 `"invalid request"`；校验错误返回可读文案。
+绑定错误不暴露底层字段名和类型，只返回 `"invalid request"`；校验错误的 `msg` 优先使用 `message` 标签文案，未定义时回退到 `"invalid argument"`，两种情况都不暴露结构体路径。
 
 ### 7.3 错误映射表
 
 | 条件 | HTTP | code | msg |
 | --- | --- | --- | --- |
 | 绑定失败 | 400 | 40002 | invalid request |
-| 校验失败 | 400 | 40001 | invalid argument |
+| 校验失败 | 400 | 40001 | `message` 文案；未定义时 `invalid argument` |
 | JWT 校验失败 | 401 | 40100 | unauthorized |
 | 未匹配路径 | 404 | 40400 | route not found |
 | 方法不允许 | 405 | 40500 | method not allowed |
@@ -2408,11 +2413,11 @@ RequestID
 ```json
 {
   "code": 40001,
-  "msg": "invalid argument",
+  "msg": "订单ID不能为空",
   "data": null,
   "req_id": "9b2f6a3e-...",
   "details": {
-    "id": "订单ID非法"
+    "id": "订单ID不能为空"
   }
 }
 ```
@@ -2539,8 +2544,8 @@ demo-service/
 │   ├── container/              # 装配根：仓库声明 + 代内 service + 模块工厂
 │   │   ├── container.go        # Container：NewContainer / Init / logger
 │   │   ├── lazy_value.go       # lazyValue[T]：惰性构造槽 + 成环检测
-│   │   ├── product.go          # ProductService 访问器
-│   │   ├── order.go            # OrderConfigService / OrderService 访问器
+│   │   ├── module_product.go   # ProductService 访问器
+│   │   ├── module_order.go     # OrderConfigService / OrderService 访问器
 │   │   ├── module_factories.go # ProductModuleFactory / OrderModuleFactory
 │   │   ├── repository_declare.go    # RepositoryDeclare{OrdersRepo, ProductsRepo}
 │   │   ├── service_declare.go       # ServiceDeclare{ProductService, OrderConfigService, OrderService}
@@ -2765,7 +2770,7 @@ package container
 
 // RepositoryDeclare 集中声明一次装配用到的全部仓库。仓库无状态、每次查询
 // 自行解析连接，零值构造后可在本代容器内复用；新增仓库时在这里补字段，
-// 再到对应模块的访问器文件（product.go / order.go）注入。
+// 再到对应模块的访问器文件（module_product.go / module_order.go）注入。
 type RepositoryDeclare struct {
     OrdersRepo   *orderrepo.OrderRepository
     ProductsRepo *productrepo.ProductRepository
@@ -2859,7 +2864,8 @@ func (l *lazyValue[T]) Get(build func() T) T {
 }
 ```
 
-`app/container/product.go` 与 `app/container/order.go` 按模块放置访问器：
+`app/container/module_product.go` 与 `app/container/module_order.go` 按模块放置
+访问器（`module_<module>.go`，与 `module_factories.go` 同一命名线索；新增模块沿用）：
 
 ```go
 func (c *Container) ProductService() *productservice.ProductService {

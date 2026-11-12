@@ -27,7 +27,7 @@ import (
 )
 
 type helloRequest struct {
-	Name string `form:"name" default:"world" validate:"required,max=32" message:"max:名称过长"`
+	Name string `form:"name" default:"world" validate:"required,max=32" message:"required:名称不能为空,max:名称过长"`
 }
 
 type helloResponse struct {
@@ -77,6 +77,13 @@ go run . stop --force=1      # 跳过确认
 ```bash
 curl 'http://127.0.0.1:8080/api/v1/hello/greet?name=gofy'
 # {"code":0,"msg":"success","data":{"message":"hello gofy"},"req_id":"..."}
+```
+
+校验失败时 `message` 标签的文案直接作为 `msg` 返回，同时保留字段级 `details`：
+
+```bash
+curl 'http://127.0.0.1:8080/api/v1/hello/greet?name='
+# {"code":40001,"msg":"名称不能为空","data":null,"req_id":"...","details":{"name":"名称不能为空"}}
 ```
 
 ## HTTP 安全与限流

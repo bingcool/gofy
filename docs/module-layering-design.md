@@ -121,8 +121,8 @@ examples/demo-service/app/
 ├── container/                      # 装配根（不在 module 目录内）
 │   ├── container.go                # Container：NewContainer / Init / logger
 │   ├── lazy_value.go               # lazyValue[T]：惰性构造槽 + 成环检测
-│   ├── product.go                  # ProductService 访问器
-│   ├── order.go                    # OrderConfigService / OrderService 访问器
+│   ├── module_product.go           # ProductService 访问器
+│   ├── module_order.go             # OrderConfigService / OrderService 访问器
 │   ├── module_factories.go         # ProductModuleFactory / OrderModuleFactory
 │   ├── repository_declare.go       # RepositoryDeclare{OrdersRepo, ProductsRepo}
 │   └── service_declare.go          # ServiceDeclare{ProductService, OrderConfigService, OrderService}
@@ -314,7 +314,7 @@ func (c *Container) Init(logger *zap.Logger) { /* 记录本代 logger，首次�
 ```
 
 ```go
-// app/container/product.go / order.go
+// app/container/module_product.go / module_order.go
 func (c *Container) ProductService() *productservice.ProductService {
     return c.services.ProductService.Get(func() *productservice.ProductService {
         return productservice.NewProductService(productservice.Dependencies{

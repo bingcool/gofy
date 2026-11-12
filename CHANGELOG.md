@@ -43,9 +43,10 @@ All notable changes to this project are documented here. The format follows
   module and unused capabilities stay unbuilt. Each slot uses its own `sync.Once`
   plus a `building` flag: re-entering a slot during its own construction means
   the wiring graph has a cycle, which panics with the service name instead of
-  deadlocking in `sync.Once`. Wiring is split per module (`product.go`,
-  `order.go`, `module_factories.go`), so the file touched by a new dependency
-  stays small as the app grows. Module roots keep only `NewModule` / `Register`
+  deadlocking in `sync.Once`. Wiring is split per module
+  (`module_product.go`, `module_order.go`, `module_factories.go`), so the file
+  touched by a new dependency stays small as the app grows. Accessor files are
+  named `module_<module>.go`, the same convention new modules follow. Module roots keep only `NewModule` / `Register`
   (route binding); per-generation containers replace the former package-level
   singletons, so services are never shared between test cases or reload
   generations, and the order accessor resolves product first, removing the
@@ -416,6 +417,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Validation failures now promote `message` tag text to the response `msg`:
+  matching messages are joined with `; ` when several fields fail and stay in
+  `details[field]`, so clients can show `msg` without parsing `details`. The
+  tag is resolved through the validator struct namespace, so `dive` item fields
+  and embedded structs pick it up too. Requests without a matching tag still
+  return `invalid argument`, and the `details` fallback is now a concise
+  `field failed on the 'rule' rule (param)` instead of validator's
+  `Key: 'Type.field' Error:...` string. The demo contracts (`orderrequest`)
+  now ship Chinese `message` tags for every rule.
 - `gofy-interface-service`: the shared contract core now lives under `apicore/`
   — `apicore/contracts`, `apicore/client`, `apicore/adapter` and `apicore/cmd`
   — so the directory name marks code that business definitions must not edit;

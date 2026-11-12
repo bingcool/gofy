@@ -210,11 +210,26 @@ func TestGetOrderValidationContract(t *testing.T) {
 	gofytest.Status(t, rr, http.StatusBadRequest)
 
 	body := gofytest.RawJSON(t, rr)
-	if body["code"] != float64(40001) || body["msg"] != "invalid argument" {
+	if body["code"] != float64(40001) || body["msg"] != "订单ID不能为空" {
 		t.Fatalf("envelope = %v", body)
 	}
 	details, _ := body["details"].(map[string]any)
-	if msg, _ := details["id"].(string); msg == "" {
+	if msg, _ := details["id"].(string); msg != "订单ID不能为空" {
+		t.Fatalf("details = %v", details)
+	}
+}
+
+func TestListOrderValidationMessageContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/order/orders")
+	gofytest.Status(t, rr, http.StatusBadRequest)
+
+	body := gofytest.RawJSON(t, rr)
+	if body["code"] != float64(40001) || body["msg"] != "用户ID不能为空" {
+		t.Fatalf("envelope = %v", body)
+	}
+	details, _ := body["details"].(map[string]any)
+	if msg, _ := details["user_id"].(string); msg != "用户ID不能为空" {
 		t.Fatalf("details = %v", details)
 	}
 }

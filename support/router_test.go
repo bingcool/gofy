@@ -187,8 +187,8 @@ func TestValidationFailureReturnsDetails(t *testing.T) {
 	if codeOf(t, body) != 40001 {
 		t.Fatalf("code = %v, want 40001", body["code"])
 	}
-	if body["msg"] != "invalid argument" {
-		t.Fatalf("msg = %v, want invalid argument", body["msg"])
+	if body["msg"] != "用户ID不能为空; 金额不能为空" {
+		t.Fatalf("msg = %v, want joined message tags", body["msg"])
 	}
 	details, _ := body["details"].(map[string]any)
 	if details["user_id"] != "用户ID不能为空" {

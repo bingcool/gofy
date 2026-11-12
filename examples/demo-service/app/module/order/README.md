@@ -173,8 +173,13 @@ service 包不能反向 import 模块根或容器（import 方向是
 `container → module → service`），所以依赖只在构造期由容器显式传入。没有包级
 `RepoDeps`、没有 module getter、也没有 innerapi 单例槽：`innerapi` 只保留纯
 契约，跨模块耦合点仍是 `productapi.ProductAPI` 接口。制造新的服务时，在
-`container/product.go` 或 `container/order.go` 里加一个访问器即可，装配面不会
-随着模块数量线性膨胀成一个巨大的 `Build`。
+`container/module_product.go` 或 `container/module_order.go` 里加一个访问器即可，
+装配面不会随着模块数量线性膨胀成一个巨大的 `Build`。
+
+访问器文件按模块命名：`module_<module>.go`（当前 `module_product.go`、
+`module_order.go`），与 `module_factories.go`、模块根的 `module.go` 保持同一条
+命名线索。后续新增模块沿用这个规则，不要用 `product.go` / `order.go` 这类裸模块名，
+以免和模块内同名文件（如 `model/product.go`、`model/order.go`）混淆。
 
 `Register` 只创建 controller（传入 logger），遍历 `orderroute.Orders` 与
 `orderroute.Config` 调用 `gofyadapter.BindGroup`，不再创建或注入中间件注册表。

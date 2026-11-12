@@ -7,7 +7,7 @@ import (
 
 // ServiceDeclare 集中声明一次装配用到的全部 service 构造槽。每个槽在首次取用
 // 时按依赖链构建，之后复用；新增 service 时在这里补字段，再到对应模块的访问器
-// 文件（product.go / order.go）里写构造逻辑。
+// 文件（module_product.go / module_order.go）里写构造逻辑。
 type ServiceDeclare struct {
 	ProductService     lazyValue[*productservice.ProductService]
 	OrderConfigService lazyValue[*orderservice.OrderConfigService]

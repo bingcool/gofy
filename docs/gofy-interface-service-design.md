@@ -520,26 +520,26 @@ import (
 
 // GetOrderRequest 查询订单。
 type GetOrderRequest struct {
-	ID types.Uint64String `uri:"id" json:"id" validate:"required" doc:"订单ID" example:"1234567890123456789"`
+	ID types.Uint64String `uri:"id" json:"id" validate:"required" message:"required:订单ID不能为空" doc:"订单ID" example:"1234567890123456789"`
 }
 
 // ListOrdersRequest 分页查询订单。
 type ListOrdersRequest struct {
 	paging.PageRequest
 
-	UserID types.Uint64String    `form:"user_id" json:"user_id" validate:"required" doc:"用户ID"`
-	Status orderenum.OrderStatus `form:"status" json:"status" validate:"omitempty,oneof=pending paid cancelled" doc:"订单状态" enum:"pending,paid,cancelled"`
+	UserID types.Uint64String    `form:"user_id" json:"user_id" validate:"required" message:"required:用户ID不能为空" doc:"用户ID"`
+	Status orderenum.OrderStatus `form:"status" json:"status" validate:"omitempty,oneof=pending paid cancelled" message:"oneof:订单状态必须是 pending、paid、cancelled" doc:"订单状态" enum:"pending,paid,cancelled"`
 	// 时间范围使用字符串，避免 query 中的时区歧义；格式 RFC3339。
-	CreatedFrom string `form:"created_from" json:"created_from" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00" doc:"创建时间起（RFC3339）"`
-	CreatedTo   string `form:"created_to" json:"created_to" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00" doc:"创建时间止（RFC3339）"`
+	CreatedFrom string `form:"created_from" json:"created_from" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00" message:"datetime:创建时间起必须是 RFC3339 格式" doc:"创建时间起（RFC3339）"`
+	CreatedTo   string `form:"created_to" json:"created_to" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00" message:"datetime:创建时间止必须是 RFC3339 格式" doc:"创建时间止（RFC3339）"`
 }
 
 // CreateOrderRequest 创建订单。
 type CreateOrderRequest struct {
-	UserID types.Uint64String `json:"user_id" validate:"required" doc:"用户ID"`
-	Amount int64              `json:"amount" validate:"required,gt=0" doc:"金额，单位：分" example:"1999"`
-	Remark string             `json:"remark,omitempty" validate:"max=255" doc:"备注" example:"尽快发货"`
-	Items  []CreateOrderItem  `json:"items" validate:"required,min=1,max=100,dive" doc:"订单明细"`
+	UserID types.Uint64String `json:"user_id" validate:"required" message:"required:用户ID不能为空" doc:"用户ID"`
+	Amount int64              `json:"amount" validate:"required,gt=0" message:"required:金额不能为空,gt:金额必须大于0" doc:"金额，单位：分" example:"1999"`
+	Remark string             `json:"remark,omitempty" validate:"max=255" message:"max:备注最多255个字符" doc:"备注" example:"尽快发货"`
+	Items  []CreateOrderItem  `json:"items" validate:"required,min=1,max=100,dive" message:"required:订单明细不能为空,min:订单明细至少1条,max:订单明细最多100条" doc:"订单明细"`
 }
 
 // GetConfigRequest 查询订单模块配置；没有字段，保留类型是为了让路由与适配器保持强类型。
@@ -995,7 +995,7 @@ func (Decimal) OpenAPIType() (typ, format string) { return "string", "decimal" }
 | `cookie` | Cookie | `cookie:"session"` |
 | `validate` | 校验规则 | `validate:"required,min=1"` |
 | `default` | 默认值 | `default:"20"` |
-| `message` | 错误消息 | `message:"required:用户ID不能为空"` |
+| `message` | 错误消息，同时作为响应 `msg` 返回 | `message:"required:用户ID不能为空"` |
 | `doc` | 字段说明 | `doc:"订单ID"` |
 | `example` | 示例 | `example:"10001"` |
 | `enum` | 枚举值 | `enum:"pending,paid"` |
@@ -1980,7 +1980,7 @@ func RequestIDOf(err error) string
 
 - 客户端以 `code` 为准，不以 HTTP status 为准；HTTP status 仅用于传输层判断。
 - 未知字段忽略；契约新增字段不得导致旧客户端失败。
-- `details` 用于字段级校验错误，如 `{"user_id":"用户ID不能为空"}`。
+- `details` 用于字段级校验错误，如 `{"user_id":"用户ID不能为空"}`；同一文案也会出现在信封 `msg` 中（多字段失败用 `; ` 拼接），客户端直接展示 `msg` 即可。
 
 ### 6.5 重试、超时、幂等
 
