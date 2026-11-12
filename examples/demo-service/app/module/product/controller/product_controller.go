@@ -1,67 +1,79 @@
-// Package controller exposes product handlers for the demo. The in-memory
-// samples here are not wired to HTTP routes yet; real product persistence lives
-// in app/module/product/repository (products table, db.default) and is consumed
-// by the order service through product.innerapi.
 package controller
 
 import (
 	"context"
 	"errors"
-	"time"
 
+	"github.com/bingcool/gofy/apperr"
+	"github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"gofy/gofy-interface-service/apicore/contracts/common/types"
+	"gofy/gofy-interface-service/appinterface/demoservice"
+	"gofy/gofy-interface-service/appinterface/demoservice/productdto"
+	"gofy/gofy-interface-service/appinterface/demoservice/productrequest"
+	"gofy/gofy-interface-service/appinterface/demoservice/productresponse"
 )
 
-// ErrProductNotFound is returned when a demo product id does not exist.
-var ErrProductNotFound = errors.New("product not found")
+var _ demoservice.ProductsService = (*ProductController)(nil)
 
-// Product is the demo payload returned by the product controller.
-type Product struct {
-	ID        uint64    `json:"id"`
-	Name      string    `json:"name"`
-	Price     int64     `json:"price"` // 单位：分
-	Stock     int       `json:"stock"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// ProductController serves in-memory sample products.
+// ProductController adapts the demoservice product contract to
+// ProductService. It maps contract requests to plain values and service views
+// back to DTOs, and never imports model / repository / innerapi.
 type ProductController struct {
-	logger *zap.Logger
-	items  []Product
+	productService *service.ProductService
+	logger         *zap.Logger
 }
 
-// NewProductController builds a product controller with sample data. A nil
-// logger disables logs.
-func NewProductController(logger *zap.Logger) *ProductController {
+// NewProductController builds a controller around the product service. A nil
+// logger disables logs. Successful requests are left to the access log; the
+// controller logs only the unexpected errors it turns into 500 responses.
+func NewProductController(svc *service.ProductService, logger *zap.Logger) *ProductController {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	return &ProductController{
-		logger: logger.With(zap.String("component", "product.controller")),
-		items: []Product{
-			{ID: 1, Name: "Gofy T-Shirt", Price: 9900, Stock: 120, CreatedAt: base},
-			{ID: 2, Name: "Gofy Mug", Price: 3900, Stock: 80, CreatedAt: base.Add(time.Hour)},
-			{ID: 3, Name: "Gofy Sticker Pack", Price: 1500, Stock: 500, CreatedAt: base.Add(2 * time.Hour)},
-		},
+		productService: svc,
+		logger:         logger.With(zap.String("component", "product.controller")),
 	}
 }
 
-// Get returns one sample product or ErrProductNotFound.
-func (c *ProductController) Get(ctx context.Context, id uint64) (*Product, error) {
-	for _, p := range c.items {
-		if p.ID == id {
-			out := p
-			return &out, nil
+// GetProduct returns one product.
+func (c *ProductController) GetProduct(ctx context.Context, req *productrequest.GetProductRequest) (*productresponse.GetProductResponse, error) {
+	p, err := c.productService.Get(ctx, req.ID.Uint64())
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			return nil, gofyadapter.Error(demoservice.ErrProductNotFound)
 		}
+		c.logger.Error("get product failed", zap.Uint64("product_id", req.ID.Uint64()), zap.Error(err))
+		return nil, apperr.Internal("get product failed").WithCause(err)
 	}
-	return nil, ErrProductNotFound
+	return &productresponse.GetProductResponse{Product: toProductDTO(p.ID, p.Name, p.Price, p.Stock, p.OnSale)}, nil
 }
 
-// List returns a copy of the sample products.
-func (c *ProductController) List(ctx context.Context) []Product {
-	out := make([]Product, len(c.items))
-	copy(out, c.items)
-	c.logger.Debug("list products", zap.Int("rows", len(out)))
-	return out
+// ListProducts returns one page of products.
+func (c *ProductController) ListProducts(ctx context.Context, req *productrequest.ListProductsRequest) (*paging.ListData[productdto.ProductDTO], error) {
+	items, total, err := c.productService.List(ctx, req.Page, req.PageSize)
+	if err != nil {
+		c.logger.Error("list products failed", zap.Error(err))
+		return nil, apperr.Internal("list products failed").WithCause(err)
+	}
+	list := make([]productdto.ProductDTO, 0, len(items))
+	for i := range items {
+		list = append(list, *toProductDTO(items[i].ID, items[i].Name, items[i].Price, items[i].Stock, items[i].OnSale))
+	}
+	return &paging.ListData[productdto.ProductDTO]{Total: total, List: list}, nil
+}
+
+// toProductDTO 把 service 返回的领域视图映射成契约 DTO：uint64 转
+// types.Uint64String，库存 int 转契约的 int32。
+func toProductDTO(id uint64, name string, price int64, stock int, onSale bool) *productdto.ProductDTO {
+	return &productdto.ProductDTO{
+		ID:     types.Uint64String(id),
+		Name:   name,
+		Price:  price,
+		Stock:  int32(stock),
+		OnSale: onSale,
+	}
 }

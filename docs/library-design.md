@@ -614,7 +614,7 @@ type Stopper interface {
 | `Start` 的 ctx | 与 `rt.Context()` 相同，关停时取消 |
 | `Stop` 顺序 | 按注册**逆序**串行调用 |
 | `Stop` 的 ctx | 新建的、带 `WithShutdownTimeout` 的 context；不是已取消的 app ctx |
-| 前缀冲突 | 构建阶段检测，冲突返回错误，不监听端口 |
+| 前缀冲突 | 非空挂载前缀在构建阶段检测，冲突返回错误，不监听端口；空前缀（挂在根 Router）不去重，真实重复路由由 gin 报错 |
 
 路由前缀规则：
 
@@ -633,6 +633,12 @@ moduleRouter = base.Group(prefix)
 ```text
 /api/v1/order + /orders/:id = /api/v1/order/orders/:id
 ```
+
+多个模块可以同时返回 `Prefix() == ""`：每个契约分组自带不同部署前缀
+（`orderroute.Orders` 是 `/api/v1/order`，`productroute.Products` 是
+`/api/v1/product`），框架无法、也不应只凭挂载点判断冲突。空前缀因此跳过前缀
+去重，真正重复的路由在 gin 注册阶段报错，并由 `Register` 的 panic 恢复转成
+启动错误；非空挂载前缀仍按前缀去重。
 
 框架不再用 `apiPrefix` 或模块名给契约补前缀；这两个机制只服务于不使用契约
 分组的普通模块。
@@ -2571,11 +2577,11 @@ demo-service/
 │       │   └── model/
 │       │       └── order.go
 │       └── product/
-│           ├── module.go       # 模块根：NewModule/Register（无路由）
+│           ├── module.go       # 模块根：NewModule/Register；Prefix() 返回 ""
 │           ├── controller/
-│           │   └── product_controller.go  # 预留内存示例，本轮不绑定路由
+│           │   └── product_controller.go  # 实现 ProductsService，契约 ↔ service 映射
 │           ├── service/
-│           │   ├── product_service.go  # 实现 innerapi.ProductAPI：读取 + 扣库存
+│           │   ├── product_service.go  # 实现 innerapi.ProductAPI：读取 + 分页 + 扣库存
 │           │   └── deps.go             # Dependencies{Products, Logger}
 │           ├── innerapi/
 │           │   └── innerapi.go       # ProductAPI 接口 + Product 视图 + 错误
@@ -2618,7 +2624,7 @@ import (
 )
 
 var (
-    version   = "dev"
+    version   = "1.0.0"
     commit    = "none"
     buildTime = "unknown"
 )
@@ -2898,7 +2904,7 @@ func (c *Container) ProductModuleFactory() gofy.ModuleFactory {
             return nil, errors.New("product module requires database")
         }
         c.Init(rt.Logger)
-        return product.NewModule(c.ProductService(), rt.Logger), nil
+        return product.NewModule(c.ProductService(), rt.Logger, c.BindOptions()), nil
     }
 }
 

@@ -1,36 +1,109 @@
 package product_test
 
 import (
+	"context"
+	"net/http"
 	"testing"
 
-	"github.com/bingcool/gofy/support"
-	"github.com/gin-gonic/gin"
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/gofytest"
+	"github.com/bingcool/gofy/support/sqlite"
+	"github.com/yourorg/demo-service/app/container"
+	appdb "github.com/yourorg/demo-service/app/io/db"
+	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/product"
+	"github.com/yourorg/demo-service/app/module/product/model"
+	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	"go.uber.org/zap"
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
+	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"gofy/gofy-interface-service/appinterface/demoservice/productdto"
 )
 
-// TestModuleName 校验模块名：Name 参与模块去重与错误信息。模块不实现
-// Prefixer，由框架按默认规则挂载——产品模块没有路由，不需要挂载点。
-func TestModuleName(t *testing.T) {
-	module := product.NewModule(nil, nil)
-	if got := module.Name(); got != "product" {
-		t.Fatalf("Name() = %q, want %q", got, "product")
+// newTestApp 用纯 Go SQLite 建产品表并发布为 app/io 句柄，再按 demo-service 的
+// 装配方式启动测试 App：产品模块绑定契约分组，应用层中间件通过
+// WithMiddlewareRegistrar 注册进框架创建的共享注册表（分组声明了
+// "audit"、"auth" 两个别名）。
+func newTestApp(t *testing.T) *gofytest.App {
+	t.Helper()
+	conn, err := sqlite.New(context.Background(), sqlite.Config{
+		DSN:      ":memory:",
+		LogLevel: "silent",
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
 	}
-	if _, ok := any(module).(interface{ Prefix() string }); ok {
-		t.Fatal("product module must not override Prefix: order already owns the root prefix")
+	t.Cleanup(func() {
+		if err := sqlite.Close(conn); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
+	if err := conn.AutoMigrate(&model.Product{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	seeds := []model.Product{
+		{ID: 1, Name: "Gofy T-Shirt", Price: 9900, Stock: 120, Status: productrepo.StatusOnSale},
+		{ID: 2, Name: "Retired Mug", Price: 3900, Stock: 0, Status: 0},
+	}
+	if err := conn.Create(&seeds).Error; err != nil {
+		t.Fatalf("seed products: %v", err)
+	}
+	prev := appdb.Db
+	appdb.Db = conn
+	t.Cleanup(func() { appdb.Db = prev })
+
+	ctr := container.NewContainer()
+	ctr.Init(zap.NewNop())
+	module := product.NewModule(ctr.ProductService(), zap.NewNop(), gofyadapter.BindOptions{})
+	return gofytest.New(t,
+		gofy.WithName("demo-service-test"),
+		gofy.WithMiddlewareRegistrar(func(reg gofy.MiddlewareRegistration) error {
+			return middleware.Register(reg.Registry, middleware.Deps{
+				Logger:    zap.NewNop(),
+				Responder: reg.Responder,
+			})
+		}),
+		gofy.WithModules(module),
+	)
+}
+
+func TestGetProductContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/product/products/1")
+	gofytest.Status(t, rr, http.StatusOK)
+
+	resp := gofytest.JSON[struct {
+		Product *productdto.ProductDTO `json:"product"`
+	}](t, rr)
+	if resp.Product == nil {
+		t.Fatal("product is nil")
+	}
+	p := resp.Product
+	if p.ID.Uint64() != 1 || p.Name != "Gofy T-Shirt" || p.Price != 9900 || p.Stock != 120 || !p.OnSale {
+		t.Fatalf("product = %+v", p)
 	}
 }
 
-// TestModuleRegistersNoRoutes 固定「本轮不挂 HTTP 路由」的约定：产品能力只通过
-// innerapi 发布。Register 应成功返回且不向 gin 注册任何路由。
-func TestModuleRegistersNoRoutes(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	router := support.NewRouter(engine, support.RouterConfig{})
-
-	if err := product.NewModule(nil, nil).Register(router); err != nil {
-		t.Fatalf("Register: %v", err)
+func TestGetProductNotFound(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/product/products/404")
+	gofytest.Status(t, rr, http.StatusNotFound)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(60001) {
+		t.Fatalf("code = %v, want 60001", code)
 	}
-	if routes := engine.Routes(); len(routes) != 0 {
-		t.Fatalf("registered %d routes, want none: %+v", len(routes), routes)
+}
+
+func TestListProductsContract(t *testing.T) {
+	app := newTestApp(t)
+	rr := app.GET("/api/v1/product/products?page=1&page_size=1")
+	gofytest.Status(t, rr, http.StatusOK)
+
+	resp := gofytest.JSON[paging.ListData[productdto.ProductDTO]](t, rr)
+	if resp.Total != 2 || len(resp.List) != 1 {
+		t.Fatalf("list = %+v", resp)
+	}
+	// 仓库按 id 倒序分页，第一页第一条是最新（id 最大）的产品。
+	if resp.List[0].ID.Uint64() != 2 || resp.List[0].OnSale {
+		t.Fatalf("first product = %+v", resp.List[0])
 	}
 }

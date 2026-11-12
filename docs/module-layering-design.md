@@ -63,7 +63,9 @@
 
 - 不改 `gofy` 框架的 `ModuleFactory` / `Runtime` / `support/registry` API；
 - 不引入跨库事务（仍单库 `db.default`）；
-- 不给 product 补 HTTP 路由（本轮只做 innerapi 装配，路由后续按契约另议）；
+- 本轮只做 innerapi 装配，不改 product 的 HTTP 面。后续迭代已按同一契约模式补齐
+  产品只读路由（`productroute.Products`，前缀 `/api/v1/product`），controller 因此
+  从内存示例改为契约适配器；见 §4 目录树与 §11 变更记录。
 - 不重新引入集中式 `app/repository` 组合层。
 
 ## 3. 分层契约
@@ -142,10 +144,11 @@ examples/demo-service/app/
     │   └── model/
     │       └── order.go            # 表结构
     └── product/
-        ├── module.go               # 模块根：NewModule/Register（本轮无路由）
-        ├── controller/             # 暂保留内存示例，后续接契约时改为依赖 service
+        ├── module.go               # 模块根：NewModule/Register；Prefix() 返回 ""
+        ├── controller/
+        │   └── product_controller.go # 实现 demoservice.ProductsService，契约 ↔ service 映射
         ├── service/
-        │   ├── product_service.go  # 实现 innerapi.ProductAPI；读取 + 扣库存；0 行分类
+        │   ├── product_service.go  # 实现 innerapi.ProductAPI；读取 + 分页 + 扣库存；0 行分类
         │   └── deps.go             # Dependencies（本模块仓库 + Logger）
         ├── innerapi/
         │   └── innerapi.go         # ProductAPI 接口 + Product 视图 + 错误
@@ -158,7 +161,8 @@ examples/demo-service/app/
 `a_init_repository.go` / 包级 `RepoDeps` 删除，由 `service/dependencies.go` 的 `Dependencies`
 结构取代。仓库与 service 的实例化集中在 `app/container`，模块根只保留
 `NewModule` / `Register`。每个模块都拥有自己的 `innerapi`（即使本轮只有 product
-被跨模块调用，order 也预留契约，保持对称）。
+被跨模块调用，order 也预留契约，保持对称）。product 同时通过 controller 暴露
+只读 HTTP 路由，跨模块调用仍只走 innerapi，两条出口互不依赖。
 
 ## 5. 调用链详解
 
@@ -608,9 +612,11 @@ import 多个模块的包，跨模块依赖只在它里面解析。
 | P5 | 删除 `a_init_repository.go` / `RepoDeps`；更新 import guard 为 §10 规则 | `make check` 与三仓库回归通过 |
 | P6 | 同步 README / library-design / repository-composition-design / CHANGELOG | 文档与代码一致 |
 | P7（2026-11-11） | 装配收敛：新增 `app/container`（`RepositoryDeclare` + 惰性访问器 + 模块工厂）；删除 innerapi 单例槽、module getter 与模块级工厂；`reload` 每代新建容器 | `make check` 与三仓库回归通过；容器测试覆盖幂等、按需构建、代际隔离、缺库失败、工厂顺序无关与成环检测 |
+| P8（2026-11-12） | product 补只读 HTTP 路由：controller 改为 `ProductsService` 适配器，service/repository 增加分页；模块根实现 `Prefix() == ""` 并绑定 `productroute.Products`。配套：gofy 允许多个模块同时挂根前缀，docgen 支持同一服务的多个部署前缀 | 产品 HTTP 用例（详情 / 404 / 分页）通过；三仓库回归通过 |
 
-P0 已确认，P1–P7 已于 2026-11-11 全部落地：根仓库 `make check` 与 demo /
-interface-service 三仓库回归通过，HTTP 行为、错误码与契约不变。
+P0 已确认，P1–P8 已全部落地：根仓库 `make check` 与 demo / interface-service
+三仓库回归通过；订单侧 HTTP 行为、错误码与契约不变，产品侧新增
+`/api/v1/product/products` 两条只读路由。
 
 回滚点：P1–P3 不改 HTTP 行为与表结构，可独立回滚；P4 回滚即恢复 order 对 product
 repository 的取用；P7 回滚即恢复模块级工厂（但不恢复包级单例）。全程不动
@@ -627,7 +633,7 @@ repository 的取用；P7 回滚即恢复模块级工厂（但不恢复包级单
 | 并发首次取用 | `building` 标记按“串行装配”假设设计 | 取用只发生在模块工厂装配期；服务一旦构建完成，运行期只读字段 |
 | 状态常量双份 | 领域常量与契约枚举各一份 | controller 映射 + 一致性测试（§11.4） |
 | 0 行分类多一次查询 | 失败路径补 FindByID | 仅失败路径，正常路径单条 SQL；不影响原子性 |
-| 产品 controller 暂为内存示例 | 未接契约 | 本轮只装配 innerapi；接路由时改为依赖 service |
+| 产品路由与 innerapi 双出口 | 同一 service 同时服务 HTTP 与跨模块调用 | controller 只做契约映射；跨模块仍只依赖 innerapi，两条出口互不 import |
 
 ## 14. 决策记录
 
@@ -654,10 +660,14 @@ repository 的取用；P7 回滚即恢复模块级工厂（但不恢复包级单
    构造 service 并拆到各模块文件；模块根只保留 `NewModule` / `Register`。Go 的 import 方向是
    `container → module → service`，service 不能反向 import 容器或模块根，所以组合
    只能在装配期完成。
-9. **事务由发起用例的 service 开启**：跨模块传同一 ctx，被调用方不另开事务。
-10. **错误逐层翻译**：product innerapi 哨兵 → order 域哨兵 → controller HTTP 码；
+9. **product 与 order 一样挂根前缀**（2026-11-12）：两条契约分组各自携带完整部署
+   前缀（`/api/v1/order`、`/api/v1/product`），模块根 `Prefix()` 都返回空串。
+   gofy 因此对空前缀跳过挂载点去重，真实重复路由交给 gin 在注册阶段报错；
+   docgen 用 `demoservice.product` 这类更长 key 为产品路由选择第二个前缀。
+10. **事务由发起用例的 service 开启**：跨模块传同一 ctx，被调用方不另开事务。
+11. **错误逐层翻译**：product innerapi 哨兵 → order 域哨兵 → controller HTTP 码；
     controller 不 import 其他模块。
-11. **模块内 service → service 用具体类型组合**：同包 service 若需要协作，由容器
+12. **模块内 service → service 用具体类型组合**：同包 service 若需要协作，由容器
     先构造、经 `Dependencies` 注入具体类型，不走 innerapi（那是跨模块的缝）；只有
     别的模块也要调时，才加进 innerapi 并由容器以接口注入新消费方。当前
     `OrderService` 与 `OrderConfigService` 互不依赖，配置由 `OrderConfigController`

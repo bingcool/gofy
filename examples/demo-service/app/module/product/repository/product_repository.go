@@ -65,6 +65,25 @@ func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[ui
 	return items, nil
 }
 
+// List 返回按 id 倒序的一页产品和总数。列表包含已下架产品，是否可售由
+// service 换算成视图的 OnSale，调用方自行过滤。
+func (r *ProductRepository) List(ctx context.Context, offset, limit int) ([]model.Product, int64, error) {
+	var (
+		items []model.Product
+		total int64
+	)
+	q := func() *gorm.DB {
+		return r.conn(ctx).WithContext(ctx).Model(&model.Product{})
+	}
+	if err := q().Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count products: %w", err)
+	}
+	if err := q().Order("id DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
+		return nil, 0, fmt.Errorf("list products: %w", err)
+	}
+	return items, total, nil
+}
+
 // DecreaseStock 在商品上架且库存充足时扣减 num，返回受影响行数。条件写在
 // SQL 里，避免先查后改的竞争；0 表示商品不存在、已下架或库存不足，由调用方
 // service 区分并映射成 innerapi 业务错误。

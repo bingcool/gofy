@@ -439,10 +439,17 @@ func (a *App) registerModules(base *support.Router, modules []support.Module) er
 		}
 		prefix = support.NormalizePrefix(prefix)
 		full := support.NormalizePrefix(a.opts.apiPrefix + prefix)
-		if other, ok := used[full]; ok {
-			return fmt.Errorf("gofy: route prefix %q is used by both %q and %q", full, other, m.Name())
+		// 空前缀表示模块挂在根 Router 上，真实路由前缀由模块自己决定（通常
+		// 来自契约分组的完整部署前缀），框架只凭挂载点无从判断冲突：多个模块
+		// 各挂 /api/v1/order、/api/v1/product 是正常用法。真正重复的路由由 gin
+		// 在注册阶段报错，registerModule 会把 panic 转成启动错误。非空挂载点
+		// 仍按前缀去重。
+		if full != "" {
+			if other, ok := used[full]; ok {
+				return fmt.Errorf("gofy: route prefix %q is used by both %q and %q", full, other, m.Name())
+			}
+			used[full] = m.Name()
 		}
-		used[full] = m.Name()
 		if err := registerModule(m, base.ModuleGroup(prefix)); err != nil {
 			return err
 		}

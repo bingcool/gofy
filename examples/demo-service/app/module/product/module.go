@@ -3,48 +3,62 @@
 // Layering convention:
 //   - innerapi is the pure contract published to other modules;
 //   - service implements innerapi.ProductAPI and owns the use cases;
-//   - repository owns persistence and the model type, returning model only.
+//   - repository owns persistence and the model type, returning model only;
+//   - controller speaks the gofy-interface-service product contract.
 //
-// 与 order 模块不同，本轮产品模块不挂 HTTP 路由：能力只通过 innerapi 发布，
-// 消费方是订单 service。service 由装配根（app/container）构造，并按
-// innerapi.ProductAPI 接口注入订单侧；模块根只作为模块清单的一员存在，负责
-// Name 与（空的）Register，模块生命周期（工厂 → Register → Start）与其它模块
-// 保持一致。
+// 模块根把产品 controller 绑定到契约的 Products 分组；产品能力同时通过
+// innerapi 发布给订单模块。service 由装配根（app/container）构造，模块根只
+// 负责路由装配。
 package product
 
 import (
 	"github.com/bingcool/gofy/support"
+	"github.com/yourorg/demo-service/app/module/product/controller"
 	"github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
+	"gofy/gofy-interface-service/appinterface/demoservice/productroute"
 )
 
 // Module is the product module root.
 type Module struct {
 	// productService 是本次服务容器构造的产品 service，实现 innerapi.ProductAPI。
-	// 模块根只持有引用；跨模块发布由装配根按接口注入，不经过模块根。
 	productService *service.ProductService
-	// logger 是本次服务的 logger，与 order 模块同源；当前模块根没有路由与后台任务，
-	// 仅保留以便日后补产品路由时构造 controller。
+	// logger 是本次服务的 logger，与 order 模块同源，用于构造 controller。
 	logger *zap.Logger
+	// bindOptions 携带装配根提供的绑定选项（当前是限流回调），模块根原样转交
+	// BindGroup；产品路由未声明限流，因此当前不影响产品分组。
+	bindOptions gofyadapter.BindOptions
 }
 
 // NewModule builds a module around an existing service. A nil logger disables
 // logs. 装配根或测试直接构造 service 后调用。
-func NewModule(productService *service.ProductService, logger *zap.Logger) *Module {
+func NewModule(
+	productService *service.ProductService,
+	logger *zap.Logger,
+	bindOptions gofyadapter.BindOptions,
+) *Module {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Module{productService: productService, logger: logger}
+	return &Module{
+		productService: productService,
+		logger:         logger,
+		bindOptions:    bindOptions,
+	}
 }
 
 // Name is the module identity used for deduplication and error messages.
 func (m *Module) Name() string { return "product" }
 
-// Register 本轮不绑定任何路由：产品能力只通过 innerapi 暴露给其它模块。
-// 保留空实现而不是在模块清单里特判，让每个模块都走同一套工厂 → Register →
-// Start 生命周期。
-//
-// 这里也不实现 Prefixer：没有路由就不需要挂载点，保持默认前缀即可。日后补
-// 产品路由时再实现 Prefix() 返回空串，让契约自带的完整部署前缀直接挂在根
-// Router 上（order 模块因绑定契约路由才需要）。
-func (m *Module) Register(_ *support.Router) error { return nil }
+// Prefix 返回模块挂载前缀。契约分组已携带完整前缀（/api/v1/product），模块
+// 必须挂在根 Router 上，避免再叠加模块名或 API 前缀。
+func (m *Module) Prefix() string { return "" }
+
+// Register binds the demoservice product route group to its controller. 分组
+// 中间件（"audit"、"auth"）由 App 启动时注册的共享注册表按名字解析；产品
+// 路由只读、未声明限流，所以 BindOptions 当前只原样传递。
+func (m *Module) Register(r *support.Router) error {
+	handler := controller.NewProductController(m.productService, m.logger)
+	return gofyadapter.BindGroup(r, productroute.Products, handler, m.bindOptions)
+}

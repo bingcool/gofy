@@ -17,6 +17,10 @@ import (
 // 编译期保证 ProductService 满足产品模块对外发布的契约。
 var _ productapi.ProductAPI = (*ProductService)(nil)
 
+// ErrNotFound 表示产品不存在。controller 用它把错误映射成契约的
+// ErrProductNotFound，不必 import innerapi。
+var ErrNotFound = productapi.ErrNotFound
+
 // ProductService implements product use cases.
 type ProductService struct {
 	products *repository.ProductRepository
@@ -53,6 +57,26 @@ func (s *ProductService) ListByIDs(ctx context.Context, ids []uint64) (map[uint6
 		zap.Int("found", len(views)),
 	)
 	return views, nil
+}
+
+// List 分页返回产品视图和总数，包含已下架产品。方法不依赖 HTTP 分页类型，
+// 只收页码与页大小，偏移量在这里换算。
+func (s *ProductService) List(ctx context.Context, page, size int) ([]productapi.Product, int64, error) {
+	rows, total, err := s.products.List(ctx, (page-1)*size, size)
+	if err != nil {
+		return nil, 0, err
+	}
+	views := make([]productapi.Product, len(rows))
+	for i := range rows {
+		views[i] = toProduct(&rows[i])
+	}
+	s.logger.Debug("list products",
+		zap.Int("page", page),
+		zap.Int("page_size", size),
+		zap.Int("rows", len(views)),
+		zap.Int64("total", total),
+	)
+	return views, total, nil
 }
 
 // DecreaseStock 扣减库存。正常路径只跑一条条件更新 SQL；返回 0 行时在失败

@@ -333,13 +333,14 @@ type OrderService struct {
 
 ## 产品模块装配与 innerapi
 
-产品模块（`app/module/product`）是订单的跨模块依赖方，结构与订单对称，但本轮
-不挂 HTTP 路由：
+产品模块（`app/module/product`）是订单的跨模块依赖方，结构与订单对称；它既通过
+`innerapi` 提供产品能力，也按同一契约模式挂了只读 HTTP 路由
+（`/api/v1/product/products`）：
 
 ```
 product/
-├── module.go                  # 模块根：NewModule/Register（无路由）
-├── controller/                # 预留的内存示例（仅标准库 + zap），本轮不绑定路由
+├── module.go                  # 模块根：NewModule/Register，Prefix() 返回 ""
+├── controller/                # 实现 demoservice.ProductsService，映射契约 DTO
 ├── service/
 │   ├── product_service.go     # 实现 innerapi.ProductAPI，返回领域视图
 │   └── deps.go                # Dependencies{Products, Logger}
@@ -354,8 +355,8 @@ product/
 `app/container` 的 `ProductService()` 访问器用本次服务的 `RepositoryDeclare.ProductsRepo`
 按需构造 `ProductService`；订单访问器再把它作为 `Dependencies.Products` 传入。
 `svc` 编译期满足 `var _ productapi.ProductAPI = (*ProductService)(nil)`。
-`Register` 返回 nil（无路由）——产品模块的价值是提供 innerapi 实现，装配和
-跨模块注入都由容器完成，没有包级发布或名字登记。
+`Register` 绑定 `productroute.Products` 分组（前缀 `/api/v1/product`，与订单一样
+挂在根 Router）；跨模块注入仍由容器完成，与路由无关。
 
 `innerapi.ProductAPI` 发布三个能力：
 

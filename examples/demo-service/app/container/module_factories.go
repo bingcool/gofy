@@ -10,15 +10,15 @@ import (
 )
 
 // ProductModuleFactory 构建产品模块：先确认数据库就绪，再记录本次服务的 logger
-// 并取出产品 service，最后交给模块根。产品模块没有路由，service 只通过
-// innerapi 注入订单侧，所以工厂不传绑定选项。
+// 并取出产品 service，最后交给模块根。产品模块现在也绑定契约路由，因此与订单
+// 工厂一样把 BindOptions 传下去。
 func (c *Container) ProductModuleFactory() gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
 			return nil, errors.New("product module requires database")
 		}
 		c.Init(rt.Logger)
-		return product.NewModule(c.ProductService(), rt.Logger), nil
+		return product.NewModule(c.ProductService(), rt.Logger, c.BindOptions()), nil
 	}
 }
 

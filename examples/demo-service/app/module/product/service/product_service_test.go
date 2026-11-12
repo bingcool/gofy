@@ -81,6 +81,31 @@ func TestListByIDsSkipsMissingProducts(t *testing.T) {
 	}
 }
 
+func TestListPagesNewestFirst(t *testing.T) {
+	svc := newProductService(t)
+	ctx := context.Background()
+
+	views, total, err := svc.List(ctx, 1, 1)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 2 || len(views) != 1 {
+		t.Fatalf("total = %d, rows = %d, want 2 and 1", total, len(views))
+	}
+	// 按 id 倒序：第一页第一条是 id 最大的产品，且保留下架状态。
+	if views[0].ID != 2 || views[0].OnSale {
+		t.Fatalf("first view = %+v", views[0])
+	}
+
+	second, total, err := svc.List(ctx, 2, 1)
+	if err != nil {
+		t.Fatalf("List page 2: %v", err)
+	}
+	if total != 2 || len(second) != 1 || second[0].ID != 1 || !second[0].OnSale {
+		t.Fatalf("page 2 = %+v, total = %d", second, total)
+	}
+}
+
 func TestDecreaseStockRespectsStatusAndStock(t *testing.T) {
 	svc := newProductService(t)
 	ctx := context.Background()

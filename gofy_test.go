@@ -59,6 +59,13 @@ type recorder struct {
 	events []string
 }
 
+type prefixModule struct {
+	testModule
+	prefix string
+}
+
+func (m *prefixModule) Prefix() string { return m.prefix }
+
 func (r *recorder) add(event string) {
 	r.mu.Lock()
 	r.events = append(r.events, event)
@@ -190,6 +197,57 @@ func TestHandlerServesTypedRoutes(t *testing.T) {
 
 	rr = app.GET("/healthz")
 	gofytest.Status(t, rr, http.StatusOK)
+}
+
+// TestModulesCanShareTheRootPrefix 固定「多个模块都返回 Prefix() == ""」的用法：
+// 契约分组自带完整部署前缀，模块根只负责把各自分组的完整路径挂到根 Router，
+// 框架不能按挂载点把它们判成冲突。
+func TestModulesCanShareTheRootPrefix(t *testing.T) {
+	orderModule := &prefixModule{
+		testModule: testModule{name: "order", reg: func(r *support.Router) error {
+			support.GET(r, "/api/v1/order/orders/:id", func(_ context.Context, req *orderRequest) (*orderResponse, error) {
+				return &orderResponse{ID: req.ID}, nil
+			})
+			return nil
+		}},
+	}
+	productModule := &prefixModule{
+		testModule: testModule{name: "product", reg: func(r *support.Router) error {
+			support.GET(r, "/api/v1/product/products/:id", func(_ context.Context, req *orderRequest) (*orderResponse, error) {
+				return &orderResponse{ID: req.ID}, nil
+			})
+			return nil
+		}},
+	}
+	app := gofytest.New(t,
+		gofy.WithName("root-prefix-test"),
+		gofy.WithModules(orderModule, productModule),
+	)
+
+	for _, path := range []string{"/api/v1/order/orders/7", "/api/v1/product/products/9"} {
+		rr := app.GET(path)
+		gofytest.Status(t, rr, http.StatusOK)
+		if data, _ := gofytest.RawJSON(t, rr)["data"].(map[string]any); data["id"] == nil {
+			t.Fatalf("%s: data = %v", path, data)
+		}
+	}
+}
+
+// TestDuplicateNonRootPrefixIsRejected 确认非空挂载点仍按前缀去重。
+func TestDuplicateNonRootPrefixIsRejected(t *testing.T) {
+	app, err := gofy.New(
+		gofy.WithLogger(zap.NewNop()),
+		gofy.WithModules(
+			&prefixModule{testModule: testModule{name: "one"}, prefix: "/same"},
+			&prefixModule{testModule: testModule{name: "two"}, prefix: "/same"},
+		),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := app.Handler(context.Background()); err == nil || !strings.Contains(err.Error(), "used by both") {
+		t.Fatalf("Handler error = %v, want duplicate prefix error", err)
+	}
 }
 
 func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {

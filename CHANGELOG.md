@@ -422,6 +422,19 @@ All notable changes to this project are documented here. The format follows
 - `nacos.Config` now exposes `Register` and `Discovery`, parsed from
   `service_register` and `discovery_service_client`. Discovery defaults its
   namespace and group to the registration values.
+- module mounting: several modules may return `Prefix() == ""` and mount at the
+  root router. Prefix deduplication is skipped only for the empty normalized
+  prefix, because the real route prefix then comes from the module itself
+  (usually a contract route group); duplicate routes are still rejected at gin
+  registration and surface as startup errors through the module panic
+  recovery. Non-empty mount prefixes are still deduplicated.
+- `examples/demo-service`: the product module now serves the contract's read-only
+  product routes. `productroute.Products` mounts `/api/v1/product` with
+  `GetProduct` (`/products/{id}`) and `ListProducts` (`/products`, paged); the
+  controller became a `demoservice.ProductsService` adapter over
+  `ProductService`, the service and repository gained paged listing, and the
+  module root returns `Prefix() == ""` and binds the group. Product errors use
+  the new 60000-60999 band (`ErrCodeProductNotFound = 60001`).
 
 ### Changed
 
