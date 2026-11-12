@@ -111,7 +111,7 @@ All notable changes to this project are documented here. The format follows
   caller). A service-level SQLite test
   (`app/module/order/service/transaction_test.go`) proves stock decrease and
   order create share one transaction and roll back together.
-  `scripts/check-imports.sh` enforces the five-layer rules per module
+  `shell/check-imports.sh` enforces the five-layer rules per module
   (`controller` → own `service` only, never `app/io`; `service` → no HTTP
   contract, cross-module only the other module's `innerapi`; `innerapi` →
   stdlib/`support` pure types only; `repository` → own `model` only, no contract;
@@ -417,6 +417,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- the shell-script directories were renamed from `scripts/` to `shell/` in both
+  this repository and `examples/demo-service`, so the name states what they
+  hold. `check-imports.sh` moved with them; `make guards` (root `Makefile` and
+  the demo `Makefile`), the design docs and the module README now point at
+  `./shell/check-imports.sh` and `examples/demo-service/shell/check-imports.sh`.
 - `examples/demo-service`: rate limiting is now driven entirely by the
   contract. `app/middleware.RateLimiter` returns the
   `gofyadapter.BindOptions.RateLimit` callback and builds one middleware per

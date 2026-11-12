@@ -13,7 +13,7 @@ test:
 	go test -race -count=1 ./...
 
 guards:
-	./scripts/check-imports.sh
+	./shell/check-imports.sh
 
 check: guards test
 

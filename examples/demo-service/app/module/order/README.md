@@ -31,7 +31,7 @@ order/
     └── order.go               # 持久化模型（orders 表）
 ```
 
-分层约定（import 矩阵见设计文档 §3.2，由 `scripts/check-imports.sh` 强制）：
+分层约定（import 矩阵见设计文档 §3.2，由 `shell/check-imports.sh` 强制）：
 
 | 层 | 职责 | 依赖限制 |
 | --- | --- | --- |
@@ -625,7 +625,7 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
   报出成环（`app/container/*_test.go`）。
 
 `make guards`（根仓库 `make check` 也会调用）运行
-`examples/demo-service/scripts/check-imports.sh`，按层强制 import 边界（规则见
+`examples/demo-service/shell/check-imports.sh`，按层强制 import 边界（规则见
 [`docs/module-layering-design.md`](../../../../docs/module-layering-design.md) §10）：
 
 | 层 | 允许的跨包 import | 禁止 |

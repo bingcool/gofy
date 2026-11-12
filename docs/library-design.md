@@ -3836,7 +3836,7 @@ jobs:
             exit 1
           fi
       - name: import direction
-        run: ./scripts/check-imports.sh
+        run: ./shell/check-imports.sh
 
   api:
     steps:

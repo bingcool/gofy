@@ -715,10 +715,10 @@ repository 接口并把字段/泛型参数改回接口类型；P7 的仓库无�
 > **已被取代**：import guard 改为按 5 层（controller / service / innerapi / repository / model）
 > 校验，跨模块只允许 import 对方 `innerapi`，不再有「一个包最多 import 一个其他模块 repository」
 > 的上限规则。最新规则见 [module-layering-design.md](./module-layering-design.md) §10 与
-> `examples/demo-service/scripts/check-imports.sh`。下文保留原文供追溯。
+> `examples/demo-service/shell/check-imports.sh`。下文保留原文供追溯。
 
-已在 `examples/demo-service/scripts/check-imports.sh` 落地 import guard（沿用根仓库
-`scripts/check-imports.sh` 的写法），由 demo 与根仓库的 `make guards` / `make check`
+已在 `examples/demo-service/shell/check-imports.sh` 落地 import guard（沿用根仓库
+`shell/check-imports.sh` 的写法），由 demo 与根仓库的 `make guards` / `make check`
 调用。脚本只检查非测试文件的 import（`go list` 的 `.Imports` 不含 `_test.go`），
 测试仍可同时引用多个模块的 `model` 和 `repository` 来建 SQLite 库；包依赖成环由
 `go build` 直接报错兜底。

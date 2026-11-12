@@ -27,8 +27,8 @@ example:
 	cd $(EXAMPLE) && $(GO) build ./... && $(GO) test $(GOFLAGS) -race -count=1 ./...
 
 guards:
-	./scripts/check-imports.sh
-	$(EXAMPLE)/scripts/check-imports.sh
+	./shell/check-imports.sh
+	$(EXAMPLE)/shell/check-imports.sh
 	@if grep -rn "func init()" --include="*.go" *.go apperr core logger support script command config gofytest internal; then \
 		echo "public packages must not use init()"; exit 1; \
 	fi

@@ -5,7 +5,7 @@
   innerapi 接口；不再有包级服务单例、module getter 或工厂顺序约束。每个模块固定
   `controller / service / innerapi / repository / model`，跨模块只走对方 innerapi。
 - 范围：`examples/demo-service/app/module/{order,product}` 的分层（新增 `innerapi`）、
-  装配方式、跨模块调用；`examples/demo-service/scripts/check-imports.sh` 规则；
+  装配方式、跨模块调用；`examples/demo-service/shell/check-imports.sh` 规则；
   `gofy/support/registry` 仍作为可选的「名字 → 实例」工具存在，demo 不再使用
 - 关联：[repository-composition-design.md](./repository-composition-design.md)（本文取代其
   §5.3–§5.6 的取用模式与 §8 的 import 规则）、[library-design.md](./library-design.md) §9
@@ -543,7 +543,7 @@ HTTP POST /api/v1/order/orders
 
 ## 10. import guard 规则（替换现有 §8）
 
-`examples/demo-service/scripts/check-imports.sh` 改为按层校验（仍只查非测试文件）：
+`examples/demo-service/shell/check-imports.sh` 改为按层校验（仍只查非测试文件）：
 
 1. `controller`：只允许 import 本模块 `service` 与 HTTP 契约包
    （`gofy/gofy-interface-service/...`）；禁止任何 `model` / `repository` / `innerapi` /
