@@ -10,7 +10,8 @@ import (
 )
 
 // ProductModuleFactory 构建产品模块：先确认数据库就绪，再记录本代 logger 并
-// 取出产品 service，最后交给模块绑定路由。
+// 取出产品 service，最后交给模块根。产品模块没有路由，service 只通过
+// innerapi 注入订单侧，所以工厂不传绑定选项。
 func (c *Container) ProductModuleFactory() gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
