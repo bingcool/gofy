@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `gofy.WithAccessLogOptions(opts middleware.AccessLogOptions)`: enables the
+  access log with an explicit configuration instead of the fixed
+  `DefaultAccessLogOptions()`. The supplied options apply literally (no merge
+  with the defaults), so `SkipPaths`, `SlowThreshold`, `MaxPathLength`, the
+  redacted `SensitiveQuery` list and the field toggles (`LogRequestID`,
+  `LogUserAgent`, `LogClientIP`, `LogQuery`) can now be tuned per application;
+  nil slices still fall back to the access-log defaults. The middleware keeps
+  its position outside `Recovery` and stays registered as `access-log`.
 - `support/registry`: generic, explicit name→instance registry for cross-module
   wiring. `NewRegistry` builds a concurrency-safe map; `Register` rejects blank
   names, nil instances (including typed nil pointers/maps/slices) and duplicate

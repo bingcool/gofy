@@ -22,6 +22,7 @@ import (
 	"github.com/bingcool/gofy/logger"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
@@ -244,6 +245,61 @@ func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
 	}
 	if strings.Contains(string(mustReadFile(t, errorPath)), "panic recovered") {
 		t.Fatal("panic was written to error.log")
+	}
+}
+
+func TestWithAccessLogOptionsAppliesCustomOptions(t *testing.T) {
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "info.log")
+
+	module := &testModule{
+		name: "catalog",
+		reg: func(r *support.Router) error {
+			support.GET(r, "/ping", func(context.Context, *struct{}) (*orderResponse, error) {
+				return &orderResponse{ID: 1}, nil
+			})
+			return nil
+		},
+	}
+	app, err := gofy.New(
+		gofy.WithName("accesslog-options-test"),
+		gofy.WithPIDFile(""),
+		gofy.WithHealthEndpoints(true),
+		// 自定义配置按字面生效：只跳过模块路由，默认的健康检查跳过不再生效。
+		gofy.WithAccessLogOptions(middleware.AccessLogOptions{
+			SkipPaths: []string{"/catalog/ping"},
+		}),
+		gofy.WithLogConfig(logger.Config{Outputs: []string{infoPath}}),
+		gofy.WithModules(module),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := app.Handler(context.Background())
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/catalog/ping", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ping status = %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("health status = %d", rr.Code)
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	logs := string(mustReadFile(t, infoPath))
+	if strings.Contains(logs, "/catalog/ping") {
+		t.Fatalf("skip path was logged: %s", logs)
+	}
+	if !strings.Contains(logs, "/healthz") {
+		t.Fatalf("health check was not logged under custom options: %s", logs)
 	}
 }
 

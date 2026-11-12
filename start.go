@@ -285,7 +285,13 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 	}
 	if a.opts.accessLog {
-		accessLog := middleware.AccessLog(lg, middleware.DefaultAccessLogOptions())
+		// 默认用 DefaultAccessLogOptions；WithAccessLogOptions 传入的配置按字面
+		// 生效，不再与默认值合并。
+		accessLogOpts := middleware.DefaultAccessLogOptions()
+		if a.opts.accessLogOptions != nil {
+			accessLogOpts = *a.opts.accessLogOptions
+		}
+		accessLog := middleware.AccessLog(lg, accessLogOpts)
 		engine.Use(accessLog)
 		if err := register(middleware.NameAccessLog, accessLog); err != nil {
 			return nil, nil, err

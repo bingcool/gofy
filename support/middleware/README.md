@@ -12,7 +12,7 @@ Gin 中间件集合：请求 ID、访问日志、异常恢复、Body 上限、CO
 | 中间件 | 契约别名常量 | 构造方式 | 根包选项 | 作用 |
 | --- | --- | --- | --- | --- |
 | `RequestID` | `NameRequestID` = `request-id` | `RequestID(support.DefaultRequestIDHeader)` | 自动安装 | 上游 `X-Trace-ID` 合法则复用，否则生成 UUID；写回响应头与 request context，下游 interface-service 客户端自动透传 |
-| `AccessLog` | `NameAccessLog` = `access-log` | `AccessLog(logger, opts)` | `WithAccessLog(true)` | 结构化访问日志；跳过 `/healthz`、`/readyz`；query 中的 token/password 等敏感键脱敏；慢请求阈值 500ms |
+| `AccessLog` | `NameAccessLog` = `access-log` | `AccessLog(logger, opts)` | `WithAccessLog(true)`（默认）/ `WithAccessLogOptions(opts)` | 结构化访问日志；默认跳过 `/healthz`、`/readyz`；query 中的 token/password 等敏感键脱敏；慢请求阈值 500ms |
 | `Recovery` | `NameRecovery` = `recovery` | `Recovery(logger, responder)` | `WithRecovery(true)`（默认开） | panic → 500 标准包络，堆栈只进日志不外泄 |
 | `BodyLimit` | `NameBodyLimit` = `body-limit` | `BodyLimit(maxBytes)` | `WithMaxBodyBytes(n)` | `http.MaxBytesReader` 限制请求体，超限由绑定层映射为 413 |
 | `CORS` | `NameCORS` = `cors` | `CORS(cfg)` | `WithCORS(cfg)` | 裸域名展开 http/https、`*.example.com` 子域、路径白名单、非法来源 403；详见包内 cors.go |
@@ -58,6 +58,21 @@ RequestID
 - **Recovery 在业务中间件外层**：业务 panic 仍会得到标准 500 包络。
 - 顺序不可随意调整：`RequestID` 必须最先建立 `req_id`，`HeaderPropagation` 要用
   `req_id` 或 OTel trace id 兜底 `X-Trace-Id`。
+
+访问日志默认启用，配置固定为 `middleware.DefaultAccessLogOptions()`。需要改跳过
+路径、慢请求阈值或字段开关时用 `WithAccessLogOptions`；传入的配置**按字面生效**，
+不与默认值合并（切片为 nil 时仍由 `AccessLog` 补默认 SkipPaths / SensitiveQuery）：
+
+```go
+gofy.WithAccessLogOptions(middleware.AccessLogOptions{
+    SkipPaths:     []string{"/healthz", "/readyz", "/metrics"},
+    SlowThreshold: 300 * time.Millisecond,
+    LogRequestID:  true,
+    LogClientIP:   true,
+    LogQuery:      true,
+    MaxPathLength: 512,
+})
+```
 
 ### 请求 ID 与下游透传
 

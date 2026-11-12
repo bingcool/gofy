@@ -436,6 +436,7 @@ type Option func(*options) error
 | `WithResponder(support.Responder)` | `support.NewResponder(support.ResponderConfig{})` | 统一响应格式 | 非 nil |
 | `WithRecovery(bool)` | `true` | 是否安装 panic 恢复中间件 | — |
 | `WithAccessLog(bool)` | `true` | 是否安装访问日志 | — |
+| `WithAccessLogOptions(AccessLogOptions)` | — | 启用访问日志并应用显式配置（按字面生效，不与默认值合并） | 无；nil 切片由中间件补默认 |
 | `WithHeaderPropagation(bool)` | `false` | 入口白名单请求头写入 request context，供下游客户端透传 | — |
 | `WithCORS(CORSConfig)` | 关闭 | 跨域配置 | credentials + wildcard 冲突时报错 |
 | `WithJWTAuth(JWTAuthConfig)` | 关闭 | 模块路由的 Bearer Token 校验 | `Parser` 非 nil |
@@ -4149,6 +4150,7 @@ func WithShutdownTimeout(time.Duration) Option
 func WithResponder(Responder) Option
 func WithRecovery(bool) Option
 func WithAccessLog(bool) Option
+func WithAccessLogOptions(AccessLogOptions) Option
 func WithHeaderPropagation(bool) Option
 func WithCORS(CORSConfig) Option
 func WithHealthEndpoints(bool) Option
