@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=dev
+ARG VERSION=1.0.0
 ARG COMMIT=none
 ARG BUILD_AT=unknown
 RUN CGO_ENABLED=0 go build -trimpath \
