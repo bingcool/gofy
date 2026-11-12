@@ -2770,7 +2770,7 @@ service 都在这里显式构造，模块根只负责把 service 接到路由上
 package container
 
 // RepositoryDeclare 集中声明一次装配用到的全部仓库。仓库无状态、每次查询
-// 自行解析连接，零值构造后可在本代容器内复用；新增仓库时在这里补字段，
+// 自行解析连接，零值构造后可在本次服务的容器内复用；新增仓库时在这里补字段，
 // 再到对应模块的访问器文件（module_product.go / module_order.go）注入。
 type RepositoryDeclare struct {
     OrdersRepo   *orderrepo.OrderRepository
@@ -2803,14 +2803,14 @@ func NewContainer() *Container {
     }
 }
 
-// Init 记录本代 Runtime 的 logger；重复调用保留第一次的值，nil 退化为 Nop。
+// Init 记录本次服务 Runtime 的 logger；重复调用保留第一次的值，nil 退化为 Nop。
 func (c *Container) Init(logger *zap.Logger) { ... }
 
-// logger 返回本代 logger；尚未 Init 时退化为 Nop。
+// logger 返回本次服务的 logger；尚未 Init 时退化为 Nop。
 func (c *Container) logger() *zap.Logger { ... }
 ```
 
-`app/container/service_declare.go` 集中声明本代全部 service 构造槽，与
+`app/container/service_declare.go` 集中声明本次服务的全部 service 构造槽，与
 `repository_declare.go` 同构：新增 service 时在这里补字段，再到模块访问器文件里
 写构造逻辑。
 

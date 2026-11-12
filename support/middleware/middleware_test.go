@@ -125,7 +125,8 @@ func TestAccessLogRecordsStructuredFields(t *testing.T) {
 		t.Fatalf("path = %v, want /orders", fields["path"])
 	}
 
-	// Skipped paths must not produce an entry.
+	// 命中 SkipPaths 的路径不能产生任何日志。这里 healthz 只请求一次，
+	// 期望日志条数保持为 1（即上面的普通请求）。
 	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if got := logs.FilterMessage("http access").Len(); got != 1 {
 		t.Fatalf("skipped path produced an entry, count = %d", got)

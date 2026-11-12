@@ -38,11 +38,12 @@ product/
 
 ## 装配方式
 
-service 由装配根 `app/container` 构造（`ProductService()` 惰性槽 + 本代仓库与
+service 由装配根 `app/container` 构造（`ProductService()` 惰性槽 + 本次服务的仓库与
 `logger`），订单模块通过 `innerapi.ProductAPI` 拿到同一实例。模块根不参与
 service 装配，也不发布路由；`Register` 为空实现，只保证每个模块走同一套
 工厂 → `Register` → `Start` 生命周期。
 
 路由后续按契约另议：新增 `productservice` 契约组后，controller 改为适配契约
-并在 `Register` 里调用 `gofyadapter.BindGroup`，`Prefix()` 继续保持空串，
-让契约自带的完整部署前缀直接挂在根 Router 上。
+并在 `Register` 里调用 `gofyadapter.BindGroup`，同时实现 `Prefix()` 返回空串，
+让契约自带的完整部署前缀直接挂在根 Router 上。当前没有路由，因此**不实现**
+`Prefixer`：order 已经占用空前缀，重复声明会被 gofy 的前缀去重检查拒绝。

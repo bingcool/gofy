@@ -183,18 +183,18 @@ factories := []gofy.ModuleFactory{
 factories = append(factories, ctr.ModuleFactories()...)
 ```
 
-`container.NewContainer()` 零值构造本代全部仓库（`RepositoryDeclare`），service
+`container.NewContainer()` 零值构造本次服务的全部仓库（`RepositoryDeclare`），service
 则在模块工厂首次取用时按依赖链惰性构造；每个服务一个构造槽，只构建自己需要的
 子树：
 
 1. `ProductService`（使用本模块仓库 `ProductsRepo`，只被产品访问器或订单访问器触发）；
 2. `OrderConfigService`（无外部依赖，由模块根直接注入 `OrderConfigController`）；
 3. `OrderService`：首次取用时解析
-   `Dependencies{OrderRepository, ProductAPI, Logger}`，其中 `ProductAPI` 是本代
-   容器按需构造的产品 service，以 `productapi.ProductAPI` 接口传入。
+   `Dependencies{OrderRepository, ProductAPI, Logger}`，其中 `ProductAPI` 是本次服务
+   的容器按需构造的产品 service，以 `productapi.ProductAPI` 接口传入。
 
 `ModuleFactories()` 返回 `ProductModuleFactory()` 与 `OrderModuleFactory()`；
-每个工厂检查 `rt.DB`，调用 `c.Init(rt.Logger)` 记录本代 logger，再取本模块
+每个工厂检查 `rt.DB`，调用 `c.Init(rt.Logger)` 记录本次服务的 logger，再取本模块
 service 交给模块根绑定路由。**模块工厂的排列顺序不承载依赖顺序**：订单工厂
 单独执行时也会先构造产品 service；未被挂载的能力不会因为别的模块启动而被构建。
 启动和每次 `Reload` 各用一个新容器，旧的模块实例继续服务在途请求，代际之间
@@ -209,7 +209,7 @@ type RepositoryDeclare struct {
 }
 ```
 
-仓库无状态、按查询解析连接，零值构造后在本代内复用；构造槽只生效一次
+仓库无状态、按查询解析连接，零值构造后在本次服务内复用；构造槽只生效一次
 （每个服务一个 `sync.Once`，重复取用返回同一实例）。构造期间再次取用同一个槽
 会被判定为依赖成环，直接 panic 并带上服务名，不会让 `sync.Once` 静默死锁；装配
 只在启动期串行执行，不支持并发的首次取用。工厂执行时 `app/io` 还没 `Start`，
@@ -278,7 +278,7 @@ app := gofytest.New(t,
 // app/module/order/service/dependencies.go
 type Dependencies struct {
     OrderRepository *repository.OrderRepository // 本模块仓库，来自 RepositoryDeclare
-    ProductAPI      productapi.ProductAPI       // 跨模块产品契约，由容器注入本代产品 service
+    ProductAPI      productapi.ProductAPI       // 跨模块产品契约，由容器注入本次服务的产品 service
     Logger          *zap.Logger                 // 允许 nil，退化为 zap.NewNop()
 }
 ```
@@ -288,7 +288,7 @@ type Dependencies struct {
   GORM 实现，接口除了让测试塞 fake 之外没有替换价值，测试改用纯 Go SQLite 跑
   真实 SQL；
 - **跨模块依赖（ProductAPI）**：通过 `Dependencies.ProductAPI` 以
-  `productapi.ProductAPI` **接口**注入。容器把本代刚构造的 `ProductService`
+  `productapi.ProductAPI` **接口**注入。容器把本次服务刚构造的 `ProductService`
   直接传进来，service 不 import 产品的 service/repository/model，也不在构造期做
   运行期查找。`Create` 里调 `s.productAPI.ListByIDs` /
   `s.productAPI.DecreaseStock`。
@@ -351,7 +351,7 @@ product/
     └── product.go             # 持久化模型（products 表）
 ```
 
-`app/container` 的 `ProductService()` 访问器用本代 `RepositoryDeclare.ProductsRepo`
+`app/container` 的 `ProductService()` 访问器用本次服务的 `RepositoryDeclare.ProductsRepo`
 按需构造 `ProductService`；订单访问器再把它作为 `Dependencies.Products` 传入。
 `svc` 编译期满足 `var _ productapi.ProductAPI = (*ProductService)(nil)`。
 `Register` 返回 nil（无路由）——产品模块的价值是提供 innerapi 实现，装配和

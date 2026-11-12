@@ -20,10 +20,10 @@ import (
 
 // Module is the product module root.
 type Module struct {
-	// productService 是本代容器构造的产品 service，实现 innerapi.ProductAPI。
+	// productService 是本次服务容器构造的产品 service，实现 innerapi.ProductAPI。
 	// 模块根只持有引用；跨模块发布由装配根按接口注入，不经过模块根。
 	productService *service.ProductService
-	// logger 是本代 logger，与 order 模块同源；当前模块根没有路由与后台任务，
+	// logger 是本次服务的 logger，与 order 模块同源；当前模块根没有路由与后台任务，
 	// 仅保留以便日后补产品路由时构造 controller。
 	logger *zap.Logger
 }

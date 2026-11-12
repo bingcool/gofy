@@ -8,12 +8,13 @@ package container
 import (
 	"sync"
 
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
+
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
-	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
 )
 
-// Container 持有本代仓库、service 构造槽与 logger。它不是包级全局：装配方每代
+// Container 持有本次服务的仓库、service 构造槽与 logger。它不是包级全局：装配方每代
 // 新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
 type Container struct {
 	repos    RepositoryDeclare
@@ -27,7 +28,7 @@ type Container struct {
 //
 // 启动和重启（热更新）都会重新走一遍装配：启动时 appOptions 调
 // reload.factories(cfg)，热更新时 app.Reload 再用 reloader.factories(cfg)；
-// 两者都新建容器，并把本代 ModuleFactories() 与 middlewareRegistrar 注册到
+// 两者都新建容器，并把本次服务的 ModuleFactories() 与 middlewareRegistrar 注册到
 // 当次 App。因此每代各有一套仓库与构造槽，旧代实例只服务在途请求。
 func NewContainer() *Container {
 	return &Container{
@@ -47,7 +48,7 @@ func (c *Container) BindOptions() gofyadapter.BindOptions {
 	return gofyadapter.BindOptions{RateLimit: appmiddleware.RateLimiter{}.Callback()}
 }
 
-// Init 记录本代 Runtime 的 logger，供后续惰性构造使用。模块工厂在取用任何
+// Init 记录本次服务 Runtime 的 logger，供后续惰性构造使用。模块工厂在取用任何
 // service 之前调用；重复调用保留第一次的值，nil 退化为 zap.NewNop()。
 func (c *Container) Init(logger *zap.Logger) {
 	c.loggerMu.Lock()
@@ -61,6 +62,7 @@ func (c *Container) Init(logger *zap.Logger) {
 	c.zapLogger = logger
 }
 
+// init logger
 func (c *Container) logger() *zap.Logger {
 	c.loggerMu.Lock()
 	defer c.loggerMu.Unlock()

@@ -14,7 +14,7 @@ type ServiceDeclare struct {
 	OrderService       lazyValue[*orderservice.OrderService]
 }
 
-// NewServiceDeclare 声明本代全部构造槽，此时尚未构建任何实例。
+// NewServiceDeclare 声明本次服务的全部构造槽，此时尚未构建任何实例。
 func NewServiceDeclare() ServiceDeclare {
 	return ServiceDeclare{
 		ProductService:     newLazyValue[*productservice.ProductService]("product service"),

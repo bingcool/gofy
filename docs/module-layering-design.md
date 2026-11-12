@@ -310,7 +310,7 @@ type Container struct {
     zapLogger *zap.Logger
 }
 
-func (c *Container) Init(logger *zap.Logger) { /* 记录本代 logger，首次生效 */ }
+func (c *Container) Init(logger *zap.Logger) { /* 记录本次服务的 logger，首次生效 */ }
 ```
 
 ```go
@@ -371,7 +371,7 @@ type RepositoryDeclare struct {
 // order/service/dependencies.go
 type Dependencies struct {
     OrderRepository *repository.OrderRepository // 本模块仓库
-    ProductAPI      productapi.ProductAPI       // 跨模块接口，由容器注入本代产品 service
+    ProductAPI      productapi.ProductAPI       // 跨模块接口，由容器注入本次服务的产品 service
     Logger          *zap.Logger                 // 允许 nil
 }
 
