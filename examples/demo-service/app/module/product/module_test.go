@@ -8,15 +8,15 @@ import (
 	"github.com/yourorg/demo-service/app/module/product"
 )
 
-// TestModuleIdentity 校验模块身份：Name 参与模块去重与错误信息，Prefix 为空
-// 表示挂在根 Router 上，与契约自带的完整部署前缀配合。
-func TestModuleIdentity(t *testing.T) {
+// TestModuleName 校验模块名：Name 参与模块去重与错误信息。模块不实现
+// Prefixer，由框架按默认规则挂载——产品模块没有路由，不需要挂载点。
+func TestModuleName(t *testing.T) {
 	module := product.NewModule(nil, nil)
 	if got := module.Name(); got != "product" {
 		t.Fatalf("Name() = %q, want %q", got, "product")
 	}
-	if got := module.Prefix(); got != "" {
-		t.Fatalf("Prefix() = %q, want empty", got)
+	if _, ok := any(module).(interface{ Prefix() string }); ok {
+		t.Fatal("product module must not override Prefix: order already owns the root prefix")
 	}
 }
 

@@ -29,7 +29,7 @@ product/
 
 | 层 | 职责 | 依赖限制 |
 | --- | --- | --- |
-| module | 模块清单成员：`Name` / `Prefix` / 空 `Register` | 只 import 本模块 `service` 与 `support`；不碰 `app/io`、契约 |
+| module | 模块清单成员：`Name` / 空 `Register` | 只 import 本模块 `service` 与 `support`；不碰 `app/io`、契约 |
 | controller | 内存样例，尚未接入路由 | 不 import `model`/`repository`；接契约后只依赖本模块 `service` |
 | service | 业务用例：读取、扣库存、0 行时区分不存在 / 下架 / 库存不足 | 实现本模块 `innerapi`；不 import HTTP 契约、其它模块 |
 | innerapi | 模块对外纯契约：接口 + 只读视图 + 哨兵错误 | 只允许标准库；不 import `service`/`repository`/`model` |

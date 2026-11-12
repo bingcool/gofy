@@ -40,12 +40,11 @@ func NewModule(productService *service.ProductService, logger *zap.Logger) *Modu
 // Name is the module identity used for deduplication and error messages.
 func (m *Module) Name() string { return "product" }
 
-// Prefix 返回模块挂载前缀。契约分组携带完整部署前缀，模块必须挂在根 Router
-// 上；产品模块本轮没有路由，同样显式声明空前缀，避免默认的 "/product" 在日后
-// 补路由时叠加到契约路径前面。
-func (m *Module) Prefix() string { return "" }
-
 // Register 本轮不绑定任何路由：产品能力只通过 innerapi 暴露给其它模块。
 // 保留空实现而不是在模块清单里特判，让每个模块都走同一套工厂 → Register →
 // Start 生命周期。
+//
+// 这里也不实现 Prefixer：没有路由就不需要挂载点，保持默认前缀即可。日后补
+// 产品路由时再实现 Prefix() 返回空串，让契约自带的完整部署前缀直接挂在根
+// Router 上（order 模块因绑定契约路由才需要）。
 func (m *Module) Register(_ *support.Router) error { return nil }
