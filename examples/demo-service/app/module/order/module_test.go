@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/yourorg/demo-service/app/container"
 	appdb "github.com/yourorg/demo-service/app/io/db"
 	"github.com/yourorg/demo-service/app/middleware"
@@ -26,6 +28,7 @@ import (
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
 	"gofy/gofy-interface-service/apicore/contracts/common/paging"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
 	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
@@ -119,12 +122,33 @@ func newTestApp(t *testing.T) *gofytest.App {
 	return newTestAppWithConfig(t, middleware.JWTConfig{})
 }
 
+// testRedisClient 返回连到本测试 miniredis 的客户端，供限流计数使用。
+func testRedisClient(t *testing.T) *goredis.Client {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
 // newTestAppWithConfig 用与 demo-service 相同的装配方式启动测试 App：
 // 应用层中间件通过 WithMiddlewareRegistrar 注册进框架创建的共享注册表。
 func newTestAppWithConfig(t *testing.T, jwtCfg middleware.JWTConfig) *gofytest.App {
 	t.Helper()
+	return newTestAppWith(t, jwtCfg, gofyadapter.BindOptions{})
+}
+
+// newTestAppWithBindOptions 与 newTestAppWithConfig 相同，但把装配根提供的
+// 绑定选项（例如按契约生成的限流回调）交给模块。
+func newTestAppWithBindOptions(t *testing.T, bindOptions gofyadapter.BindOptions) *gofytest.App {
+	t.Helper()
+	return newTestAppWith(t, middleware.JWTConfig{}, bindOptions)
+}
+
+func newTestAppWith(t *testing.T, jwtCfg middleware.JWTConfig, bindOptions gofyadapter.BindOptions) *gofytest.App {
+	t.Helper()
 	orderService, orderConfigService := newTestServices(t)
-	module := order.NewModule(orderService, orderConfigService, zap.NewNop())
+	module := order.NewModule(orderService, orderConfigService, zap.NewNop(), bindOptions)
 	return gofytest.New(t,
 		gofy.WithName("demo-service-test"),
 		gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), jwtCfg)),
@@ -232,6 +256,31 @@ func TestListOrderValidationMessageContract(t *testing.T) {
 	if msg, _ := details["user_id"].(string); msg != "用户ID不能为空" {
 		t.Fatalf("details = %v", details)
 	}
+}
+
+// 限流完全由契约驱动：ListOrders 声明 100 次/分钟、按用户计数。测试 App 的
+// JWT 未启用，取不到身份时退回客户端 IP，所以同一测试客户端的第 101 次请求
+// 返回 429；GetOrder 有独立额度，不受影响。
+func TestRateLimitFollowsContract(t *testing.T) {
+	client := testRedisClient(t)
+	rateLimiter := middleware.RateLimiter{RedisClient: func(context.Context, string) (*goredis.Client, error) {
+		return client, nil
+	}}.Callback()
+	app := newTestAppWithBindOptions(t, gofyadapter.BindOptions{RateLimit: rateLimiter})
+
+	for i := 0; i < 100; i++ {
+		gofytest.Status(t, app.GET("/api/v1/order/orders?user_id=100"), http.StatusOK)
+	}
+	rr := app.GET("/api/v1/order/orders?user_id=100")
+	gofytest.Status(t, rr, http.StatusTooManyRequests)
+	if body := gofytest.RawJSON(t, rr); body["code"] != float64(42900) {
+		t.Fatalf("envelope = %v", body)
+	}
+	if got := rr.Header().Get("X-RateLimit-Limit"); got != "100" {
+		t.Fatalf("X-RateLimit-Limit = %q, want 100", got)
+	}
+
+	gofytest.Status(t, app.GET("/api/v1/order/orders/1"), http.StatusOK)
 }
 
 func TestGetOrderNotFoundContract(t *testing.T) {
@@ -371,7 +420,7 @@ func TestCancelWithJWT(t *testing.T) {
 func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	orderService, orderConfigService := newTestServices(t)
-	module := order.NewModule(orderService, orderConfigService, zap.New(core))
+	module := order.NewModule(orderService, orderConfigService, zap.New(core), gofyadapter.BindOptions{})
 	app := gofytest.New(t,
 		gofy.WithName("demo-service-test"),
 		gofy.WithMiddlewareRegistrar(testRegistrar(zap.New(core), middleware.JWTConfig{})),
@@ -409,7 +458,7 @@ func TestContractMiddlewareNamesAreResolved(t *testing.T) {
 func TestModuleRegisterBuildsFreshRegistry(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	orderService, orderConfigService := newTestServices(t)
-	module := order.NewModule(orderService, orderConfigService, zap.New(core))
+	module := order.NewModule(orderService, orderConfigService, zap.New(core), gofyadapter.BindOptions{})
 
 	for i := 0; i < 2; i++ {
 		app := gofytest.New(t,

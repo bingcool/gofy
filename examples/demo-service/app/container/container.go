@@ -8,7 +8,9 @@ package container
 import (
 	"sync"
 
+	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
+	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
 )
 
 // Container 持有本代仓库、service 构造槽与 logger。它不是包级全局：装配方每代
@@ -32,6 +34,17 @@ func NewContainer() *Container {
 		repos:    NewRepositoryDeclare(),
 		services: NewServiceDeclare(),
 	}
+}
+
+// BindOptions 返回契约路由的绑定选项，与具体模块无关，所有模块共用。
+//
+// 限流中间件按每条路由声明的 Spec.RateLimit 动态生成：哪些路由要限流、
+// 限多少、按什么主体计数、用哪个 Redis 实例（RedisAlias）全部写在契约里。
+// 这里只交出回调，不持有 Store 或连接：adapter 在绑定路由时逐条调用回调，
+// 中间件在首次请求时按别名自行解析连接（路由绑定早于 app/io 模块打开
+// Redis）。每个模块工厂各调用一次本方法，得到的都是同一个无状态回调。
+func (c *Container) BindOptions() gofyadapter.BindOptions {
+	return gofyadapter.BindOptions{RateLimit: appmiddleware.RateLimiter{}.Callback()}
 }
 
 // Init 记录本代 Runtime 的 logger，供后续惰性构造使用。模块工厂在取用任何

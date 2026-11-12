@@ -23,13 +23,16 @@ func (c *Container) ProductModuleFactory() gofy.ModuleFactory {
 
 // OrderModuleFactory 构建订单模块。订单 service 的取用会按依赖链先构造产品
 // service，因此这个工厂先于产品工厂执行也能正常工作。
+//
+// BindOptions 携带契约限流回调：模块根在 Register 时把它原样传给
+// gofyadapter.BindGroup，具体哪条路由挂限流由 adapter 读取契约决定。
 func (c *Container) OrderModuleFactory() gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		if rt.DB == nil {
 			return nil, errors.New("order module requires database")
 		}
 		c.Init(rt.Logger)
-		return order.NewModule(c.OrderService(), c.OrderConfigService(), rt.Logger), nil
+		return order.NewModule(c.OrderService(), c.OrderConfigService(), rt.Logger, c.BindOptions()), nil
 	}
 }
 

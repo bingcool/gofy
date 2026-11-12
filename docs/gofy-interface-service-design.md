@@ -1069,6 +1069,9 @@ var (
 		Description: "按订单ID查询订单；订单不存在返回 40401。",
 		Tags:        []string{"demoservice"},
 		Auth:        endpoint.AuthRequired,
+		// 契约声明多少就限多少：服务端按 Key 生成限流中间件。没有声明
+		// RateLimit 的路由不挂限流。
+		RateLimit:   &endpoint.RateLimit{Limit: 120, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 		Errors: []endpoint.ErrorSpec{
 			{Code: int(ordererror.ErrCodeOrderNotFound), Status: 404, Message: "order not found"},
 		},
@@ -1093,6 +1096,7 @@ var (
 		Summary:     "创建订单",
 		Tags:        []string{"demoservice"},
 		Auth:        endpoint.AuthRequired,
+		RateLimit:   &endpoint.RateLimit{Limit: 60, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 		Errors: []endpoint.ErrorSpec{
 			{Code: 40001, Status: 400, Message: "invalid argument"},
 		},
@@ -1107,6 +1111,7 @@ var (
 		Tags:        []string{"demoservice"},
 		Auth:        endpoint.AuthRequired,
 		NoContent:   true,
+		RateLimit:   &endpoint.RateLimit{Limit: 60, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 		Errors: []endpoint.ErrorSpec{
 			{Code: int(ordererror.ErrCodeOrderNotFound), Status: 404, Message: "order not found"},
 			{Code: int(ordererror.ErrCodeOrderClosed), Status: 409, Message: "order already closed"},
@@ -1399,7 +1404,8 @@ type BindOptions struct {
 	// 直接从这里解析。
 	Registry MiddlewareRegistry
 
-	// RateLimit 根据契约元数据构造路由级限流中间件；未提供时忽略限流元数据。
+	// RateLimit 按契约声明构造限流中间件，只对声明了 Spec.RateLimit 的路由
+	// 调用，返回值装在路由中间件链最前面；返回 nil 表示该路由不挂限流。
 	RateLimit func(endpoint.Spec) support.Middleware
 
 	// Strict 为 true 时，实现类型缺少方法、签名不符会返回错误（默认 true）。
@@ -1493,9 +1499,10 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
   也可以只是分组名，`BindGroup`/`BindAll` 会通过 `Router.GroupPrefix()` 把
   完整 `Spec.Path` 裁剪成组内相对路径后注册；客户端与 OpenAPI 始终使用
   `Spec.Path` 的相对路径，部署前缀由分组或 `docgen.Options.Prefixes` 提供；
-- 中间件顺序：分组中间件（按 `group.Use` 顺序）→ `BindOptions.Global` →
-  路由中间件名（按 `spec.Middleware` 顺序）→ `Routes[OperationID]` →
-  `RateLimit`（契约声明时）；
+- 中间件顺序：分组中间件（按 `group.Use` 顺序）→ `RateLimit`（契约声明时）→
+  `BindOptions.Global` → 路由中间件名（按 `spec.Middleware` 顺序）→
+  `Routes[OperationID]`；限流放在路由链最前面，超额请求在进入其余路由中间件
+  和 handler 之前就被拒绝；
 - 所有中间件都必须显式声明并注册，不存在默认别名或内建兜底：
   `spec.Auth = AuthRequired` 只写入 OpenAPI 的 security 标记，adapter 不会自动
   附加认证中间件；需要认证时在契约里写 `group.Use("auth")` 或
@@ -1510,7 +1517,8 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
    - SSE/Download/Chunked 使用专用绑定函数，不进入普通 JSON 分支。
 3. 解析 `Spec.Middleware` 逻辑名（`opts.Middleware` → `opts.Registry` → Router 的
    App 注册表），缺失即记入聚合错误；认证也走同一条路径，没有默认别名。
-4. 根据 `Spec.RateLimit` 和 `opts.RateLimit` 安装限流中间件。
+4. 对声明了 `Spec.RateLimit` 的路由调用 `opts.RateLimit`，把返回的中间件装在
+   路由链最前面；没有声明的路由不限流。
 5. 调用 gofy 的 `support.Any(r, method, path, h, mw...)` 注册。
 6. 返回聚合错误，列出所有缺失/签名不符的方法，而不是遇到第一个就退出。
 
@@ -1603,21 +1611,53 @@ func (h *Handler) GetConfig(ctx context.Context, req *orderrequest.GetConfigRequ
 func (m *Module) Register(r *support.Router) error {
 	// 应用层中间件（含认证 "auth"）由 App 启动时的 WithMiddlewareRegistrar
 	// 注册进共享注册表，随 support.Router 下发；模块只绑定路由，不创建注册表、
-	// 不构造认证中间件。
-	opts := gofyadapter.BindOptions{
-		// RateLimit 按契约元数据构造；未提供时忽略 spec.RateLimit。
-		RateLimit: func(spec endpoint.Spec) support.Middleware {
-			return m.rateLimiter(spec)
-		},
-	}
+	// 不构造认证中间件。bindOptions 由装配根（app/container）构造后注入。
 	for _, group := range []*endpoint.Group{orderroute.Orders, orderroute.Config} {
-		if err := gofyadapter.BindGroup(r, group, m.handler, opts); err != nil {
+		if err := gofyadapter.BindGroup(r, group, m.handler, m.bindOptions); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 ```
+
+限流完全由契约驱动：路由声明 `Spec.RateLimit` 就限流，`Limit` /
+`WindowSeconds` 就是生效阈值，`Key` 决定计数主体，`RedisAlias` 指定计数
+使用的 Redis 命名实例（缺省 `ratelimit`）；没有声明就不挂限流。demo 的实现
+是 `app/middleware.RateLimiter`，装配根只把回调交给绑定选项：
+
+```go
+// app/container/container.go
+func (c *Container) BindOptions() gofyadapter.BindOptions {
+	return gofyadapter.BindOptions{RateLimit: appmiddleware.RateLimiter{}.Callback()}
+}
+```
+
+中间件在首次请求时用 `redisstore.New(redis.NewIO(ctx, alias))` 构建
+`ratelimit.Store` 并缓存：模块工厂完成路由绑定时 `app/io` 尚未打开 Redis，
+而 `Reload` 时新代中间件必须绑定到新代连接。解析失败不缓存，失败请求按 503
+处理。
+
+`RateLimiter` 按 `RateKey` 生成不同的计数主体，统一使用框架
+`middleware.RateLimit` + `ratelimit.Store`：
+
+| `RateKey` | 计数主体 | 身份缺失时 |
+| --- | --- | --- |
+| `user` | `frameworkcontext.UserID` | 退回客户端 IP |
+| `ip`（缺省/未知 Key 同此） | 客户端 IP | — |
+| `api_key` | `X-API-Key` 请求头 | 退回客户端 IP |
+| `route` | 整条路由，不区分调用方 | — |
+
+- 分桶键始终带方法 + 路由（`<主体>\|<subject>\|<method>\|<route>`），一条热点
+  路由不会耗尽另一条路由的额度；
+- 认证声明在分组层，先于限流执行，所以 `user` 主体能读到已认证身份；
+- 限流中间件装在路由中间件链最前面（分组中间件之后），超额请求在进入其余
+  路由中间件和 handler 之前就被拒绝；
+- 契约里的 `Limit` / `WindowSeconds` 非法、Redis 实例解析失败或计数失败时
+  都返回 503，不会静默放行；
+- 计数写在契约 `RedisAlias` 指定的实例上（缺省 `ratelimit`），Redis 键使用
+  `redisstore.DefaultPrefix`，多实例共享同一份计数；换存储只改
+  `RateLimiter.RedisClient` 或中间件实现，契约和路由绑定都不用动。
 
 契约里 `group.Use("audit", "auth")` 声明了分组级中间件，`spec.Middleware`
 声明了路由级中间件；它们都在启动期从 App 注册表解析，缺失即报错。
@@ -1633,12 +1673,11 @@ RequestID
   -> BodyLimit
   -> CORS
   -> 业务全局中间件（WithMiddleware）
-  -> 模块 RateLimit / JWTAuth
   -> 路由分组中间件（router.Group(prefix, mw...)，来自 group.Use 名字）
+  -> RateLimit（如果契约声明 Spec.RateLimit）
   -> BindOptions.Global
   -> 契约路由中间件名（Spec.Middleware，按声明顺序）
   -> 契约路由中间件（BindOptions.Routes[OperationID]）
-  -> RateLimit（如果契约声明）
   -> 参数绑定 + 校验
   -> handler
   -> after 中间件（P2）
@@ -1651,7 +1690,8 @@ RequestID
 - `Recovery` 必须在业务中间件之外，panic 也要返回信封。
 - `AccessLog` 在 `Recovery` 外层，才能记录 500。
 - 鉴权在参数绑定前，未认证请求不解析 body。
-- 限流在鉴权后（用户级限流需要 Principal），IP 级限流可在鉴权前；由 `RateKey` 决定。
+- 限流在路由链最前面、分组中间件之后：用户级限流依赖分组层的认证，因此认证
+  应声明在 `group.Use`，而不是 `spec.Middleware`。
 - 契约路由的中间件由 `BindAll` 安装，避免业务模块重复写。
 
 ### 5.5 特殊响应绑定

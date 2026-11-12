@@ -26,15 +26,18 @@ type Module struct {
 	orderService       *service.OrderService
 	orderConfigService *service.OrderConfigService
 	logger             *zap.Logger
+	bindOptions        gofyadapter.BindOptions
 }
 
 // NewModule builds a module around existing services. A nil logger disables
 // logs. 装配根（app/container）或测试直接构造 service 后调用；配置 service
-// 单独传入，Config 分组只依赖它。
+// 单独传入，Config 分组只依赖它。bindOptions 携带装配根提供的绑定选项
+// （当前是限流中间件回调），模块根只把它原样交给 BindGroup。
 func NewModule(
 	orderService *service.OrderService,
 	orderConfigService *service.OrderConfigService,
 	logger *zap.Logger,
+	bindOptions gofyadapter.BindOptions,
 ) *Module {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -43,6 +46,7 @@ func NewModule(
 		orderService:       orderService,
 		orderConfigService: orderConfigService,
 		logger:             logger,
+		bindOptions:        bindOptions,
 	}
 }
 
@@ -56,16 +60,18 @@ func (m *Module) Prefix() string { return "" }
 // Register binds each demoservice route group to its own handler. 契约只声明
 // 中间件别名（分组 "audit"、CreateOrder 的 "order-audit"、认证 "auth"），
 // App 启动时已把这些实例注册进 Router 携带的共享注册表，BindGroup 直接按
-// 名字解析，模块不再创建或注入注册表。
+// 名字解析，模块不再创建或注入注册表。限流也同样由契约驱动：
+// bindOptions.RateLimit 对声明了 Spec.RateLimit 的路由生成限流中间件，
+// 未声明的路由不限流。
 //
 // BindGroup 把一个实现绑定到分组的全部路由（按 OperationID 反射找方法），
 // 所以 Orders 与 Config 必须各传自己的处理器：订单处理器没有 GetConfig，
 // 配置处理器也不实现订单读写。
 func (m *Module) Register(r *support.Router) error {
 	orderHandler := controller.NewOrderController(m.orderService, m.logger)
-	if err := gofyadapter.BindGroup(r, orderroute.Orders, orderHandler, gofyadapter.BindOptions{}); err != nil {
+	if err := gofyadapter.BindGroup(r, orderroute.Orders, orderHandler, m.bindOptions); err != nil {
 		return err
 	}
 	configHandler := controller.NewOrderConfigController(m.orderConfigService)
-	return gofyadapter.BindGroup(r, orderroute.Config, configHandler, gofyadapter.BindOptions{})
+	return gofyadapter.BindGroup(r, orderroute.Config, configHandler, m.bindOptions)
 }

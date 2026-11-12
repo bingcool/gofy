@@ -417,6 +417,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: rate limiting is now driven entirely by the
+  contract. `app/middleware.RateLimiter` returns the
+  `gofyadapter.BindOptions.RateLimit` callback and builds one middleware per
+  declared `Spec.RateLimit`: `Limit` / `WindowSeconds` are the effective
+  thresholds and `RateKey` selects the bucket subject (`user` via
+  `frameworkcontext.UserID`, `api_key` via `X-API-Key`, `route`, or the client
+  IP; the identity keys fall back to the client IP when absent). Every bucket
+  key also carries the method and route, so one endpoint cannot exhaust
+  another's quota. Counting always goes through `support/ratelimit.Store`: each
+  route's middleware resolves the Redis alias declared in the contract
+  (`RateLimit.RedisAlias`, defaulting to `ratelimit`) and wraps
+  `redis.NewIO(ctx, alias)` in `redisstore`, so several instances share one set
+  of counters. Resolution is lazy and cached per route, because route binding
+  runs before `app/io` opens Redis and a reload must bind the new generation to
+  its own connection; failures are not cached. Invalid contract numbers, an
+  unavailable Redis instance and counting errors all fail closed with 503
+  instead of silently disabling the limit. Routes without `Spec.RateLimit` get
+  no limiter. The adapter installs the rate limiter at the front of the route
+  middleware chain (after group middleware), so over-limit requests are
+  rejected before the route's other middleware and the handler run. The
+  composition root keeps a module-agnostic `container.BindOptions()` that only
+  hands over the callback. The order contract declares `RateLimit` on all four
+  routes, so the generated OpenAPI documents gained their 429 responses.
 - Validation failures now promote `message` tag text to the response `msg`:
   matching messages are joined with `; ` when several fields fail and stay in
   `details[field]`, so clients can show `msg` without parsing `details`. The

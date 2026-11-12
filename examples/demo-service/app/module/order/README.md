@@ -94,6 +94,54 @@ curl 'http://127.0.0.1:8080/api/v1/order/orders?user_id=100&page=1&page_size=20'
 > 契约还声明了 `status`、`created_from`、`created_to` 三个查询参数，会参与
 > 参数校验，但当前 demo 的 `List` 只按 `user_id` 过滤，这三个条件尚未生效。
 
+## 限流
+
+限流完全由契约驱动：契约在四条订单路由上都声明了 `Spec.RateLimit`，其中的
+`Limit` / `WindowSeconds` 就是实际生效的阈值，`Key` 决定计数主体，
+`RedisAlias` 决定计数存放在哪个 Redis 命名实例（当前都是 `ratelimit`，也是
+缺省值，对应 `config.yaml` 的 `redis.ratelimit`）。没有声明 `Spec.RateLimit`
+的路由（如 `GetConfig`）不挂限流。
+
+装配根的 `BindOptions()` 与模块无关、所有模块共用，只把中间件包交给
+`gofyadapter.BindOptions.RateLimit`；模块根只负责透传：
+
+```go
+// app/container/container.go
+func (c *Container) BindOptions() gofyadapter.BindOptions {
+	return gofyadapter.BindOptions{RateLimit: appmiddleware.RateLimiter{}.Callback()}
+}
+```
+
+`app/middleware.RateLimiter` 按 `RateKey` 选择计数主体，统一使用框架的
+`middleware.RateLimit` + `ratelimit.Store`：
+
+| `RateKey` | 计数主体 | 桶键 |
+| --- | --- | --- |
+| `user` | `frameworkcontext.UserID`，取不到退回客户端 IP | `user\|<uid>\|<method>\|<route>` |
+| `ip`（缺省或未知 Key 同此） | 客户端 IP | `ip\|<ip>\|<method>\|<route>` |
+| `api_key` | `X-API-Key` 请求头，缺失退回客户端 IP | `api_key\|<key>\|<method>\|<route>` |
+| `route` | 整条路由，不区分调用方 | `route\|\|<method>\|<route>` |
+
+订单契约声明的数值（当前全部是 `RateKeyUser`）：
+
+| 路由 | 数值 |
+| --- | --- |
+| `GetOrder` | 每用户 120 次/分钟 |
+| `ListOrders` | 每用户 100 次/分钟 |
+| `CreateOrder` / `CancelOrder` | 每用户 60 次/分钟 |
+
+- 限流中间件装在单条路由中间件链的**最前面**：超额请求在进入其余路由中间件和
+  handler 之前就被拒绝。分组中间件（`audit`、`auth`）由 `router.Group` 安装，
+  仍然先执行，所以用户级限流能读到已认证身份。
+- 计数存储是契约里 `RedisAlias` 指定的 Redis 命名实例（缺省 `ratelimit`），
+  中间件在首次请求时用 `redisstore.New(redis.NewIO(ctx, alias))` 构建并缓存：
+  路由绑定早于 `app/io` 模块打开 Redis，`Reload` 后新代中间件也会绑定到新代
+  连接。解析失败不缓存，下一次请求重试；实例未启用或 Redis 故障时请求返回
+  503，不会静默放行。
+- 契约里的 `Limit` / `WindowSeconds` 非法时中间件返回 503，不会静默放行。
+- 超限返回 `429 / 42900`，响应带 `X-RateLimit-Limit`、`X-RateLimit-Remaining`、
+  `X-RateLimit-Reset` 和 `Retry-After`。
+
 ## 配置
 
 配置位于 `config.yaml` 顶层的 `jwt` 段，结构体是 `middleware.JWTConfig`
@@ -183,6 +231,8 @@ service 包不能反向 import 模块根或容器（import 方向是
 
 `Register` 只创建 controller（传入 logger），遍历 `orderroute.Orders` 与
 `orderroute.Config` 调用 `gofyadapter.BindGroup`，不再创建或注入中间件注册表。
+绑定选项来自装配根：`container.BindOptions()` 生成按契约声明工作的限流回调（所有
+模块共用同一份），`order.NewModule` 只把它原样交给两次 `BindGroup`。
 
 契约里的中间件只声明别名，认证也不例外：`Orders` 分组声明了
 `group.Use("audit", "auth")`，`Config` 分组声明了 `group.Use("auth")`，
@@ -192,7 +242,7 @@ service 包不能反向 import 模块根或容器（import 方向是
 `support/middleware.JWTAuth`）。`spec.Auth = AuthRequired` 只用于 OpenAPI 的
 security 标记，adapter 不会因此自动附加认证中间件。审计中间件在 handler 之后
 记录方法、路由模板、状态码和 `req_id`，与框架的 `AccessLog` 互补。执行顺序：
-`分组 audit → 分组 auth → BindOptions.Global → 路由 order-audit → Routes[OperationID] → RateLimit`。
+`分组 audit → 分组 auth → RateLimit（契约声明时）→ BindOptions.Global → 路由 order-audit → Routes[OperationID]`。
 
 别名与实例的对应关系集中在 `app/middleware.Register`：该包导出
 `NameAuth = "auth"`、`NameAudit = "audit"`、`NameOrderAudit = "order-audit"`，
@@ -211,7 +261,7 @@ security 标记，adapter 不会因此自动附加认证中间件。审计中间
 `gofy.WithMiddlewareRegistrar` 安装与 main 相同的 registrar：
 
 ```go
-module := order.NewModule(myService, myConfigService, zap.NewNop())
+module := order.NewModule(myService, myConfigService, zap.NewNop(), gofyadapter.BindOptions{})
 app := gofytest.New(t,
     gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), middleware.JWTConfig{})),
     gofy.WithModules(module),
@@ -450,6 +500,7 @@ HTTP 状态码为 `401`。`jwt.secret` 为空时 `Auth` 返回一个直接放行
 | `40001` | 400 | 参数校验失败，`details` 按字段给出原因 |
 | `40100` | 401 | JWT 鉴权失败（仅在配置了 `jwt.secret` 时） |
 | `40401` | 404 | 订单不存在 |
+| `42900` | 429 | 触发路由限流（只作用于契约声明了 `RateLimit` 的路由） |
 | `50000` | 500 | 内部错误；具体原因只写日志，不返回给客户端 |
 
 错误经过两段翻译，controller 只认订单域哨兵错误：
@@ -564,6 +615,10 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
 - 同一个模块装配两次不会撞别名冲突，每次装配 App 都新建中间件注册表
   （`TestModuleRegisterBuildsFreshRegistry`、`app/middleware` 的
   `TestRegisterUsesTheGivenRegistry`）；
+- 限流由契约驱动：`ListOrders` 声明 100 次/分钟，第 101 次请求返回 `42900`，
+  `GetOrder` 有独立额度；`app/middleware` 逐个覆盖 `user`/`ip`/`api_key`/`route`
+  四种计数主体（`TestRateLimitFollowsContract`、`TestRateLimiter*`、
+  `TestBindOptionsRateLimitFollowsContract`）；
 - 容器装配：访问器按需构建产品 / 订单配置 / 订单 service，重复取用不替换实例；
   产品访问器只构建产品子树；每个装配代用独立容器得到不同实例；缺数据库时模块
   工厂启动失败；订单工厂先于产品工厂执行也能工作；构造期间重入同一槽会 panic
