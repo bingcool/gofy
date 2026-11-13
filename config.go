@@ -15,38 +15,49 @@ import (
 )
 
 // Runtime is the shared runtime passed to modules, scripts and commands.
+// Runtime 是传给模块、脚本和命令的共享运行时。
 type Runtime = core.Runtime
 
 // VersionInfo describes the running build.
+// VersionInfo 描述当前运行的构建版本。
 type VersionInfo = core.VersionInfo
 
 // ModuleFactory builds a Module during startup.
+// ModuleFactory 在启动期构建 Module，能拿到当代 Runtime。
 type ModuleFactory = support.ModuleFactory
 
 // Middleware is a gin middleware function.
+// Middleware 是一个 gin 中间件函数。
 type Middleware = support.Middleware
 
 // Responder renders HTTP successes and errors.
+// Responder 渲染 HTTP 成功与错误响应。
 type Responder = support.Responder
 
 // CORSConfig is the cross-origin policy passed to WithCORS.
+// CORSConfig 是传给 WithCORS 的跨域策略。
 type CORSConfig = support.CORSConfig
 
 // DatabaseConfig is the MySQL-protocol configuration passed to WithDatabase.
+// DatabaseConfig 是传给 WithDatabase 的 MySQL 协议配置。
 type DatabaseConfig = gofydb.Config
 
 // LogConfig is the logger configuration passed to WithLogConfig.
+// LogConfig 是传给 WithLogConfig 的 logger 配置。
 type LogConfig = logger.Config
 
 // NacosConfig is the Nacos connection and service settings passed to
 // WithNacosRegistration.
+// NacosConfig 是传给 WithNacosRegistration 的 Nacos 连接与服务配置。
 type NacosConfig = nacos.Config
 
 // TelemetryConfig is the OpenTelemetry tracing configuration passed to
 // WithTelemetry.
+// TelemetryConfig 是传给 WithTelemetry 的 OpenTelemetry tracing 配置。
 type TelemetryConfig = otel.Config
 
 // HTTPConfig configures the HTTP server.
+// HTTPConfig 配置 HTTP 服务器；零值字段会先补成框架默认值再整体校验。
 type HTTPConfig struct {
 	Host              string        `yaml:"host" default:"0.0.0.0"`
 	Port              int           `yaml:"port" default:"8080"`
@@ -55,10 +66,12 @@ type HTTPConfig struct {
 	WriteTimeout      time.Duration `yaml:"write_timeout" default:"30s"`
 	IdleTimeout       time.Duration `yaml:"idle_timeout" default:"60s"`
 	MaxHeaderBytes    int           `yaml:"max_header_bytes" default:"1048576"`
-	Mode              string        `yaml:"mode" default:"release"` // debug|release|test
+	Mode              string        `yaml:"mode" default:"release"` // debug|release|test；可选值，默认 release，大小写不敏感
 }
 
 // Validate checks the HTTP configuration.
+// Validate 校验 HTTP 配置：端口范围、超时与请求头上限不能为负，mode 只接受
+// debug、release 或 test（大小写不敏感）。
 func (c HTTPConfig) Validate() error {
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("gofy: invalid http port %d", c.Port)

@@ -19,6 +19,7 @@ import (
 	_ "image/png"               // 注册 PNG 解码
 )
 
+// encodeFormats are the formats the pure Go implementation can export.
 // encodeFormats 是当前纯 Go 实现可以导出的格式。
 var encodeFormats = map[string]struct{}{
 	"jpeg": {},
@@ -26,6 +27,7 @@ var encodeFormats = map[string]struct{}{
 	"gif":  {},
 }
 
+// formatInfo is the MIME type and extension of a format.
 // formatInfo 是格式对应的 MIME 与扩展名。
 type formatInfo struct {
 	mime      string
@@ -38,6 +40,7 @@ var formatInfos = map[string]formatInfo{
 	"gif":  {mime: "image/gif", extension: ".gif"},
 }
 
+// normalizeFormat canonicalises the format name, mapping jpg to jpeg.
 // normalizeFormat 统一格式名，jpg 归一到 jpeg。
 func normalizeFormat(format string) string {
 	format = strings.ToLower(strings.TrimSpace(format))
@@ -52,6 +55,8 @@ func supportedEncodeFormat(format string) bool {
 	return ok
 }
 
+// pixelsExceeded computes the pixel count in int64 to avoid overflow when
+// multiplying width and height.
 // pixelsExceeded 用 int64 计算像素数，避免宽高相乘溢出。
 func pixelsExceeded(width, height, maxPixels int) bool {
 	if maxPixels <= 0 {
@@ -60,6 +65,7 @@ func pixelsExceeded(width, height, maxPixels int) bool {
 	return int64(width)*int64(height) > int64(maxPixels)
 }
 
+// newNRGBA copies any image into a zero-origin NRGBA, preserving alpha.
 // newNRGBA 把任意图像复制成 0 基的 NRGBA，保留透明通道。
 func newNRGBA(src stdimage.Image) *stdimage.NRGBA {
 	bounds := src.Bounds()
@@ -68,6 +74,7 @@ func newNRGBA(src stdimage.Image) *stdimage.NRGBA {
 	return dst
 }
 
+// decodeError maps standard library format errors onto the sentinel errors.
 // decodeError 把标准库的格式错误映射到哨兵错误。
 func decodeError(err error) error {
 	if errors.Is(err, stdimage.ErrFormat) {
@@ -76,6 +83,7 @@ func decodeError(err error) error {
 	return fmt.Errorf("%w: %v", ErrInvalidImage, err)
 }
 
+// decodeBytes decodes an in-memory image.
 // decodeBytes 解码内存中的图片。
 func decodeBytes(data []byte, maxPixels int) (*stdimage.NRGBA, string, error) {
 	if len(data) == 0 {
@@ -99,6 +107,8 @@ func decodeBytes(data []byte, maxPixels int) (*stdimage.NRGBA, string, error) {
 	return newNRGBA(src), normalizeFormat(format), nil
 }
 
+// decodeFile opens and decodes a file; it runs DecodeConfig first so oversized
+// images never reach memory.
 // decodeFile 打开文件解码；先 DecodeConfig 预检，避免超大图直接进内存。
 func decodeFile(path string, maxPixels int) (*stdimage.NRGBA, string, error) {
 	file, err := os.Open(path)
@@ -130,6 +140,8 @@ func decodeFile(path string, maxPixels int) (*stdimage.NRGBA, string, error) {
 	return newNRGBA(src), normalizeFormat(format), nil
 }
 
+// targetSize computes the target size for a resize mode; 0 leaves that
+// dimension unconstrained.
 // targetSize 根据缩放模式计算目标尺寸；0 表示该维不限制。
 func targetSize(srcW, srcH, width, height int, mode Mode) (int, int, error) {
 	if srcW <= 0 || srcH <= 0 {
@@ -172,6 +184,8 @@ func targetSize(srcW, srcH, width, height int, mode Mode) (int, int, error) {
 	}
 }
 
+// scaledSize computes the proportional size for the given dimensions and
+// allows enlarging; with a single dimension it scales by that dimension.
 // scaledSize 按给定维度等比计算，允许放大；单维时按该维。
 func scaledSize(srcW, srcH, width, height int) (int, int, error) {
 	scale := 1.0
@@ -195,6 +209,7 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// resize resamples with CatmullRom.
 // resize 用 CatmullRom 重采样。
 func resize(src *stdimage.NRGBA, width, height int) *stdimage.NRGBA {
 	dst := stdimage.NewNRGBA(stdimage.Rect(0, 0, width, height))
@@ -202,6 +217,7 @@ func resize(src *stdimage.NRGBA, width, height int) *stdimage.NRGBA {
 	return dst
 }
 
+// crop cuts out a rectangle; the caller has already validated the bounds.
 // crop 截取矩形区域；调用方已校验边界。
 func crop(src *stdimage.NRGBA, x, y, width, height int) *stdimage.NRGBA {
 	dst := stdimage.NewNRGBA(stdimage.Rect(0, 0, width, height))
@@ -209,6 +225,8 @@ func crop(src *stdimage.NRGBA, x, y, width, height int) *stdimage.NRGBA {
 	return dst
 }
 
+// rotate rotates the image: multiples of 90 use an exact permutation, other
+// angles use bilinear interpolation and expand the canvas.
 // rotate 旋转图像：90 的倍数走精确重排，其余角度用双线性插值并扩展画布。
 func rotate(src *stdimage.NRGBA, degrees float64) *stdimage.NRGBA {
 	angle := math.Mod(degrees, 360)
@@ -249,6 +267,7 @@ func rotate(src *stdimage.NRGBA, degrees float64) *stdimage.NRGBA {
 	return dst
 }
 
+// rotate90 rotates 90 degrees clockwise.
 // rotate90 顺时针旋转 90 度。
 func rotate90(src *stdimage.NRGBA) *stdimage.NRGBA {
 	srcW, srcH := src.Bounds().Dx(), src.Bounds().Dy()
@@ -261,6 +280,8 @@ func rotate90(src *stdimage.NRGBA) *stdimage.NRGBA {
 	return dst
 }
 
+// bilinear samples the source image bilinearly; out-of-bounds pixels are
+// treated as transparent.
 // bilinear 在源图上做双线性采样，越界像素按透明处理。
 func bilinear(src *stdimage.NRGBA, x, y float64) color.NRGBA {
 	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
@@ -297,6 +318,7 @@ func bilinear(src *stdimage.NRGBA, x, y float64) color.NRGBA {
 	}
 }
 
+// greyscale converts to greyscale by luminance while preserving alpha.
 // greyscale 按亮度转灰度，保留 alpha。
 func greyscale(src *stdimage.NRGBA) {
 	bounds := src.Bounds()
@@ -309,6 +331,7 @@ func greyscale(src *stdimage.NRGBA) {
 	}
 }
 
+// parseHexColor accepts #rgb and #rrggbb; an empty value means white.
 // parseHexColor 支持 #rgb 与 #rrggbb，空值默认为白色。
 func parseHexColor(value string) (color.NRGBA, error) {
 	value = strings.TrimSpace(value)
@@ -349,6 +372,9 @@ func hexNibble(b byte) (uint8, bool) {
 	}
 }
 
+// resolveResourcePath resolves a watermark logo or font path: it rejects ..
+// segments, requires the file to exist and confines the result to allowedRoots
+// (or BasePath when unset).
 // resolveResourcePath 解析水印 Logo/字体路径：拒绝 .. 段、要求文件存在，
 // 并限制在 allowedRoots（未配置时限制在 BasePath）内。
 func resolveResourcePath(basePath, value string, allowedRoots []string) (string, error) {
@@ -406,6 +432,8 @@ func resolveResourcePath(basePath, value string, allowedRoots []string) (string,
 	return resolved, nil
 }
 
+// placeOffset computes the top-left corner for a nine-grid anchor; the offset
+// moves inwards from the anchor.
 // placeOffset 按九宫格锚点计算左上角坐标，offset 从锚点向内偏移。
 func placeOffset(dstW, dstH, srcW, srcH int, position Position, offsetX, offsetY int) (int, int) {
 	var x, y int

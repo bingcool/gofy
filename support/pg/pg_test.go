@@ -76,6 +76,7 @@ func TestCloseNil(t *testing.T) {
 
 // TestIntegration exercises a real PostgreSQL server when GOFY_TEST_PG_DSN is
 // set, for example:
+// 设置 GOFY_TEST_PG_DSN 后测试连接真实 PostgreSQL，未设置时自动 skip；示例如下：
 //
 //	GOFY_TEST_PG_DSN='postgres://user:password@127.0.0.1:5432/app?sslmode=disable' \
 //	  go test ./support/pg -run Integration -v

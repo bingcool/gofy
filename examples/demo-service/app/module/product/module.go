@@ -21,6 +21,8 @@ import (
 )
 
 // Module is the product module root.
+// Module 是产品模块根：持有 service、logger 与绑定选项，只负责把 controller 挂到
+// 契约 Products 分组，实例装配留在 app/container。
 type Module struct {
 	// productService 是本次服务容器构造的产品 service，实现 innerapi.ProductAPI。
 	productService *service.ProductService
@@ -49,6 +51,8 @@ func NewModule(
 }
 
 // Name is the module identity used for deduplication and error messages.
+// Name 返回模块标识，用于模块去重、日志与错误信息；产品与订单模块都挂在根前缀，
+// 名字必须互不相同才能正确去重。
 func (m *Module) Name() string { return "product" }
 
 // Prefix 返回模块挂载前缀。契约分组已携带完整前缀（/api/v1/product），模块

@@ -9,9 +9,25 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameRateLimit is the middleware alias RateLimit uses on contract routes.
 // NameRateLimit 是 RateLimit 在契约路由里使用的中间件别名。
 const NameRateLimit = "rate-limit"
 
+// RateLimit allows at most cfg.Limit requests per cfg.Window, with counting
+// delegated to cfg.Store (in-memory or Redis).
+//
+// Every response carries X-RateLimit-Limit / Remaining / Reset so clients can
+// back off early; a rejected request additionally carries Retry-After and gets
+// the standard 429 envelope, and the rejected attempt is counted and reported in
+// the headers as well.
+//
+// A store failure fails closed by default: it returns 503 instead of letting
+// traffic through, so an outage of the counter cannot hammer downstream. Set
+// FailOpen to true when availability matters more than exact counting.
+//
+// The bucket identity comes from cfg.KeyFunc; without one, requests are bucketed
+// by "client IP + method + route template". Paths matching SkipPaths are not
+// counted at all and get no rate limit headers.
 // RateLimit 在 cfg.Window 窗口内限制请求数不超过 cfg.Limit，计数委托给
 // cfg.Store（内存或 Redis 实现）。
 //
@@ -75,6 +91,12 @@ func RateLimit(cfg support.RateLimitConfig, responder support.Responder) (gin.Ha
 	}, nil
 }
 
+// defaultRateLimitKey is the default bucket key: client IP + method + route
+// template. Method and route are included so every route has its own quota and
+// one hot route cannot drain the same client's quota on other routes; the route
+// is the template registered with gin (such as /orders/:id), so different IDs of
+// one route share a bucket, falling back to the raw URL path when no template is
+// available.
 // defaultRateLimitKey 是默认分桶键：客户端 IP + 方法 + 路由模板。带方法和
 // 路由是为了让每条路由拥有独立额度，一条热点路由不会耗尽同一客户端在其它
 // 路由上的配额；路由取 gin 注册的模板路径（如 /orders/:id），同一路由的不同

@@ -18,6 +18,8 @@ type OrderConfigController struct {
 }
 
 // NewOrderConfigController builds a controller around the config service.
+// NewOrderConfigController 用配置 service 构造 controller；Config 分组只绑定它，
+// 不与订单读写处理器共享实例，保证两组路由各自独立。
 func NewOrderConfigController(svc *service.OrderConfigService) *OrderConfigController {
 	return &OrderConfigController{configService: svc}
 }

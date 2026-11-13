@@ -12,6 +12,9 @@ import (
 // bindAndValidate applies defaults, binds path/query/body values and validates
 // the request. All failures are returned as *apperr.Error so the responder can
 // render them without leaking implementation details.
+// 失败一律封装为 *apperr.Error，调用方只应按错误码渲染，不要依赖底层错误文本；
+// 请求体超过 MaxBytes 时映射为 413，其余绑定错误统一为 400。每个请求只应调用
+// 一次，重复调用会再次写入默认值。
 func (e *engine) bindAndValidate(c *gin.Context, req any) error {
 	if err := defaults.Set(req); err != nil {
 		return apperr.InvalidArgument("invalid request")

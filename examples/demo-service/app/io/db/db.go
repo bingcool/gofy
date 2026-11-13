@@ -41,6 +41,8 @@ func Default() *gorm.DB {
 // Set holds one generation of connections. Open builds it, Install publishes it
 // and Close releases the extra instances; the default connection belongs to the
 // framework and is never closed here.
+// Set 持有一个装配代的连接：Open 构建、Install 发布、Close 只释放额外实例；
+// db.default 由框架持有，本包从不关闭它。
 type Set struct {
 	defaultDB *gorm.DB
 	registry  *gofydb.Registry
@@ -51,11 +53,14 @@ type Set struct {
 // NewSet builds a generation that carries only db.default and owns no extra
 // pool. It is the script/test path: the caller publishes a pool the framework
 // opened instead of running the io module lifecycle.
+// NewSet 构造只含 db.default、不持有额外连接池的一代，供脚本与测试使用：
+// 调用方把框架已打开的池直接发布成快照，不跑 io 模块的生命周期。
 func NewSet(defaultDB *gorm.DB) *Set {
 	return &Set{defaultDB: defaultDB}
 }
 
 // Default returns the framework-managed db.default of this generation.
+// Default 返回本代的 db.default；它的生命周期归框架，与本包无关。
 func (s *Set) Default() *gorm.DB {
 	if s == nil {
 		return nil
@@ -65,6 +70,8 @@ func (s *Set) Default() *gorm.DB {
 
 // Instance returns the eagerly opened pool for name; nil when the instance is
 // not configured in this generation.
+// Instance 返回本代在启动时已打开的连接；实例未配置时返回 nil，调用方需自行
+// 判空后回落到 NewIO。
 func (s *Set) Instance(name string) *gorm.DB {
 	if s == nil {
 		return nil
@@ -101,6 +108,7 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 		if name == "default" {
 			// db.default is opened by the framework; NewIO would create a
 			// second pool, so it stays out of the registry.
+			// db.default 由框架打开，再走 NewIO 会多建一个池，因此不进 registry。
 			continue
 		}
 		extra[name] = c
@@ -146,6 +154,9 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 // connection on first use. db.default is framework-managed and stays out of the
 // registry; use Default for it. A script snapshot built with NewSet owns no
 // registry, so it reports ErrNotConfigured.
+// NewIO 返回本代 name 对应的连接池，首次调用时才真正建连。db.default 不在
+// registry 里，需要它请用 Default；NewSet 建的脚本快照没有 registry，查询返回
+// ErrNotConfigured。
 func (s *Set) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
 	if s == nil || s.registry == nil {
 		return nil, gofydb.ErrNotConfigured
@@ -156,12 +167,15 @@ func (s *Set) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
 // NewIO resolves name in the installed generation. It stays for callers that
 // have no request context (scripts); request paths go through the snapshot so
 // the lookup cannot cross a reload.
+// NewIO 在已发布一代里解析 name，保留给没有请求上下文的调用方（脚本）；请求
+// 路径走快照，避免一次请求跨代取连接。
 func NewIO(ctx context.Context, name string) (*gorm.DB, error) {
 	return current.Load().NewIO(ctx, name)
 }
 
 // Install publishes this generation. Readers see the whole set or the previous
 // one, never a half-updated handle.
+// Install 发布本代：读方看到的要么是整代、要么是上一代，不会读到半更新的句柄。
 func (s *Set) Install() {
 	if s == nil {
 		return
@@ -172,6 +186,8 @@ func (s *Set) Install() {
 // Close releases every extra pool of this generation. The installed pointer is
 // cleared only while it still points at this set, so a reload that already
 // installed new connections keeps them intact.
+// Close 释放本代全部额外连接池。只有发布指针仍指向自己时才清空，Reload 已安装
+// 的新连接不会被旧代误删。
 func (s *Set) Close() error {
 	if s == nil {
 		return nil

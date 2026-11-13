@@ -12,6 +12,8 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
+// WatermarkImage overlays a logo on the canvas; the path is confined to
+// BasePath/AllowedRoots.
 // WatermarkImage 在画布上叠加 Logo；路径受 BasePath/AllowedRoots 限制。
 func (e *Editor) WatermarkImage(wm ImageWatermark) error {
 	if err := wm.validate(); err != nil {
@@ -33,6 +35,8 @@ func (e *Editor) WatermarkImage(wm ImageWatermark) error {
 	return nil
 }
 
+// WatermarkText renders a TTF/OTF text watermark; the angle follows the Rotate
+// direction.
 // WatermarkText 渲染 TTF/OTF 文字水印；角度与 Rotate 方向一致。
 func (e *Editor) WatermarkText(wm TextWatermark) error {
 	if err := wm.validate(); err != nil {
@@ -92,6 +96,8 @@ func (e *Editor) WatermarkText(wm TextWatermark) error {
 	return nil
 }
 
+// composite overlays the layer onto the canvas at the anchor; opacity is
+// implemented with a uniform alpha mask.
 // composite 按锚点把图层叠加到画布；opacity 通过统一 alpha 蒙版实现。
 func (e *Editor) composite(layer *stdimage.NRGBA, position Position, offsetX, offsetY int, opacity float64) {
 	dstW, dstH := e.img.Bounds().Dx(), e.img.Bounds().Dy()

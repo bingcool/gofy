@@ -11,6 +11,9 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// Message is the message envelope stored in the queue. __id, __retry_num and
+// __timestamp are reserved fields; business data lives in payload and is restored
+// with Decode.
 // Message 是队列中的消息信封。__id、__retry_num、__timestamp 为保留字段，
 // 业务数据放在 payload 内，用 Decode 还原。
 type Message struct {
@@ -20,6 +23,7 @@ type Message struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
+// Decode unmarshals the message payload into dest.
 // Decode 把消息 payload 反序列化到 dest。
 func (m *Message) Decode(dest any) error {
 	if m == nil {
@@ -59,6 +63,9 @@ func decodeMessage(raw string) (*Message, error) {
 	return &msg, nil
 }
 
+// scheduleRetry writes a failed message into the retry ZSET. A false result means
+// the retry limit was reached. The call mutates msg.RetryNum so the same message
+// is never scheduled twice.
 // scheduleRetry 把失败消息写入重试 ZSET。返回 false 表示已达重试上限。
 // 调用会修改 msg.RetryNum，避免同一消息被重复安排。
 func scheduleRetry(ctx context.Context, client goredis.Cmdable, key string, maxRetries int, msg *Message, delay time.Duration) (bool, error) {
@@ -83,6 +90,8 @@ func scheduleRetry(ctx context.Context, client goredis.Cmdable, key string, maxR
 	return true, nil
 }
 
+// score uses Unix seconds with a fractional part as the ZSET score, which is
+// compatible with swoolefy's second-granularity scores.
 // score 用 Unix 秒（含小数）作为 ZSET 分值，与 swoolefy 的秒级 score 兼容。
 func score(at time.Time) float64 {
 	return float64(at.UnixNano()) / float64(time.Second)

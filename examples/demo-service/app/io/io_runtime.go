@@ -24,6 +24,8 @@ import (
 
 // Module publishes app/io/db, app/io/redis, app/io/amqp, app/io/kafka,
 // app/io/rocketmq and app/io/uuidint handles during startup.
+// Module 在启动时打开各实例并发布 db、redis、amqp、kafka、rocketmq、uuidint 的
+// 包级句柄；它不注册路由，只负责连接生命周期与快照发布。
 type Module struct {
 	rt          *gofy.Runtime
 	dbCfg       map[string]gofy.DatabaseConfig
@@ -44,6 +46,7 @@ type Module struct {
 }
 
 // NewModuleFactory builds the module from the application runtime.
+// NewModuleFactory 把实例配置封进模块工厂；每次装配由框架传入当代的 Runtime。
 func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config) gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
 		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg, uuidintCfg), nil
@@ -51,6 +54,8 @@ func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Co
 }
 
 // NewModule builds a module around rt and the instance configuration.
+// NewModule 用本代 Runtime 与实例配置构造模块；构造函数不建连，连接要到 Start
+// 才建立，因此装配失败不会留下半开的连接。
 func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config) *Module {
 	return &Module{
 		rt:          rt,
@@ -64,12 +69,16 @@ func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg 
 }
 
 // Name returns the module name.
+// Name 返回模块名 "io"，框架用它做模块去重与错误标识。
 func (m *Module) Name() string { return "io" }
 
 // Register is a no-op: this module only publishes connection handles.
+// Register 是空实现：本模块只发布连接句柄，路由由业务模块注册。
 func (m *Module) Register(*support.Router) error { return nil }
 
 // Start opens the extra instances and publishes every handle.
+// Start 依次打开各实例，任一失败都会关掉已建的连接再返回错误；全部就绪后才
+// 安装句柄并一次发布快照，避免请求读到半成品。
 func (m *Module) Start(ctx context.Context) error {
 	if m.rt == nil {
 		return errors.New("io: runtime is required")
@@ -135,6 +144,8 @@ func (m *Module) Start(ctx context.Context) error {
 	rocketmqSet.Install()
 	// uuidint 依赖 redis 的命名实例，放在 redis 安装之后发布。
 	uuidintSet.Install()
+	// The snapshot is published once every handle of this generation is ready;
+	// request middleware takes its connections from it.
 	// 快照在本代全部句柄就绪后一次发布；请求中间件从这里取连接。
 	m.snapshot = newSnapshot(dbSet, redisSet, amqpSet, kafkaSet, rocketmqSet, uuidintSet)
 	Publish(m.snapshot)
@@ -144,6 +155,8 @@ func (m *Module) Start(ctx context.Context) error {
 // Stop closes this generation. A reload starts the replacement before stopping
 // the old module, so the old snapshot is withdrawn only when it is still the
 // published one and the old handles never clear the new connections.
+// Stop 关闭本代全部句柄。Reload 先启动新模块再停旧模块，因此只撤回仍指向自己的
+// 快照，旧句柄不会清掉新连接。
 func (m *Module) Stop(context.Context) error {
 	current.CompareAndSwap(m.snapshot, nil)
 	return errors.Join(

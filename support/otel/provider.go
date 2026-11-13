@@ -30,6 +30,8 @@ const defaultServiceName = "unknown_service"
 
 // Provider owns a tracer provider and its exporter. A nil Provider is valid
 // and behaves like a disabled one, so callers can use it unconditionally.
+// Provider 持有 tracer provider 及其 exporter。nil 的 *Provider 合法，行为等同
+// 于禁用状态，调用方可以无条件调用。
 type Provider struct {
 	cfg          Config
 	logger       *zap.Logger
@@ -52,9 +54,11 @@ type providerOptions struct {
 
 // Option customizes New. Options override the matching Config fields only when
 // the option value is non-empty.
+// Option 自定义 New 的行为。只有选项值非空时才会覆盖对应的 Config 字段。
 type Option func(*providerOptions)
 
 // WithLogger sets the logger used for exporter errors and shutdown failures.
+// WithLogger 设置记录导出错误与关闭失败的 logger。
 func WithLogger(logger *zap.Logger) Option {
 	return func(o *providerOptions) {
 		if logger != nil {
@@ -64,6 +68,7 @@ func WithLogger(logger *zap.Logger) Option {
 }
 
 // WithServiceName sets service.name when the Config does not define it.
+// WithServiceName 在 Config 未定义 service.name 时设置它。
 func WithServiceName(name string) Option {
 	return func(o *providerOptions) {
 		if v := strings.TrimSpace(name); v != "" {
@@ -73,6 +78,7 @@ func WithServiceName(name string) Option {
 }
 
 // WithServiceVersion sets service.version when the Config does not define it.
+// WithServiceVersion 在 Config 未定义 service.version 时设置它。
 func WithServiceVersion(version string) Option {
 	return func(o *providerOptions) {
 		if v := strings.TrimSpace(version); v != "" {
@@ -83,6 +89,7 @@ func WithServiceVersion(version string) Option {
 
 // WithEnvironment sets deployment.environment.name when the Config does not
 // define it.
+// WithEnvironment 在 Config 未定义 deployment.environment.name 时设置它。
 func WithEnvironment(env string) Option {
 	return func(o *providerOptions) {
 		if v := strings.TrimSpace(env); v != "" {
@@ -93,6 +100,8 @@ func WithEnvironment(env string) Option {
 
 // WithSpanExporter replaces the OTLP exporter. It is useful for tests and for
 // applications that ship spans somewhere other than an OTLP collector.
+// WithSpanExporter 替换 OTLP exporter，便于测试，也适用于把 Span 发往
+// OTLP collector 之外的目的地。
 func WithSpanExporter(exporter sdktrace.SpanExporter) Option {
 	return func(o *providerOptions) {
 		if exporter != nil {
@@ -163,6 +172,9 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 		return nil, err
 	}
 
+	// Export failures are recorded by this Provider itself instead of the
+	// process-wide ErrorHandler: they stay visible with Global=false, and
+	// several Apps cannot overwrite each other's handler.
 	// 导出失败由本 Provider 自己记录，不依赖进程级 ErrorHandler：Global=false
 	// 时也能看到失败，而且不会因为多个 App 争抢全局处理器而互相覆盖。
 	report := &errorHandler{logger: po.logger}
@@ -179,6 +191,9 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 	)
 	propagator := defaultPropagator()
 	if cfg.Global {
+		// In global mode all four settings are installed together; the
+		// ErrorHandler is replaced only here. It shares report with the export
+		// wrapper, so the dedup window keeps duplicate errors from printing twice.
 		// 全局模式下四项设置一起安装；ErrorHandler 也只在此时替换。与导出包装
 		// 共用同一个 report，重复错误在去重窗口内不会打印两次。
 		otelapi.SetErrorHandler(report)
@@ -193,9 +208,11 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 }
 
 // Enabled reports whether a real exporter is installed.
+// Enabled 报告是否已安装真实的 exporter。
 func (p *Provider) Enabled() bool { return p != nil && p.enabled }
 
 // ServiceName returns service.name used for spans and the Gin middleware.
+// ServiceName 返回 Span 与 Gin 中间件使用的 service.name。
 func (p *Provider) ServiceName() string {
 	if p == nil {
 		return ""
@@ -205,6 +222,8 @@ func (p *Provider) ServiceName() string {
 
 // TracerProvider returns the tracer provider. It is never nil; a disabled
 // Provider returns a no-op provider.
+// TracerProvider 返回 tracer provider，永不为 nil；禁用的 Provider 返回
+// no-op 实现，调用方不必判空。
 func (p *Provider) TracerProvider() trace.TracerProvider {
 	if p == nil || p.tp == nil {
 		return noop.NewTracerProvider()
@@ -214,6 +233,7 @@ func (p *Provider) TracerProvider() trace.TracerProvider {
 
 // Propagator returns the W3C TraceContext and Baggage propagator. It is never
 // nil.
+// Propagator 返回 W3C TraceContext 与 Baggage 传播器，永不为 nil。
 func (p *Provider) Propagator() propagation.TextMapPropagator {
 	if p == nil || p.propagator == nil {
 		return defaultPropagator()
@@ -222,11 +242,13 @@ func (p *Provider) Propagator() propagation.TextMapPropagator {
 }
 
 // Tracer returns a tracer from the underlying provider.
+// Tracer 从底层 provider 获取 tracer。
 func (p *Provider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
 	return p.TracerProvider().Tracer(name, opts...)
 }
 
 // Config returns the effective configuration with defaults applied.
+// Config 返回填入默认值后的实际生效配置。
 func (p *Provider) Config() Config {
 	if p == nil {
 		return Config{}
@@ -236,6 +258,7 @@ func (p *Provider) Config() Config {
 
 // ForceFlush exports every buffered span before the deadline. It is a no-op
 // when tracing is disabled.
+// ForceFlush 在 deadline 之前导出所有已缓冲的 Span；追踪关闭时为空操作。
 func (p *Provider) ForceFlush(ctx context.Context) error {
 	if p == nil || p.sdk == nil {
 		return nil
@@ -250,6 +273,9 @@ func (p *Provider) ForceFlush(ctx context.Context) error {
 // and safe to call on a nil or disabled Provider. The process-wide providers
 // installed by Config.Global are left untouched, because other components may
 // still hold references to them.
+// Shutdown 刷出待导出的 Span 并释放 exporter。它可重复调用，对 nil 或禁用的
+// Provider 也安全。Config.Global 安装的进程级 provider 不会被改动，因为其他
+// 组件可能仍持有引用。
 func (p *Provider) Shutdown(ctx context.Context) error {
 	if p == nil || p.sdk == nil {
 		return nil
@@ -428,6 +454,12 @@ func hasScheme(endpoint string) bool {
 	return strings.Contains(endpoint, "://")
 }
 
+// loggingExporter wraps the real exporter: export failures are logged through
+// the Provider logger first and then handed back unchanged to the
+// BatchSpanProcessor. Problems stay visible with Global=false without
+// overriding the process-wide ErrorHandler; with Global=true it shares one
+// errorHandler with the global handler, so the dedup window avoids double
+// prints.
 // loggingExporter 包装真实 exporter：导出失败先用 Provider 的 logger 记录，
 // 再把错误原样交回 BatchSpanProcessor。Global=false 时也能看到导出问题，
 // 不需要覆盖进程级 ErrorHandler；Global=true 时与全局处理器共用同一个
@@ -449,6 +481,8 @@ func (e *loggingExporter) Shutdown(ctx context.Context) error {
 
 // errorHandler forwards OTel internal errors to zap and suppresses repeats for
 // a minute, so an unreachable collector cannot flood the log.
+// errorHandler 把 OTel 内部错误转给 zap，并在 1 分钟内抑制重复记录，避免不可
+// 达的 collector 刷满日志。
 type errorHandler struct {
 	logger     *zap.Logger
 	mu         sync.Mutex

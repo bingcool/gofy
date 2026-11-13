@@ -8,15 +8,26 @@ import (
 )
 
 var (
+	// ErrTxFuncRequired reports that Transaction was called without a callback.
 	// ErrTxFuncRequired 表示 Transaction 没有收到回调。
 	ErrTxFuncRequired = errors.New("db: transaction callback is required")
+	// ErrTxDBRequired reports that ctx carries no transaction and the caller
+	// supplied no connection to start one on.
 	// ErrTxDBRequired 表示 ctx 中没有事务，且调用方没有提供可开启事务的连接。
 	ErrTxDBRequired = errors.New("db: transaction requires a connection")
 )
 
+// txKey is the unique context key for the transaction, so it cannot collide
+// with context values of other packages.
 // txKey 是事务在 context 中的唯一键，避免与其他包的 context 值冲突。
 type txKey struct{}
 
+// Transaction starts a transaction on conn and runs fn with a ctx carrying it.
+//
+// The transaction travels down through ctx and repositories pick it up with
+// WithContext, so repository calls of several modules in one request land in
+// the same transaction. Nested calls reuse the outer transaction and create no
+// savepoint: an inner error bubbles up to the outer caller, which rolls back.
 // Transaction 在 conn 上开启事务，并在携带事务的 ctx 上执行 fn。
 //
 // 事务通过 ctx 向下传递，repository 用 WithContext 取用，因此同一次请求里
@@ -40,6 +51,13 @@ func Transaction(ctx context.Context, conn *gorm.DB, fn func(ctx context.Context
 	})
 }
 
+// WithContext returns the connection this call should use: the transaction in
+// ctx when present, otherwise fallback.
+//
+// fallback is usually the repository's explicit connection or the package-level
+// handle installed by app/io; it is also returned when ctx is nil. An explicit
+// connection never overrides an existing transaction: the outermost caller
+// opens it and inner repositories only consume it, never switch connections.
 // WithContext 返回本次调用应使用的连接：ctx 中带有事务时返回该事务，否则返回
 // fallback。
 //

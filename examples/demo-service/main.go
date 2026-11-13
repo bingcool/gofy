@@ -36,6 +36,7 @@ func main() {
 		nacosCfg.File = configPath()
 	}
 	// stop/version/script must work without reaching Nacos.
+	// stop/version/script 子命令不访问 Nacos 也必须可用，因此只在 start 时拉配置。
 	pullConfig := enableNacosSyncConfig && nacosCfg.Enabled && isStartInvocation(os.Args[1:])
 	if pullConfig {
 		if _, err := nacos.Sync(ctx, nacosCfg); err != nil {
@@ -69,6 +70,8 @@ func main() {
 	}
 	// Publish the app before Execute starts the watcher: a config change may
 	// arrive as soon as the watcher polls, and the callback needs to find it.
+	// 必须在 Execute 启动监听之前发布 app：监听首次轮询就可能带来配置变更，
+	// 回调需要立刻能找到运行中的应用。
 	reload.app.Store(app)
 
 	if err := app.Execute(ctx); err != nil {

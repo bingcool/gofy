@@ -11,44 +11,74 @@ import (
 )
 
 // ExportSpec declares one .xlsx export.
+// ExportSpec 声明一次 .xlsx 导出。
 type ExportSpec struct {
+	// FileName must be a basename and gets a .xlsx suffix appended; when empty a
+	// name of the form export_<time>_<random>.xlsx is generated.
+	// The export fails if the target file already exists; it is never overwritten.
 	// FileName 只接受 basename，自动补 .xlsx；为空时生成 export_时间_随机串.xlsx。
 	// 目标文件已存在时导出失败，绝不覆盖。
 	FileName string
+	// SheetName uses Sheet1 when empty.
 	// SheetName 留空时使用 Sheet1。
 	SheetName string
+	// Headers is required and its length fixes the width of every row.
 	// Headers 必填，表头数量决定每行宽度。
 	Headers []string
+	// Rows yields data row by row; an error returned by yield aborts the export.
+	// When nil only the header is written.
 	// Rows 逐行产出数据；yield 返回错误会中止导出。为 nil 时只写表头。
 	Rows func(yield func([]any) error) error
+	// ColumnWidths accepts both "A" and "B:D" forms with widths in 0.1-255.
 	// ColumnWidths 支持 "A" 与 "B:D" 两种写法，宽度范围 0.1~255。
 	ColumnWidths map[string]float64
+	// FreezeRows is the number of header rows to freeze; nil freezes 1 row by
+	// default and a pointer to 0 freezes none.
 	// FreezeRows 冻结表头行数；nil 默认冻结 1 行，指向 0 表示不冻结。
 	FreezeRows *int
+	// AutoFilter adds an auto filter; nil means true.
 	// AutoFilter 是否添加自动筛选；nil 默认 true。
 	AutoFilter *bool
+	// DateLayout is the time.Time layout, 2006-01-02 15:04:05 by default.
 	// DateLayout 是 time.Time 的格式化布局，默认 2006-01-02 15:04:05。
 	DateLayout string
+	// Hooks is the optional export lifecycle hooks.
 	// Hooks 是可选的导出生命周期钩子。
 	Hooks ExportHooks
 }
 
+// ExportHooks provides hooks corresponding to configureSheet/writeHeader/afterRows
+// in the PHP version.
 // ExportHooks 提供与 PHP 版 configureSheet/writeHeader/afterRows 等对应的钩子。
 type ExportHooks struct {
+	// ConfigureSheet runs after the sheet is created and before any cell is
+	// written, for non-cell settings such as gridlines.
 	// ConfigureSheet 在建表后、写任何单元格前调用，用于网格线等非单元格配置。
 	ConfigureSheet func(file *excelize.File) error
+	// ConfigureHeaderStyle may modify the default header style (bold, fill,
+	// border).
 	// ConfigureHeaderStyle 可修改默认表头样式（加粗、底色、边框）。
 	ConfigureHeaderStyle func(style *excelize.Style)
+	// WriteHeader takes over header writing entirely and returns the number of
+	// rows the header occupies (0 means no header).
 	// WriteHeader 完全接管表头写入，返回表头实际占用行数（0 表示无表头）。
 	WriteHeader func(file *excelize.File, sheet string, headers []string, styleID int) (int, error)
+	// AfterRows runs after the rows are written and before the auto filter,
+	// suited to totals, merges and formulas.
 	// AfterRows 在数据写完后、自动筛选前调用，适合合计行/合并/公式。
 	AfterRows func(file *excelize.File, ctx ExportContext) error
+	// AutoFilterRange returns a custom filter range; no filter is added when the
+	// second return value is false.
 	// AutoFilterRange 返回自定义筛选范围；第二个返回值为 false 时不添加筛选。
 	AutoFilterRange func(ctx ExportContext) (string, bool)
+	// BeforeSave runs after the filter and before saving, the last chance for
+	// cell-level adjustments.
 	// BeforeSave 在筛选之后、保存之前调用，是最后的单元格级调整机会。
 	BeforeSave func(file *excelize.File, ctx ExportContext) error
 }
 
+// ExportContext describes the row and column layout of this export; indexes are
+// 0-based and row numbers are 1-based.
 // ExportContext 描述本次导出的行列布局；索引为 0 基，行号为 1 基。
 type ExportContext struct {
 	Headers           []string
@@ -58,11 +88,14 @@ type ExportContext struct {
 	NextRowIndex      int
 }
 
+// NextRowNumber returns the 1-based Excel row number of the next writable row.
 // NextRowNumber 返回下一个可写行的 Excel 行号（1 基）。
 func (c ExportContext) NextRowNumber() int {
 	return c.NextRowIndex + 1
 }
 
+// DefaultAutoFilterRange returns the default A1:last-column+last-row filter
+// range.
 // DefaultAutoFilterRange 返回 A1:最后列+最后一行的默认筛选范围。
 func (c ExportContext) DefaultAutoFilterRange() string {
 	lastColumn := lastColumnLetter(len(c.Headers))
@@ -73,6 +106,7 @@ func (c ExportContext) DefaultAutoFilterRange() string {
 	return fmt.Sprintf("A1:%s%d", lastColumn, lastRow)
 }
 
+// ExportResult is the file information of a successful export.
 // ExportResult 是导出成功后的文件信息。
 type ExportResult struct {
 	Path      string
@@ -82,6 +116,8 @@ type ExportResult struct {
 	Size      int64
 }
 
+// exportPlan is the validated configuration shared by Export and ExportStream;
+// the target file is already reserved exclusively.
 // exportPlan 是 Export 与 ExportStream 共用的已校验配置；目标文件已排他预留。
 type exportPlan struct {
 	dir        string
@@ -94,6 +130,8 @@ type exportPlan struct {
 	layout     string
 }
 
+// prepareExport validates the export arguments and reserves the target file with
+// O_EXCL.
 // prepareExport 校验导出参数并以 O_EXCL 预留目标文件。
 func prepareExport(dir, fileName, sheetName string, headers []string, widths map[string]float64, freeze *int, layout string) (*exportPlan, error) {
 	dir, err := normalizeDirectory(dir)
@@ -152,6 +190,12 @@ func prepareExport(dir, fileName, sheetName string, headers []string, widths map
 	}, nil
 }
 
+// Export builds the .xlsx described by spec in dir and returns the file
+// information.
+//
+// The target file is reserved exclusively: an existing file with the same name
+// fails the export, and an error midway deletes the reserved or partial file so
+// no empty shell is left behind.
 // Export 按 spec 生成 .xlsx 并写入 dir，返回文件信息。
 //
 // 目标文件以排他方式预留：同名文件已存在时直接失败；导出中途出错会删除
@@ -306,6 +350,8 @@ func Export(ctx context.Context, dir string, spec ExportSpec) (*ExportResult, er
 	}, nil
 }
 
+// newHeaderStyle builds the default header style: bold, white text on a blue
+// fill, centred, with thin borders.
 // newHeaderStyle 生成默认表头样式：加粗、蓝底白字、居中、细边框。
 func newHeaderStyle(file *excelize.File, customize func(*excelize.Style)) (int, error) {
 	style := &excelize.Style{
@@ -328,6 +374,7 @@ func newHeaderStyle(file *excelize.File, customize func(*excelize.Style)) (int, 
 	return file.NewStyle(style)
 }
 
+// writeDefaultHeader writes one header row and applies the header style.
 // writeDefaultHeader 写一行表头并应用表头样式。
 func writeDefaultHeader(file *excelize.File, sheet string, headers []string, styleID int) error {
 	for i, header := range headers {
@@ -346,6 +393,8 @@ func writeDefaultHeader(file *excelize.File, sheet string, headers []string, sty
 	return file.SetCellStyle(sheet, "A1", lastCell, styleID)
 }
 
+// writeRows validates and writes the data rows one by one and returns the number
+// of data rows.
 // writeRows 逐行校验并写入数据区，返回数据行数。
 func writeRows(ctx context.Context, file *excelize.File, sheet string, headers []string, headerRows int, layout string, rows func(yield func([]any) error) error) (int, error) {
 	if rows == nil {

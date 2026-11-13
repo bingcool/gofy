@@ -12,18 +12,24 @@ import (
 )
 
 // Result describes the outcome of a Sync.
+// Result 描述一次 Sync 的结果。
 type Result struct {
 	// File is the local config path.
+	// File 是本地配置文件路径。
 	File string
 	// Digest is the hex MD5 of the remote content.
+	// Digest 是远端配置内容的十六进制 MD5。
 	Digest string
 	// Changed reports whether the local file was rewritten.
+	// Changed 表示本地文件是否被重写。
 	Changed bool
 }
 
 // Sync fetches the remote config and writes it to Config.File. The content
 // must be valid YAML; the file is replaced atomically and left untouched when
 // it already matches.
+// Sync 拉取远端配置并写入 Config.File。内容必须是合法 YAML；文件以原子
+// 替换方式写入，内容一致时不改动本地文件。
 func Sync(ctx context.Context, cfg Config) (Result, error) {
 	client, err := NewClient(cfg)
 	if err != nil {
@@ -33,6 +39,7 @@ func Sync(ctx context.Context, cfg Config) (Result, error) {
 }
 
 // Sync fetches the remote config and writes it to Config.File.
+// Sync 拉取远端配置并写入 Config.File。
 func (c *Client) Sync(ctx context.Context) (Result, error) {
 	if !c.cfg.Enabled {
 		return Result{}, ErrDisabled
@@ -93,6 +100,7 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 
 	// The config may contain credentials.
+	// 配置里可能包含凭据，临时文件只授予属主读写权限。
 	if err := tmp.Chmod(0o600); err != nil {
 		cleanup()
 		return fmt.Errorf("nacos: chmod temp file: %w", err)

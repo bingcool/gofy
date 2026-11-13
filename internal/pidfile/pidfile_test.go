@@ -33,6 +33,7 @@ func TestWriteAndRead(t *testing.T) {
 
 	// A rewrite replaces the previous value and leaves no temporary files
 	// behind.
+	// 重写会替换旧值，且不残留任何临时文件。
 	if err := pidfile.Write(path, 7, 0o644); err != nil {
 		t.Fatalf("Write overwrite: %v", err)
 	}

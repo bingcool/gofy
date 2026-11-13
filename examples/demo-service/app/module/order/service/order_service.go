@@ -21,6 +21,8 @@ import (
 var _ orderapi.OrderAPI = (*OrderService)(nil)
 
 // OrderService implements order use cases.
+// OrderService 是订单用例的实现，也是 innerapi.OrderAPI 的唯一实现：对外只暴露
+// 领域视图，模块内持有订单仓库与产品 innerapi 契约。
 type OrderService struct {
 	orderRepository *repository.OrderRepository
 	productAPI      productapi.ProductAPI
@@ -30,6 +32,9 @@ type OrderService struct {
 // NewOrderService builds an OrderService from explicit dependencies.
 // OrderRepository and ProductAPI are required; a nil logger falls back to
 // zap.NewNop().
+// NewOrderService 按显式依赖构造 service：仓库与产品 innerapi 必填，缺失会在
+// 调用时 panic；logger 为 nil 时回退 zap.NewNop()。依赖由装配根在构造期注入，
+// service 不自行查容器。
 func NewOrderService(deps Dependencies) *OrderService {
 	logger := deps.Logger
 	if logger == nil {
@@ -43,6 +48,8 @@ func NewOrderService(deps Dependencies) *OrderService {
 }
 
 // Get returns one order view or ErrOrderNotFound.
+// Get 返回单个订单视图；仓库 ErrNotFound 翻译成订单域 ErrOrderNotFound，model 在
+// 这里换算成 innerapi 视图，不出 service 边界。
 func (s *OrderService) Get(ctx context.Context, id uint64) (*orderapi.Order, error) {
 	o, err := s.orderRepository.FindByID(ctx, id)
 	if err != nil {
@@ -127,6 +134,8 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 }
 
 // List returns one page of order views plus the total count.
+// List 按用户分页返回订单视图与总数，偏移量由页码在这里换算；空页返回空切片
+// 而不是 nil，controller 可直接构造响应列表。
 func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderapi.Order, int64, error) {
 	items, total, err := s.orderRepository.ListByUser(ctx, userID, (page-1)*size, size)
 	if err != nil {
@@ -146,6 +155,8 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 }
 
 // Cancel marks an order as cancelled.
+// Cancel 把订单状态置为 cancelled；订单不存在返回 ErrOrderNotFound，且只按 Debug
+// 记录——404 是预期业务结果，不该当成故障告警。
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
 	if err := s.orderRepository.UpdateStatus(ctx, id, StatusCancelled); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {

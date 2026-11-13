@@ -12,6 +12,8 @@ import (
 )
 
 // ErrNotFound is returned when an order does not exist.
+// ErrNotFound 表示订单不存在，service 据此翻译成领域哨兵错误；gorm 的错误类型
+// 不出仓库边界。
 var ErrNotFound = errors.New("order not found")
 
 // OrderRepository persists orders with GORM. 调用方（service、脚本）直接依赖
@@ -30,6 +32,8 @@ func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
 }
 
 // FindByID returns one order or ErrNotFound.
+// FindByID 按主键取一条订单；记录缺失返回 ErrNotFound，其它失败带上订单 id 包装，
+// 便于上层定位是哪一条查询出错。
 func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order, error) {
 	var o model.Order
 	err := r.conn(ctx).WithContext(ctx).First(&o, id).Error
@@ -43,6 +47,8 @@ func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order
 }
 
 // Create inserts o and fills its generated ID.
+// Create 插入订单并把自增主键回填到入参 o；事务由 ctx 携带，调用方不用显式传 tx，
+// 因此跨模块扣库存与建单能同提交同回滚。
 func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Order, error) {
 	if err := r.conn(ctx).WithContext(ctx).Create(o).Error; err != nil {
 		return nil, fmt.Errorf("create order: %w", err)
@@ -51,6 +57,8 @@ func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Or
 }
 
 // ListByUser returns one page of orders plus the user's total count.
+// ListByUser 按用户分页返回订单与总数；计数与列表两条 SQL 都从同一个 ctx 连接
+// 发出，保证它们落在同一事务或同一代连接上。
 func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error) {
 	var (
 		items []model.Order
@@ -69,6 +77,8 @@ func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset,
 }
 
 // UpdateStatus sets the status and returns ErrNotFound when the id is missing.
+// UpdateStatus 无条件改写订单状态，受影响行数为 0 即 id 不存在，返回 ErrNotFound；
+// 状态是否允许从当前值改为目标值由 service 的领域规则决定。
 func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status string) error {
 	res := r.conn(ctx).WithContext(ctx).Model(&model.Order{}).Where("id = ?", id).Update("status", status)
 	if res.Error != nil {

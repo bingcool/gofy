@@ -13,6 +13,7 @@ import (
 )
 
 // Watcher keeps a local config file in sync with Nacos using long polling.
+// Watcher 通过长轮询让本地配置文件与 Nacos 保持一致。
 type Watcher struct {
 	client *Client
 	logger *zap.Logger
@@ -23,9 +24,11 @@ type Watcher struct {
 }
 
 // WatchOption customizes a Watcher.
+// WatchOption 用于定制 Watcher。
 type WatchOption func(*Watcher)
 
 // WithLogger sets the logger used by the watcher. The default discards logs.
+// WithLogger 设置 watcher 使用的日志器；默认丢弃日志。
 func WithLogger(logger *zap.Logger) WatchOption {
 	return func(w *Watcher) {
 		if logger != nil {
@@ -36,6 +39,7 @@ func WithLogger(logger *zap.Logger) WatchOption {
 
 // WithOnChange runs fn after a changed config has been written. The new file
 // is already in place when fn is called.
+// WithOnChange 在变更后的配置写入完成后执行 fn；调用 fn 时新文件已就位。
 func WithOnChange(fn func(ctx context.Context, result Result) error) WatchOption {
 	return func(w *Watcher) { w.onChange = fn }
 }
@@ -48,6 +52,11 @@ func WithOnChange(fn func(ctx context.Context, result Result) error) WatchOption
 //
 // Windows does not support the termination signal; the error is reported by
 // the watcher.
+// WithRestartOnChange 在配置变更后终止 pidFile 记录的进程（为空表示当前进程）。
+// watcher 不会拉起新进程，需要由 systemd、Kubernetes 或容器重启策略等外部
+// 监管者重启，新进程启动时会重新拉取配置。
+//
+// Windows 不支持该终止信号，错误由 watcher 上报。
 func WithRestartOnChange(pidFile string) WatchOption {
 	return func(w *Watcher) {
 		w.restart = true
@@ -56,6 +65,7 @@ func WithRestartOnChange(pidFile string) WatchOption {
 }
 
 // NewWatcher validates cfg and returns a watcher.
+// NewWatcher 校验 cfg 并返回 watcher。
 func NewWatcher(cfg Config, opts ...WatchOption) (*Watcher, error) {
 	client, err := NewClient(cfg)
 	if err != nil {
@@ -71,6 +81,7 @@ func NewWatcher(cfg Config, opts ...WatchOption) (*Watcher, error) {
 }
 
 // Watch runs a watcher until ctx is cancelled.
+// Watch 运行 watcher 直到 ctx 被取消。
 func Watch(ctx context.Context, cfg Config, opts ...WatchOption) error {
 	w, err := NewWatcher(cfg, opts...)
 	if err != nil {
@@ -81,6 +92,8 @@ func Watch(ctx context.Context, cfg Config, opts ...WatchOption) error {
 
 // Run blocks until ctx is cancelled. Listener and apply failures are logged
 // and retried after RetryDelay; a bad remote config never replaces the file.
+// Run 阻塞直到 ctx 被取消。监听或应用失败会记录日志并在 RetryDelay 后重试；
+// 远端配置非法时不会替换本地文件。
 func (w *Watcher) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -143,6 +156,8 @@ func (w *Watcher) Run(ctx context.Context) error {
 // prime writes the current remote config to disk and returns its digest. If
 // the server is unreachable, it falls back to the digest of the local file so
 // polling can retry without treating the file as changed.
+// prime 先把当前远端配置写入磁盘并返回其 digest。服务端不可达时退回本地文件
+// 的 digest，使后续轮询继续重试而不会误判文件已变更。
 func (w *Watcher) prime(ctx context.Context) (string, error) {
 	result, err := w.client.Sync(ctx)
 	if err == nil {

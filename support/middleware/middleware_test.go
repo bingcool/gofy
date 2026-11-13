@@ -125,6 +125,9 @@ func TestAccessLogRecordsStructuredFields(t *testing.T) {
 		t.Fatalf("path = %v, want /orders", fields["path"])
 	}
 
+	// A path matching SkipPaths must not produce any log entry. healthz is
+	// requested once here, so the entry count stays at 1 (the normal request
+	// above).
 	// 命中 SkipPaths 的路径不能产生任何日志。这里 healthz 只请求一次，
 	// 期望日志条数保持为 1（即上面的普通请求）。
 	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -186,6 +189,11 @@ func TestRecoveryMapsHandledError(t *testing.T) {
 	}
 }
 
+// TestRecoveryBoundaryIsDownstreamOnly pins the coverage boundary of Recovery:
+// it only catches the chain installed after it. A panic in an outer middleware
+// keeps propagating to net/http, while the outer AccessLog still records the
+// final 500 produced from the inner panic. App assembly order relies on both
+// properties.
 // TestRecoveryBoundaryIsDownstreamOnly 固定 Recovery 的覆盖边界：它只捕获安装
 // 之后的链路。装在外层的中间件 panic 会继续向上抛给 net/http；外层 AccessLog
 // 仍能记录内层 panic 转换后的最终 500。App 装配顺序依赖这两个性质。

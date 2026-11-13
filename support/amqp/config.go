@@ -25,10 +25,13 @@ const (
 )
 
 // ErrHostRequired is returned when Config.Hosts is empty.
+// ErrHostRequired 在 Config.Hosts 为空时返回。
 var ErrHostRequired = errors.New("amqp: at least one host is required")
 
 // Host is one broker endpoint. Config tries hosts in order, so a cluster can
 // list its nodes and still connect when the first node is down.
+// Host 是一个 broker 端点。Config 按顺序尝试各 host，集群列出多个节点时，
+// 首个节点宕机仍能连上。
 type Host struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port" default:"5672"`
@@ -36,22 +39,28 @@ type Host struct {
 	Password string `yaml:"password"`
 	Vhost    string `yaml:"vhost" default:"/"`
 	// Scheme is amqp or amqps. amqps enables TLS with the system roots.
+	// Scheme 取 amqp 或 amqps。amqps 使用系统根证书启用 TLS。
 	Scheme string `yaml:"scheme" default:"amqp"`
 }
 
 // Config describes one AMQP connection. Every field applies to all hosts.
+// Config 描述一个 AMQP 连接，所有字段对所有 host 生效。
 type Config struct {
 	Hosts []Host `yaml:"hosts"`
 	// Heartbeat is the keep-alive interval negotiated with the broker. Zero
 	// uses 10s; the broker may lower it.
+	// Heartbeat 是与 broker 协商的保活间隔。0 表示使用 10s，broker 可能下调。
 	Heartbeat time.Duration `yaml:"heartbeat" default:"10s"`
 	// ConnectionTimeout bounds TCP dialing and the AMQP handshake for each
 	// host. Zero uses 5s.
+	// ConnectionTimeout 限制对每个 host 的 TCP 拨号和 AMQP 握手耗时，
+	// 0 表示使用 5s。
 	ConnectionTimeout time.Duration `yaml:"connection_timeout" default:"5s"`
 	Locale            string        `yaml:"locale" default:"en_US"`
 }
 
 // Validate checks the config without connecting.
+// Validate 只校验配置，不建立连接。
 func (c Config) Validate() error {
 	if len(c.Hosts) == 0 {
 		return ErrHostRequired
@@ -120,6 +129,8 @@ func (h Host) withDefaults() Host {
 
 // uri renders the host as an AMQP URI. Credentials are percent-encoded by
 // net/url, so reserved characters in a password are safe.
+// uri 把 host 渲染成 AMQP URI。net/url 会对凭据做百分号编码，密码中的保留
+// 字符因此可以安全使用。
 func (h Host) uri() string {
 	u := url.URL{
 		Scheme: h.Scheme,
@@ -135,6 +146,7 @@ func (h Host) uri() string {
 
 // address is the endpoint used in logs and errors; it never includes
 // credentials.
+// address 是日志与错误中使用的端点，永不包含凭据。
 func (h Host) address() string {
 	return net.JoinHostPort(h.Host, strconv.Itoa(h.Port))
 }

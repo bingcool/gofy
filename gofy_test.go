@@ -66,6 +66,8 @@ type prefixModule struct {
 	prefix string
 }
 
+// blockingStartModule blocks in Start until release is closed, so Reload stalls
+// before publishing the next generation and a race with Shutdown can be created.
 // blockingStartModule 在 Start 中等待 release，用来让 Reload 停在发布新代
 // 之前，制造与 Shutdown 的竞争窗口。
 type blockingStartModule struct {
@@ -220,6 +222,10 @@ func TestHandlerServesTypedRoutes(t *testing.T) {
 	gofytest.Status(t, rr, http.StatusOK)
 }
 
+// TestModulesCanShareTheRootPrefix pins down the usage where several modules all
+// return Prefix() == "": the contract group already carries the full deployment
+// prefix and each module root only mounts its groups' full paths on the root Router,
+// so the framework must not judge them as conflicting mount points.
 // TestModulesCanShareTheRootPrefix 固定「多个模块都返回 Prefix() == ""」的用法：
 // 契约分组自带完整部署前缀，模块根只负责把各自分组的完整路径挂到根 Router，
 // 框架不能按挂载点把它们判成冲突。
@@ -254,6 +260,8 @@ func TestModulesCanShareTheRootPrefix(t *testing.T) {
 	}
 }
 
+// TestDuplicateNonRootPrefixIsRejected confirms non-empty mount points are still
+// deduplicated by prefix.
 // TestDuplicateNonRootPrefixIsRejected 确认非空挂载点仍按前缀去重。
 func TestDuplicateNonRootPrefixIsRejected(t *testing.T) {
 	app, err := gofy.New(
@@ -327,6 +335,10 @@ func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
 	}
 }
 
+// TestMiddlewareOrderContract pins down the middleware install order of
+// buildHTTPWith: framework middleware runs before business global middleware,
+// business global middleware before module group/route middleware, and the handler
+// comes last. Any change that alters the relative order fails here.
 // TestMiddlewareOrderContract 固定 buildHTTPWith 的中间件安装顺序：框架内建
 // 中间件先于业务全局中间件执行，业务全局中间件先于模块分组/路由中间件，最后
 // 才是 handler。任何调整若改变相对顺序都会在这里失败。
@@ -349,6 +361,8 @@ func TestMiddlewareOrderContract(t *testing.T) {
 			c.Next()
 		}
 	}
+	// Framework side effects visible to business middleware, used to prove the built-in
+	// middleware already ran.
 	// 业务中间件可见的框架副作用，用来确认内建中间件已经执行过。
 	assertBuiltinsRan := func(c *gin.Context) {
 		if c.GetString(support.RequestIDKey) == "" {
@@ -419,6 +433,10 @@ func TestMiddlewareOrderContract(t *testing.T) {
 	}
 }
 
+// TestPanicResponseKeepsEnvelopeAndAccessLog proves a panic stays inside the unified
+// Envelope after Recovery, the outer AccessLog records the final 500 and req_id is
+// not lost. trace_id only reaches the access log when telemetry is enabled, so it is
+// not covered here.
 // TestPanicResponseKeepsEnvelopeAndAccessLog 证明 panic 经过 Recovery 后仍是
 // 统一 Envelope，外层 AccessLog 记录最终 500，且 req_id 没有丢。trace_id 只在
 // 启用 telemetry 时写入访问日志，这里不覆盖。
@@ -507,6 +525,8 @@ func TestWithAccessLogOptionsAppliesCustomOptions(t *testing.T) {
 		gofy.WithName("accesslog-options-test"),
 		gofy.WithPIDFile(""),
 		gofy.WithHealthEndpoints(true),
+		// The custom config applies literally: only the module route is skipped, the
+		// default health-check skip no longer holds.
 		// 自定义配置按字面生效：只跳过模块路由，默认的健康检查跳过不再生效。
 		gofy.WithAccessLogOptions(middleware.AccessLogOptions{
 			SkipPaths: []string{"/catalog/ping"},
@@ -927,6 +947,7 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 	}
 
 	// An invalid spec must leave the running routes untouched.
+	// 非法的 spec 必须让正在运行的路由保持原样。
 	err = app.Reload(context.Background(), gofy.ReloadSpec{
 		Database:        &gofy.DatabaseConfig{},
 		ModuleFactories: []gofy.ModuleFactory{reloadFactory("v3", events)},
@@ -951,6 +972,9 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 	}
 }
 
+// TestReloadDrainsInFlightRequests proves the old generation's modules stop only
+// after in-flight requests release their lease, while the new routes already serve
+// traffic during the drain.
 // TestReloadDrainsInFlightRequests 证明旧代模块要等在途请求释放租约后才停止，
 // 而新代路由在排空期间已可对外服务。
 func TestReloadDrainsInFlightRequests(t *testing.T) {
@@ -1014,6 +1038,7 @@ func TestReloadDrainsInFlightRequests(t *testing.T) {
 
 	// The successor is published before the drain, so new requests are served
 	// by it while the old request is still running.
+	// 新 generation 在排空之前就已发布，因此旧请求仍在执行时新请求已经由它处理。
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if getText(t, port, "/reload/ping") == "v2" {
@@ -1048,6 +1073,8 @@ func TestReloadDrainsInFlightRequests(t *testing.T) {
 	if got := countEvents(events, "stop:drain"); got != 1 {
 		t.Fatalf("old module stop count after drain = %d, want 1", got)
 	}
+	// The old module must stop after the in-flight handler returns, otherwise the old
+	// request would keep running against closed resources.
 	// 旧模块 Stop 必须晚于在途 handler 返回，否则旧请求会在资源关闭后继续执行。
 	finishAt, stopAt := -1, -1
 	for i, event := range events.snapshot() {
@@ -1075,6 +1102,9 @@ func TestReloadDrainsInFlightRequests(t *testing.T) {
 	}
 }
 
+// TestReloadStartFailureKeepsOldGeneration proves the old generation keeps serving
+// when a new module fails to start, and the failed generation neither enters the
+// started list nor triggers Stop.
 // TestReloadStartFailureKeepsOldGeneration 证明新代模块启动失败时旧代继续服务，
 // 失败的新代不会进入已启动列表，也不会触发 Stop。
 func TestReloadStartFailureKeepsOldGeneration(t *testing.T) {
@@ -1133,6 +1163,9 @@ func TestReloadStartFailureKeepsOldGeneration(t *testing.T) {
 	}
 }
 
+// TestReloadAndShutdownSerialize parks Reload inside the new generation's Start and
+// triggers Shutdown concurrently: cleanup must wait for Reload to finish before
+// stopping modules, and each generation stops exactly once.
 // TestReloadAndShutdownSerialize 让 Reload 停在新代 Start 中，再并发触发
 // Shutdown：cleanup 必须等 Reload 完成后才停模块，新旧两代各 Stop 一次。
 func TestReloadAndShutdownSerialize(t *testing.T) {
@@ -1193,6 +1226,8 @@ func TestReloadAndShutdownSerialize(t *testing.T) {
 	shutdownDone := make(chan error, 1)
 	go func() { shutdownDone <- app.Shutdown(context.Background()) }()
 
+	// Shutdown now waits for Reload to release reloadMu; once released both generations
+	// stop once, a duplicate Stop is not allowed.
 	// Shutdown 现在等 Reload 释放 reloadMu；放行后两代各停一次，不允许重复 Stop。
 	close(release)
 	select {
@@ -1228,6 +1263,9 @@ func TestReloadAndShutdownSerialize(t *testing.T) {
 	}
 }
 
+// TestReloadRebuildsMiddlewareRegistry proves the registry is assembled per run by
+// the App: modules only resolve aliases by name, so once Reload receives a new
+// registrar the new routes immediately use the new instance.
 // TestReloadRebuildsMiddlewareRegistry 证明注册表由 App 按次装配创建：
 // 模块只按名字解析，Reload 传入新的 registrar 后新路由立即使用新实例。
 func TestReloadRebuildsMiddlewareRegistry(t *testing.T) {

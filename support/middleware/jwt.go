@@ -10,9 +10,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameJWTAuth is the middleware alias JWTAuth uses on contract routes.
 // NameJWTAuth 是 JWTAuth 在契约路由里使用的中间件别名。
 const NameJWTAuth = "jwt-auth"
 
+// JWTAuth verifies the bearer token and puts the validated claims into the gin
+// context.
+//
+// Flow: a path matching SkipPaths passes straight through; otherwise the token
+// is taken from the configured header and scheme (default
+// Authorization: Bearer) and verified by cfg.Parser. When the token is missing
+// or invalid, Optional=true passes the request through anonymously, otherwise
+// the middleware writes WWW-Authenticate and returns the standard 401 envelope
+// whose message is only "unauthorized", never the parser error.
+//
+// On success:
+//   - the claims are stored in the gin context under cfg.ContextKey (default
+//     support.JWTClaimsKey) and handlers read them with Claims;
+//   - the same identity is written into the request context through
+//     frameworkcontext.WithUser, taking precedence over propagated headers, so
+//     downstream calls carry the same user and tenant.
+//
+// Invalid configuration (cfg.Validate failing) returns an error, so the
+// assembly root fails at startup instead of at request time.
 // JWTAuth 校验 bearer token，并把验证通过的 claims 放进 gin context。
 //
 // 流程：命中 SkipPaths 时直接放行；否则按配置的请求头与 scheme（默认
@@ -61,6 +81,9 @@ func JWTAuth(cfg support.JWTAuthConfig, responder support.Responder) (gin.Handle
 			claims, err := cfg.Parser.Parse(token)
 			if err == nil {
 				c.Set(contextKey, claims)
+				// The locally authenticated identity wins over propagated headers;
+				// WithUser writes it back into the context so downstream calls carry
+				// the same user and tenant.
 				// 本地认证身份优先于透传头；WithUser 会把身份回写到 context，
 				// 保证下游调用携带同一个用户和租户。
 				c.Request = c.Request.WithContext(
@@ -80,6 +103,10 @@ func JWTAuth(cfg support.JWTAuthConfig, responder support.Responder) (gin.Handle
 	}, nil
 }
 
+// Claims reads back the claims JWTAuth stored under the context key. A nil c, an
+// empty key (which falls back to the default key), a missing key or a value of
+// another type all return (nil, false), so callers can tell whether the request
+// is authenticated.
 // Claims 按 context key 取回 JWTAuth 写入的 claims。c 为 nil、key 为空时用
 // 默认 key、key 不存在或类型不符都返回 (nil, false)，调用方据此判断是否已认证。
 func Claims(c *gin.Context, contextKey string) (*jwtauth.Claims, bool) {
@@ -97,6 +124,11 @@ func Claims(c *gin.Context, contextKey string) (*jwtauth.Claims, bool) {
 	return claims, ok
 }
 
+// bearerToken extracts the token from the header: with an empty scheme the whole
+// header is the token; otherwise the prefix must match case-insensitively and be
+// followed by a space or tab, and surrounding blanks are trimmed. An empty token
+// counts as absent, so a truncated header such as "Bearer" is never parsed as a
+// credential.
 // bearerToken 从请求头里切出 token：scheme 为空时整个头就是 token；否则要求
 // 前缀大小写不敏感匹配、后面紧跟空格或 Tab，再去掉首尾空白。空 token 视为
 // 不存在，避免把 "Bearer" 这样的残缺头当成凭证去解析。

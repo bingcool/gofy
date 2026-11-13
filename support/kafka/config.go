@@ -25,26 +25,36 @@ const (
 )
 
 // ErrBrokerRequired is returned when Config.Brokers is empty.
+// ErrBrokerRequired 在 Config.Brokers 为空时返回。
 var ErrBrokerRequired = errors.New("kafka: at least one broker is required")
 
 // Config describes one Kafka cluster connection.
+// Config 描述一个 Kafka 集群连接。
 type Config struct {
 	// Brokers is the seed broker list (host:port). The client discovers the
 	// rest of the cluster from metadata.
+	// Brokers 是种子 broker 列表（host:port），其余节点由客户端从 metadata
+	// 中发现。
 	Brokers  []string `yaml:"brokers"`
 	ClientID string   `yaml:"client_id" default:"gofy"`
 	// DialTimeout bounds TCP dialing to each broker. Zero uses 5s.
+	// DialTimeout 限制对每个 broker 的 TCP 拨号耗时，0 表示使用 5s。
 	DialTimeout time.Duration `yaml:"dial_timeout" default:"5s"`
 	// Idempotent enables broker-side deduplication of reissued produce
 	// requests. It is off by default, matching the swoolefy library; enabling
 	// it requires the cluster to allow idempotent writes.
+	// Idempotent 让 broker 对重发的生产请求去重，默认关闭以对齐 swoolefy
+	// 库；开启前需确认集群允许幂等写入。
 	Idempotent bool `yaml:"idempotent"`
 	// RecordRetries limits how often one record is produced. Zero uses 10;
 	// -1 means unlimited (the franz-go default).
+	// RecordRetries 限制单条记录的生产重试次数。0 表示使用 10；-1 表示不限
+	// （franz-go 的默认值），可能造成长时间的阻塞发送。
 	RecordRetries int `yaml:"record_retries" default:"10"`
 }
 
 // Validate checks the config without connecting.
+// Validate 只校验配置，不建立连接。
 func (c Config) Validate() error {
 	if len(c.Brokers) == 0 {
 		return ErrBrokerRequired
@@ -85,6 +95,8 @@ func (c Config) withDefaults() Config {
 // clientOptions renders the shared client options. Consumer groups add their
 // own options on top and create a separate client, because franz-go stores the
 // group configuration per client.
+// clientOptions 生成共享的客户端选项。消费者组会在此基础上追加自己的选项并
+// 另建客户端，因为 franz-go 的组配置是客户端级别的。
 func (c Config) clientOptions() []kgo.Opt {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(c.Brokers...),

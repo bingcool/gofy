@@ -162,6 +162,7 @@ func TestParseExpiryLeewayAndRequirement(t *testing.T) {
 	parser := newParser(t, func() time.Time { return now })
 
 	// Expired 3s ago, inside the 5s leeway.
+	// 3 秒前过期，仍在 5 秒的 leeway 容忍范围内。
 	token := sign(t, "HS256", secret, map[string]any{
 		"iss": "gofy", "aud": "orders", "exp": now.Add(-3 * time.Second).Unix(),
 	})

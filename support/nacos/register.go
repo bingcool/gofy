@@ -15,38 +15,51 @@ import (
 
 // RegisterConfig describes how the application instance is published in
 // Nacos. It maps to application.yaml nacos.service_register.
+// RegisterConfig 描述应用实例如何发布到 Nacos，对应 application.yaml 的
+// nacos.service_register。
 type RegisterConfig struct {
 	// Enabled maps to nacos.enable_nacos_register in application.yaml.
+	// Enabled 对应 application.yaml 的 nacos.enable_nacos_register。
 	Enabled bool
 
 	// ServiceName is the registered service name, for example demo-service.
+	// ServiceName 是注册的服务名，例如 demo-service。
 	ServiceName string
 
 	// IP is the advertised address. Empty triggers automatic detection;
 	// NACOS_SERVICE_REGISTER_HOST and POD_IP take precedence when set.
+	// IP 是向外公布的地址。留空时自动探测；若设置了 NACOS_SERVICE_REGISTER_HOST
+	// 或 POD_IP，则优先使用它们。
 	IP string
 
 	// Port is the advertised port. Zero makes the App use its listener port;
 	// NACOS_SERVICE_REGISTER_PORT takes precedence over both.
+	// Port 是向外公布的端口。为 0 时由 App 使用自身监听端口；
+	// NACOS_SERVICE_REGISTER_PORT 的优先级高于两者。
 	Port int
 
 	// Namespace and Group default to the connection namespace and
 	// DEFAULT_GROUP.
+	// Namespace 和 Group 默认取连接配置中的命名空间与 DEFAULT_GROUP。
 	Namespace string
 	Group     string
 
 	// Cluster defaults to the Nacos default cluster when empty.
+	// Cluster 为空时使用 Nacos 的默认集群。
 	Cluster string
 
 	// Weight defaults to 1.
+	// Weight 默认值为 1。
 	Weight float64
 
 	// HeartbeatInterval is the initial lease renewal interval; Nacos can
 	// adjust it through the heartbeat response. Default 5s.
+	// HeartbeatInterval 是初始续约间隔，Nacos 可通过心跳响应调整它，默认 5s。
 	HeartbeatInterval time.Duration
 
 	// Metadata is stored with the instance and can carry version or protocol
 	// hints for discovery clients.
+	// Metadata 随实例一起保存，可携带版本或协议提示供服务发现客户端使用。
 	Metadata map[string]string
 }
 
@@ -91,6 +104,7 @@ func (c RegisterConfig) validate() error {
 }
 
 // Registrar publishes one instance and renews its lease until stopped.
+// Registrar 发布一个实例并持续续约，直到被停止。
 type Registrar struct {
 	client   *Client
 	cfg      RegisterConfig
@@ -105,6 +119,8 @@ type Registrar struct {
 
 // NewRegistrar builds a registrar from the Nacos connection config and the
 // service_register block. The instance is not registered until Start.
+// NewRegistrar 根据 Nacos 连接配置和 service_register 块创建注册器；实例在调用
+// Start 之前不会注册。
 func NewRegistrar(cfg Config, logger *zap.Logger) (*Registrar, error) {
 	reg := cfg.Register.normalize(cfg.Namespace)
 	if !reg.Enabled {
@@ -150,10 +166,13 @@ func NewRegistrar(cfg Config, logger *zap.Logger) (*Registrar, error) {
 }
 
 // Instance returns the published instance description.
+// Instance 返回已发布的实例描述。
 func (r *Registrar) Instance() Instance { return r.instance }
 
 // Start registers the instance and starts the heartbeat loop. It is
 // idempotent: a second call while running returns nil without re-registering.
+// Start 注册实例并启动心跳循环。它是幂等的：运行期间重复调用直接返回 nil，
+// 不会重复注册。
 func (r *Registrar) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -194,6 +213,7 @@ func (r *Registrar) Start(ctx context.Context) error {
 }
 
 // Stop cancels the heartbeat and deregisters the instance. It is idempotent.
+// Stop 取消心跳并注销实例；该调用是幂等的。
 func (r *Registrar) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -221,6 +241,8 @@ func (r *Registrar) Stop(ctx context.Context) error {
 
 	// Deregistration should still run when the caller's context was already
 	// cancelled by shutdown.
+	// 即使调用方的 ctx 已因关闭被取消，注销仍要执行，因此这里剥离取消信号
+	// 并单独设置 5s 超时。
 	deregCtx, deregCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer deregCancel()
 	if err := r.client.DeregisterInstance(deregCtx, r.instance); err != nil {
@@ -262,6 +284,7 @@ func (r *Registrar) heartbeat(ctx context.Context, done chan struct{}) {
 			)
 			// The lease may have expired after repeated failures: fall back to
 			// a full beat, then register again if that does not help.
+			// 连续失败后租约可能已过期：先退回完整心跳，若仍无效则重新注册。
 			light = false
 			if failures >= 2 {
 				if regErr := r.client.RegisterInstance(ctx, r.instance); regErr != nil {
@@ -295,6 +318,9 @@ func clampBeatInterval(interval time.Duration) time.Duration {
 // ResolveRegisterIP picks the address advertised to Nacos. Precedence:
 // NACOS_SERVICE_REGISTER_HOST, POD_IP, configured IP, the local address used
 // to reach the Nacos host, then any non-loopback IPv4.
+// ResolveRegisterIP 选择向 Nacos 公布的地址，优先级依次为：
+// NACOS_SERVICE_REGISTER_HOST、POD_IP、配置的 IP、访问 Nacos 所用的本机地址，
+// 最后是任意非回环 IPv4 地址。
 func ResolveRegisterIP(configured, nacosHost string) string {
 	if v, ok := lookupEnv("NACOS_SERVICE_REGISTER_HOST"); ok {
 		if ip := parseIPOrHost(v); ip != "" {
@@ -373,6 +399,8 @@ func firstNonLoopbackIPv4() string {
 
 // expandEnvPlaceholder resolves ${VAR} in configuration values; unset
 // variables become empty, matching the swoolefy application.yaml behavior.
+// expandEnvPlaceholder 解析配置值中的 ${VAR}；未设置的变量替换为空串，与
+// swoolefy 的 application.yaml 行为一致。
 func expandEnvPlaceholder(value string) string {
 	if !strings.Contains(value, "${") {
 		return value

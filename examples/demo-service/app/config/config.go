@@ -20,6 +20,7 @@ import (
 )
 
 // DefaultDatabase is the instance the framework manages and scripts use.
+// DefaultDatabase 是框架托管、脚本也使用的实例名；其余实例由 io 模块自行建连。
 const DefaultDatabase = "default"
 
 // Config 的 DB 按实例名分组：框架只托管 default，其余实例由 io 模块建连。
@@ -40,6 +41,7 @@ type Config struct {
 }
 
 // Database returns the named instance; the caller must have checked it exists.
+// Database 返回指定实例的配置；实例缺失时给回零值，存在性由调用方自行确认。
 func (c *Config) Database(name string) gofy.DatabaseConfig {
 	return c.DB[name]
 }

@@ -15,18 +15,25 @@ const (
 	gormSpanKey = "gofy:otel:gorm:span"
 	// maxStatementLength bounds db.statement so one large query cannot blow up
 	// an export batch.
+	// maxStatementLength 限制 db.statement 的长度，避免单条大 SQL 撑爆一次
+	// 导出批次。
 	maxStatementLength = 4096
 )
 
 // GORMPlugin adds client spans around GORM create, query, update, delete, row
 // and raw operations. The statement attribute holds the SQL template with
 // placeholders, never the bound values, so secrets stay out of traces.
+// GORMPlugin 为 GORM 的 create、query、update、delete、row、raw 操作加上
+// client Span。statement 属性只保存带占位符的 SQL 模板，绝不写入绑定值，
+// 敏感数据因此不会进入 Trace。
 type GORMPlugin struct {
 	tracer trace.Tracer
 }
 
 // NewGORMPlugin builds a plugin from a tracer provider. A no-op provider yields
 // a disabled plugin.
+// NewGORMPlugin 用 tracer provider 构建插件。传入 no-op provider 得到的是
+// 不埋点的插件。
 func NewGORMPlugin(tp trace.TracerProvider) *GORMPlugin {
 	if tp == nil {
 		return &GORMPlugin{}
@@ -35,16 +42,21 @@ func NewGORMPlugin(tp trace.TracerProvider) *GORMPlugin {
 }
 
 // Name implements gorm.Plugin.
+// Name 实现 gorm.Plugin 接口。
 func (p *GORMPlugin) Name() string { return "gofy:otel" }
 
 // Initialize registers the callbacks on db. Applying the same plugin twice to
 // one *gorm.DB returns gorm's duplicate callback error.
+// Initialize 在 db 上注册回调。同一个 *gorm.DB 重复应用同一插件会返回 gorm 的
+// 回调重复注册错误，因此每个 db 只应安装一次。
 func (p *GORMPlugin) Initialize(db *gorm.DB) error {
 	if db == nil || p == nil || p.tracer == nil {
 		return nil
 	}
 	// GORM returns unexported callback types, so each processor is registered
 	// through the exported Register method only.
+	// GORM 返回的是未导出的回调类型，因此只能通过导出的 Register 方法注册每个
+	// processor。
 	type registration struct {
 		name   string
 		op     string
@@ -72,6 +84,7 @@ func (p *GORMPlugin) Initialize(db *gorm.DB) error {
 }
 
 // callbackRegistrar is the exported part of GORM's unexported callback type.
+// callbackRegistrar 是 GORM 未导出回调类型中已导出的部分。
 type callbackRegistrar interface {
 	Register(name string, fn func(*gorm.DB)) error
 }
@@ -141,6 +154,7 @@ func dialectName(db *gorm.DB) string {
 
 // InstrumentGORM installs the tracing plugin on db. It is a no-op when tracing
 // is disabled or db is nil.
+// InstrumentGORM 在 db 上安装追踪插件。追踪关闭或 db 为 nil 时为空操作。
 func (p *Provider) InstrumentGORM(db *gorm.DB) error {
 	if !p.Enabled() || db == nil {
 		return nil

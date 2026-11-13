@@ -9,6 +9,7 @@ import (
 	"image/png"
 )
 
+// ProcessResult is the result of one encode pass.
 // ProcessResult 是一次编码的结果。
 type ProcessResult struct {
 	Binary    []byte
@@ -17,6 +18,10 @@ type ProcessResult struct {
 	Size      int64
 }
 
+// Encode merges, in priority order, the global configuration, the preset encode
+// and the per-call options before encoding. The pure Go implementation supports
+// jpeg, png and gif; webp/avif are decode-only (webp) or fail with
+// ErrUnsupportedFormat.
 // Encode 按「全局配置 → 预设 encode → 本次参数」的优先级合并后编码。
 // 纯 Go 实现支持 jpeg、png、gif；webp/avif 仅支持解码（webp）或直接报
 // ErrUnsupportedFormat。
@@ -57,6 +62,8 @@ func (e *Editor) Encode(opts *EncodeOptions) (*ProcessResult, error) {
 	}, nil
 }
 
+// Base64 returns the encoded image as a standard base64 string without a data
+// URI prefix.
 // Base64 返回编码后的标准 base64 字符串（不含 data URI 前缀）。
 func (e *Editor) Base64(opts *EncodeOptions) (string, error) {
 	result, err := e.Encode(opts)
@@ -66,6 +73,8 @@ func (e *Editor) Base64(opts *EncodeOptions) (string, error) {
 	return base64.StdEncoding.EncodeToString(result.Binary), nil
 }
 
+// resolveEncodeOptions merges the three configuration layers and negotiates the
+// format.
 // resolveEncodeOptions 合并三层配置并完成格式协商。
 func (e *Editor) resolveEncodeOptions(opts *EncodeOptions) (EncodeOptions, error) {
 	out := e.encode
@@ -80,6 +89,7 @@ func (e *Editor) resolveEncodeOptions(opts *EncodeOptions) (EncodeOptions, error
 	if out.Format == "" {
 		switch e.sourceFormat {
 		case "png", "webp", "gif":
+			// Avoid flattening the alpha channel onto a solid JPEG background.
 			// 避免把透明通道压成 JPEG 的实色背景。
 			out.Format = "png"
 		default:

@@ -12,14 +12,17 @@ import (
 )
 
 // GormLoggerConfig configures the zap-backed GORM logger.
+// GormLoggerConfig 配置基于 zap 的 GORM 日志器；LogLevel 非法时会退化为 warn，不会中断启动。
 type GormLoggerConfig struct {
 	SlowThreshold             time.Duration
-	LogLevel                  string // silent|error|warn|info
+	LogLevel                  string // silent|error|warn|info；可选值，非法值退化为 warn
 	IgnoreRecordNotFoundError bool
 	ParameterizedQueries      bool
 }
 
 // GormLogger adapts a zap logger to gorm's logger interface.
+// GormLogger 把 zap logger 适配成 gorm 的日志接口；传入 nil 时使用 nop logger，
+// 因此调用方无需保证已有日志器。ParameterizedQueries 为 true 时 Trace 中不再输出 SQL 文本。
 func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface {
 	if l == nil {
 		l = zap.NewNop()

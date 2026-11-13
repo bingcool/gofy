@@ -21,6 +21,8 @@ var _ demoservice.ProductsService = (*ProductController)(nil)
 // ProductController adapts the demoservice product contract to
 // ProductService. It maps contract requests to plain values and service views
 // back to DTOs, and never imports model / repository / innerapi.
+// ProductController 实现契约的 Products 分组：入参拆成普通值、返回值映射成 DTO，
+// 不 import model、repository 或 innerapi，产品内部结构调整不会波及契约层。
 type ProductController struct {
 	productService *service.ProductService
 	logger         *zap.Logger
@@ -29,6 +31,8 @@ type ProductController struct {
 // NewProductController builds a controller around the product service. A nil
 // logger disables logs. Successful requests are left to the access log; the
 // controller logs only the unexpected errors it turns into 500 responses.
+// NewProductController 绑定产品用例，logger 为 nil 时静默。成功请求交给访问日志，
+// controller 只记录转成 500 的意外错误，避免与访问日志重复采样。
 func NewProductController(svc *service.ProductService, logger *zap.Logger) *ProductController {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -40,6 +44,8 @@ func NewProductController(svc *service.ProductService, logger *zap.Logger) *Prod
 }
 
 // GetProduct returns one product.
+// GetProduct 返回单个产品；service 的 ErrNotFound 映射成契约的 ErrProductNotFound，
+// 其它失败返回 500，controller 不接触 innerapi 哨兵错误。
 func (c *ProductController) GetProduct(ctx context.Context, req *productrequest.GetProductRequest) (*productresponse.GetProductResponse, error) {
 	p, err := c.productService.Get(ctx, req.ID.Uint64())
 	if err != nil {
@@ -53,6 +59,8 @@ func (c *ProductController) GetProduct(ctx context.Context, req *productrequest.
 }
 
 // ListProducts returns one page of products.
+// ListProducts 返回一页产品，包含已下架商品：是否可售由响应的 OnSale 字段表达，
+// 由调用方自行过滤，接口本身不做售中筛选。
 func (c *ProductController) ListProducts(ctx context.Context, req *productrequest.ListProductsRequest) (*paging.ListData[productdto.ProductDTO], error) {
 	items, total, err := c.productService.List(ctx, req.Page, req.PageSize)
 	if err != nil {

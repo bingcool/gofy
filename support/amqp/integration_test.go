@@ -12,6 +12,8 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
+// TestIntegrationDirectPublishConsume requires a real RabbitMQ broker and is
+// skipped unless the GOFY_TEST_AMQP_* variables below are set.
 // TestIntegrationDirectPublishConsume 需要真实 RabbitMQ：
 //
 //	GOFY_TEST_AMQP_ADDR=127.0.0.1:5672 \

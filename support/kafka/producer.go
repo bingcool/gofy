@@ -12,14 +12,18 @@ import (
 )
 
 // ErrTopicRequired is returned when a producer or consumer has no topic.
+// ErrTopicRequired 在生产或消费未指定 topic 时返回。
 var ErrTopicRequired = errors.New("kafka: topic is required")
 
 // ProducerConfig describes one producer. Durability and retry settings live on
 // Config because they apply to the shared client.
+// ProducerConfig 描述一个生产者。持久性与重试设置放在 Config 上，因为它们
+// 作用于共享客户端。
 type ProducerConfig struct {
 	Topic string `yaml:"topic"`
 	// FlushTimeout bounds one Publish call, including waiting for the broker
 	// acknowledgement. Zero uses 5s.
+	// FlushTimeout 限制单次 Publish 的耗时，包含等待 broker 确认，0 表示 5s。
 	FlushTimeout time.Duration `yaml:"flush_timeout" default:"5s"`
 }
 
@@ -44,12 +48,14 @@ func (c ProducerConfig) withDefaults() ProducerConfig {
 
 // Producer publishes records to one topic. It shares the client's connection
 // and is safe for concurrent use.
+// Producer 向一个 topic 发布记录。它共用客户端的连接，可以并发使用。
 type Producer struct {
 	raw *kgo.Client
 	cfg ProducerConfig
 }
 
 // NewProducer validates cfg and binds it to client.
+// NewProducer 校验 cfg 并把它绑定到 client。
 func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -63,17 +69,22 @@ func NewProducer(client *Client, cfg ProducerConfig) (*Producer, error) {
 }
 
 // Config returns the effective producer configuration.
+// Config 返回实际生效的生产者配置。
 func (p *Producer) Config() ProducerConfig {
 	return p.cfg
 }
 
 // PublishOptions overrides the defaults for one record.
+// PublishOptions 覆盖单条记录的默认值。
 type PublishOptions struct {
 	// Topic overrides ProducerConfig.Topic.
+	// Topic 覆盖 ProducerConfig.Topic。
 	Topic string
 	// Key chooses the partition through Kafka's default partitioner. Records
 	// with the same key keep their order, so use a stable business id such as
 	// an order id when ordering matters.
+	// Key 经 Kafka 默认分区器决定分区。相同 key 的记录保持顺序，因此对顺序
+	// 敏感的场景应使用订单号这类稳定的业务 ID。
 	Key       string
 	Headers   map[string]string
 	Timestamp time.Time
@@ -81,6 +92,8 @@ type PublishOptions struct {
 
 // Publish sends body and waits for the broker acknowledgement. The wait is
 // bounded by ProducerConfig.FlushTimeout and by ctx, whichever ends first.
+// Publish 发送 body 并等待 broker 确认，等待时间由 ProducerConfig.FlushTimeout
+// 与 ctx 中先到期者决定。
 func (p *Producer) Publish(ctx context.Context, body []byte, opts PublishOptions) error {
 	if p == nil || p.raw == nil {
 		return ErrClientRequired
@@ -117,6 +130,8 @@ func (p *Producer) Publish(ctx context.Context, body []byte, opts PublishOptions
 
 // PublishJSON marshals value as JSON and publishes it. The record gets a
 // content-type header when the caller did not set one.
+// PublishJSON 把 value 序列化为 JSON 后发布。调用方未设置 content-type 头时
+// 会自动补上 application/json。
 func (p *Producer) PublishJSON(ctx context.Context, value any, opts PublishOptions) error {
 	body, err := json.Marshal(value)
 	if err != nil {

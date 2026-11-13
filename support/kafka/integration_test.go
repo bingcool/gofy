@@ -19,6 +19,8 @@ import (
 // unique names. Run them with:
 //
 //	GOFY_TEST_KAFKA_BROKERS=127.0.0.1:9092 go test ./support/kafka -run Integration
+// 这些测试需要可访问的 Kafka 集群，并使用唯一名称的自动创建 topic。运行方式见
+// 上方命令；未设置环境变量时相关用例会跳过。
 
 func testBrokers(t *testing.T) []string {
 	t.Helper()
@@ -61,6 +63,8 @@ func testClient(t *testing.T, brokers []string) *Client {
 // createTopic creates the test topic explicitly: production deployments usually
 // provision topics outside the application, and auto-create may race with the
 // first produce.
+// createTopic 显式创建测试 topic：生产环境通常由应用之外预先创建 topic，而自动
+// 创建可能与首次生产发生竞争。
 func createTopic(t *testing.T, brokers []string, topic string) {
 	t.Helper()
 	raw, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ClientID("gofy-test-admin"))
@@ -205,6 +209,7 @@ func TestIntegrationManualCommitStopsAtFailure(t *testing.T) {
 	}
 
 	// Manual commits stop at msg-1, so the next consumer must redeliver msg-2.
+	// 手动提交只到 msg-1，因此下一个 Consumer 必须重投 msg-2。
 	replay, err := NewConsumer(client, ConsumerConfig{
 		Topic:           topic,
 		Group:           group,

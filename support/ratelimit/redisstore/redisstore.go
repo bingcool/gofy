@@ -1,5 +1,6 @@
 // Package redisstore implements ratelimit.Store on top of Redis so several
 // instances share the same counters.
+// 包 redisstore 在 Redis 之上实现 ratelimit.Store，使多个实例共享同一份计数。
 package redisstore
 
 import (
@@ -16,6 +17,7 @@ import (
 )
 
 // DefaultPrefix namespaces limiter keys.
+// DefaultPrefix 是限流 key 的命名空间前缀。
 const DefaultPrefix = "gofy:ratelimit"
 
 // allowScript is a sorted-set sliding window. It uses the Redis server clock so
@@ -27,6 +29,9 @@ const DefaultPrefix = "gofy:ratelimit"
 // ARGV[2]: limit
 // ARGV[3]: unique member
 // Returns {allowed, limit, remaining, retry_after_ms, reset_at_ms}.
+// allowScript 是用有序集合实现的滑动窗口：时间取自 Redis 服务器时钟，因此时钟
+// 有偏差的实例也能得到一致结果；成员使用 UUID，同一毫秒内的两次请求不会互相
+// 覆盖。
 const allowScript = `
 local key = KEYS[1]
 local window = tonumber(ARGV[1])
@@ -59,6 +64,7 @@ return {1, limit, limit - count - 1, 0, reset}
 var script = goredis.NewScript(allowScript)
 
 // Store implements ratelimit.Store with Redis sorted sets.
+// Store 用 Redis 有序集合实现 ratelimit.Store。
 type Store struct {
 	client goredis.Scripter
 	prefix string
@@ -66,6 +72,8 @@ type Store struct {
 
 // New builds a store. prefix is prepended to every key and defaults to
 // DefaultPrefix; a trailing ":" is trimmed so callers can pass either form.
+// New 构建 Store。prefix 会拼在每个 key 之前，默认 DefaultPrefix；末尾的 ":" 会
+// 被去掉，调用方传哪种形式都可以。
 func New(client goredis.Scripter, prefix string) (*Store, error) {
 	if client == nil {
 		return nil, errors.New("redisstore: client is required")
@@ -79,6 +87,8 @@ func New(client goredis.Scripter, prefix string) (*Store, error) {
 
 // Allow implements ratelimit.Store. Redis errors are returned unchanged so the
 // middleware can fail open or closed according to its configuration.
+// Allow 实现 ratelimit.Store。Redis 错误原样返回，中间件按自身配置决定 fail open
+// 还是 fail closed。
 func (s *Store) Allow(ctx context.Context, key string, limit int, window time.Duration) (ratelimit.Result, error) {
 	if limit <= 0 {
 		return ratelimit.Result{}, ratelimit.ErrInvalidLimit

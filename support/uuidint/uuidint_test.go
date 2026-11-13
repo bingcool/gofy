@@ -13,6 +13,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// testClient returns a client connected to miniredis and closed automatically at
+// the end of the test.
 // testClient 返回连接 miniredis 的客户端，测试结束时自动关闭。
 func testClient(t *testing.T, mr *miniredis.Miniredis) *goredis.Client {
 	t.Helper()
@@ -27,6 +29,8 @@ func testClient(t *testing.T, mr *miniredis.Miniredis) *goredis.Client {
 	return client
 }
 
+// deadClient points at an unreachable address and is used to exercise retries,
+// the error callback and the fallback path.
 // deadClient 指向不可达地址，用来验证重试、告警和降级路径。
 func deadClient(t *testing.T) *goredis.Client {
 	t.Helper()
@@ -133,6 +137,8 @@ func TestGetBatchReturnsAscendingRange(t *testing.T) {
 	if len(next) != 3 {
 		t.Fatalf("len(second batch) = %d, want 3", len(next))
 	}
+	// The in-segment counter resets across milliseconds, so only a trend of
+	// increase is guaranteed, not continuity across batches.
 	// 跨毫秒时段序号会重置，只保证趋势递增，不保证跨批次连续。
 	if next[0] <= ids[len(ids)-1] {
 		t.Fatalf("second batch = %v, want values above %d", next, ids[len(ids)-1])

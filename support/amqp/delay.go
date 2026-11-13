@@ -19,8 +19,10 @@ import (
 // 队列，避免过期消息因为目标交换机不存在而丢失。
 type DelayConfig struct {
 	// TTL is the queue-level message TTL, at least 1ms.
+	// TTL 是队列级消息 TTL，至少 1ms。
 	TTL time.Duration
 	// Target is where expired messages are routed.
+	// Target 是过期消息被路由到的目的地。
 	Target Topology
 }
 
@@ -37,12 +39,15 @@ func (d DelayConfig) declareTarget(ch *amqp091.Channel) error {
 
 // declareDelaySource declares the staging exchange and a queue whose
 // arguments forward expired messages to the target.
+// declareDelaySource 声明暂存 exchange，以及一个通过参数把过期消息转发到
+// Target 的队列。
 func (c QueueConfig) declareDelaySource(ch *amqp091.Channel) error {
 	delay := c.Delay
 	args := mergeArgs(c.Topology.Arguments, amqp091.Table{
 		"x-dead-letter-exchange":    delay.Target.Exchange,
 		"x-dead-letter-routing-key": delay.Target.routingKey(),
 		// RabbitMQ expects milliseconds for queue-level TTL.
+		// RabbitMQ 的队列级 TTL 以毫秒为单位。
 		"x-message-ttl": delay.TTL.Milliseconds(),
 	})
 	if err := c.Topology.declareExchange(ch); err != nil {

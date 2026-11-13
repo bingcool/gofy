@@ -9,29 +9,54 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// StreamExportSpec declares one streaming .xlsx export for large data sets.
+//
+// Differences from ExportSpec: the header is a fixed single row and neither
+// ExportHooks nor an auto filter is supported; data rows are written through the
+// excelize StreamWriter one at a time, so the workbook never resides in memory as
+// a whole.
 // StreamExportSpec 声明一次流式 .xlsx 导出，适合大数据量。
 //
 // 与 ExportSpec 的差异：固定单行表头，不支持 ExportHooks 与自动筛选；
 // 数据行通过 excelize StreamWriter 逐行写盘，工作簿不会整体驻留内存。
 type StreamExportSpec struct {
+	// FileName must be a basename and gets a .xlsx suffix appended; when empty a
+	// default file name is generated.
+	// The export fails if the target file already exists; it is never overwritten.
 	// FileName 只接受 basename，自动补 .xlsx；为空时生成默认文件名。
 	// 目标文件已存在时导出失败，绝不覆盖。
 	FileName string
+	// SheetName uses Sheet1 when empty.
 	// SheetName 留空时使用 Sheet1。
 	SheetName string
+	// Headers is required and its length fixes the width of every row.
 	// Headers 必填，表头数量决定每行宽度。
 	Headers []string
+	// Rows yields data row by row; an error returned by yield aborts the export.
+	// When nil only the header is written.
 	// Rows 逐行产出数据；yield 返回错误会中止导出。为 nil 时只写表头。
 	Rows func(yield func([]any) error) error
+	// ColumnWidths accepts both "A" and "B:D" forms with widths in 0.1-255.
 	// ColumnWidths 支持 "A" 与 "B:D" 两种写法，宽度范围 0.1~255。
 	ColumnWidths map[string]float64
+	// FreezeRows is the number of rows to freeze; nil freezes 1 row by default
+	// and a pointer to 0 freezes none.
+	// The streaming mode has a single header row, so only 0 or 1 is accepted.
 	// FreezeRows 冻结行数；nil 默认冻结 1 行，指向 0 表示不冻结。
 	// 流式模式只有一行表头，因此取值只能是 0 或 1。
 	FreezeRows *int
+	// DateLayout is the time.Time layout, 2006-01-02 15:04:05 by default.
 	// DateLayout 是 time.Time 的格式化布局，默认 2006-01-02 15:04:05。
 	DateLayout string
 }
 
+// ExportStream builds the .xlsx with the excelize StreamWriter: the header and
+// data rows are written one at a time, so memory use does not depend on the row
+// count. Use Export for small data sets or when hooks or an auto filter are
+// needed.
+//
+// As with Export: the file is reserved exclusively, an existing file is never
+// overwritten and a failed export deletes the partial file.
 // ExportStream 用 excelize StreamWriter 生成 .xlsx：表头与数据行逐行写入，
 // 内存占用与数据行数无关。小数据量或需要钩子/自动筛选时用 Export。
 //

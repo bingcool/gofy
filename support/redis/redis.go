@@ -1,6 +1,8 @@
 // Package redis opens and closes a redis.Client. Like support/db it keeps
 // no global state: callers pass a context and a Config, and own the returned
 // client.
+// 包 redis 负责创建并关闭 redis.Client，与 support/db 一样不持有全局状态：
+// 调用方传入 context 与 Config，并自行负责关闭返回的 client（用 Close）。
 package redis
 
 import (
@@ -14,12 +16,15 @@ import (
 )
 
 // ErrAddrRequired is returned when Config.Addr is empty.
+// Config.Addr 为空时返回该错误，可直接与 errors.Is 比较。
 var ErrAddrRequired = errors.New("redis: addr is required")
 
 // Config describes a Redis connection pool.
+// 描述一个 Redis 连接池配置；零值字段在 New 中按 default tag 补默认值，
+// 因此与 go-redis 原生 Options 不同，部分字段无法用零值表达"关闭"语义。
 type Config struct {
-	Network      string        `yaml:"network" default:"tcp"` // tcp|unix
-	Addr         string        `yaml:"addr"`                  // host:port or socket path
+	Network      string        `yaml:"network" default:"tcp"` // tcp|unix；可选值，默认 tcp
+	Addr         string        `yaml:"addr"`                  // host:port or socket path；tcp 填 host:port，unix 填 socket 路径
 	Username     string        `yaml:"username"`
 	Password     string        `yaml:"password"`
 	DB           int           `yaml:"db"`
@@ -31,10 +36,14 @@ type Config struct {
 	PingTimeout  time.Duration `yaml:"ping_timeout" default:"5s"`
 	// MaxRetries is the number of command retries. Zero uses the go-redis
 	// default (3); -1 disables retries.
+	// 命令重试次数。0 表示沿用 go-redis 默认值（3），-1 表示关闭重试；
+	// 小于 -1 会被 Validate 拒绝，超出可重试语义的命令请自行保证幂等。
 	MaxRetries int `yaml:"max_retries"`
 }
 
 // Validate checks the config without connecting.
+// 只做字段校验，不建立连接，可用于启动前的配置自检；返回值直接透传
+// ErrAddrRequired 或 fmt 包装的错误，不修改接收者。
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Addr) == "" {
 		return ErrAddrRequired
@@ -92,6 +101,8 @@ func (c Config) withDefaults() Config {
 
 // New validates cfg, opens a client and verifies it with a ping. The client is
 // closed before returning when the ping fails.
+// 校验 cfg 后创建 client 并 ping 一次；ping 失败时已关掉 client，调用方拿到
+// 的总是 nil client。ctx 为 nil 时退化为 context.Background，不继承任何取消。
 func New(ctx context.Context, cfg Config) (*goredis.Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -126,6 +137,8 @@ func New(ctx context.Context, cfg Config) (*goredis.Client, error) {
 }
 
 // Ping verifies connectivity. A zero timeout uses 5s.
+// 用带超时的子 context 探测连通性，timeout <= 0 时取 5s；client 为 nil 返回
+// 错误而不是 panic，超时只影响本次探测，不会改变池中连接的读超时。
 func Ping(ctx context.Context, client *goredis.Client, timeout time.Duration) error {
 	if client == nil {
 		return errors.New("redis: client is nil")
@@ -146,6 +159,8 @@ func Ping(ctx context.Context, client *goredis.Client, timeout time.Duration) er
 
 // Close releases the client. A nil client is a no-op. The client must not be
 // used afterwards.
+// 释放 client 及其连接池，nil client 视为无操作；关闭后不可再使用该 client。
+// 与 go-redis 一样不等待在途命令结束，调用方需先保证不再有新命令提交。
 func Close(client *goredis.Client) error {
 	if client == nil {
 		return nil
@@ -158,6 +173,8 @@ func Close(client *goredis.Client) error {
 
 // describeAddr keeps the error useful without echoing credentials; only the
 // network, address and database index are included.
+// 生成错误描述时只带 network、addr、db 与超时，刻意不含用户名和密码，
+// 避免错误日志泄露凭据。
 func describeAddr(client *goredis.Client, timeout time.Duration) string {
 	opts := client.Options()
 	return fmt.Sprintf("%s:%s db=%d timeout=%s", opts.Network, opts.Addr, opts.DB, timeout)

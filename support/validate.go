@@ -11,10 +11,14 @@ import (
 
 // defaultValidationMessage is used when no message tag matches the failing
 // rule, so existing clients keep seeing the documented message.
+// defaultValidationMessage 在没有 message tag 命中失败规则时使用，保证已有客户端
+// 始终看到文档承诺的提示文案。
 const defaultValidationMessage = "invalid argument"
 
 // NewValidator returns a validator with tag names derived from json/form/uri
 // tags, so error details use the same keys as the API payload.
+// NewValidator 返回 tag 名取自 json/form/uri 的 validator，使错误 details 的键与
+// API 负载一致；任何对校验规则的修改都应在启动期完成。
 func NewValidator() *validator.Validate {
 	v := validator.New()
 	v.RegisterTagNameFunc(func(field reflect.StructField) string {
@@ -33,6 +37,9 @@ func NewValidator() *validator.Validate {
 // message tags are promoted to msg (joined with "; " when several fields
 // fail) and keep their per-field entries in details, so clients can show a
 // readable message without parsing the envelope.
+// validationError 把校验失败转换为 40001 错误：自定义 message tag 提升到 msg
+// （多个字段失败时以 "; " 连接），同时保留逐字段的 details，客户端无需解析
+// envelope 即可展示可读提示。
 func validationError(req any, err error) *apperr.Error {
 	verrs, ok := err.(validator.ValidationErrors)
 	if !ok {
@@ -63,6 +70,8 @@ func validationError(req any, err error) *apperr.Error {
 // messageFor returns the message tag entry matching the failing rule and
 // whether it was defined. The tag is resolved from the struct namespace so
 // dive errors also pick up the item field's message.
+// messageFor 返回与失败规则匹配的 message tag 条目及其是否已定义；它按 struct
+// namespace 解析，因此 dive 产生的元素错误也能取到对应字段的提示。
 func messageFor(typ reflect.Type, fe validator.FieldError) (string, bool) {
 	if field, ok := fieldFor(typ, fe.StructNamespace()); ok {
 		if msg := parseMessageTag(field.Tag.Get("message"))[fe.Tag()]; msg != "" {
@@ -74,6 +83,8 @@ func messageFor(typ reflect.Type, fe validator.FieldError) (string, bool) {
 
 // fieldFor walks the validator struct namespace, e.g.
 // "CreateOrderRequest.Items[0].SkuID", and returns the failing field.
+// fieldFor 沿 validator 的 struct namespace 逐层定位失败字段；路径无法解析或
+// 字段不存在时返回 false，由调用方回落到默认提示。
 func fieldFor(typ reflect.Type, namespace string) (reflect.StructField, bool) {
 	segments := strings.Split(namespace, ".")
 	if typ == nil || len(segments) < 2 {
@@ -108,6 +119,8 @@ func fieldFor(typ reflect.Type, namespace string) (reflect.StructField, bool) {
 
 // defaultMessage renders a concise fallback without the struct name that
 // validator includes in FieldError.Error().
+// defaultMessage 生成简洁的兜底提示，去掉 validator 在 FieldError.Error() 中
+// 附带的结构体名，避免把内部类型暴露给客户端。
 func defaultMessage(fe validator.FieldError) string {
 	if fe.Param() == "" {
 		return fmt.Sprintf("%s failed on the '%s' rule", fe.Field(), fe.Tag())
@@ -116,6 +129,8 @@ func defaultMessage(fe validator.FieldError) string {
 }
 
 // parseMessageTag parses `tag:message,tag:message` pairs.
+// parseMessageTag 解析 `tag:message,tag:message` 形式的 message tag；格式不符的
+// 条目会被跳过而不是报错，只有能识别的规则生效。
 func parseMessageTag(tag string) map[string]string {
 	if tag == "" {
 		return nil

@@ -89,6 +89,7 @@ func TestAppFallbacksAndSecurityOptions(t *testing.T) {
 	gofytest.Status(t, rr, http.StatusOK)
 
 	// The unauthenticated attempt is limited too: it sits in the same bucket.
+	// 未认证的尝试同样计入限流：它与已认证请求共用一个桶。
 	rr = app.GET("/secure")
 	gofytest.Status(t, rr, http.StatusUnauthorized)
 

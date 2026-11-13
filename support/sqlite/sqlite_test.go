@@ -78,6 +78,8 @@ func TestNewOpensFileDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sql db: %v", err)
 	}
+	// The single-writer default of SQLite: only one connection is kept unless
+	// configured otherwise.
 	// SQLite 的单写默认值：不显式配置时只保留一个连接。
 	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("MaxOpenConnections = %d, want 1", got)

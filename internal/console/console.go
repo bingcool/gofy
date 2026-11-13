@@ -1,6 +1,9 @@
 // Package console renders human-facing CLI output: colored status lines,
 // confirmation prompts and simple tables. Color is disabled when the writer is
 // not a terminal, when NO_COLOR is set, or on Windows.
+// 包 console 渲染面向人的命令行输出：带颜色的状态行、确认提示和简单表格。
+// 当 writer 不是终端、设置了 NO_COLOR 或运行在 Windows 上时，颜色会被关闭，
+// 因此重定向到文件或管道的输出不会混入 ANSI 转义码。
 package console
 
 import (
@@ -13,6 +16,7 @@ import (
 )
 
 // Console writes human-facing CLI output to Out and Err.
+// Console 把面向人的命令行输出写到 Out 和 Err；Color 决定是否着色，可由调用方覆盖。
 type Console struct {
 	Out   io.Writer
 	Err   io.Writer
@@ -20,6 +24,7 @@ type Console struct {
 }
 
 // New builds a Console. Color is detected from Out.
+// New 构建 Console，并依据 Out 是否为终端自动探测是否着色；传入 nil 时输出会 panic。
 func New(out, errOut io.Writer) *Console {
 	return &Console{Out: out, Err: errOut, Color: colorEnabled(out)}
 }
@@ -62,22 +67,29 @@ func (c *Console) line(code, label, format string, args ...any) {
 }
 
 // Info prints a cyan informational line.
+// Info 输出一行青色的提示信息。
 func (c *Console) Info(format string, args ...any) { c.line(cyan, "[INFO]", format, args...) }
 
 // Success prints a green success line.
+// Success 输出一行绿色的成功信息。
 func (c *Console) Success(format string, args ...any) { c.line(green, "[ OK ]", format, args...) }
 
 // Warn prints a yellow warning line.
+// Warn 输出一行黄色的警告信息。
 func (c *Console) Warn(format string, args ...any) { c.line(yellow, "[WARN]", format, args...) }
 
 // Error prints a red error line.
+// Error 输出一行红色的错误信息。
 func (c *Console) Error(format string, args ...any) { c.line(red, "[FAIL]", format, args...) }
 
 // Note prints a plain line.
+// Note 输出一行无色无前缀的普通文本。
 func (c *Console) Note(format string, args ...any) { c.line("", "", format, args...) }
 
 // Confirm writes a yellow prompt and reports whether the next input line is
 // "yes". EOF and any other answer count as a refusal.
+// Confirm 先写出黄色提示，再判断下一行输入是否为 "yes"。EOF 和其他任何回答都算拒绝，
+// 调用方据此决定是否继续破坏性操作；r 为 nil 时直接返回 false。
 func (c *Console) Confirm(r io.Reader, format string, args ...any) (bool, error) {
 	if r == nil {
 		return false, nil
@@ -97,6 +109,7 @@ func (c *Console) Confirm(r io.Reader, format string, args ...any) (bool, error)
 }
 
 // Table renders rows as a bordered two-or-more column table.
+// Table 把行渲染成带边框的多列表格；rows 为空时不输出任何内容，各列按显示宽度对齐。
 func (c *Console) Table(rows [][]string) {
 	if len(rows) == 0 {
 		return
@@ -153,6 +166,8 @@ func (c *Console) border(widths []int, left, mid, right string) {
 }
 
 // displayWidth approximates terminal columns, treating CJK runes as wide.
+// displayWidth 近似计算终端列宽，把 CJK 字符按双宽处理，以保证表格对齐；
+// 这只是估值，不处理组合字符和 emoji。
 func displayWidth(s string) int {
 	width := 0
 	for _, r := range s {

@@ -21,6 +21,8 @@ func TestAccessorsReturnServices(t *testing.T) {
 	}
 }
 
+// Each construction slot takes effect only once: repeated access returns the
+// same instance.
 // 每个构造槽只生效一次：重复取用返回同一实例。
 func TestAccessorsAreIdempotent(t *testing.T) {
 	ctr := container.NewContainer()

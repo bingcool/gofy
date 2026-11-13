@@ -81,6 +81,7 @@ func TestWithDetailsCopiesMap(t *testing.T) {
 
 	// Mutating a returned error must not affect a sibling derived from the
 	// same receiver.
+	// 修改一个返回的错误，不能影响由同一个接收者派生出的另一个错误。
 	sibling := base.WithDetails(map[string]string{"id": "other"})
 	sibling.Details["id"] = "mutated"
 	if got := withDetails.Details["id"]; got != "invalid" {

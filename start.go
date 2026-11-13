@@ -27,6 +27,8 @@ import (
 
 // Run starts the HTTP server and blocks until the context is cancelled, the
 // listener fails, or a fatal runtime error is reported.
+// Run 启动 HTTP 服务器并阻塞，直到 context 被取消、listener 出错或上报了致命
+// 运行时错误；返回的错误同时包含关闭过程中的错误。
 func (a *App) Run(ctx context.Context) error {
 	if err := a.beginStart(false); err != nil {
 		return err
@@ -36,6 +38,8 @@ func (a *App) Run(ctx context.Context) error {
 
 // Handler builds and returns an http.Handler without listening on a port.
 // Modules are registered but not started; call Shutdown to release resources.
+// Handler 构建并返回 http.Handler，但不监听端口。模块只注册不启动，调用方需
+// 自行调用 Shutdown 释放资源；该模式下不会写 pid 文件，也不会注册 Nacos。
 func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	if err := a.beginStart(true); err != nil {
 		return nil, err
@@ -170,12 +174,15 @@ func (a *App) run(parent context.Context) error {
 
 	// The first generation owns the factory-built modules; the injected ones
 	// belong to the App and keep running across reloads.
+	// 第一代持有工厂构建的模块；注入的模块归 App 所有，跨 Reload 持续运行。
 	gen := newGeneration(1, engine)
 	gen.started = a.factoryStarted()
 	gen.db, gen.ownDB = db, ownDB
 	gen.logger, gen.systemLogger, gen.ownLogger = lg, system, own
 	// The server keeps this wrapper for its whole life; Reload only swaps the
 	// generation stored inside it, so the listener is never touched.
+	// server 整个生命周期都持有这个包装器；Reload 只替换其中存放的 generation，
+	// listener 因此始终不动。
 	a.handlerRef = newHandlerSwap(gen)
 	a.gen = gen
 	a.setState(stateRunning)
@@ -195,6 +202,8 @@ func (a *App) run(parent context.Context) error {
 
 	// Register only once the listener is accepting connections, so discovery
 	// clients never receive traffic for a port that is not ready.
+	// 只在 listener 已能接受连接后才注册，发现服务的客户端因此不会把流量打到还
+	// 没准备好的端口上。
 	if err := a.startNacosRegistration(ctx, listener, lg); err != nil {
 		return a.abort(err)
 	}
@@ -258,11 +267,25 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 	} else {
 		// An empty slice disables gin's default "trust every proxy" behavior.
+		// 空切片会关闭 gin 默认的“信任所有代理”行为；否则客户端 IP 可被伪造，
+		// 影响访问日志与限流维度。
 		if err := engine.SetTrustedProxies([]string{}); err != nil {
 			return nil, nil, fmt.Errorf("gofy: disable trusted proxies: %w", err)
 		}
 	}
 
+	// The middleware install order is an external contract
+	// (docs/library-design.md §3.4.6, §7.1): changing it requires updating
+	// TestMiddlewareOrderContract in the same change. Key constraints: RequestID
+	// stays outermost because logs, spans and propagated headers depend on req_id;
+	// Trace follows RequestID so HeaderPropagation and AccessLog can read the OTel
+	// trace id; AccessLog wraps Recovery so a panic turned into 500 is still logged
+	// with its final status; Recovery sits inside CORS so panic responses still carry
+	// CORS headers; BodyLimit must precede every handler that reads the body; App
+	// Middleware and module routes sit inside Recovery so business panics are caught,
+	// while the framework middleware before it runs no user code and its panics fall
+	// back to net/http, so a second Recovery layer here would change what AccessLog
+	// records.
 	// 中间件安装顺序是对外契约（docs/library-design.md §3.4.6、§7.1），
 	// 修改时必须同步 TestMiddlewareOrderContract：
 	//
@@ -288,12 +311,18 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	if err := register(middleware.NameRequestID, requestID); err != nil {
 		return nil, nil, err
 	}
+	// The Trace middleware follows RequestID: the span must exist first so
+	// HeaderPropagation can fall back to the trace id for X-Trace-Id, and probe
+	// requests are not traced.
 	// Trace 中间件紧跟 RequestID：先建立 span，后续 HeaderPropagation 才能用
 	// trace id 兜底 X-Trace-Id；探针请求不进入 trace。
 	if traceMW := a.telemetry.GinMiddleware(otel.SkipPaths("/healthz", "/readyz")); traceMW != nil {
 		engine.Use(traceMW)
 	}
 	if a.opts.headerPropagation {
+		// Installed right after RequestID: fall back to req_id or the OTel trace id for
+		// X-Trace-Id, and make the propagated headers readable from the context by the
+		// middleware and handlers that follow.
 		// 紧贴 RequestID 安装：用 req_id 或 OTel trace id 兜底 X-Trace-Id，
 		// 并保证后续业务中间件和 handler 都能从 context 读到透传头。
 		headerPropagation := middleware.HeaderPropagation(a.opts.trusted)
@@ -313,6 +342,8 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 	}
 	if a.opts.accessLog {
+		// DefaultAccessLogOptions apply by default; a config passed to
+		// WithAccessLogOptions is taken literally and is not merged with the defaults.
 		// 默认用 DefaultAccessLogOptions；WithAccessLogOptions 传入的配置按字面
 		// 生效，不再与默认值合并。
 		accessLogOpts := middleware.DefaultAccessLogOptions()
@@ -357,6 +388,9 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 	}
 	registerFallbacks(engine, a.opts.responder)
 
+	// The root Router carries the single middleware registry of this process and every
+	// module group shares it through the engine; it must be created after the global
+	// engine.Use calls so it inherits the global chain.
 	// 根 Router 携带本进程唯一的中间件注册表，所有模块分组都通过
 	// engine 共享它；必须在全局 engine.Use 之后创建，才能继承全局链。
 	base := support.NewRouter(engine, support.RouterConfig{
@@ -368,6 +402,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 
 	// Rate limiting and JWT apply to module routes only, so probes and unknown
 	// paths keep their plain behavior (200 and 404).
+	// 限流与 JWT 只作用于模块路由，探针和未知路径因此保持原样（200 与 404）。
 	if a.opts.rateLimit != nil {
 		mw, err := middleware.RateLimit(*a.opts.rateLimit, a.opts.responder)
 		if err != nil {
@@ -388,6 +423,8 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 			return nil, nil, err
 		}
 	}
+	// Application middleware registers after the built-in entries; registering the
+	// same alias twice fails at startup.
 	// 应用层中间件在框架内建项之后注册；同别名重复注册会在启动期直接失败。
 	for i, registrar := range registrars {
 		if err := registrar(MiddlewareRegistration{
@@ -467,6 +504,13 @@ func (a *App) registerModules(base *support.Router, modules []support.Module) er
 		}
 		prefix = support.NormalizePrefix(prefix)
 		full := support.NormalizePrefix(a.opts.apiPrefix + prefix)
+		// An empty prefix means the module mounts on the root Router and decides its
+		// real route prefix itself (usually the full deployment prefix of the contract
+		// group); the framework cannot detect conflicts from the mount point alone,
+		// since several modules mounting /api/v1/order or /api/v1/product is normal
+		// usage. Truly duplicate routes are reported by gin at registration time, and
+		// registerModule turns that panic into a startup error. Non-empty mount points
+		// are still deduplicated by prefix.
 		// 空前缀表示模块挂在根 Router 上，真实路由前缀由模块自己决定（通常
 		// 来自契约分组的完整部署前缀），框架只凭挂载点无从判断冲突：多个模块
 		// 各挂 /api/v1/order、/api/v1/product 是正常用法。真正重复的路由由 gin
@@ -514,6 +558,8 @@ func (a *App) startModules(rt *core.Runtime) error {
 // factoryStarted returns the started modules Reload owns, excluding instances
 // injected with WithModules: those belong to the App and keep running across
 // reloads.
+// factoryStarted 返回 Reload 需要负责的已启动模块，排除经 WithModules 注入的
+// 实例：它们归 App 所有，跨 Reload 持续运行。
 func (a *App) factoryStarted() []support.Module {
 	if len(a.opts.modules) == 0 {
 		return a.started
@@ -535,6 +581,8 @@ func (a *App) factoryStarted() []support.Module {
 // startNacosRegistration publishes this instance once the listener is up. A
 // registration failure aborts startup: running without being discoverable is
 // worse than failing fast.
+// startNacosRegistration 在 listener 就绪后发布本实例。注册失败会中止启动：
+// 带着不可发现的状态继续跑，比快速失败更糟。
 func (a *App) startNacosRegistration(ctx context.Context, listener net.Listener, lg *zap.Logger) error {
 	cfg := a.opts.nacosRegistration
 	if cfg == nil || !cfg.Enabled || !cfg.Register.Enabled {
@@ -621,6 +669,8 @@ func (a *App) startPIDRefresh(lg *zap.Logger) {
 
 // registerFallbacks renders unmatched paths and unsupported methods with the
 // same envelope as handlers. Without NoRoute, gin returns a plain-text 404.
+// registerFallbacks 用与 handler 相同的包络渲染未匹配路径和不支持的方法；没有
+// NoRoute 时 gin 会返回纯文本 404，破坏响应格式的统一。
 func registerFallbacks(engine *gin.Engine, responder support.Responder) {
 	engine.HandleMethodNotAllowed = true
 	engine.NoRoute(func(c *gin.Context) {
@@ -653,6 +703,8 @@ func registerHealth(engine *gin.Engine, rt *core.Runtime) {
 
 // Shutdown triggers a graceful stop. It is idempotent and safe to call
 // concurrently. Calling it before the app starts is a no-op.
+// Shutdown 触发优雅停止：可重复调用，也可并发调用；App 尚未启动时调用是 no-op。
+// 返回的是清理阶段累积的错误，且在停止完成后重复调用会得到同一结果。
 func (a *App) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -697,10 +749,12 @@ func (a *App) abort(err error) error {
 }
 
 // cleanup runs once and releases every resource the App owns.
+// cleanup 只执行一次，释放 App 持有的全部资源；重复调用返回首次的结果。
 func (a *App) cleanup() error {
 	a.cleanupOnce.Do(func() {
 		// Wait for an in-flight Reload: it may still be swapping modules and
 		// resources, and cleanup must see the final state.
+		// 等待在途的 Reload 结束：它可能还在替换模块与资源，清理必须看到最终状态。
 		a.reloadMu.Lock()
 		defer a.reloadMu.Unlock()
 
@@ -716,6 +770,8 @@ func (a *App) cleanup() error {
 
 		// Deregister before closing the server so discovery clients stop
 		// routing new requests here while in-flight ones finish.
+		// 先注销再关闭 server：发现服务的客户端会停止把新请求路由过来，在途请求
+		// 仍能正常结束。
 		if a.registrar != nil {
 			if err := a.registrar.Stop(ctx); err != nil {
 				lg.Warn("nacos service deregistration failed", zap.Error(err))
@@ -754,6 +810,9 @@ func (a *App) cleanup() error {
 			}
 		}
 
+		// Spans produced by module shutdown and database close are still in the buffer,
+		// so flush them all here. An export failure is only logged: an unavailable
+		// collector must not be escalated into a shutdown error.
 		// 模块停机和数据库关闭产生的 span 也在缓冲区内，最后统一 flush。
 		// 导出失败只记录日志，不把采集器不可用升级成停机错误。
 		_ = a.telemetry.Shutdown(ctx)

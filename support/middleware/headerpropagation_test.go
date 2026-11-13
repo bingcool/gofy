@@ -23,6 +23,8 @@ func propagatedHandler(c *gin.Context) {
 	})
 }
 
+// Identity headers sent by an untrusted peer must be dropped, and Authorization
+// must not enter the propagation context either.
 // 不可信对端携带的身份头必须丢弃，Authorization 也不进入透传上下文。
 func TestHeaderPropagationDropsIdentityFromUntrustedPeer(t *testing.T) {
 	engine := newGin()
@@ -55,6 +57,8 @@ func TestHeaderPropagationDropsIdentityFromUntrustedPeer(t *testing.T) {
 	}
 }
 
+// Identity headers forwarded by a trusted proxy are kept, and the client IP uses
+// the original value supplied by the proxy.
 // 可信代理转发的身份头保留，客户端 IP 使用代理提供的原值。
 func TestHeaderPropagationKeepsIdentityFromTrustedProxy(t *testing.T) {
 	engine := newGin()
@@ -79,6 +83,7 @@ func TestHeaderPropagationKeepsIdentityFromTrustedProxy(t *testing.T) {
 	}
 }
 
+// Without an X-Trace-Id the trace id falls back to the value RequestID generated.
 // 没有 X-Trace-Id 时，trace id 使用 RequestID 生成的值。
 func TestHeaderPropagationUsesRequestIDAsTraceFallback(t *testing.T) {
 	engine := newGin()

@@ -10,11 +10,25 @@ import (
 	"github.com/google/uuid"
 )
 
+// NameRequestID is the middleware alias RequestID uses on contract routes.
 // NameRequestID 是 RequestID 在契约路由里使用的中间件别名。
 const NameRequestID = "request-id"
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
+// RequestID reads (or generates) the request ID and makes sure the same ID
+// reaches downstream services:
+//
+//   - a legal X-Trace-ID on the incoming request is reused;
+//   - when it is missing or malformed a UUID is generated;
+//   - the ID is written to the gin context (response envelope req_id) and to the
+//     X-Trace-ID request/response headers;
+//   - the ID goes into the request context via support.ContextWithRequestID, so
+//     business code can read it directly;
+//   - it is also merged into headerpropagation's X-Trace-Id, which the
+//     gofy-interface-service client forwards downstream on its own, so no manual
+//     ContextWithRequestID call is needed.
+//
 // RequestID 读取（或生成）请求 ID，并保证同一个 ID 能传到下游服务：
 //
 //   - 上游请求带合法 X-Trace-ID 时直接复用；
@@ -29,6 +43,9 @@ func RequestID(header string) gin.HandlerFunc {
 		header = support.DefaultRequestIDHeader
 	}
 	return func(c *gin.Context) {
+		// Upstream first: reuse X-Trace-ID whenever it is legal, so a custom
+		// header configured by the business never breaks a trace already started
+		// upstream. A new ID is generated only when neither header is usable.
 		// 上游优先：只要 X-Trace-ID 合法就沿用它；即使业务配置了自定义头，
 		// 也不会覆盖上游已经建立的 trace 链路。都没有时才生成新的。
 		id := strings.TrimSpace(c.GetHeader(support.DefaultRequestIDHeader))
@@ -42,11 +59,19 @@ func RequestID(header string) gin.HandlerFunc {
 		c.Set(support.RequestIDKey, id)
 		c.Request.Header.Set(header, id)
 		if header != support.DefaultRequestIDHeader {
+			// In custom-header mode X-Trace-ID is aligned as well, so downstream
+			// sees the same trace value.
 			// 自定义头模式下也把 X-Trace-ID 对齐，保证下游拿到的 trace 一致。
 			c.Request.Header.Set(support.DefaultRequestIDHeader, id)
 		}
 		c.Writer.Header().Set(header, id)
 
+		// The request ID enters two layers of context:
+		//  1. the support private key, readable with
+		//     support.RequestIDFromContext(ctx) in handlers;
+		//  2. the headerpropagation contract key, which the downstream
+		//     interface-service client forwards as X-Trace-Id automatically; an
+		//     existing upstream value is kept here rather than regenerated.
 		// 请求 ID 同时进入两层 context：
 		//  1. support 私钥：handler 里 support.RequestIDFromContext(ctx) 可取；
 		//  2. headerpropagation 契约 key：下游 interface-service 客户端自动转发

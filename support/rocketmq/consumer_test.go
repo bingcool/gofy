@@ -77,6 +77,8 @@ func TestConsumerFilter(t *testing.T) {
 
 // fakeView implements viewReader; the SDK MessageView has no public
 // constructor, so the mapping is tested through this stand-in.
+// fakeView 实现 viewReader；SDK 的 MessageView 没有公开构造函数，因此通过该
+// 替身测试字段映射。
 type fakeView struct {
 	id         string
 	topic      string
@@ -179,6 +181,7 @@ func TestConsumerRequiresHandler(t *testing.T) {
 }
 
 // fakeConsumer scripts the pull loop without a broker.
+// fakeConsumer 在没有 broker 的情况下编排拉取循环的返回结果。
 type fakeConsumer struct {
 	mu         sync.Mutex
 	batches    [][]deliveredMessage

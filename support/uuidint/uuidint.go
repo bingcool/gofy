@@ -3,6 +3,12 @@
 // millisecond time prefix from Redis TIME with a segment counter and checks for
 // same-millisecond collisions, so PHP and Go services can share the same
 // Redis key and produce the same ID layout.
+// 包 uuidint 基于 Redis 生成分布式、趋势递增的 int64 ID，移植自 swoolefy PHP 的
+// Uuid 库：Lua 脚本把 Redis TIME 得到的毫秒前缀与段内序号拼接，并处理同毫秒冲突，
+// 因此 PHP 与 Go 服务可以共用同一个 Redis key 并生成相同布局的 ID。
+//
+// ID 只在单进程内趋势递增，跨实例的严格单调需要调用方另外保证；取号结果依赖
+// Redis 可用性，Redis 全部失败时返回包装了 ErrUnavailable 的错误。
 package uuidint
 
 import (
@@ -17,17 +23,23 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
+// MaxIncr is the largest counter allowed within one millisecond; beyond it the
+// Lua script rolls incrKey.
 // MaxIncr 是同一毫秒内允许的最大序号；超过后 Lua 会滚动 incrKey。
 const MaxIncr = 999990
 
 var (
 	// ErrKeyRequired is returned when the Redis key is empty.
+	// Redis key 为空时由 New 返回，可用 errors.Is 比较。
 	ErrKeyRequired = errors.New("uuidint: key is required")
 	// ErrUnavailable is returned when every retry and fallback failed.
+	// 主连接重试与全部备用连接都失败时返回，可用 errors.Is 判定；原始错误通过
+	// errors.Join 保留在链上，告警回调也会先收到一次同样的错误。
 	ErrUnavailable = errors.New("uuidint: no id is available")
 )
 
 // Option configures a Generator.
+// Option 在 New 中按顺序应用，任一返回错误即中止构造；nil Option 会被跳过。
 type Option func(*settings) error
 
 type settings struct {
@@ -46,6 +58,8 @@ type settings struct {
 
 // WithClient uses an explicit Redis client as the primary source. It cannot be
 // combined with WithInstance.
+// 用显式传入的 client 作为主连接；client 为 nil 时构造报错，与 WithInstance
+// 互斥。调用方仍持有该 client，Generator 不负责关闭它。
 func WithClient(client *goredis.Client) Option {
 	return func(s *settings) error {
 		if client == nil {
@@ -64,6 +78,10 @@ func WithClient(client *goredis.Client) Option {
 // that own per-generation connections should pass WithClient with that
 // generation's client instead. Without WithClient or WithInstance the alias
 // "default" is used. It cannot be combined with WithClient.
+// 用 support/redis 中的命名实例作为主连接。别名在每次取号时经包级 redis.NewIO
+// 解析，跟随进程内最后一次 Install 的 Registry，而不是固定某一代；它是单 App
+// 脚本的兼容路径，按代持有连接的组件应改用 WithClient 传入该代的 client。
+// 两者都不指定时使用别名 "default"，与 WithClient 互斥。
 func WithInstance(name string) Option {
 	return func(s *settings) error {
 		name = strings.TrimSpace(name)
@@ -78,6 +96,8 @@ func WithInstance(name string) Option {
 
 // WithFallbackClients appends explicit clients tried, in order, after the
 // primary source fails all its retries.
+// 追加显式 client 作为备用连接，按传入顺序在主连接重试全部失败后各尝试一次；
+// 任一为 nil 时构造报错。
 func WithFallbackClients(clients ...*goredis.Client) Option {
 	return func(s *settings) error {
 		for _, client := range clients {
@@ -92,6 +112,8 @@ func WithFallbackClients(clients ...*goredis.Client) Option {
 
 // WithFallbackInstances appends named support/redis instances tried, in order,
 // after the primary source fails all its retries.
+// 追加命名实例作为备用连接，按传入顺序在主连接重试全部失败后各尝试一次；
+// 名称去空白后为空时构造报错。
 func WithFallbackInstances(names ...string) Option {
 	return func(s *settings) error {
 		for _, name := range names {
@@ -107,6 +129,8 @@ func WithFallbackInstances(names ...string) Option {
 
 // WithTTL sets the lifetime of the counter keys. Defaults to 15s; values below
 // one second are rejected because Redis EXPIRE needs whole seconds.
+// 设置计数器 key 的 TTL，默认 15s；小于 1s 的非零值直接报错，因为 Redis EXPIRE
+// 只接受整秒，传 0 表示沿用默认值。
 func WithTTL(ttl time.Duration) Option {
 	return func(s *settings) error {
 		if ttl < 0 {
@@ -123,6 +147,8 @@ func WithTTL(ttl time.Duration) Option {
 // WithRetry sets how many attempts the primary source gets (default 3) and the
 // delay between them (default 150ms). Retries also cover same-millisecond
 // collisions reported by the Lua script.
+// 设置主连接的总尝试次数（默认 3）与间隔（默认 150ms）；Lua 报同毫秒冲突时也走
+// 这套重试。等待可被 ctx 取消，取消后立即返回 ctx.Err() 而不进入备用连接。
 func WithRetry(times int, delay time.Duration) Option {
 	return func(s *settings) error {
 		if times < 0 {
@@ -139,6 +165,8 @@ func WithRetry(times int, delay time.Duration) Option {
 
 // WithErrorHandler installs a callback invoked once when the primary source
 // fails all its retries, before the fallbacks are tried.
+// 主连接重试全部失败、尚未尝试备用连接时回调一次，用于告警；回调在取号路径上
+// 同步执行，应保持快速且不 panic。
 func WithErrorHandler(fn func(error)) Option {
 	return func(s *settings) error {
 		s.onError = fn
@@ -154,6 +182,12 @@ func WithErrorHandler(fn func(error)) Option {
 //
 // size must be in [1, MaxIncr]; interval must be at least 10ms (1s–2s is a
 // sensible range, mirroring the PHP recommendation).
+// 启用本地预取池：StartPool 立即预取一批 size 个 ID，之后按 interval 定时补充，
+// Get 与 GetBatch 先消费池内缓冲再访问 Redis。池内 ID 是提前分配的，所以空闲三个
+// 周期后（缓冲被清空）或 StopPool 丢弃时会产生空洞，但绝不会重复。
+//
+// size 必须在 [1, MaxIncr] 内；interval 至少 10ms（1s–2s 是合理区间，与 PHP
+// 版建议一致）。
 func WithPool(size int, interval time.Duration) Option {
 	return func(s *settings) error {
 		if size < 1 || size > MaxIncr {
@@ -168,6 +202,8 @@ func WithPool(size int, interval time.Duration) Option {
 	}
 }
 
+// source is the Redis connection used for one allocation: an explicit client or
+// an alias resolved lazily.
 // source 是一次取号要用的 Redis 连接：显式客户端，或按别名懒解析。
 type source struct {
 	client   *goredis.Client
@@ -182,6 +218,8 @@ func (s source) resolve(ctx context.Context) (*goredis.Client, error) {
 }
 
 // Generator issues IDs from one Redis counter key.
+// Generator 从同一个 Redis 计数器 key 取号；Get、GetBatch 可并发调用，
+// 启动预取池后由内部定时器补充，StopPool 会停止该定时器。
 type Generator struct {
 	key        string
 	ttl        time.Duration
@@ -196,6 +234,9 @@ type Generator struct {
 // New builds a Generator for key. The primary source is WithClient, or
 // WithInstance, or the "default" named support/redis instance when neither is
 // given.
+// 为 key 构造 Generator，key 去空白后为空返回 ErrKeyRequired。主连接优先取
+// WithClient，其次 WithInstance，都没有时使用别名 "default"；同时传入两者会报错。
+// New 不建立连接，启用预取池时需再调用 StartPool。
 func New(key string, opts ...Option) (*Generator, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -242,6 +283,7 @@ func New(key string, opts ...Option) (*Generator, error) {
 }
 
 // Get returns one ID. It is GetBatch with n=1.
+// 返回单个 ID，等价于 GetBatch(ctx, 1)；错误语义与 GetBatch 相同。
 func (g *Generator) Get(ctx context.Context) (int64, error) {
 	ids, err := g.GetBatch(ctx, 1)
 	if err != nil {
@@ -255,8 +297,10 @@ func (g *Generator) Get(ctx context.Context) (int64, error) {
 // range [max-remain+1, max]). n above MaxIncr is clamped, so the returned
 // length can be smaller than requested. A non-positive n returns an empty
 // result without calling Redis.
-//
-// 取号失败且已经从池里取出部分 ID 时，这些 ID 会随错误一起返回，不会静默丢弃。
+// 分配 n 个 ID 并按升序返回。启用池时先消费缓冲，再向 Redis 取剩余部分（闭区间
+// [max-remain+1, max]）；n 超过 MaxIncr 会被钳制，返回长度可能小于请求值，
+// n <= 0 直接返回空结果且不访问 Redis。出错且池内已取出部分 ID 时，这些 ID 随
+// 错误一起返回，不会静默丢弃。
 func (g *Generator) GetBatch(ctx context.Context, n int) ([]int64, error) {
 	if n <= 0 {
 		return nil, nil
@@ -273,6 +317,9 @@ func (g *Generator) GetBatch(ctx context.Context, n int) ([]int64, error) {
 	return ids, nil
 }
 
+// generate retries the primary source retryTimes times; if it still fails it
+// fires the error callback, then tries each fallback once, matching the PHP
+// version.
 // generate 先在主连接上重试 retryTimes 次；仍失败则回调告警，再依次尝试
 // 备用连接各一次（与 PHP 版一致）。
 func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
@@ -318,6 +365,9 @@ func (g *Generator) wait(ctx context.Context) error {
 	}
 }
 
+// try resolves the connection and runs the Lua script once. An empty array from
+// Lua means a same-millisecond collision or a counter rollover, which is
+// returned as a retryable error.
 // try 解析连接并执行一次 Lua。Lua 返回空数组表示同一毫秒冲突或段号回绕，
 // 这里作为可重试错误返回。
 func (g *Generator) try(ctx context.Context, src source, step int) (int64, error) {
@@ -357,6 +407,8 @@ func toInt64(v interface{}) (int64, error) {
 	}
 }
 
+// clampStep mirrors the clamping done in Lua; expanding a batch must use the
+// same step.
 // clampStep 与 Lua 的钳制保持一致，批量展开必须用同一个步长。
 func clampStep(n int) int {
 	if n > MaxIncr {
@@ -368,6 +420,9 @@ func clampStep(n int) int {
 	return n
 }
 
+// expandRange returns [maxID-count+1, maxID]; maxID is the right end of this
+// INCRBY, so count itself must not be subtracted or the previous ID would be
+// included and the current maximum lost.
 // expandRange 返回 [maxID-count+1, maxID]；maxID 是本次 INCRBY 的右端，
 // 不能减 count 本身，否则会包含上一号并丢掉本段最大号。
 func expandRange(maxID int64, count int) []int64 {
@@ -383,6 +438,14 @@ func expandRange(maxID int64, count int) []int64 {
 	return ids
 }
 
+// uuidScript keeps the same semantics as PHP LuaScripts::getUuidLuaScript():
+//  1. INCRBY the in-segment counter; above MaxIncr delete the key and retry, and
+//     discard the segment if it is still over the limit;
+//  2. build a 19-digit prefix from Redis TIME seconds + milliseconds (seconds +
+//     milliseconds + six zeros);
+//  3. on the first write of a segment compare the previous millisecond stamp and
+//     return an empty result on a same-millisecond collision so the caller retries.
+//
 // uuidScript 与 PHP LuaScripts::getUuidLuaScript() 保持同一语义：
 //  1. INCRBY 段内序号，超过 MaxIncr 先删 key 重试，仍超限则本段作废；
 //  2. 用 Redis TIME 的秒 + 毫秒拼 19 位前缀（秒 + 毫秒 + 6 个 0）；

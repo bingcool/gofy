@@ -1,5 +1,7 @@
 // Package commandline builds the cobra command tree. It receives callbacks
 // and descriptors only; it never imports the gofy root package.
+// 包 commandline 负责构建 cobra 命令树。它只接收回调和描述信息，从不 import
+// gofy 根包，因此不会与上层应用和框架生命周期产生循环依赖。
 package commandline
 
 import (
@@ -14,11 +16,13 @@ import (
 )
 
 // StartOptions are the flags of the start command.
+// StartOptions 是 start 命令的旗标；Daemon 为 true 时先 detach 到后台再让父进程退出。
 type StartOptions struct {
 	Daemon bool
 }
 
 // StopOptions are the flags of the stop command.
+// StopOptions 是 stop/restart 命令的旗标；Timeout 到期后只有 Force 为 true 才会发送 SIGKILL。
 type StopOptions struct {
 	PIDFile string
 	Timeout time.Duration
@@ -26,12 +30,14 @@ type StopOptions struct {
 }
 
 // Script describes a registered script for listing.
+// Script 描述一个已注册脚本，仅用于 `script --list` 的展示。
 type Script struct {
 	Name  string
 	Short string
 }
 
 // Command is a custom subcommand.
+// Command 是一个自定义子命令；Flags 可为空，Run 必须非空，否则执行时会 panic。
 type Command struct {
 	Use   string
 	Short string
@@ -40,6 +46,8 @@ type Command struct {
 }
 
 // Deps contains everything Build needs.
+// Deps 包含 Build 所需的全部依赖。Start/Stop/Restart/RunScript/Version 等回调由调用方注入，
+// 未设置 Out/ErrOut 时输出被丢弃，Usage 默认为原样返回错误。
 type Deps struct {
 	Name   string
 	Short  string
@@ -63,6 +71,7 @@ type Deps struct {
 }
 
 // Build constructs a fresh command tree.
+// Build 构建一棵全新的命令树；每次调用都返回独立实例，便于测试中重复构建而互不干扰。
 func Build(d Deps) *cobra.Command {
 	if d.Usage == nil {
 		d.Usage = func(err error) error { return err }
@@ -170,6 +179,7 @@ func newRestartCmd(d Deps) *cobra.Command {
 }
 
 // confirmAction asks for a yes/no confirmation. Anything but "yes" cancels.
+// confirmAction 请求 yes/no 确认，除 "yes" 之外的任何输入都视为取消，此时返回 false 且不执行操作。
 func confirmAction(d Deps, verb string) (bool, error) {
 	c := console.New(d.Out, d.ErrOut)
 	ok, err := c.Confirm(d.In, "你确定 [%s] 应用【%s】? (yes or no): ", verb, d.Name)
@@ -217,6 +227,8 @@ func listScripts(d Deps) error {
 		_, err := fmt.Fprintln(d.Out, "no scripts registered")
 		return err
 	}
+	// The header makes each column self-explanatory; Table aligns by content and omits
+	// colors when the output is not a terminal.
 	// 表头让列含义一目了然；Table 会按内容对齐，非终端输出不含颜色。
 	rows := make([][]string, 0, len(d.Scripts)+1)
 	rows = append(rows, []string{"NAME", "DESCRIPTION"})

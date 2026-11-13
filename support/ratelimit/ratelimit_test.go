@@ -43,6 +43,7 @@ func TestMemoryStoreSlidingWindow(t *testing.T) {
 		t.Fatalf("third = %+v, want rejection", third)
 	}
 	// The oldest hit was at t0, so the window opens 50s from now.
+	// 最早一次命中发生在 t0，因此窗口从现在起还要 50 秒才重新打开。
 	if third.RetryAfter != 40*time.Second {
 		t.Fatalf("retry after = %v, want 40s", third.RetryAfter)
 	}
@@ -51,6 +52,7 @@ func TestMemoryStoreSlidingWindow(t *testing.T) {
 	}
 
 	// Once the first hit expires only one hit remains, so one request fits.
+	// 第一次命中滑出窗口后只剩一次命中，因此还能再放行一个请求。
 	now = now.Add(40 * time.Second)
 	fourth, err := store.Allow(ctx, "ip|GET|/orders", 2, time.Minute)
 	if err != nil {
@@ -99,6 +101,7 @@ func TestMemoryStorePrunesIdleKeys(t *testing.T) {
 	}
 
 	// Past the sweep interval (one minute) the idle key is dropped.
+	// 超过清理周期（一分钟）后，闲置的 key 会被回收。
 	now = now.Add(61 * time.Second)
 	if _, err := store.Allow(context.Background(), "active", 5, time.Second); err != nil {
 		t.Fatalf("Allow: %v", err)

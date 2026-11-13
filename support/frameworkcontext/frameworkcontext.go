@@ -1,3 +1,20 @@
+// Package frameworkcontext provides a single entry point for reading the
+// request identity.
+//
+// It merges two identity sources:
+//
+//   - the local authenticated identity: written by the JWT middleware or a
+//     custom authenticator;
+//   - the allowlisted identity headers propagated by a trusted upstream
+//     service.
+//
+// The local identity wins and the propagated headers are only a fallback,
+// matching swoolefy's FrameworkContext semantics. Both live in context.Context,
+// so handlers, the Service layer and downstream clients always read the same
+// identity data.
+//
+// A user_id parameter in the body or query is not an identity source, use the
+// getters of this package instead.
 // Package frameworkcontext 提供请求身份的统一读取入口。
 //
 // 它合并两类身份来源：
@@ -25,23 +42,36 @@ import (
 
 type userKey struct{}
 
+// User is the identity snapshot taken after local authentication. WithUser
+// stores a copy, so mutating the original value afterwards cannot affect the
+// identity already written into the request context.
 // User 是本地认证通过后的身份快照。WithUser 保存的是副本，
 // 之后修改原始值不会影响已经写入请求 context 的身份。
 type User struct {
+	// ID is the user primary key; a User with an empty ID is never written into
+	// the context.
 	// ID 是用户主键；ID 为空的 User 不会被写入 context。
 	ID string
+	// TenantID is the tenant the request belongs to; an empty string means no
+	// tenant.
 	// TenantID 是请求所属租户；空字符串表示没有租户。
 	TenantID string
+	// Code is the business-level user code.
 	// Code 是业务层的用户编号。
 	Code string
+	// Name is the display name of the user.
 	// Name 是用户显示名称。
 	Name string
+	// Via records the credential channel, for example "jwt".
 	// Via 记录凭证通道，例如 "jwt"。
 	Via string
+	// Claims holds the raw payload of the verified token, so business code can
+	// read custom claims.
 	// Claims 保存已校验的 token 原始载荷，供业务读取自定义声明。
 	Claims map[string]any
 }
 
+// Claim returns a raw claim value.
 // Claim 返回一个原始 claim 值。
 func (u User) Claim(name string) (any, bool) {
 	if u.Claims == nil {
@@ -51,6 +81,8 @@ func (u User) Claim(name string) (any, bool) {
 	return v, ok
 }
 
+// StringClaim returns a string claim; it returns "" when the claim is missing or
+// not a string.
 // StringClaim 返回字符串 claim；claim 不存在或类型不是字符串时返回 ""。
 func (u User) StringClaim(name string) string {
 	v, _ := u.Claim(name)
@@ -69,6 +101,13 @@ func (u User) clone() User {
 	return out
 }
 
+// WithUser writes the locally authenticated identity and aligns the propagated
+// identity headers with it, so downstream services receive the same user and
+// tenant. Identity fields the local identity does not provide are removed, so a
+// stale value captured from the upstream request is never forwarded.
+//
+// A User with an empty ID counts as an invalid identity and the original ctx is
+// returned.
 // WithUser 写入本地认证身份，并把透传上下文中的身份头对齐到该身份，
 // 使下游服务收到相同的用户和租户。本地身份没有提供的身份字段会被清除，
 // 避免把上游请求中捕获的残留值继续下发。
@@ -112,6 +151,10 @@ func WithUser(ctx context.Context, user User) context.Context {
 	return ctx
 }
 
+// UserFromContext returns the locally authenticated identity. A downstream
+// service that only receives propagated headers gets false; in that case use the
+// semantic getters such as UserID, which fall back to trusted propagated headers
+// automatically.
 // UserFromContext 返回本地认证身份。只收到上游透传头的下游服务会得到 false；
 // 这类场景请使用 UserID 等语义 getter，它们会自动回落到可信透传头。
 func UserFromContext(ctx context.Context) (User, bool) {
@@ -125,6 +168,12 @@ func UserFromContext(ctx context.Context) (User, bool) {
 	return user.clone(), true
 }
 
+// UserFromClaims converts verified JWT claims into a User.
+//
+// ID comes from "user_id", then "uid", then the registered subject "sub";
+// tenant, code and name come from "tenant_id", "user_code" and "user_name"
+// (falling back to "name" when absent). String and numeric claims are both
+// accepted, and other business claims remain readable through Claims.
 // UserFromClaims 把已校验的 JWT claims 转换为 User。
 //
 // ID 依次取 "user_id"、"uid" 和注册主体 "sub"；租户、编号、名称分别取
@@ -149,6 +198,8 @@ func UserFromClaims(claims *jwtauth.Claims) User {
 	}
 }
 
+// claimString converts a claim to text. User IDs in tokens are often numeric and
+// jwtauth decodes them as json.Number, which is handled here as well.
 // claimString 把 claim 转成文本。token 中的用户 ID 常用数字表示，
 // jwtauth 会把它们解码成 json.Number，这里一并兼容。
 func claimString(claims *jwtauth.Claims, name string) string {
@@ -168,6 +219,8 @@ func claimString(claims *jwtauth.Claims, name string) string {
 	}
 }
 
+// UserID returns the locally authenticated user ID first, then the value
+// propagated by a trusted upstream, and "" when neither exists.
 // UserID 优先返回本地认证用户 ID；没有本地身份时返回可信上游透传的值，
 // 两者都不存在时返回 ""。
 func UserID(ctx context.Context) string {
@@ -177,6 +230,8 @@ func UserID(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderUserID)
 }
 
+// TenantID returns the tenant ID of the local identity first, then the
+// propagated value.
 // TenantID 优先返回本地身份的租户 ID，其次返回透传值。
 func TenantID(ctx context.Context) string {
 	if user, ok := UserFromContext(ctx); ok {
@@ -185,6 +240,8 @@ func TenantID(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderTenantID)
 }
 
+// UserCode returns the user code of the local identity first, then the
+// propagated value.
 // UserCode 优先返回本地身份的用户编号，其次返回透传值。
 func UserCode(ctx context.Context) string {
 	if user, ok := UserFromContext(ctx); ok {
@@ -193,6 +250,8 @@ func UserCode(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderUserCode)
 }
 
+// UserName returns the user name of the local identity first, then the
+// propagated value.
 // UserName 优先返回本地身份的用户名，其次返回透传值。
 func UserName(ctx context.Context) string {
 	if user, ok := UserFromContext(ctx); ok {
@@ -201,26 +260,31 @@ func UserName(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderUserName)
 }
 
+// TraceID returns the trace id from the propagation context.
 // TraceID 返回透传上下文中的 trace id。
 func TraceID(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderTraceID)
 }
 
+// ClientIP returns the original client address from the propagation context.
 // ClientIP 返回透传上下文中的原始客户端地址。
 func ClientIP(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderClientIP)
 }
 
+// UserAgent returns the SDK or gateway marker from the propagation context.
 // UserAgent 返回透传上下文中的 SDK 或网关标识。
 func UserAgent(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderUserAgent)
 }
 
+// Header returns the value of one propagated request header.
 // Header 返回一个透传请求头的值。
 func Header(ctx context.Context, name string) string {
 	return headerpropagation.HeaderFromContext(ctx, name)
 }
 
+// Headers returns a copy of every propagated request header, safe to modify.
 // Headers 返回全部透传请求头的副本，可安全修改。
 func Headers(ctx context.Context) http.Header {
 	return headerpropagation.HeadersFromContext(ctx)

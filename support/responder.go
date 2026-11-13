@@ -11,25 +11,33 @@ import (
 
 const (
 	// RequestIDKey is the gin.Context key holding the current request id.
+	// RequestIDKey 是 gin.Context 中存放当前请求 ID 的 key；改用它之前确认
+	// 上游中间件确实写入了该 key。
 	RequestIDKey = "gofy.request_id"
 	// DefaultRequestIDHeader is the header read and written by the RequestID
 	// middleware.
+	// DefaultRequestIDHeader 是 RequestID 中间件读写请求 ID 的响应头名称；
+	// 响应体里的 req_id 也以此处取到的值为准。
 	DefaultRequestIDHeader = "X-Trace-ID"
 )
 
 // Responder renders successes and errors. Implementations must be safe for
 // concurrent use.
+// Responder 负责渲染成功与错误响应；实现必须可并发使用，且不得在渲染时
+// 再返回错误，否则调用方无法处理。
 type Responder interface {
 	Success(c *gin.Context, data any)
 	Error(c *gin.Context, err error)
 }
 
 // ResponderConfig configures the default responder.
+// ResponderConfig 配置默认 responder；零值表示成功码 0、消息 "success"、
+// HTTP 状态按错误语义返回。
 type ResponderConfig struct {
-	SuccessCode  int    // default 0
-	SuccessMsg   string // default "success"
-	RequestIDKey string // default support.RequestIDKey
-	AlwaysOK     bool   // when true every response uses HTTP 200
+	SuccessCode  int    // default 0；成功响应码，默认 0
+	SuccessMsg   string // default "success"；成功提示语，默认 "success"
+	RequestIDKey string // default support.RequestIDKey；读取请求 ID 的键名，默认 support.RequestIDKey
+	AlwaysOK     bool   // when true every response uses HTTP 200；为 true 时所有响应都返回 HTTP 200，不再按错误语义映射状态码
 }
 
 type envelope struct {
@@ -49,6 +57,8 @@ type defaultResponder struct {
 
 // NewResponder builds the default responder. It is stateless and therefore
 // safe for concurrent use.
+// NewResponder 构造默认 responder；实例无可变状态，可在整个进程内共享，
+// 配置在构造时固化，之后修改 ResponderConfig 不会影响已创建的实例。
 func NewResponder(cfg ResponderConfig) Responder {
 	if cfg.RequestIDKey == "" {
 		cfg.RequestIDKey = RequestIDKey

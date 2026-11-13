@@ -1,6 +1,8 @@
 // Package core holds the runtime dependencies shared by the gofy root
 // package, scripts and custom commands. It is a leaf package: it must not
 // import any other gofy package.
+// 包 core 持有 gofy 根包、脚本与自定义命令共享的运行时依赖。它是叶子包：不得
+// 导入任何其他 gofy 包，以免形成循环依赖。
 package core
 
 import (
@@ -15,6 +17,7 @@ import (
 )
 
 // VersionInfo describes the build an application is running.
+// VersionInfo 描述应用当前运行的构建信息。
 type VersionInfo struct {
 	Version   string `json:"version"`
 	Commit    string `json:"commit"`
@@ -24,6 +27,7 @@ type VersionInfo struct {
 
 // Runtime is the set of dependencies built by the framework during startup.
 // Business code reads it; it is not a dependency-injection container.
+// Runtime 是框架在启动期构建的依赖集合。业务代码只读它，它不是依赖注入容器。
 type Runtime struct {
 	Name      string
 	Env       string
@@ -32,10 +36,17 @@ type Runtime struct {
 	Version   VersionInfo
 	StartedAt time.Time
 
+	// TracerProvider lets business code create spans; it is a no-op provider when
+	// tracing is off.
 	// TracerProvider 供业务代码创建 span；未启用 tracing 时是 no-op provider。
 	TracerProvider trace.TracerProvider
+	// Propagator is the W3C TraceContext + Baggage propagator used inbound and
+	// outbound.
 	// Propagator 是入站和出站使用的 W3C TraceContext + Baggage 传播器。
 	Propagator propagation.TextMapPropagator
+	// Tracing reports that the App enabled OpenTelemetry export. Business code uses it
+	// to decide whether to install optional instrumentation such as GORM or Redis,
+	// avoiding the extra cost of a no-op tracer.
 	// Tracing 表示 App 已启用 OpenTelemetry 导出。业务据此决定是否安装
 	// GORM、Redis 等可选埋点，避免 no-op tracer 带来的额外开销。
 	Tracing bool
@@ -46,6 +57,7 @@ type Runtime struct {
 
 // RuntimeConfig contains the fields used to construct a Runtime.
 // Applications normally do not call this directly.
+// RuntimeConfig 包含构造 Runtime 所需的字段，应用通常不直接调用它。
 type RuntimeConfig struct {
 	Name      string
 	Env       string
@@ -62,6 +74,7 @@ type RuntimeConfig struct {
 }
 
 // NewRuntime builds a Runtime from cfg, filling safe defaults for nil fields.
+// NewRuntime 按 cfg 构造 Runtime，并为 nil 字段填入安全的默认值。
 func NewRuntime(cfg RuntimeConfig) *Runtime {
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
@@ -101,6 +114,7 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 
 // Context is cancelled when the application starts shutting down.
 // Background goroutines should watch it instead of registering signals.
+// Context 在应用开始关闭时被取消。后台 goroutine 应监听它，而不是自行注册信号。
 func (r *Runtime) Context() context.Context {
 	if r == nil || r.ctx == nil {
 		return context.Background()
@@ -110,6 +124,7 @@ func (r *Runtime) Context() context.Context {
 
 // Fail reports a fatal error and triggers application shutdown.
 // The first call wins; later calls are ignored. Fail never panics.
+// Fail 上报致命错误并触发应用关闭。先到者生效，后续调用被忽略；Fail 从不 panic。
 func (r *Runtime) Fail(err error) {
 	if r == nil || r.fail == nil || err == nil {
 		return

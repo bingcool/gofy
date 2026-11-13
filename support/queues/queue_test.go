@@ -307,6 +307,7 @@ func TestDelayQueueAddAndPop(t *testing.T) {
 		t.Fatalf("payload.N = %d, want 1", payload.N)
 	}
 
+	// Expired messages are deleted while the unexpired ones stay in the queue.
 	// 已到期的消息会被删除，未到期的仍在队列里。
 	length, err = q.Len(ctx)
 	if err != nil {

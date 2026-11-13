@@ -12,6 +12,9 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// Terminal color modes. auto keeps TTY detection, always forces color for non-TTY
+// consoles such as IDEs, and never disables it entirely. All three apply to
+// stdout/stderr only; file sinks are never colored.
 // 终端着色模式。auto 沿用 TTY 检测，always 供 IDE 这类非 TTY 控制台强制开启，
 // never 完全关闭；三者都只作用于 stdout/stderr，文件 sink 永不着色。
 const (
@@ -25,6 +28,8 @@ const (
 	ansiReset = "\x1b[0m"
 )
 
+// normalizeColor normalizes the configured value; an invalid one yields an empty
+// string so that Validate can report it.
 // normalizeColor 归一化配置值，非法值返回空串由 Validate 报错。
 func normalizeColor(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
@@ -39,6 +44,9 @@ func normalizeColor(mode string) string {
 	}
 }
 
+// colorAllowed reports whether a sink may use color. A nil file means a file sink
+// (rotated or written directly), which stays uncolored even with always configured
+// so ANSI codes never leak into log files.
 // colorAllowed 判断一个 sink 是否着色。file 为 nil 表示文件 sink（滚动或直接
 // 写文件），即使配置 always 也不着色，避免 ANSI 码落进日志文件。
 func colorAllowed(mode string, file *os.File) bool {
@@ -63,12 +71,19 @@ func colorEnabled(f *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
+// terminalErrorEncoder renders error and above entries on terminal sinks as a red
+// multi-line block: the first line carries time, level, caller, message and the
+// remaining fields, the error gets its own line, and the stacktrace is expanded
+// line by line instead of being squeezed into one JSON line. Entries below error
+// keep using the configured encoder.
 // terminalErrorEncoder 在终端 sink 上把 error 及以上条目渲染成红色多行块：
 // 首行是时间、级别、caller、消息和其余字段，error 单独成行，stacktrace 逐行
 // 展开，不再挤在一行 JSON 里。低于 error 的条目沿用配置的编码器。
 type terminalErrorEncoder struct {
 	zapcore.Encoder
 	block zapcore.Encoder
+	// pool backs the colored buffer; zap frees the buffer returned by EncodeEntry,
+	// and a zero-value Buffer cannot be freed.
 	// pool 支撑着色后的缓冲；zap 会释放 EncodeEntry 返回的 buffer，
 	// 零值 Buffer 无法被释放。
 	pool buffer.Pool
@@ -78,6 +93,9 @@ func newTerminalErrorEncoder(enc zapcore.Encoder, cfg Config) terminalErrorEncod
 	return terminalErrorEncoder{Encoder: enc, block: newBlockEncoder(cfg), pool: buffer.NewPool()}
 }
 
+// newBlockEncoder reuses the same encoding config, only swapping the separator for
+// a space, uppercasing the level, and disabling the built-in stacktrace output
+// (this encoder emits it line by line instead).
 // newBlockEncoder 复用同一份编码配置，只把分隔符换成空格、级别换成大写，
 // 并关掉自带的 stacktrace 输出（由本编码器逐行接管）。
 func newBlockEncoder(cfg Config) zapcore.Encoder {
@@ -92,6 +110,10 @@ func (e terminalErrorEncoder) Clone() zapcore.Encoder {
 	return terminalErrorEncoder{Encoder: e.Encoder.Clone(), block: e.block.Clone(), pool: e.pool}
 }
 
+// zap bakes BaseFields and logger.With fields into the encoder itself through the
+// Add* methods rather than passing them to EncodeEntry, so both encoders must
+// receive the same fields; otherwise the error block would drop fixed fields such
+// as service and component.
 // zap 把 BaseFields 和 logger.With 的字段通过 Add* 烘焙进编码器本身，而不是
 // 交给 EncodeEntry，所以两个编码器都要收到同样的字段，否则 error 块会丢掉
 // service、component 这类固定字段。
@@ -266,6 +288,8 @@ func (e terminalErrorEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fi
 	return block, nil
 }
 
+// errorFieldLine renders an error field as "field: error text"; custom keys such as
+// those from zap.NamedError get their own line the same way.
 // errorFieldLine 把 error 字段渲染成「字段名: 错误文本」，zap.NamedError
 // 这类自定义键也按同样的方式单独成行。
 func errorFieldLine(f zapcore.Field) string {

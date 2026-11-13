@@ -109,6 +109,8 @@ func TestRateLimiterKeyByIP(t *testing.T) {
 	}
 }
 
+// Bucket keys carry method + route, so exhausting one route's quota does not
+// affect another route.
 // 桶键带方法 + 路由：一条路由耗尽额度不影响另一条路由。
 func TestRateLimiterBucketsPerRoute(t *testing.T) {
 	limiter := buildLimiter(t, spec(http.MethodGet, 1, endpoint.RateKeyRoute))

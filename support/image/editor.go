@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+// Manager is the stateless configuration entry point; call Open repeatedly to
+// derive several sizes from the same source image.
 // Manager 是配置入口，无状态；同一原图派生多档尺寸时重复 Open。
 type Manager struct {
 	cfg          Config
@@ -18,6 +20,8 @@ type Manager struct {
 	allowedRoots []string
 }
 
+// NewManager validates the configuration and returns a Manager; when max_pixels
+// is unset it defaults to 40 million.
 // NewManager 校验配置并返回 Manager；未配置 max_pixels 时使用 4000 万。
 func NewManager(cfg Config) (*Manager, error) {
 	if err := cfg.Validate(); err != nil {
@@ -42,6 +46,8 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
+// Config returns a copy of the configuration so callers can read the watermark
+// and preset defaults.
 // Config 返回配置副本，便于业务读取水印/预设默认值。
 func (m *Manager) Config() Config {
 	cfg := m.cfg
@@ -52,6 +58,8 @@ func (m *Manager) Config() Config {
 	return cfg
 }
 
+// Open decodes a file path and returns an Editor. The pixel count is checked
+// before the full decode.
 // Open 解码文件路径并返回 Editor。像素数在完整解码前预检。
 func (m *Manager) Open(path string) (*Editor, error) {
 	path = strings.TrimSpace(path)
@@ -65,6 +73,7 @@ func (m *Manager) Open(path string) (*Editor, error) {
 	return m.newEditor(pixels, format), nil
 }
 
+// OpenBytes decodes an in-memory image.
 // OpenBytes 解码内存中的二进制图片。
 func (m *Manager) OpenBytes(data []byte) (*Editor, error) {
 	pixels, format, err := decodeBytes(data, m.maxPixels)
@@ -74,6 +83,8 @@ func (m *Manager) OpenBytes(data []byte) (*Editor, error) {
 	return m.newEditor(pixels, format), nil
 }
 
+// Create returns a blank canvas of the given size and background colour; an
+// empty background yields transparency.
 // Create 返回指定尺寸和背景色的空白画布；background 为空时透明。
 func (m *Manager) Create(width, height int, background string) (*Editor, error) {
 	if width <= 0 || height <= 0 {
@@ -112,12 +123,15 @@ func (m *Manager) newEditor(pixels *stdimage.NRGBA, sourceFormat string) *Editor
 	}
 }
 
+// ImageSize is the current canvas size.
 // ImageSize 是当前画布尺寸。
 type ImageSize struct {
 	Width  int
 	Height int
 }
 
+// Editor is a request-scoped image editor and must not be shared across
+// goroutines.
 // Editor 是请求级的图像编辑器，禁止跨 goroutine 共享。
 type Editor struct {
 	img          *stdimage.NRGBA
@@ -130,12 +144,16 @@ type Editor struct {
 	allowedRoots []string
 }
 
+// Size returns the current size.
 // Size 返回当前尺寸。
 func (e *Editor) Size() ImageSize {
 	bounds := e.img.Bounds()
 	return ImageSize{Width: bounds.Dx(), Height: bounds.Dy()}
 }
 
+// Resize scales by mode: contain only shrinks, cover fills then crops from the
+// centre, scale may enlarge, stretch stretches both dimensions; 0 leaves that
+// dimension unconstrained (except for cover).
 // Resize 按 mode 缩放：contain 只缩不放，cover 铺满后居中裁剪，scale 允许
 // 放大，stretch 双维拉伸；0 表示该维不限制（cover 除外）。
 func (e *Editor) Resize(width, height int, mode Mode) error {
@@ -160,6 +178,8 @@ func (e *Editor) Resize(width, height int, mode Mode) error {
 	return nil
 }
 
+// Thumbnail only shrinks, fitting proportionally inside width×height; both
+// dimensions must be positive.
 // Thumbnail 只缩小不放大，按比例放进 width×height；两维都必须大于 0。
 func (e *Editor) Thumbnail(width, height int) error {
 	if width <= 0 || height <= 0 {
@@ -176,6 +196,8 @@ func (e *Editor) Thumbnail(width, height int) error {
 	return nil
 }
 
+// Crop cuts out a rectangle; the coordinates and size must lie inside the
+// current canvas.
 // Crop 截取矩形；坐标与尺寸必须在当前画布内。
 func (e *Editor) Crop(x, y, width, height int) error {
 	bounds := e.img.Bounds()
@@ -190,6 +212,9 @@ func (e *Editor) Crop(x, y, width, height int) error {
 	return nil
 }
 
+// Rotate rotates by degrees, expanding the canvas to fit the rotated image;
+// multiples of 90 are permuted exactly, other angles use bilinear
+// interpolation.
 // Rotate 按角度旋转（度），画布扩展到容纳旋转后的图像；90 的倍数精确重排，
 // 其余角度双线性插值。
 func (e *Editor) Rotate(degrees float64) error {
@@ -212,11 +237,16 @@ func (e *Editor) Rotate(degrees float64) error {
 	return nil
 }
 
+// Greyscale converts to greyscale by luminance while preserving the alpha
+// channel.
 // Greyscale 按亮度转灰度，保留透明通道。
 func (e *Editor) Greyscale() {
 	greyscale(e.img)
 }
 
+// ApplyPreset applies the size template with the given configuration name; the
+// preset's own encode becomes the default format of subsequent Encode calls. An
+// unknown name returns ErrInvalidImage.
 // ApplyPreset 按配置名应用尺寸模板；预设自带的 encode 会成为后续 Encode 的
 // 默认格式。未知名称返回 ErrInvalidImage。
 func (e *Editor) ApplyPreset(name string) error {

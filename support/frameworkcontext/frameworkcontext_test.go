@@ -11,6 +11,8 @@ import (
 	"github.com/bingcool/gofy/support/jwtauth"
 )
 
+// After the local identity is written, stale identity in the propagated headers
+// must be replaced while non-identity headers stay unchanged.
 // 写入本地身份后，透传头中的旧身份必须被替换，非身份头保持不变。
 func TestWithUserAlignsPropagatedHeaders(t *testing.T) {
 	ctx := headerpropagation.ContextWithHeaders(context.Background(), http.Header{
@@ -93,6 +95,8 @@ func TestIdentityFallsBackToPropagatedHeaders(t *testing.T) {
 	}
 }
 
+// A tenant left over from upstream must not be propagated downstream when the
+// local identity carries no tenant.
 // 本地身份没有租户时，上游残留的租户不能继续下发给下游。
 func TestLocalIdentityClearsPropagatedTenant(t *testing.T) {
 	ctx := headerpropagation.ContextWithHeaders(context.Background(), http.Header{

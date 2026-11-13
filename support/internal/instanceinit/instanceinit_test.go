@@ -50,6 +50,7 @@ func TestGetCoalescesConcurrentFirstOpen(t *testing.T) {
 	<-started
 	// Give the remaining callers time to reach the in-flight attempt; they must
 	// join it instead of starting their own.
+	// 给其余调用方留出进入进行中尝试的时间，它们必须加入该尝试而不是各自新建。
 	time.Sleep(50 * time.Millisecond)
 	if got := opens.Load(); got != 1 {
 		t.Fatalf("open calls = %d, want 1", got)

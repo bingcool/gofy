@@ -41,6 +41,7 @@ func TestTraceLogsTemplateOnError(t *testing.T) {
 	core, observed := observer.New(zapcore.ErrorLevel)
 	gl := newGormLogger(zap.New(core), Config{})
 	// gormLogger.Trace receives the SQL already filtered by ParamsFilter.
+	// gormLogger.Trace 收到的 SQL 已由 ParamsFilter 处理，这里再确认错误路径的日志。
 	gl.Trace(context.Background(), time.Now(), func() (string, int64) {
 		return "SELECT * FROM orders WHERE phone = ?", 0
 	}, errors.New("driver failure"))

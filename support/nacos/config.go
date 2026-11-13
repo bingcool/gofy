@@ -24,6 +24,14 @@
 // Sync validates that the remote content is YAML before replacing the local
 // file, and the replacement is atomic so a running application never reads a
 // partially written config.
+// 包 nacos 把 Nacos 配置中心的配置拉取成本地 YAML 文件，并监听其变化。
+//
+// 它直接通过 HTTP（含长轮询）调用 Nacos Open API，因此不引入 SDK 依赖。推荐
+// 沿用 swoolefy 的两文件布局：nacos.yaml 存服务端连接信息，application.yaml
+// 存配置中心入口与监听开关。上方示例依次演示加载、同步和监听。
+//
+// Sync 会先确认远端内容是合法 YAML 再替换本地文件，替换是原子的，运行中的
+// 应用不会读到写了一半的配置文件。
 package nacos
 
 import (
@@ -42,8 +50,10 @@ import (
 
 const (
 	// DefaultGroup is used when Config.Group is empty.
+	// Config.Group 为空时使用默认分组。
 	DefaultGroup = "DEFAULT_GROUP"
 	// DefaultFile is used when Config.File is empty.
+	// Config.File 为空时使用默认本地文件名。
 	DefaultFile = "config.yaml"
 )
 
@@ -52,14 +62,22 @@ const (
 // Addr takes precedence over Host/Port when both are set. Namespace is the
 // namespace ID (not its display name); "public" and an empty value both mean
 // the default namespace.
+// Config 描述 Nacos 连接信息以及要生成的本地文件。
+//
+// Addr 与 Host/Port 同时设置时以 Addr 为准。Namespace 是命名空间 ID（不是展示
+// 名）；"public" 与空值都表示默认命名空间。
 type Config struct {
 	// Enabled gates Sync and Watch. Disabled configs return ErrDisabled.
+	// Enabled 控制是否启用 Sync 与 Watch；关闭时相关调用返回 ErrDisabled。
 	Enabled bool
 
 	// Addr is the Nacos server base URL, for example http://127.0.0.1:8848.
 	// A value without a scheme is treated as http.
+	// Addr 是 Nacos 服务端基础 URL，例如 http://127.0.0.1:8848；不带协议时按
+	// http 处理。
 	Addr string
 	// Host and Port are used when Addr is empty.
+	// Addr 为空时使用 Host 和 Port。
 	Host string
 	Port int
 
@@ -68,51 +86,68 @@ type Config struct {
 	Namespace string
 
 	// DataID and Group identify the configuration in Nacos.
+	// DataID 和 Group 共同定位 Nacos 中的配置。
 	DataID string
 	Group  string
 
 	// File is the local path written by Sync and Watch.
+	// File 是 Sync 与 Watch 写入的本地路径。
 	File string
 
 	// Watch keeps the local file in sync after startup. It maps to
 	// application.yaml nacos.enable_nacos_config_change_restart in the
 	// two-file layout and defaults to true.
+	// Watch 表示启动后是否持续把远端配置同步到本地文件。在双文件布局中对应
+	// application.yaml 的 nacos.enable_nacos_config_change_restart，默认开启。
 	Watch bool
 
 	// Timeout bounds a single config or auth request.
+	// Timeout 限制单次配置请求或鉴权请求的耗时。
 	Timeout time.Duration
 	// PollTimeout is how long the server holds a listener request open.
+	// PollTimeout 是服务端挂起监听请求的时长。
 	PollTimeout time.Duration
 	// RetryDelay is the pause after a failed listener request or a failed
 	// config apply.
+	// RetryDelay 是监听请求失败或配置应用失败后的等待时间。
 	RetryDelay time.Duration
 
 	// Register describes how this process is published in Nacos naming.
+	// Register 描述本进程如何注册到 Nacos 命名服务。
 	Register RegisterConfig
 
 	// Discovery describes how clients load-balance instances of a service.
+	// Discovery 描述客户端如何在服务的多个实例之间做负载均衡。
 	Discovery DiscoveryConfig
 }
 
 // DiscoveryConfig mirrors application.yaml nacos.discovery_service_client. It
 // is used by clients that resolve a service name through Nacos naming.
+// DiscoveryConfig 对应 application.yaml 的 nacos.discovery_service_client，
+// 供通过 Nacos 命名服务解析服务名的客户端使用。
 type DiscoveryConfig struct {
 	// Group and Namespace default to the service_register values.
+	// Group 和 Namespace 默认沿用 service_register 中的值。
 	Group     string
 	Namespace string
 
 	// LoadBalancer is random, round_robin or weight. Default random.
+	// LoadBalancer 可选 random、round_robin 或 weight，默认 random。
 	LoadBalancer string
 
 	// CacheTTL is how long a resolved instance list stays fresh.
+	// CacheTTL 是解析后的实例列表的有效期。
 	CacheTTL time.Duration
 	// StaleTTL allows serving a stale list when Nacos is unreachable.
+	// StaleTTL 允许在 Nacos 不可达时继续使用过期列表。
 	StaleTTL time.Duration
 
 	// HealthyOnly drops unhealthy instances. Default true.
+	// HealthyOnly 表示是否剔除不健康实例，默认 true。
 	HealthyOnly bool
 
 	// Clusters restricts discovery to the listed clusters.
+	// Clusters 把发现范围限制在列出的集群内。
 	Clusters []string
 
 	healthyOnlySet bool
@@ -181,6 +216,8 @@ func envSeconds(key string, fallback time.Duration) time.Duration {
 
 // DefaultConfig returns a config pointing at 127.0.0.1:8848, writing
 // config.yaml, with the feature disabled.
+// DefaultConfig 返回指向 127.0.0.1:8848、写入 config.yaml 的默认配置，
+// 且该配置默认处于关闭状态。
 func DefaultConfig() Config {
 	return Config{
 		Host:        "127.0.0.1",
@@ -200,6 +237,9 @@ func DefaultConfig() Config {
 //	NACOS_USERNAME, NACOS_PASSWORD, NACOS_NAMESPACE,
 //	NACOS_DATA_ID, NACOS_GROUP, NACOS_FILE,
 //	NACOS_TIMEOUT_MS, NACOS_LISTENER_TIMEOUT_MS, NACOS_LISTENER_FAILED_MS
+//
+// FromEnv 在默认配置基础上用环境变量覆盖后返回配置，可识别的变量见上方列表。
+// 返回值已完成归一化，环境变量缺失或取值非法时沿用默认值。
 func FromEnv() Config {
 	cfg := DefaultConfig()
 	if v, ok := lookupEnv("NACOS_ENABLED"); ok {
@@ -250,6 +290,9 @@ func FromEnv() Config {
 //	  data_id: gofy-service
 //	  group: GO_GROUP
 //	  file: config.yaml
+//
+// LoadConfig 读取 nacos.yaml，并对文件中留空的字段应用环境变量覆盖。
+// 优先级为文件 > 环境变量 > 默认值。示例中的键即 nacos.yaml 的写法。
 func LoadConfig(path string) (Config, error) {
 	cfg := FromEnv()
 	n, err := readNacosFile(path)
@@ -278,6 +321,16 @@ func LoadConfig(path string) (Config, error) {
 // In this layout Nacos is enabled by default, mirroring swoolefy where the
 // presence of nacos.yaml means the configuration is managed remotely. Set
 // nacos.enabled: false or NACOS_ENABLED=0 to opt out.
+// Load 读取 swoolefy 风格的两个文件：nacosPath 存服务端连接信息，appPath
+// （通常是 application.yaml）存配置中心入口与变更监听开关。
+//
+// 上方列表给出各文件中的键名。优先级为文件 > 环境变量 > 默认值。tenant 依次
+// 取 nacos.yaml 的 namespace（或 NACOS_NAMESPACE）、application.yaml 的
+// tenant（或 NACOS_TENANT）、public 命名空间。application.yaml 可选，缺失时
+// 仍可使用单文件布局的旧键。
+//
+// 该布局下 Nacos 默认启用，与 swoolefy 一致：存在 nacos.yaml 即表示配置由远端
+// 托管。要关闭请显式设置 nacos.enabled: false 或 NACOS_ENABLED=0。
 func Load(nacosPath, appPath string) (Config, error) {
 	cfg := FromEnv()
 	n, err := readNacosFile(nacosPath)
@@ -286,6 +339,7 @@ func Load(nacosPath, appPath string) (Config, error) {
 	}
 
 	// Only an explicit switch (env or either file) overrides the layout default.
+	// 只有显式开关（环境变量或任一文件）才会覆盖该布局的默认启用状态。
 	explicitEnabled := envSet("NACOS_ENABLED")
 	applyNacosFile(&cfg, n)
 	if n.Enabled != nil {
@@ -295,6 +349,8 @@ func Load(nacosPath, appPath string) (Config, error) {
 	if appPath != "" {
 		// application.yaml is optional: a missing file keeps the nacos.yaml
 		// result, while any other read or parse error is fatal.
+		// application.yaml 是可选的：文件不存在时沿用 nacos.yaml 的结果，
+		// 其他读取或解析错误则直接返回。
 		app, appErr := readApplicationFile(appPath)
 		switch {
 		case appErr == nil:
@@ -336,6 +392,7 @@ func applyNacosFile(cfg *Config, n rawConfig) {
 	} else if n.Host != "" || n.Port > 0 {
 		// The file describes the endpoint with host/port, so drop an addr
 		// inherited from the environment.
+		// 文件用 host/port 描述端点，因此丢弃从环境变量继承来的 addr。
 		cfg.Addr = ""
 	}
 	if v := strings.TrimSpace(n.Host); v != "" {
@@ -436,6 +493,8 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 	if app.Nacos.EnableNacosConfigChangeRestart != nil {
 		// The key keeps swoolefy's name; it now enables watching, and the
 		// callback decides whether a change reloads or restarts.
+		// 该键沿用 swoolefy 的命名；现在它只表示开启监听，变更后是热加载还是
+		// 重启由回调决定。
 		cfg.Watch = *app.Nacos.EnableNacosConfigChangeRestart
 	}
 	monitor := app.Nacos.MonitorConfigChange
@@ -482,6 +541,8 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 
 	// The connection file wins: service_config.tenant is only a fallback when
 	// nacos.yaml neither set a namespace nor NACOS_NAMESPACE did.
+	// 连接文件优先：仅当 nacos.yaml 未设置 namespace 且无 NACOS_NAMESPACE 时，
+	// 才使用 service_config.tenant 作为兜底。
 	if namespaceFromNacos(n) {
 		return
 	}
@@ -497,6 +558,8 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 // namespaceFromNacos reports whether the namespace came from nacos.yaml or
 // NACOS_NAMESPACE. In that case application.yaml service_config.tenant is
 // ignored, matching swoolefy.
+// namespaceFromNacos 报告命名空间是否来自 nacos.yaml 或 NACOS_NAMESPACE；
+// 若是，则忽略 application.yaml 的 service_config.tenant，与 swoolefy 保持一致。
 func namespaceFromNacos(n rawConfig) bool {
 	if firstNonEmpty(n.Namespace, n.NamespaceID) != "" {
 		return true

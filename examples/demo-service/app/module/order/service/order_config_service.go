@@ -21,6 +21,8 @@ type OrderConfigService struct {
 }
 
 // NewOrderConfigService builds an OrderConfigService. A nil logger disables logs.
+// NewOrderConfigService 构造配置 service，logger 为 nil 时回退 zap.NewNop()，
+// 让测试与脚本不必引入日志依赖。
 func NewOrderConfigService(logger *zap.Logger) *OrderConfigService {
 	if logger == nil {
 		logger = zap.NewNop()

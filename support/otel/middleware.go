@@ -13,6 +13,9 @@ import (
 //
 // The middleware extracts the W3C traceparent header from the request, so a
 // caller's trace continues into this service.
+// GinMiddleware 返回 server Span 中间件。追踪关闭时返回 nil，调用方可直接跳过
+// 安装。filter 对每个请求求值，返回 true 表示需要追踪；nil 表示全部追踪。
+// 中间件从请求中提取 W3C traceparent 头，调用方的 Trace 因此能延续到本服务。
 func (p *Provider) GinMiddleware(filter func(*http.Request) bool) gin.HandlerFunc {
 	if !p.Enabled() {
 		return nil
@@ -29,6 +32,8 @@ func (p *Provider) GinMiddleware(filter func(*http.Request) bool) gin.HandlerFun
 
 // SkipPaths returns a Gin filter that traces every request except the given
 // URL paths. It keeps probes and metrics endpoints out of the trace stream.
+// SkipPaths 返回一个 Gin filter：除给定 URL 路径外都追踪。它让探活与指标接口
+// 不进入 Trace 流，避免噪声。
 func SkipPaths(paths ...string) func(*http.Request) bool {
 	skip := make(map[string]struct{}, len(paths))
 	for _, path := range paths {

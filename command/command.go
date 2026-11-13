@@ -1,4 +1,5 @@
 // Package command defines custom CLI commands registered by an application.
+// 包 command 定义应用注册的自定义 CLI 命令；注册时会校验名字格式、保留字与重名。
 package command
 
 import (
@@ -12,11 +13,13 @@ import (
 )
 
 // Runtime is the shared runtime passed to custom commands.
+// Runtime 是传给自定义命令的共享运行时。
 type Runtime = core.Runtime
 
 // Command is a custom subcommand.
+// Command 是一个自定义子命令：Use 必须是单个单词，Run 不能为空。
 type Command struct {
-	Use             string // single word, e.g. "migrate"
+	Use             string // single word, e.g. "migrate"；命令名必须是单个单词，不能含空格
 	Short           string
 	Flags           func(fs *pflag.FlagSet)
 	Run             func(ctx context.Context, rt *Runtime, fs *pflag.FlagSet) error
@@ -36,6 +39,8 @@ var reservedNames = map[string]struct{}{
 
 // Validate checks command names, reserved words, duplicates and required
 // fields. reserved allows the caller to reserve additional names.
+// Validate 校验命令名、保留字、重名和必填字段；reserved 让调用方额外保留一些名字，
+// 例如与其他子命令集合共享的命名空间。
 func Validate(cmds []Command, reserved ...string) error {
 	blocked := make(map[string]struct{}, len(reservedNames)+len(reserved))
 	for name := range reservedNames {

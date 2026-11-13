@@ -21,6 +21,8 @@ import (
 var _ demoservice.OrdersService = (*OrderController)(nil)
 
 // OrderController adapts the demoservice contract to OrderService.
+// OrderController 实现契约的 Orders 分组：入参转成普通值交给 service，再把领域
+// 视图映射回 DTO；controller 不 import model、repository 或 innerapi。
 type OrderController struct {
 	orderService *service.OrderService
 	logger       *zap.Logger
@@ -30,6 +32,9 @@ type OrderController struct {
 // logger disables logs. Successful requests are left to the access log; the
 // controller logs only the unexpected errors it turns into 500 responses,
 // including the wrapped cause.
+// NewOrderController 绑定订单读写用例，logger 为 nil 时静默。成功请求交给访问
+// 日志；controller 只在把错误转成 500 时记 Error 并带上 wrap 的根因，避免与
+// 访问日志重复记录同一请求。
 func NewOrderController(svc *service.OrderService, logger *zap.Logger) *OrderController {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -41,6 +46,8 @@ func NewOrderController(svc *service.OrderService, logger *zap.Logger) *OrderCon
 }
 
 // GetOrder returns one order.
+// GetOrder 返回单个订单；service 的 ErrOrderNotFound 在这里映射成契约的
+// ErrOrderNotFound，其余失败按内部错误返回 500。
 func (c *OrderController) GetOrder(ctx context.Context, req *orderrequest.GetOrderRequest) (*orderresponse.GetOrderResponse, error) {
 	o, err := c.orderService.Get(ctx, req.ID.Uint64())
 	if err != nil {
@@ -54,6 +61,8 @@ func (c *OrderController) GetOrder(ctx context.Context, req *orderrequest.GetOrd
 }
 
 // ListOrders returns one page of orders.
+// ListOrders 按用户分页返回订单；页码与页大小原样透传，偏移量换算留在 service，
+// 因此 controller 不感知分页语义。
 func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.ListOrdersRequest) (*paging.ListData[orderdto.OrderDTO], error) {
 	items, total, err := c.orderService.List(ctx, req.UserID.Uint64(), req.Page, req.PageSize)
 	if err != nil {
@@ -70,6 +79,9 @@ func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.List
 // CreateOrder creates an order and returns it. SKUs are validated by the
 // service against the product module; unknown or off-sale products are client
 // errors, not server failures.
+// CreateOrder 下单并返回订单视图。SKU 由 service 跨模块调用产品 innerapi 校验；
+// 产品不存在、已下架、库存不足都归为调用方错误，统一映射成 400，只有其它异常
+// 才记日志并返回 500。
 func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.CreateOrderRequest) (*orderresponse.CreateOrderResponse, error) {
 	items := make([]service.CreateItem, 0, len(req.Items))
 	for _, item := range req.Items {
@@ -95,6 +107,8 @@ func (c *OrderController) CreateOrder(ctx context.Context, req *orderrequest.Cre
 }
 
 // CancelOrder cancels an order.
+// CancelOrder 取消订单；订单不存在映射成契约的 ErrOrderNotFound，其余失败按
+// 内部错误返回 500。状态合法性由 service 决定，controller 不做业务判断。
 func (c *OrderController) CancelOrder(ctx context.Context, req *orderrequest.CancelOrderRequest) error {
 	if err := c.orderService.Cancel(ctx, req.ID.Uint64()); err != nil {
 		if errors.Is(err, service.ErrOrderNotFound) {

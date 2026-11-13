@@ -22,12 +22,16 @@ func clearRegistry(t *testing.T) {
 	t.Cleanup(func() { _ = reg.Close() })
 }
 
+// tempDSN returns a fresh temporary database path on every call so tests do not
+// interfere with each other.
 // tempDSN 每次返回独立的临时库路径，测试之间互不影响。
 func tempDSN(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "app.db")
 }
 
+// badDSN points at a directory that does not exist and is used to exercise
+// connection failures.
 // badDSN 指向不存在的目录，用来验证建连失败的处理。
 func badDSN(t *testing.T) string {
 	t.Helper()

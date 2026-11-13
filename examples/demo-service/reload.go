@@ -23,19 +23,25 @@ import (
 
 // reloader rebuilds the modules from a freshly loaded config and applies them
 // to the running application without restarting the process.
+// reloader 用新加载的配置重建模块并应用到运行中的进程，无需重启；它只在
+// Nacos 监听启用时存在。
 type reloader struct {
 	// nacosCfg is fixed at startup: changing the Nacos connection itself still
 	// requires a process restart.
+	// nacosCfg 在启动时固定：Reload 只换配置内容，改 Nacos 连接参数仍需重启进程。
 	nacosCfg nacos.Config
 	// watch reports whether every rebuild should include the watcher module.
+	// watch 决定每次重建是否附带监听模块；关闭配置同步后新的一代不再监听变更。
 	watch bool
 	// httpCfg is the address the listener was bound to; Reload cannot move it.
+	// httpCfg 是监听已绑定的地址；Reload 不重新绑定，只记下来给出告警。
 	httpCfg gofy.HTTPConfig
 	// envFromProcess 记录 GOFY_ENV 是否由进程显式设置。未显式设置时，
 	// 热更新会让该变量跟随 config.yaml，保持 systemenv 与 Runtime.Env 一致。
 	envFromProcess bool
 	// app is stored after New and before Execute so the watcher callback can
 	// reach the running application.
+	// app 在 New 之后、Execute 之前存入，监听回调据此拿到运行中的应用句柄。
 	app atomic.Pointer[gofy.App]
 }
 
@@ -45,6 +51,10 @@ type reloader struct {
 //
 // Reload starts this set before stopping the previous one, so a change briefly
 // runs two watchers; the old watcher is cancelled once the swap completes.
+// factories 按 cfg 返回本次的模块工厂列表，启动与每次 Nacos 变更都走这里，
+// 重建后的集合必须仍包含业务路由和配置监听。
+// Reload 先启动新集合再停旧集合，切换期间会短暂存在两个监听，旧监听在切换
+// 完成后才取消。
 func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	// 每个装配代新建一个容器：启动和每次 Reload 各得到一套仓库与 service，
 	// 旧的模块实例继续服务在途请求。容器内部固定按 产品 → 订单 构建，模块
@@ -71,6 +81,10 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 //
 // It runs inside the watcher's change handler, after nacos.Watch has written
 // the new content to disk, so config.Load sees the updated file.
+// reload 重新读取已落盘的配置，就地替换 logger、数据库连接池和模块；HTTP
+// 监听沿用启动地址，改地址只告警不生效。
+// 它运行在监听模块的变更回调里，此时 nacos.Watch 已把新内容写入磁盘，因此
+// config.Load 读到的是更新后的文件。
 func (r *reloader) reload(ctx context.Context) error {
 	app := r.app.Load()
 	if app == nil {

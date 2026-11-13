@@ -115,6 +115,8 @@ func TestJWTAuthStoresClaims(t *testing.T) {
 	}
 }
 
+// A successful JWT check populates FrameworkContext and writes the identity back
+// as propagated headers for downstream use.
 // JWT 校验成功后写入 FrameworkContext，并把身份回写为透传头供下游使用。
 func TestJWTAuthPopulatesFrameworkContext(t *testing.T) {
 	engine := newGin()
@@ -142,6 +144,8 @@ func TestJWTAuthPopulatesFrameworkContext(t *testing.T) {
 		"sub":       "sub-1",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 	}))
+	// Identity captured upstream must not override the local verification result;
+	// non-identity headers are preserved verbatim.
 	// 上游捕获的身份不能覆盖本地校验结果；非身份头必须原样保留。
 	ctx := headerpropagation.ContextWithHeader(context.Background(),
 		headerpropagation.HeaderUserID, "9999")
@@ -160,6 +164,8 @@ func TestJWTAuthPopulatesFrameworkContext(t *testing.T) {
 	if identity.Via != "jwt" {
 		t.Fatalf("via = %q, want jwt", identity.Via)
 	}
+	// The middleware replaces gin's Request and must not mutate the request
+	// context handed in by the caller.
 	// 中间件替换的是 gin 的 Request，不应修改调用方传入的 request context。
 	if got := frameworkcontext.UserID(req.Context()); got != "9999" {
 		t.Fatalf("the original request context was mutated: user id = %q", got)
@@ -178,6 +184,8 @@ func TestJWTAuthPopulatesFrameworkContext(t *testing.T) {
 	}
 }
 
+// A tenant left over from upstream must not be forwarded downstream when the
+// token carries no tenant.
 // token 中没有租户时，不能把上游残留的租户继续下发给下游。
 func TestJWTAuthClearsPropagatedIdentityAbsentFromToken(t *testing.T) {
 	engine := newGin()

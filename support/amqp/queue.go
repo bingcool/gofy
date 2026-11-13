@@ -18,6 +18,8 @@ var (
 	ErrHandlerRequired = errors.New("amqp: handler is required")
 	// ErrDeliveryClosed means the broker cancelled the consumer or the channel
 	// went away; Consume reconnects unless the context was cancelled.
+	// ErrDeliveryClosed 表示 broker 取消了消费者或 channel 已失效；除非上下文
+	// 被取消，Consume 会重连。
 	ErrDeliveryClosed = errors.New("amqp: delivery channel closed")
 )
 
@@ -26,6 +28,9 @@ var (
 // Publishing uses a shared channel guarded by a mutex. Consuming opens a
 // dedicated channel per Consume call, so a long-running consumer never blocks
 // publishers and multiple consumers can run on the same Queue.
+// Queue 声明一套 topology，并通过它发布或消费。
+// 发布使用由互斥锁保护的共享 channel；消费为每次 Consume 打开独立 channel，
+// 因此长跑的消费者不会阻塞发布者，同一个 Queue 上也能并行多个消费者。
 type Queue struct {
 	client *Client
 	cfg    QueueConfig
@@ -35,6 +40,7 @@ type Queue struct {
 }
 
 // NewQueue validates cfg and binds it to client.
+// NewQueue 校验 cfg 并把它绑定到 client。
 func NewQueue(client *Client, cfg QueueConfig) (*Queue, error) {
 	if client == nil {
 		return nil, ErrClientRequired
@@ -46,23 +52,29 @@ func NewQueue(client *Client, cfg QueueConfig) (*Queue, error) {
 }
 
 // Config returns the effective queue configuration.
+// Config 返回实际生效的队列配置。
 func (q *Queue) Config() QueueConfig {
 	return q.cfg
 }
 
 // PublishOptions overrides the defaults for one message.
+// PublishOptions 覆盖单条消息的默认值。
 type PublishOptions struct {
 	// RoutingKey overrides QueueConfig.RoutingKey. Topic publishers use it to
 	// address a specific binding.
+	// RoutingKey 覆盖 QueueConfig.RoutingKey。topic 发布者用它指向具体的绑定。
 	RoutingKey  string
 	ContentType string
 	// Persistent sets delivery mode 2 so the message survives a broker restart
 	// when its queue is durable. The default is transient.
+	// Persistent 设置投递模式 2；队列为 durable 时消息可跨 broker 重启存活。
+	// 默认是 transient。
 	Persistent bool
 	Priority   uint8
 	Headers    amqp091.Table
 	// Expiration is the per-message TTL. The broker applies the smaller of this
 	// and the queue-level TTL.
+	// Expiration 是单条消息的 TTL。broker 取它与队列级 TTL 中较小的那个。
 	Expiration    time.Duration
 	MessageID     string
 	CorrelationID string
@@ -72,11 +84,15 @@ type PublishOptions struct {
 	Timestamp     time.Time
 	// Mandatory is forwarded to the broker. basic.return notifications are not
 	// consumed by this package.
+	// Mandatory 原样传给 broker。本包不消费 basic.return 通知，未路由的消息
+	// 不会被感知。
 	Mandatory bool
 }
 
 // Publish sends body to the queue's exchange. With Confirm enabled it waits
 // for the broker to accept the message and returns an error on nack.
+// Publish 把 body 发到队列所属的 exchange。Confirm 打开时会等待 broker 确认，
+// 收到 nack 则返回错误。
 func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -139,6 +155,7 @@ func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) e
 
 // PublishJSON marshals value as JSON and publishes it. ContentType defaults to
 // application/json.
+// PublishJSON 把 value 序列化为 JSON 后发布，ContentType 默认 application/json。
 func (q *Queue) PublishJSON(ctx context.Context, value any, opts PublishOptions) error {
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -152,31 +169,43 @@ func (q *Queue) PublishJSON(ctx context.Context, value any, opts PublishOptions)
 
 // HandlerFunc processes one delivery. Returning nil acks the message; returning
 // an error nacks it (requeue by default, see ConsumeOptions.DiscardOnError).
+// HandlerFunc 处理一条投递。返回 nil 表示 ack；返回错误表示 nack（默认重新
+// 入队，见 ConsumeOptions.DiscardOnError）。handler 内的 panic 会被捕获并
+// 当作错误上报，消费者协程不会因此退出。
 type HandlerFunc func(ctx context.Context, msg amqp091.Delivery) error
 
 // ConsumeOptions controls one consumer.
+// ConsumeOptions 控制单个消费者。
 type ConsumeOptions struct {
 	// ConsumerTag is optional; the broker generates one when empty.
+	// ConsumerTag 可选，为空时由 broker 生成。
 	ConsumerTag string
 	// AutoAck disables manual acknowledgements. The handler result is then
 	// ignored for ack/nack purposes.
+	// AutoAck 关闭手动确认，此时 handler 的结果不再影响 ack/nack。
 	AutoAck   bool
 	Exclusive bool
 	NoLocal   bool
 	NoWait    bool
 	// PrefetchCount limits unacknowledged deliveries; zero means 1.
+	// PrefetchCount 限制未确认的投递数，0 表示 1。
 	PrefetchCount int
 	PrefetchSize  int
 	Global        bool
 	// DiscardOnError nacks failed messages without requeue, which drops them or
 	// routes them to a dead-letter exchange. The default requeues.
+	// DiscardOnError 让失败消息以不重新入队的方式 nack，即丢弃或转入死信
+	// exchange。默认重新入队。
 	DiscardOnError bool
 	// ReconnectDelay is the pause before rebuilding a lost consumer; zero means
 	// 3s.
+	// ReconnectDelay 是重建丢失的消费者前的等待时间，0 表示 3s。
 	ReconnectDelay time.Duration
 	Arguments      amqp091.Table
 	// OnError receives handler failures, ack/nack failures and reconnect
 	// errors. It is called from the consumer goroutine.
+	// OnError 接收 handler 失败、ack/nack 失败与重连错误。回调在消费者
+	// goroutine 中执行，不应阻塞。
 	OnError func(error)
 }
 
@@ -187,6 +216,11 @@ type ConsumeOptions struct {
 //
 // A cancelled context returns nil, so Consume can be used directly as a
 // goroutine body with a long-lived application context.
+// Consume 声明 topology 并持续处理投递，直到 ctx 被取消。handler 错误、
+// ack 失败与连接丢失经 Options.OnError 上报，之后按
+// ConsumeOptions.ReconnectDelay 重连。
+// ctx 被取消时返回 nil，因此 Consume 可以直接作为 goroutine 主体，配合长生命
+// 周期的应用上下文使用。
 func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
 	if handler == nil {
 		return ErrHandlerRequired
@@ -220,6 +254,8 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 
 // Close releases the publishing channel. A later Publish reopens it; Consume
 // opens its own channels and is unaffected.
+// Close 释放发布用的 channel。之后的 Publish 会重新打开；Consume 使用自己的
+// channel，不受影响。
 func (q *Queue) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -264,6 +300,9 @@ func (q *Queue) consumeOnce(ctx context.Context, handler HandlerFunc, opts Consu
 	for {
 		select {
 		case <-ctx.Done():
+			// Drain deliveries before closing the channel. With unread buffered
+			// messages the amqp091 consumer blocks the connection reader goroutine,
+			// so the following Close never receives close-ok.
 			// 排空投递再关 channel。amqp091 的消费者缓冲在有未读消息时会
 			// 阻塞连接读取协程，导致随后的 Close 收不到 close-ok。
 			for range deliveries {

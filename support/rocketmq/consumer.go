@@ -20,21 +20,27 @@ const (
 	defaultInvisibleDuration = 30 * time.Second
 	// receiveBackoff slows the pull loop down after a non-timeout error
 	// instead of hammering an unavailable proxy.
+	// receiveBackoff 让拉取循环在非超时错误后退避，避免持续冲击不可用的 proxy。
 	receiveBackoff = time.Second
 )
 
 var (
 	// ErrGroupRequired is returned when ConsumerConfig.Group is empty.
+	// ErrGroupRequired 在 ConsumerConfig.Group 为空时返回。
 	ErrGroupRequired = errors.New("rocketmq: consumer group is required")
 	// ErrTagsConflictSQL is returned when both SQL and a concrete tag filter
 	// are configured.
+	// ErrTagsConflictSQL 在同时配置 SQL 与具体 tag 过滤时返回。
 	ErrTagsConflictSQL = errors.New("rocketmq: sql and tags cannot be set together")
 	// ErrInvalidTag is returned for an empty tag or one containing "||".
+	// ErrInvalidTag 在 tag 为空或含 "||" 时返回。
 	ErrInvalidTag = errors.New("rocketmq: invalid tag")
 	// ErrHandlerRequired is returned when Consume receives a nil handler.
+	// ErrHandlerRequired 在 Consume 收到 nil handler 时返回。
 	ErrHandlerRequired = errors.New("rocketmq: handler is required")
 	// ErrConsumerStarted is returned when Consume is called twice on the same
 	// Consumer.
+	// ErrConsumerStarted 在同一个 Consumer 上重复调用 Consume 时返回。
 	ErrConsumerStarted = errors.New("rocketmq: consumer already started")
 )
 
@@ -43,27 +49,40 @@ var (
 // v5.1.2 has no push consumer: Consume long-polls with Receive and
 // acknowledges each message. Ordering is preserved per queue within one worker
 // batch; set Concurrency to 1 for one-at-a-time consumption.
+// ConsumerConfig 描述一个 pull 消费者的组订阅。
+// v5.1.2 没有 push 消费者：Consume 用 Receive 长轮询并逐条确认。单个 worker
+// 批次内按队列保持顺序；需要严格串行消费时把 Concurrency 设为 1。
 type ConsumerConfig struct {
 	Topic string `yaml:"topic"`
 	Group string `yaml:"group"`
 	// Tags restricts the subscription to these tags. Empty or a single "*"
 	// subscribes to every tag. Elements are joined with "||" and must not
 	// contain that sequence themselves.
+	// Tags 把订阅限定在这些 tag 上，为空或只有一个 "*" 时订阅全部 tag。多个元素
+	// 用 "||" 连接，元素自身不能包含该串。
 	Tags []string `yaml:"tags"`
 	// SQL is an SQL92 property filter such as
 	// "eventType IN ('created', 'cancelled')". It requires
 	// enablePropertyFilter=true on the broker and cannot be combined with a
 	// concrete Tags filter.
+	// SQL 是 SQL92 属性过滤表达式，例如
+	// "eventType IN ('created', 'cancelled')"。它要求 broker 打开
+	// enablePropertyFilter=true，且不能与具体 Tags 过滤同时使用。
 	SQL string `yaml:"sql"`
 	// BatchSize is how many messages one Receive asks for. Zero uses 16.
+	// BatchSize 是单次 Receive 请求的消息条数，0 表示 16。
 	BatchSize int `yaml:"batch_size"`
 	// Concurrency is the number of pull workers. Zero uses 1.
+	// Concurrency 是拉取 worker 的数量，0 表示 1。
 	Concurrency int `yaml:"concurrency"`
 	// AwaitDuration is the broker long-poll wait of one Receive. Zero uses 5s.
+	// AwaitDuration 是单次 Receive 在 broker 侧的长轮询等待时长，0 表示 5s。
 	AwaitDuration time.Duration `yaml:"await_duration"`
 	// InvisibleDuration hides a message from other consumers after delivery.
 	// A failed handler leaves the message unacknowledged, so it is redelivered
 	// after this duration. Zero uses 30s.
+	// InvisibleDuration 是消息投递后对其他消费者的不可见时长。handler 失败时
+	// 不 ack，消息在该时长结束后重投。0 表示 30s。
 	InvisibleDuration time.Duration `yaml:"invisible_duration"`
 }
 
@@ -148,6 +167,8 @@ func hasConcreteTags(tags []string) bool {
 
 // Message is one received message. Body is the raw payload; use
 // encoding/json or your own codec to decode it.
+// Message 是一条收到的消息。Body 是原始负载，请用 encoding/json 或自己的编解码
+// 器解析。
 type Message struct {
 	MessageID string
 	Topic     string
@@ -155,14 +176,19 @@ type Message struct {
 	Keys      []string
 	Body      []byte
 	// Properties are the user properties set by the producer.
+	// Properties 是生产者设置的用户属性。
 	Properties map[string]string
 	// MessageGroup is set for FIFO messages.
+	// MessageGroup 只在 FIFO 消息上设置。
 	MessageGroup string
 	// Offset is the queue offset reported by the broker.
+	// Offset 是 broker 报告的队列位点。
 	Offset int64
 	// DeliveryAttempt starts at 1 and increases on redelivery.
+	// DeliveryAttempt 从 1 开始，每次重投递增，可用于识别重复投递。
 	DeliveryAttempt int32
 	// DeliveryTimestamp is the scheduled delivery time of a delayed message.
+	// DeliveryTimestamp 是延迟消息的计划投递时间。
 	DeliveryTimestamp time.Time
 	BornTimestamp     time.Time
 }
@@ -171,25 +197,37 @@ type Message struct {
 // return leaves it unacknowledged, so the broker redelivers it after
 // InvisibleDuration and DeliveryAttempt increases; make handlers idempotent by
 // MessageID or Keys.
+// HandlerFunc 处理一条消息。返回 nil 表示 ack；返回非 nil 则不 ack，broker 会在
+// InvisibleDuration 之后重投并递增 DeliveryAttempt，因此 handler 必须按
+// MessageID 或 Keys 实现幂等。handler 内的 panic 会被捕获并当作错误上报。
 type HandlerFunc func(ctx context.Context, message *Message) error
 
 // ConsumeOptions controls one Consume call.
+// ConsumeOptions 控制单次 Consume 调用。
 type ConsumeOptions struct {
 	// DiscardOnError acknowledges a failed message and continues with the
 	// rest of the batch. The default leaves it unacknowledged for redelivery.
+	// DiscardOnError 对失败消息也 ack，并继续处理批次内其余消息。默认不 ack，
+	// 留待重投。
 	DiscardOnError bool
 	// OnError receives handler, panic, receive and acknowledgement errors. It
 	// is called from pull-worker goroutines.
+	// OnError 接收 handler、panic、拉取与 ack 错误，回调在拉取 worker 的
+	// goroutine 中执行，不应阻塞。
 	OnError func(error)
 }
 
 // Consumer reads one topic as part of a consumer group. RocketMQ consumers
 // have their own client, so a Consumer is built from Config rather than from a
 // Client. A Consumer is single-use: call Consume once, then Close.
+// Consumer 以消费者组成员的身份读取一个 topic。RocketMQ 消费者自带客户端，
+// 因此 Consumer 由 Config 而非 Client 构建。Consumer 是一次性对象：Consume
+// 只能调用一次，之后调用 Close。
 type Consumer struct {
 	cfg ConsumerConfig
 	// raw is the SDK SimpleConsumer behind an interface so the pull loop can
 	// be tested without a broker.
+	// raw 是被接口包住的 SDK SimpleConsumer，便于在没有 broker 时测试拉取循环。
 	raw       consumerClient
 	consuming atomic.Bool
 	closed    atomic.Bool
@@ -197,10 +235,12 @@ type Consumer struct {
 	wg        sync.WaitGroup
 	// mu serializes Start with Close so a close cannot race a starting
 	// consumer.
+	// mu 让 Start 与 Close 串行，避免关闭与启动并发竞争。
 	mu sync.Mutex
 }
 
 // consumerClient is the subset of rmq.SimpleConsumer the pull loop uses.
+// consumerClient 是拉取循环用到的 rmq.SimpleConsumer 子集。
 type consumerClient interface {
 	Start() error
 	Stop() error
@@ -209,6 +249,7 @@ type consumerClient interface {
 }
 
 // deliveredMessage pairs the SDK view needed by Ack with the mapped message.
+// deliveredMessage 把 Ack 需要的 SDK 视图与映射后的消息放在一起。
 type deliveredMessage struct {
 	view    *rmq.MessageView
 	message *Message
@@ -216,6 +257,8 @@ type deliveredMessage struct {
 
 // simpleConsumer adapts the SDK consumer and maps each view eagerly, so a
 // handler never touches protocol types.
+// simpleConsumer 适配 SDK 消费者，并立即完成视图映射，handler 因此不必接触协议
+// 类型。
 type simpleConsumer struct {
 	raw rmq.SimpleConsumer
 }
@@ -249,6 +292,8 @@ func (c *simpleConsumer) Ack(ctx context.Context, delivery deliveredMessage) err
 
 // NewConsumer validates the connection and subscription, and builds the pull
 // consumer. It does not connect until Consume is called.
+// NewConsumer 校验连接与订阅并构建 pull 消费者。连接要等到 Consume 被调用时才
+// 建立。
 func NewConsumer(cfg Config, consumerCfg ConsumerConfig) (*Consumer, error) {
 	if err := cfg.validateConnection(); err != nil {
 		return nil, err
@@ -271,6 +316,7 @@ func NewConsumer(cfg Config, consumerCfg ConsumerConfig) (*Consumer, error) {
 }
 
 // Config returns the effective consumer configuration.
+// Config 返回实际生效的消费者配置。
 func (c *Consumer) Config() ConsumerConfig {
 	if c == nil {
 		return ConsumerConfig{}
@@ -289,6 +335,11 @@ func (c *Consumer) Config() ConsumerConfig {
 // redelivered after InvisibleDuration unless DiscardOnError is set. With
 // Concurrency above 1, batches are processed by several workers and no order
 // is guaranteed across them.
+// Consume 启动消费者并长轮询，直到 ctx 被取消或 Close 被调用。ctx 被取消时返回
+// nil，因此可以直接作为 goroutine 主体使用。
+// 一个 worker 按顺序处理批次内的每条消息：成功的 ack；失败的除非设置
+// DiscardOnError，否则不 ack，并在 InvisibleDuration 后重投。Concurrency 大于 1
+// 时批次由多个 worker 并行处理，批次之间不保证顺序。
 func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
 	if c == nil || c.raw == nil {
 		return ErrClientRequired
@@ -332,6 +383,8 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 	cancel()
 	c.wg.Wait()
 
+	// Stop the consumer only after the workers exit: Receive racing with
+	// GracefulStop makes the SDK log meaningless receive errors.
 	// 工作协程退出后再停消费者：Receive 和 GracefulStop 并发会让 SDK
 	// 记录无意义的接收错误。
 	if err := c.raw.Stop(); err != nil && !c.closed.Load() && ctx.Err() == nil {
@@ -343,6 +396,8 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 // Close asks Consume to stop and returns immediately. Consume stops the
 // underlying client after its workers exit. It is safe to call more than once,
 // and harmless on a consumer that never started.
+// Close 通知 Consume 停止并立即返回，底层客户端由 Consume 在 worker 退出后关闭。
+// 可重复调用，对从未启动的消费者也安全。
 func (c *Consumer) Close() error {
 	if c == nil {
 		return nil
@@ -405,6 +460,8 @@ func (c *Consumer) process(ctx context.Context, delivery deliveredMessage, handl
 		c.ack(ctx, delivery, "discard", opts)
 	default:
 		report(opts, fmt.Errorf("rocketmq: handle %s@%s: %w", message.Topic, message.MessageID, err))
+		// No ack: the broker redelivers after InvisibleDuration, so the handler
+		// must be idempotent.
 		// 不 ack：InvisibleDuration 之后 broker 重投，handler 必须幂等。
 	}
 	return true
@@ -421,6 +478,9 @@ func (c *Consumer) ack(ctx context.Context, delivery deliveredMessage, action st
 // fmt.Errorf("[error] CODE=DEADLINE_EXCEEDED") instead of a typed timeout, so
 // the string match is the only portable signal; context cancellation is
 // checked by the caller.
+// isReceiveTimeout 判断 SDK 的长轮询超时。v5.1.2 返回的是普通
+// fmt.Errorf("[error] CODE=DEADLINE_EXCEEDED")，并非类型化超时，只能靠字符串
+// 匹配识别；上下文取消由调用方自行判断。
 func isReceiveTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -433,6 +493,7 @@ func isReceiveTimeout(err error) bool {
 
 // sleepCtx waits for d unless ctx ends first; it reports whether the timer
 // fired.
+// sleepCtx 等待 d，ctx 先结束则提前返回；返回值表示定时器是否到期。
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -446,6 +507,8 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 
 // viewReader is the part of *rmq.MessageView receivedMessage reads. The
 // interface exists only so field mapping is testable without a broker.
+// viewReader 是 receivedMessage 用到的 *rmq.MessageView 部分。该接口只为让字段
+// 映射在没有 broker 时也能测试。
 type viewReader interface {
 	GetMessageId() string
 	GetTopic() string

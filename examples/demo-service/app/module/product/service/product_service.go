@@ -22,12 +22,16 @@ var _ productapi.ProductAPI = (*ProductService)(nil)
 var ErrNotFound = productapi.ErrNotFound
 
 // ProductService implements product use cases.
+// ProductService 是产品用例实现，也是 innerapi.ProductAPI 的唯一实现：把持久化
+// 模型换算成跨模块只读视图，并把状态码换算成 bool OnSale。
 type ProductService struct {
 	products *repository.ProductRepository
 	logger   *zap.Logger
 }
 
 // Get returns one product view or innerapi.ErrNotFound.
+// Get 返回单个产品视图；仓库 ErrNotFound 直接翻译成 innerapi.ErrNotFound，
+// 消费方无需认识本模块仓库的错误类型。
 func (s *ProductService) Get(ctx context.Context, id uint64) (*productapi.Product, error) {
 	p, err := s.products.FindByID(ctx, id)
 	if err != nil {
@@ -43,6 +47,8 @@ func (s *ProductService) Get(ctx context.Context, id uint64) (*productapi.Produc
 
 // ListByIDs returns the products that exist, keyed by id. Missing ids are
 // absent from the result.
+// ListByIDs 是订单模块下单校验的入口：只返回存在的产品视图，缺失 id 不出现，
+// 由调用方判定哪个 SKU 不存在。
 func (s *ProductService) ListByIDs(ctx context.Context, ids []uint64) (map[uint64]productapi.Product, error) {
 	items, err := s.products.ListByIDs(ctx, ids)
 	if err != nil {

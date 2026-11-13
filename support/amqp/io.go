@@ -11,6 +11,7 @@ import (
 )
 
 // ErrUnknownInstance is returned when the requested name is not registered.
+// ErrUnknownInstance 在请求的实例名未注册时返回。
 var ErrUnknownInstance = errors.New("amqp: unknown instance")
 
 // Registry holds named configurations and opens their clients on first use.
@@ -24,6 +25,12 @@ var ErrUnknownInstance = errors.New("amqp: unknown instance")
 // parallel, concurrent callers of one name share a single attempt, and a failed
 // attempt is retried by the next call. Prefer the instance Registry for
 // per-generation isolation.
+// Registry 保存命名配置，并在首次使用时打开对应的 client。
+// Configure 安装新一代并返回它，NewIO 使用最近安装的那一代。每代只拥有自己
+// 打开的 client，因此 Reload 可以先建好新 Registry、切换使用、再关闭旧的，
+// 正在使用旧 client 的请求不受影响。
+// client 在注册表锁之外打开：不同名字并行初始化，同名并发调用共享同一次
+// 尝试，失败的那次由下一次调用重试。需要按代隔离时请使用实例上的 Registry。
 type Registry struct {
 	configs map[string]Config
 	slots   *instanceinit.Slots[*Client]
@@ -34,6 +41,8 @@ var current atomic.Pointer[Registry]
 // Configure validates the named configurations, installs them as the current
 // generation and returns it. An empty map is allowed: NewIO then reports
 // ErrUnknownInstance, which lets a reload disable every instance.
+// Configure 校验命名配置，把它们安装为当前代并返回。允许传空 map：此时 NewIO
+// 返回 ErrUnknownInstance，Reload 因此可以一次性停用所有实例。
 func Configure(configs map[string]Config) (*Registry, error) {
 	reg, err := NewRegistry(configs)
 	if err != nil {
@@ -46,6 +55,8 @@ func Configure(configs map[string]Config) (*Registry, error) {
 // NewRegistry validates the named configurations without making them current.
 // Do the eager opening through NewIO and call Install once every instance is
 // ready, so a failed startup does not replace a working generation.
+// NewRegistry 校验命名配置，但不把它们设为当前代。预打开请通过 NewIO 完成，
+// 等所有实例就绪后再调用 Install，启动失败就不会替换掉可用的一代。
 func NewRegistry(configs map[string]Config) (*Registry, error) {
 	reg := &Registry{
 		configs: make(map[string]Config, len(configs)),
@@ -71,6 +82,7 @@ func NewRegistry(configs map[string]Config) (*Registry, error) {
 
 // Install makes this generation current for package-level NewIO. Installing a
 // closed generation is a no-op.
+// Install 把本代设为包级 NewIO 使用的当前代。安装已关闭的代是空操作。
 func (r *Registry) Install() {
 	if r == nil {
 		return
@@ -81,6 +93,8 @@ func (r *Registry) Install() {
 // NewIO returns the client registered under name in the current generation,
 // opening it on first use. It reports ErrNotConfigured before Configure and
 // ErrUnknownInstance for an unregistered name.
+// NewIO 返回当前代中注册在 name 下的 client，首次使用时打开。Configure 之前
+// 返回 ErrNotConfigured，名字未注册时返回 ErrUnknownInstance。
 func NewIO(ctx context.Context, name string) (*Client, error) {
 	reg := current.Load()
 	if reg == nil {
@@ -91,6 +105,8 @@ func NewIO(ctx context.Context, name string) (*Client, error) {
 
 // CloseAllIO closes every client opened by the current generation and clears
 // it, so a later NewIO reports ErrNotConfigured.
+// CloseAllIO 关闭当前代打开的所有 client 并清除当前代，之后的 NewIO 返回
+// ErrNotConfigured。
 func CloseAllIO() error {
 	reg := current.Load()
 	if reg == nil {
@@ -100,6 +116,7 @@ func CloseAllIO() error {
 }
 
 // NewIO returns the client registered under name in this generation.
+// NewIO 返回本代中注册在 name 下的 client，未打开时按配置打开。
 func (r *Registry) NewIO(ctx context.Context, name string) (*Client, error) {
 	if r == nil {
 		return nil, ErrNotConfigured
@@ -125,6 +142,8 @@ func (r *Registry) NewIO(ctx context.Context, name string) (*Client, error) {
 
 // Close releases the clients opened by this generation and stops it from
 // opening more. Closing an earlier generation does not affect the current one.
+// Close 释放本代已打开的 client，并阻止它继续打开新连接。关闭旧的一代不会
+// 影响当前代。
 func (r *Registry) Close() error {
 	if r == nil {
 		return nil

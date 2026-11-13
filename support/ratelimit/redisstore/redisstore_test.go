@@ -56,6 +56,7 @@ func TestStoreSlidingWindow(t *testing.T) {
 	}
 
 	// Advancing the fake server clock past the window frees the slots.
+	// 把 mock 服务端时钟推进到窗口之外，占用的额度随之释放。
 	mr.FastForward(61 * time.Second)
 	fourth, err := store.Allow(ctx, "ip|GET|/orders", 2, time.Minute)
 	if err != nil {

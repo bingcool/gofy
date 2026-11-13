@@ -13,6 +13,7 @@ import (
 )
 
 // counter reads the Redis counter value written by the Lua script.
+// counter 读取 Lua 脚本写入的 Redis 计数器值，用来断言池实际消耗的号数。
 func counter(t *testing.T, mr *miniredis.Miniredis, key string) int64 {
 	t.Helper()
 	raw, err := mr.Get(key)
@@ -49,7 +50,7 @@ func TestPoolWarmsAndServesLocally(t *testing.T) {
 	mr := miniredis.RunT(t)
 	gen, err := uuidint.New("uuid-key",
 		uuidint.WithClient(testClient(t, mr)),
-		uuidint.WithPool(5, time.Hour), // 只验证预热那一批，不触发定时补货
+		uuidint.WithPool(5, time.Hour), // only the warm-up batch is checked, the ticker refill never fires; 只验证预热那一批，不触发定时补货
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -88,6 +89,8 @@ func TestPoolWarmsAndServesLocally(t *testing.T) {
 		t.Fatalf("counter after pooled Get = %d, want 5", got)
 	}
 
+	// The fifth ID still comes from the pool; Redis is only touched once the
+	// buffer is exhausted.
 	// 第 5 个仍来自池；池耗尽后回落到 Redis。
 	if _, err := gen.Get(ctx); err != nil {
 		t.Fatalf("Get last pooled id: %v", err)

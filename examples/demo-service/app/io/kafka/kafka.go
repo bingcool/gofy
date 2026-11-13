@@ -18,15 +18,18 @@ import (
 )
 
 // DefaultInstance is the name published through Default.
+// DefaultInstance 是 Default() 返回的实例名；该实例未启用时返回 nil。
 const DefaultInstance = "default"
 
 // Instance configures one named Kafka cluster connection.
+// Instance 描述单个具名 Kafka 集群连接；Enabled 为 false 时该实例不建连。
 type Instance struct {
 	Enabled          bool `yaml:"enabled"`
 	gofykafka.Config `yaml:",inline"`
 }
 
 // Config maps instance names to their connection settings.
+// Config 以实例名为键；名字可自由取，拼错只会多出一个实例而不会报错。
 type Config map[string]Instance
 
 // current 指向当前一代的 Set；发布和读取都不再持有互斥锁。
@@ -37,6 +40,8 @@ func Default() *gofykafka.Client { return current.Load().Client(DefaultInstance)
 
 // Set holds one generation of clients. Open builds it, Install publishes it
 // and Close releases it.
+// Set 持有一个装配代的客户端集合：Open 构建、Install 发布、Close 释放；Producer
+// 与 Consumer 都用这一代的 Client 创建。
 type Set struct {
 	registry *gofykafka.Registry
 	clients  map[string]*gofykafka.Client
@@ -46,6 +51,9 @@ type Set struct {
 // typo creates a different instance rather than failing; config.Load rejects
 // empty names before startup. Connections come from support/kafka NewIO, which
 // caches one client per alias for this generation.
+// Open 为每个启用实例建连。实例名自由填写，拼错只会多出一个实例而不会报错，
+// 空名字已由 config.Load 在启动前拒绝。连接来自 support/kafka 的 NewIO，本代
+// 每个别名只缓存一个客户端。
 func Open(ctx context.Context, cfg Config, logger *zap.Logger) (*Set, error) {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -91,6 +99,7 @@ func Open(ctx context.Context, cfg Config, logger *zap.Logger) (*Set, error) {
 
 // Client returns this generation's client for name; nil when the instance is
 // not enabled.
+// Client 返回本代 name 对应的客户端；实例未启用或名字不存在时返回 nil。
 func (s *Set) Client(name string) *gofykafka.Client {
 	if s == nil {
 		return nil
@@ -99,6 +108,7 @@ func (s *Set) Client(name string) *gofykafka.Client {
 }
 
 // Install publishes this generation to the package handles.
+// Install 把本代整体发布为包级句柄，读方看到的要么是整代、要么是上一代。
 func (s *Set) Install() {
 	if s == nil {
 		return
@@ -109,6 +119,8 @@ func (s *Set) Install() {
 // Close releases this generation. The installed pointer is cleared only while
 // it still points at this set, so a reload that already installed new
 // connections keeps them intact.
+// Close 释放本代连接。只有发布指针仍指向自己时才清空，Reload 已安装的新连接
+// 不会被旧代误删。
 func (s *Set) Close() error {
 	if s == nil {
 		return nil
@@ -119,6 +131,8 @@ func (s *Set) Close() error {
 
 // NewIO returns the client registered under name in this generation, opening
 // the connection on first use.
+// NewIO 返回本代 name 对应的客户端，首次调用时才真正建连；本代未注册该实例
+// 时返回 ErrNotConfigured。
 func (s *Set) NewIO(ctx context.Context, name string) (*gofykafka.Client, error) {
 	if s == nil || s.registry == nil {
 		return nil, gofykafka.ErrNotConfigured
@@ -128,17 +142,21 @@ func (s *Set) NewIO(ctx context.Context, name string) (*gofykafka.Client, error)
 
 // NewIO resolves name in the installed generation. Request paths go through the
 // snapshot so the lookup cannot cross a reload.
+// NewIO 在当前已发布一代里解析 name，供没有请求上下文的调用方使用；请求路径
+// 应走快照（appio.FromContext），避免一次请求跨代取连接。
 func NewIO(ctx context.Context, name string) (*gofykafka.Client, error) {
 	return current.Load().NewIO(ctx, name)
 }
 
 // Get returns the installed client for name, or nil when the instance is not
 // enabled.
+// Get 返回已发布一代中 name 的客户端；实例未启用时返回 nil。
 func Get(name string) *gofykafka.Client {
 	return current.Load().Client(name)
 }
 
 // Names returns the enabled instance names, sorted.
+// Names 返回已启用实例名并排序，便于日志与诊断输出稳定。
 func Names() []string {
 	set := current.Load()
 	if set == nil {

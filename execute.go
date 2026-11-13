@@ -20,8 +20,13 @@ import (
 
 // Execute parses os.Args[1:] and dispatches start, stop, script, version or a
 // custom command. It never calls os.Exit.
+// Execute 解析 os.Args[1:] 并分发 start、stop、script、version 或自定义命令；
+// 它从不调用 os.Exit，退出码由调用方根据返回的错误决定。
 func (a *App) Execute(ctx context.Context) error {
 	err := a.ExecuteArgs(ctx, os.Args[1:])
+	// Argument errors happen before the logger is built, so app.Logger() in main is
+	// still Nop. Without an injected logger, write to stderr directly so the user sees
+	// more than the exit code of go run.
 	// 参数错误发生在 logger 构建之前，main 里的 app.Logger() 还是 Nop。
 	// 没有注入 logger 时直接写 stderr，避免用户只看到 go run 的退出码。
 	if err != nil && a.opts.logger == nil && isCLIError(err) {
@@ -35,6 +40,8 @@ func isCLIError(err error) bool {
 }
 
 // ExecuteArgs is Execute with explicit arguments, which makes it testable.
+// ExecuteArgs 是带显式参数的 Execute，便于测试；ctx 为 nil 时使用
+// context.Background()。
 func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -128,6 +135,8 @@ func (a *App) runScript(ctx context.Context, name string, args []string) error {
 
 // withRuntime builds a short-lived Runtime for scripts and custom commands.
 // It starts no HTTP server, writes no pid file and makes Runtime.Fail a no-op.
+// withRuntime 为脚本和自定义命令构建一个短生命周期的 Runtime：不启动 HTTP
+// 服务、不写 pid 文件，Runtime.Fail 是 no-op，因此调用 Fail 不会中断进程。
 func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Runtime) error) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -136,6 +145,8 @@ func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Ru
 	if err != nil {
 		return err
 	}
+	// Expose it to app.Logger() so main can still log script errors after Execute
+	// returns.
 	// 暴露给 app.Logger()，让 main 在 Execute 返回后仍能记录脚本错误。
 	a.setLogger(lg, system, ownLogger)
 	if ownLogger {

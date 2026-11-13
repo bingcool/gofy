@@ -149,6 +149,7 @@ func TestRotatingSinkSizeModeUsesDateDirectory(t *testing.T) {
 func TestRotatingSinkPrunesExpiredDateDirs(t *testing.T) {
 	dir := t.TempDir()
 	parent := filepath.Join(dir, "http")
+	// Seven days before 2026-11-06 is 2026-10-30: anything earlier must be removed.
 	// 2026-11-06 往前 7 天是 2026-10-30：更早的目录应删除。
 	expired := filepath.Join(parent, "20261029")
 	boundary := filepath.Join(parent, "20261030")
@@ -165,6 +166,7 @@ func TestRotatingSinkPrunesExpiredDateDirs(t *testing.T) {
 		Mode:       "size",
 		DateDir:    true,
 		DateLayout: "20060102",
+		// A zero DateDirMaxAgeDays falls back to the default of 7.
 		// DateDirMaxAgeDays 为 0 时使用默认值 7。
 		MaxSizeMB: 1,
 		LocalTime: true,

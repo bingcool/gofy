@@ -22,6 +22,11 @@ import (
 // previous one: retired generations reject new leases, and their modules,
 // database and logger are released only after the last in-flight request
 // releases its lease.
+// generation 是一代已发布的请求侧资源：路由表，以及 Reload 必须等使用它们的
+// 请求结束后才能释放的所有东西。
+// 请求进入 handler 前获取 lease，handler 返回后释放。Reload 先发布新一代，再
+// 退役上一代：退役代拒绝新的 lease，其模块、数据库和 logger 要等最后一个在途
+// 请求释放 lease 之后才释放。
 type generation struct {
 	id      uint64
 	handler http.Handler
@@ -29,11 +34,15 @@ type generation struct {
 
 	// started holds the modules this generation started. Injected modules are
 	// owned by the App and survive reloads, so they are not listed here.
+	// started 记录本代启动的模块。注入的模块归 App 所有并跨 Reload 存活，所以
+	// 不列在这里。
 	started []support.Module
 
 	// db, logger and their ownership flags let retirement skip resources that
 	// the successor still uses (a reload without a new database shares the
 	// pool).
+	// db、logger 及其归属标记让退役流程跳过后继代仍在使用的资源（不带新数据库的
+	// Reload 会共享同一个连接池）。
 	db           *gorm.DB
 	ownDB        bool
 	logger       *zap.Logger
@@ -51,6 +60,7 @@ func newGeneration(id uint64, handler http.Handler) *generation {
 
 // generationLease counts in-flight requests and signals when a retired
 // generation has drained.
+// generationLease 统计在途请求，并在退役代排空时发出信号。
 type generationLease struct {
 	mu      sync.Mutex
 	active  int
@@ -65,6 +75,7 @@ func newGenerationLease() *generationLease {
 
 // acquire reports whether the request may use this generation. It returns false
 // once the generation is retired; the caller must retry with the current one.
+// acquire 报告请求能否使用本代。代已退役时返回 false，调用方必须改用当前代重试。
 func (l *generationLease) acquire() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -101,6 +112,8 @@ func (l *generationLease) closeDrained() {
 
 // wait blocks until every request has released the lease, the timeout expires,
 // or ctx is cancelled. It reports whether the generation drained in time.
+// wait 阻塞到所有请求释放 lease、超时或 ctx 被取消，并报告该代是否按时排空；
+// timeout 非正数时按 10s 处理。
 func (l *generationLease) wait(ctx context.Context, timeout time.Duration) bool {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -119,6 +132,7 @@ func (l *generationLease) wait(ctx context.Context, timeout time.Duration) bool 
 
 // handlerSwap lets Reload replace the generation while the process keeps its
 // listener.
+// handlerSwap 让 Reload 在进程保留 listener 的情况下替换 generation。
 type handlerSwap struct {
 	inner atomic.Pointer[generation]
 }
@@ -137,6 +151,9 @@ func (s *handlerSwap) Load() *generation { return s.inner.Load() }
 // was retired between the load and the acquire, it retries with the current
 // one. A repeatedly failing acquire means a reload is racing this request; it
 // is answered with 503 rather than entering a generation that is shutting down.
+// ServeHTTP 对它载入的 generation 获取 lease。若该代在载入与获取之间被退役，
+// 就改用当前代重试；尝试多次仍获取失败说明有 Reload 与本次请求竞争，此时返回
+// 503，而不是进入正在关闭的代。
 func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for attempt := 0; attempt < 8; attempt++ {
 		gen := s.inner.Load()
@@ -155,6 +172,8 @@ func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // retireGeneration drains gen and then releases the resources it owns. It is
 // called with the successor already published, so new requests never enter gen.
+// retireGeneration 先排空 gen，再释放它持有的资源。调用时后继代已经发布，因此
+// 新请求不会进入 gen。
 func retireGeneration(ctx context.Context, gen, successor *generation, timeout time.Duration, lg *zap.Logger) []error {
 	if gen == nil {
 		return nil
@@ -164,6 +183,8 @@ func retireGeneration(ctx context.Context, gen, successor *generation, timeout t
 		// The deadline is a safety valve: a stuck handler must not keep the
 		// process from completing a reload forever. The error is reported so
 		// operators can see requests were still running when resources closed.
+		// 截止时间是安全阀：卡住的 handler 不能让进程永远完不成 Reload。这里
+		// 记录告警，运维才能知道资源关闭时仍有请求在跑。
 		lg.Warn("reload drain timed out: releasing the previous generation with requests in flight",
 			zap.Uint64("generation", gen.id),
 			zap.Duration("timeout", timeout),

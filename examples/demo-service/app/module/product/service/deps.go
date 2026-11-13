@@ -14,6 +14,8 @@ type Dependencies struct {
 
 // NewProductService builds a ProductService. Products is required; a nil
 // logger falls back to zap.NewNop().
+// NewProductService 按显式依赖构造 service：仓库必填，logger 为 nil 时回退
+// zap.NewNop()。产品模块没有跨模块依赖，所以 Dependencies 只有本模块仓库。
 func NewProductService(deps Dependencies) *ProductService {
 	logger := deps.Logger
 	if logger == nil {

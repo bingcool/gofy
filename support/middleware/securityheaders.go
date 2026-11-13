@@ -8,9 +8,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// NameSecurityHeaders is the middleware alias SecurityHeaders uses on contract
+// routes.
 // NameSecurityHeaders 是 SecurityHeaders 在契约路由里使用的中间件别名。
 const NameSecurityHeaders = "security-headers"
 
+// SecurityHeaders writes the hardening headers on every response, including error
+// responses produced further down the chain.
+//
+// Construction merges configuration and defaults into one static header table,
+// so the request path writes once and has no branches: empty string fields fall
+// back to support.DefaultSecurityHeadersConfig; HSTS 0 means no
+// Strict-Transport-Security header; Custom is merged last and can override a
+// built-in header of the same name.
+//
+// The headers are written before c.Next(), so they are still present when a
+// handler returns 4xx/5xx.
 // SecurityHeaders 给每个响应写安全加固头，包括后续链路产生的错误响应。
 //
 // 构造期把配置与默认值合并成一张静态头表，请求期只做一次写入、没有分支：
@@ -40,6 +53,9 @@ func SecurityHeaders(cfg support.SecurityHeadersConfig) (gin.HandlerFunc, error)
 	if v := pick(cfg.ReferrerPolicy, defaults.ReferrerPolicy); v != "" {
 		headers["Referrer-Policy"] = v
 	}
+	// HSTS only applies when a duration is configured explicitly: max-age is
+	// mandatory while includeSubDomains and preload are appended on demand, so a
+	// pure HTTP environment never gets a long-lived HSTS policy by accident.
 	// HSTS 只在显式配置了时长时生效：max-age 必填，includeSubDomains 与
 	// preload 按配置追加，避免给纯 HTTP 环境误加长期 HSTS。
 	if cfg.HSTS > 0 {

@@ -1,6 +1,8 @@
 // Package pg opens and closes GORM connections for PostgreSQL-protocol
 // servers through gorm.io/driver/postgres (jackc/pgx/v5). It owns no global
 // state: callers pass a context, a config and a logger.
+// 包 pg 通过 gorm.io/driver/postgres（jackc/pgx/v5）为 PostgreSQL 协议服务器打开
+// 并关闭 GORM 连接。它不持有全局状态：调用方传入 context、配置和 logger。
 package pg
 
 import (
@@ -18,11 +20,14 @@ import (
 )
 
 // ErrDSNRequired is returned when Config.DSN is empty.
+// ErrDSNRequired 在 Config.DSN 为空时返回。
 var ErrDSNRequired = errors.New("pg: dsn is required")
 
 // Config describes a PostgreSQL connection pool. DSN accepts both pgx forms:
 // URL ("postgres://user:pass@host:5432/db?sslmode=disable") and keyword/value
 // ("host=127.0.0.1 user=app password=secret dbname=app sslmode=disable").
+// Config 描述 PostgreSQL 连接 pool。DSN 接受 pgx 的两种形式：URL 与
+// keyword/value；其余零值字段在 New 中填充默认值。
 type Config struct {
 	DSN             string        `yaml:"dsn"`
 	MaxIdleConns    int           `yaml:"max_idle_conns" default:"10"`
@@ -31,15 +36,19 @@ type Config struct {
 	ConnMaxIdleTime time.Duration `yaml:"conn_max_idle_time" default:"10m"`
 	PingTimeout     time.Duration `yaml:"ping_timeout" default:"5s"`
 	SlowThreshold   time.Duration `yaml:"slow_threshold" default:"200ms"`
-	LogLevel        string        `yaml:"log_level" default:"warn"` // silent|error|warn|info
+	LogLevel        string        `yaml:"log_level" default:"warn"` // silent|error|warn|info；可选值，默认 warn
 	// LogParameterValues logs expanded SQL arguments instead of placeholders.
 	// The default false keeps phone numbers, emails, tokens and other values
 	// out of slow and failed query logs; enable it only for local debugging.
+	// LogParameterValues 为 true 时日志记录展开后的 SQL 参数而不是占位符。默认
+	// false 可避免手机号、邮箱、token 等进入慢查询与失败日志，仅本地调试时开启。
 	LogParameterValues bool `yaml:"log_parameter_values" default:"false"`
 	PrepareStmt        bool `yaml:"prepare_stmt" default:"false"`
 }
 
 // Validate checks the config without connecting.
+// Validate 在不建立连接的前提下检查配置，拒绝负的 pool 大小与时长、非法的日志级别；
+// 应在启动期调用而不是等首个查询失败。
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.DSN) == "" {
 		return ErrDSNRequired
@@ -90,6 +99,8 @@ func (c Config) withDefaults() Config {
 
 // New opens a PostgreSQL connection, configures the pool and verifies it with
 // a ping. It never panics and never logs the DSN.
+// New 打开 PostgreSQL 连接、配置 pool 并用 ping 验证；不会 panic，也不会在日志
+// 或错误里输出完整 DSN。ping 失败时会先关闭已打开的连接再返回错误。
 func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -131,6 +142,7 @@ func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) 
 }
 
 // Close releases the underlying connection pool. A nil conn is a no-op.
+// Close 释放底层连接 pool；conn 为 nil 时是空操作，关闭后该句柄不应再使用。
 func Close(conn *gorm.DB) error {
 	if conn == nil {
 		return nil
@@ -145,11 +157,15 @@ func Close(conn *gorm.DB) error {
 	return nil
 }
 
+// passwordKV matches password=xxx (including a single-quoted value) in a
+// keyword/value DSN.
 // passwordKV 匹配 keyword/value 形式 DSN 中的 password=xxx（含单引号包裹）。
 var passwordKV = regexp.MustCompile(`(?i)(password\s*=\s*)('[^']*'|[^\s]+)`)
 
 // redactDSN hides the password portion of a DSN before it reaches a log or
 // error. Both pgx forms are covered: URL userinfo and password= keyword.
+// redactDSN 在 DSN 进入日志或错误前隐藏密码部分；URL 的 userinfo 与
+// password= 两种 pgx 形式都已覆盖。
 func redactDSN(dsn string) string {
 	if i := strings.Index(dsn, "://"); i >= 0 {
 		rest := dsn[i+3:]
@@ -197,6 +213,8 @@ func newGormLogger(logger *zap.Logger, cfg Config) gormlogger.Interface {
 // ParamsFilter implements gorm.ParamsFilter. Returning a nil var list makes the
 // dialector skip expansion, so Trace logs the statement template with its
 // placeholders instead of the actual arguments.
+// ParamsFilter 实现 gorm.ParamsFilter。返回 nil 参数列表会让 dialector 跳过展开，
+// 因此 Trace 记录的是带占位符的语句模板而不是实际参数。
 func (g *gormLogger) ParamsFilter(_ context.Context, sql string, params ...interface{}) (string, []interface{}) {
 	if g.logParameters {
 		return sql, params

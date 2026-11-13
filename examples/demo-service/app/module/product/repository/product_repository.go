@@ -12,6 +12,8 @@ import (
 )
 
 // ErrNotFound is returned when a product does not exist.
+// ErrNotFound 表示产品不存在，service 据此翻译成 innerapi 哨兵错误；gorm 的错误
+// 类型不出仓库边界。
 var ErrNotFound = errors.New("product not found")
 
 // StatusOnSale marks a product that can be ordered. 这是持久化层的状态码定义，
@@ -36,6 +38,8 @@ func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
 }
 
 // FindByID returns one product or ErrNotFound.
+// FindByID 按主键取一条产品；记录缺失返回 ErrNotFound，其它失败带上产品 id 包装，
+// 便于上层定位是哪一次查询出错。
 func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*model.Product, error) {
 	var p model.Product
 	err := r.conn(ctx).WithContext(ctx).First(&p, id).Error
@@ -50,6 +54,8 @@ func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*model.Pro
 
 // ListByIDs returns the products that exist, keyed by id. Missing ids are
 // absent from the result; an empty input returns an empty map without querying.
+// ListByIDs 批量取存在的产品并按 id 索引：缺失的 id 直接缺席而非占位，调用方据此
+// 判断哪个 SKU 不存在；空入参不发 SQL，直接返回空 map。
 func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[uint64]model.Product, error) {
 	items := make(map[uint64]model.Product, len(ids))
 	if len(ids) == 0 {

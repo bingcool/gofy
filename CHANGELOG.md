@@ -481,6 +481,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Go comments in this repository, `examples/demo-service` and
+  `gofy-interface-service` are now bilingual: every existing comment block
+  keeps its English text and gains a Chinese section after it (pure-Chinese
+  blocks gained English above them). The convention is recorded in `AGENTS.md`
+  in both repositories; code, tags, directives and generated artifacts are
+  unchanged.
 - `gofy-interface-service` now declares
   `module github.com/bingcool/gofy-interface-service`, matching the repository,
   and every import in that repository and in `examples/demo-service` was

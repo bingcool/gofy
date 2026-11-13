@@ -14,16 +14,21 @@ import (
 
 var (
 	// ErrGroupRequired is returned when ConsumerConfig.Group is empty.
+	// ErrGroupRequired 在 ConsumerConfig.Group 为空时返回。
 	ErrGroupRequired = errors.New("kafka: consumer group is required")
 	// ErrInvalidOffsetReset is returned for an unknown auto_offset_reset.
+	// ErrInvalidOffsetReset 在 auto_offset_reset 取值未知时返回。
 	ErrInvalidOffsetReset = errors.New("kafka: auto_offset_reset must be earliest or latest")
 	// ErrInvalidCommitMode is returned for an unknown commit_mode.
+	// ErrInvalidCommitMode 在 commit_mode 取值未知时返回。
 	ErrInvalidCommitMode = errors.New("kafka: commit_mode must be manual or auto")
 	// ErrHandlerRequired is returned when Consume receives a nil handler.
+	// ErrHandlerRequired 在 Consume 收到 nil handler 时返回。
 	ErrHandlerRequired = errors.New("kafka: handler is required")
 )
 
 // CommitMode controls how a consumer commits offsets.
+// CommitMode 控制消费者提交位点的方式。
 type CommitMode string
 
 const (
@@ -31,11 +36,17 @@ const (
 	// record is not committed, so it is redelivered after a restart, and
 	// records after it wait until it succeeds or is discarded. This is the
 	// default and the safe choice when losing a message is unacceptable.
+	// CommitModeManual 只提交 handler 处理成功的记录。失败的记录不提交，重启后
+	// 会重新投递；它之后的记录也会一起等待，直到该记录成功或被丢弃。这是默认
+	// 值，也是不能丢消息时的安全选择。
 	CommitModeManual CommitMode = "manual"
 	// CommitModeAuto lets franz-go commit polled offsets every
 	// AutoCommitInterval regardless of the handler result, so a failed record
 	// may already be committed. Use it only for repeatable side effects such as
 	// cache refreshes or config sync.
+	// CommitModeAuto 让 franz-go 按 AutoCommitInterval 提交已拉取的位点，与
+	// handler 结果无关，失败的记录可能已被提交。仅用于缓存刷新、配置同步等
+	// 可重复执行的副作用。
 	CommitModeAuto CommitMode = "auto"
 )
 
@@ -46,26 +57,41 @@ const (
 // these group settings are not applied: the injected client must already be
 // configured with kgo.ConsumerGroup(Group) and, for manual mode,
 // kgo.DisableAutoCommit().
+// ConsumerConfig 描述一个消费者组订阅。
+// 组配置在 franz-go 中属于客户端配置，因此受管的 Client 会由 NewConsumer
+// 另建专用客户端。Wrap 创建的 Client 不会应用这些组设置：注入的客户端必须
+// 已经配置好 kgo.ConsumerGroup(Group)，手动提交模式还需
+// kgo.DisableAutoCommit()。
 type ConsumerConfig struct {
 	Topic string `yaml:"topic"`
 	Group string `yaml:"group"`
 	// CommitMode selects manual (default) or auto offset commits. An empty
 	// value means manual.
+	// CommitMode 选择手动（默认）或自动提交位点，空值表示手动。
 	CommitMode CommitMode `yaml:"commit_mode"`
 	// DisableAutoCommit is deprecated: true is equivalent to
 	// CommitModeManual. false no longer enables auto commits, because manual
 	// is the default; set commit_mode: auto to opt in. When both fields are
 	// set, CommitMode wins.
+	// DisableAutoCommit 已废弃：true 等价于 CommitModeManual，false 不再表示
+	// 开启自动提交，因为默认就是手动；如需自动提交请设 commit_mode: auto。
+	// 两个字段同时设置时以 CommitMode 为准。
 	DisableAutoCommit bool `yaml:"disable_auto_commit"`
 	// AutoCommitInterval is the auto commit period. Zero uses 200ms.
+	// AutoCommitInterval 是自动提交周期，0 表示 200ms。
 	AutoCommitInterval time.Duration `yaml:"auto_commit_interval" default:"200ms"`
 	// AutoOffsetReset is earliest or latest. Zero value uses earliest.
+	// AutoOffsetReset 取 earliest 或 latest，零值表示 earliest。
 	AutoOffsetReset string `yaml:"auto_offset_reset" default:"earliest"`
 	// SessionTimeout is the group session timeout. Zero uses 45s.
+	// SessionTimeout 是消费者组会话超时，0 表示 45s。
 	SessionTimeout time.Duration `yaml:"session_timeout" default:"45s"`
 	// OnPartitionsAssigned and OnPartitionsRevoked are rebalance hooks. They
 	// only apply to consumers built from a managed Client; franz-go stores
 	// them on the client, so injected clients must configure their own.
+	// OnPartitionsAssigned 与 OnPartitionsRevoked 是重平衡钩子，仅对受管
+	// Client 创建的消费者生效；franz-go 把它们存在客户端上，注入的客户端需
+	// 自行配置。
 	OnPartitionsAssigned func(ctx context.Context, assigned map[string][]int32) `yaml:"-"`
 	OnPartitionsRevoked  func(ctx context.Context, revoked map[string][]int32)  `yaml:"-"`
 }
@@ -102,6 +128,8 @@ func (c ConsumerConfig) withDefaults() ConsumerConfig {
 	// DisableAutoCommit=true only keeps its old meaning; false must not turn
 	// auto commits back on, otherwise existing configs could silently switch
 	// back after this version changes the default.
+	// DisableAutoCommit=true 只保留原语义；false 不能重新开启自动提交，否则
+	// 本版本改动默认值后，存量配置会悄悄切回自动提交。
 	if out.CommitMode == "" {
 		out.CommitMode = CommitModeManual
 	}
@@ -149,23 +177,34 @@ func (c ConsumerConfig) clientOptions() []kgo.Opt {
 
 // HandlerFunc processes one record. Returning an error stops Consume unless
 // ConsumeOptions.DiscardOnError is set.
+// HandlerFunc 处理一条记录。返回错误会终止 Consume，除非设置了
+// ConsumeOptions.DiscardOnError。handler 内的 panic 会被捕获并当作错误上报。
 type HandlerFunc func(ctx context.Context, record *kgo.Record) error
 
 // ConsumeOptions controls one Consume call.
+// ConsumeOptions 控制单次 Consume 调用。
 type ConsumeOptions struct {
 	// DiscardOnError reports a handler failure and continues with the next
 	// record, committing the failed offset when manual commits are enabled.
 	// The default returns the error: the failed record and the records after
 	// it are redelivered from the last committed offset.
+	// DiscardOnError 上报 handler 失败后继续处理下一条记录，手动提交模式下
+	// 同时提交失败记录的位点。默认行为是返回错误：失败记录及其之后的记录会
+	// 从最后提交的位点重新投递。
 	DiscardOnError bool
 	// MaxRecords limits records returned by one poll; zero uses every buffered
 	// record.
+	// MaxRecords 限制单次拉取返回的记录数，0 表示取回全部已缓冲记录。
 	MaxRecords int
 	// RetryDelay pauses after a poll error that produced no records; zero uses
 	// 1s. Poll errors that still returned records are reported without a pause.
+	// RetryDelay 是拉取出错且没有返回任何记录时的等待时间，0 表示 1s。仍返回
+	// 了记录的拉取错误只上报，不暂停。
 	RetryDelay time.Duration
 	// OnError receives fetch, handler, commit and panic errors. It is called
 	// from the Consume goroutine.
+	// OnError 接收拉取、handler、提交与 panic 错误，回调在 Consume 的
+	// goroutine 中执行，不应阻塞。
 	OnError func(error)
 }
 
@@ -178,6 +217,8 @@ func (o ConsumeOptions) withDefaults() ConsumeOptions {
 
 // Consumer reads one topic as part of a consumer group. A Consumer is meant
 // for one Consume goroutine.
+// Consumer 以消费者组成员的身份读取一个 topic。每个 Consumer 只对应一个
+// Consume goroutine，不要并发调用 Consume。
 type Consumer struct {
 	raw    *kgo.Client
 	cfg    ConsumerConfig
@@ -191,6 +232,10 @@ type Consumer struct {
 // Config plus cfg, and Close closes that client. For a wrapped Client it adds
 // the topic to the injected client's subscription; the group, offset reset and
 // rebalance hooks must already be part of that client's configuration.
+// NewConsumer 校验 cfg 并订阅它的 topic。
+// 受管 Client 会用共享 Config 叠加 cfg 另建专用 franz-go 客户端，Close 负责
+// 关闭它。Wrap 创建的 Client 只把 topic 加到注入客户端的订阅上，组配置、
+// offset 重置与重平衡钩子必须已在那个客户端上配好。
 func NewConsumer(client *Client, cfg ConsumerConfig) (*Consumer, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -215,6 +260,7 @@ func NewConsumer(client *Client, cfg ConsumerConfig) (*Consumer, error) {
 }
 
 // Config returns the effective consumer configuration.
+// Config 返回实际生效的消费者配置。
 func (c *Consumer) Config() ConsumerConfig {
 	return c.cfg
 }
@@ -227,6 +273,12 @@ func (c *Consumer) Config() ConsumerConfig {
 // the group from the last commit. Set DiscardOnError to skip poison records
 // instead. CommitModeAuto lets franz-go commit polled offsets regardless of the
 // handler result and can drop a failed record.
+// Consume 持续拉取记录并调用 handler，直到 ctx 被取消。ctx 被取消时返回 nil，
+// 因此可以直接作为 goroutine 主体使用。
+// 默认 CommitModeManual 下语义为 at-least-once：失败记录不提交，Consume 返回
+// handler 错误，重启后从最后提交位点重新入组消费。需要跳过毒消息时设置
+// DiscardOnError。CommitModeAuto 则由 franz-go 提交已拉取的位点，失败的记录
+// 可能被丢弃。
 func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
 	if handler == nil {
 		return ErrHandlerRequired
@@ -276,6 +328,8 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 // Close releases the dedicated client of a managed consumer. A consumer built
 // from a wrapped client only stops this Consumer and leaves the shared client
 // open.
+// Close 释放受管消费者自己的专用客户端。基于 Wrap 客户端构建的消费者只停止
+// 自己，共享客户端保持打开。应先停 Consume 再调用 Close。
 func (c *Consumer) Close() error {
 	if c == nil {
 		return nil
@@ -308,10 +362,15 @@ func (c *Consumer) process(ctx context.Context, fetches kgo.Fetches, handler Han
 			report(opts, fmt.Errorf("kafka: handle %s/%d@%d: %w",
 				record.Topic, record.Partition, record.Offset, err))
 			if opts.DiscardOnError {
+				// Committing the offset together with a discarded record keeps the
+				// next start from retrying the same poison record.
 				// 丢弃失败消息时一并提交位点，避免每次启动都重试同一条毒消息。
 				last = record
 				continue
 			}
+			// Default semantics: commit the offsets that already succeeded, then
+			// stop. The failed record and the ones after it are redelivered on the
+			// next start or rebalance.
 			// 默认语义：先提交此前成功的位点，再停止消费。失败消息及后续消息
 			// 会在下次启动或重平衡后重新投递。
 			c.commit(ctx, last, opts)

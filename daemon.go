@@ -12,6 +12,7 @@ import (
 
 // start runs the server in the foreground, or re-executes itself detached when
 // --daemon is set.
+// start 在前台运行服务器；设置 --daemon 时改为以脱离态重新执行自身。
 func (a *App) start(ctx context.Context, opts commandline.StartOptions) error {
 	if !opts.Daemon {
 		return a.Run(ctx)
@@ -26,6 +27,7 @@ func (a *App) start(ctx context.Context, opts commandline.StartOptions) error {
 	}
 	// Appending --daemon=false makes the child parse the same command line
 	// without re-detaching.
+	// 追加 --daemon=false，让子进程解析同一份命令行但不会再次脱离。
 	args := append(append([]string{}, os.Args[1:]...), "--daemon=false")
 	c := a.con()
 	pid, err := process.Detach(executable, args)

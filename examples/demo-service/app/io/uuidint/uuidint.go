@@ -18,6 +18,7 @@ import (
 )
 
 // Config configures the demo ID generator.
+// Config 描述示例 ID 生成器；PoolSize 为 0 表示不用本地预取池。
 type Config struct {
 	Enabled       bool          `yaml:"enabled"`
 	RedisInstance string        `yaml:"redis_instance_name" default:"ratelimit"`
@@ -40,11 +41,14 @@ func Default() *gofyuuidint.Generator { return current.Load().Generator() }
 // Set holds one generation of the generator. When the generation Redis Set has
 // the configured instance, the generator is bound to that client; otherwise it
 // falls back to resolving the alias through support/redis on every call.
+// Set 持有一个装配代的生成器。本代 Redis Set 含配置的实例时，生成器直接绑定
+// 该客户端；否则每次取号都退回 support/redis 按别名解析。
 type Set struct {
 	gen *gofyuuidint.Generator
 }
 
 // Validate checks the configuration without touching Redis.
+// Validate 只校验配置、不访问 Redis，因此可以在启动期安全调用。
 func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil
@@ -55,6 +59,8 @@ func (c Config) Validate() error {
 
 // RedisInstanceName returns the Redis alias after applying defaults; app/io uses
 // it to pick this generation's client before building the generator.
+// RedisInstanceName 返回补齐默认值后的 Redis 别名；app/io 先按它取本代客户端，
+// 再构造生成器，取号就固定在这一代连接上。
 func (c Config) RedisInstanceName() string {
 	return c.withDefaults().RedisInstance
 }
@@ -87,6 +93,8 @@ func (c Config) withDefaults() Config {
 // newGenerator builds the generator. A non-nil client pins it to this
 // generation's Redis connection; nil keeps the alias-resolution path, which
 // Validate uses because it runs before any connection exists.
+// newGenerator 构造生成器。client 非 nil 时固定在传入的本代连接上；为 nil 时
+// 走别名解析，Validate 用的就是这条路径，因为它在任何连接建立之前执行。
 func (c Config) newGenerator(logger *zap.Logger, client *goredis.Client) (*gofyuuidint.Generator, error) {
 	c = c.withDefaults()
 	opts := []gofyuuidint.Option{
@@ -112,6 +120,8 @@ func (c Config) newGenerator(logger *zap.Logger, client *goredis.Client) (*gofyu
 // Open builds the generator for cfg. client is this generation's Redis client
 // for RedisInstanceName; when nil the generator falls back to resolving the
 // alias through support/redis. A disabled config returns an empty Set.
+// Open 为 cfg 构造生成器。client 是本代 RedisInstanceName 对应的客户端；为 nil
+// 时退回 support/redis 按别名解析。配置未启用时返回空 Set，后续调用都是 no-op。
 func Open(cfg Config, logger *zap.Logger, client *goredis.Client) (*Set, error) {
 	if !cfg.Enabled {
 		return &Set{}, nil
@@ -124,6 +134,7 @@ func Open(cfg Config, logger *zap.Logger, client *goredis.Client) (*Set, error) 
 }
 
 // Generator returns this generation's generator; nil when disabled.
+// Generator 返回本代生成器；未启用时返回 nil。
 func (s *Set) Generator() *gofyuuidint.Generator {
 	if s == nil {
 		return nil
@@ -132,6 +143,7 @@ func (s *Set) Generator() *gofyuuidint.Generator {
 }
 
 // Start warms the prefetch pool (when configured) and starts its ticker.
+// Start 预热预取池（配置了才预热）并启动补货定时器；未启用时直接返回。
 func (s *Set) Start(ctx context.Context) error {
 	if s == nil || s.gen == nil {
 		return nil
@@ -140,6 +152,7 @@ func (s *Set) Start(ctx context.Context) error {
 }
 
 // Install publishes this generation to the package handle.
+// Install 把本代发布为包级句柄，之后的 Default() 读到的就是这一代。
 func (s *Set) Install() {
 	if s == nil {
 		return
@@ -150,6 +163,8 @@ func (s *Set) Install() {
 // Close stops the pool and clears the handle only while it still points at this
 // set, so a reload that already installed a new generator keeps it intact. No
 // Redis connection is owned here.
+// Close 停止预取池，并只在发布指针仍指向自己时清空句柄，Reload 已安装的新生成器
+// 不受影响。本包不持有 Redis 连接，连接由 app/io 的 Redis Set 释放。
 func (s *Set) Close() error {
 	if s == nil {
 		return nil

@@ -147,6 +147,8 @@ func TestConfigAlwaysProvidesCredentials(t *testing.T) {
 func TestConfigValidateDoesNotLeakSecret(t *testing.T) {
 	// A target without a port fails parsing, so the test stays fast; the
 	// startup-check path itself is covered by TestNewFailsWhenEndpointUnreachable.
+	// 不带端口的地址会在解析阶段失败，可让测试保持快速；启动检查路径本身由
+	// TestNewFailsWhenEndpointUnreachable 覆盖。
 	cfg := Config{
 		Endpoint:      "127.0.0.1",
 		AccessKey:     "access",

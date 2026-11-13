@@ -75,6 +75,7 @@ func normalizeDirectory(dir string) (string, error) {
 	if err != nil || !info.IsDir() {
 		return "", fmt.Errorf("%w: export directory %q does not exist", ErrInvalidExport, dir)
 	}
+	// Probe writability with a temp file instead of relying on platform permission bits.
 	// 用临时文件探测可写性，避免依赖平台权限位。
 	probe, err := os.CreateTemp(abs, ".write-probe-*")
 	if err != nil {

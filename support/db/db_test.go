@@ -69,6 +69,7 @@ func TestCloseNil(t *testing.T) {
 
 // TestIntegration exercises a real MySQL server when GOFY_TEST_MYSQL_DSN is
 // set, for example:
+// 设置 GOFY_TEST_MYSQL_DSN 后测试连接真实 MySQL，未设置时自动 skip；示例如下：
 //
 //	GOFY_TEST_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime=True&loc=Local' \
 //	  go test ./support/db -run Integration -v

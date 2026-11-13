@@ -19,6 +19,7 @@ const (
 )
 
 // Instance is a service instance in Nacos naming.
+// Instance 是 Nacos 命名服务中的一个服务实例。
 type Instance struct {
 	IP          string            `json:"ip"`
 	Port        int               `json:"port"`
@@ -34,6 +35,7 @@ type Instance struct {
 }
 
 // InstanceQuery selects the instances returned by ListInstances.
+// InstanceQuery 是 ListInstances 的查询条件。
 type InstanceQuery struct {
 	ServiceName string
 	Group       string
@@ -43,16 +45,21 @@ type InstanceQuery struct {
 }
 
 // BeatResult is the renewal advice returned by Nacos for a heartbeat.
+// BeatResult 是 Nacos 对一次心跳给出的续约建议。
 type BeatResult struct {
 	// ClientBeatInterval is the interval Nacos asks the client to use.
+	// ClientBeatInterval 是 Nacos 要求客户端采用的心跳间隔。
 	ClientBeatInterval time.Duration
 	// LightBeatEnabled tells the client to omit the beat body next time.
+	// LightBeatEnabled 表示下次心跳可以省略请求体。
 	LightBeatEnabled bool
 }
 
 // NewNamingClient validates only the connection fields of cfg and returns a
 // client for the naming API. Unlike NewClient it does not require data_id or
 // file, because naming does not read config-center entries.
+// NewNamingClient 只校验 cfg 的连接相关字段，返回调用命名服务的客户端。
+// 与 NewClient 不同，它不要求 data_id 和 file，因为命名服务不读取配置中心条目。
 func NewNamingClient(cfg Config) (*Client, error) {
 	cfg = cfg.normalize()
 	if cfg.Port <= 0 || cfg.Port > 65535 {
@@ -69,6 +76,7 @@ func NewNamingClient(cfg Config) (*Client, error) {
 
 // RegisterInstance creates or updates inst. Nacos treats repeated calls for
 // the same ip/port as an idempotent registration.
+// RegisterInstance 创建或更新 inst。对同一 ip/port 重复调用是幂等注册。
 func (c *Client) RegisterInstance(ctx context.Context, inst Instance) error {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
@@ -93,6 +101,8 @@ func (c *Client) RegisterInstance(ctx context.Context, inst Instance) error {
 
 // DeregisterInstance removes inst from Nacos. Callers usually ignore the error
 // during shutdown because ephemeral instances expire on their own.
+// DeregisterInstance 从 Nacos 移除 inst。关闭阶段通常可忽略该错误，因为临时
+// 实例在心跳停止后会自行过期。
 func (c *Client) DeregisterInstance(ctx context.Context, inst Instance) error {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
@@ -108,6 +118,8 @@ func (c *Client) DeregisterInstance(ctx context.Context, inst Instance) error {
 // BeatInstance sends an ephemeral-instance heartbeat. A light beat omits the
 // body and only refreshes the lease; Nacos asks for light beats through
 // BeatResult.LightBeatEnabled.
+// BeatInstance 为临时实例发送心跳。轻量心跳省略请求体，仅刷新租约；Nacos 通过
+// BeatResult.LightBeatEnabled 告知是否改用轻量心跳。
 func (c *Client) BeatInstance(ctx context.Context, inst Instance, light bool) (BeatResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
@@ -130,6 +142,8 @@ func (c *Client) BeatInstance(ctx context.Context, inst Instance, light bool) (B
 // ListInstances returns the registered hosts of one service. Filtering by
 // Enabled/Healthy is left to the caller so it can decide how to handle
 // unhealthy instances.
+// ListInstances 返回某个服务已注册的主机列表。是否按 Enabled/Healthy 过滤由
+// 调用方决定，以便自行处理不健康实例。
 func (c *Client) ListInstances(ctx context.Context, q InstanceQuery) ([]Instance, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
@@ -162,6 +176,7 @@ func (c *Client) ListInstances(ctx context.Context, q InstanceQuery) ([]Instance
 }
 
 // AvailableInstances drops hosts that cannot accept traffic.
+// AvailableInstances 过滤掉无法承接流量的主机。
 func AvailableInstances(instances []Instance) []Instance {
 	out := make([]Instance, 0, len(instances))
 	for _, inst := range instances {
@@ -223,6 +238,7 @@ func parseBeat(data []byte) (BeatResult, error) {
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		// Some Nacos versions answer a light beat with a plain "ok".
+		// 部分 Nacos 版本对轻量心跳只返回纯文本 "ok"。
 		if expectOK(data) == nil {
 			return BeatResult{}, nil
 		}

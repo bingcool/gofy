@@ -93,6 +93,7 @@ func (c *Container) Init(logger *zap.Logger) {
 }
 
 // init logger
+// init logger 取 Init 记录的 logger；未初始化时返回 zap.NewNop()，调用方不必判空。
 func (c *Container) logger() *zap.Logger {
 	c.loggerMu.Lock()
 	defer c.loggerMu.Unlock()

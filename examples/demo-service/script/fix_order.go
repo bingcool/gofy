@@ -13,6 +13,8 @@ import (
 )
 
 // FixOrder repairs inconsistent order status.
+// FixOrder 修复不一致的订单状态：按 order-id 把待支付订单改成已取消，dry-run
+// 时只打印不落库。
 func FixOrder() gofyscript.Script {
 	return gofyscript.Script{
 		Name:  "fix-order",

@@ -14,6 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// marker returns an identifiable middleware: on a hit it writes name into a
+// response header, which lets the test confirm Lookup returned the very instance
+// that was registered.
 // marker 返回一个可识别的中间件：命中时把 name 写进响应头，
 // 测试据此确认 Lookup 拿到的就是注册进去的那个实例。
 func marker(name string) support.Middleware {

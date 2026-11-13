@@ -144,6 +144,8 @@ func TestExportStreamRejectsUnsafeFileName(t *testing.T) {
 		t.Fatalf("ExportStream = %v, want ErrInvalidExport", err)
 	}
 	if strings.Contains(err.Error(), "output") {
+		// Only make sure the error comes from argument validation, not from writing
+		// to disk.
 		// 只是确保错误来自参数校验而不是落盘。
 		t.Fatalf("unexpected error: %v", err)
 	}

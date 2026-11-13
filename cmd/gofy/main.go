@@ -1,4 +1,5 @@
 // Command gofy scaffolds a new gofy application.
+// gofy 命令用于脚手架生成一个新的 gofy 应用。
 package main
 
 import (
@@ -116,6 +117,8 @@ func newNewCmd() *cobra.Command {
 }
 
 // Generate renders the embedded templates into dir.
+// Generate 把内嵌模板渲染到 dir；force 为 false 时拒绝写入非空目录，避免覆盖
+// 用户已有的文件。
 func (s scaffold) Generate(dir string, force bool) error {
 	dir = filepath.Clean(dir)
 	if err := checkTarget(dir, force); err != nil {

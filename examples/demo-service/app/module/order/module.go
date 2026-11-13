@@ -22,6 +22,8 @@ import (
 )
 
 // Module wires the order HTTP routes.
+// Module 是订单模块根：只把已构造好的订单与配置 service 绑定到契约路由分组，
+// 仓库与跨模块依赖的装配留在 app/container。
 type Module struct {
 	orderService       *service.OrderService
 	orderConfigService *service.OrderConfigService
@@ -51,6 +53,7 @@ func NewModule(
 }
 
 // Name is the module identity used for deduplication and error messages.
+// Name 返回模块标识，用于启动期模块去重、日志与错误信息；改名会影响去重与排障。
 func (m *Module) Name() string { return "order" }
 
 // Prefix 返回模块挂载前缀。契约分组已携带完整前缀（RoutePrefix =

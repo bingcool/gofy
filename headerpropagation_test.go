@@ -38,6 +38,8 @@ func propagationModule(t *testing.T) *testModule {
 	}
 }
 
+// Without a configured trusted proxy the inbound identity headers are dropped and
+// the client IP comes from the direct connection.
 // 未配置可信代理时，入口身份头被丢弃，客户端 IP 使用直连地址。
 func TestAppHeaderPropagationDropsIdentityFromUntrustedPeer(t *testing.T) {
 	app := gofytest.New(t,
@@ -64,6 +66,8 @@ func TestAppHeaderPropagationDropsIdentityFromUntrustedPeer(t *testing.T) {
 	}
 }
 
+// A request from a proxy registered with WithTrustedProxies keeps its identity
+// headers, and a missing trace id is generated.
 // 命中 WithTrustedProxies 的请求保留身份头，缺少 trace 时自动生成。
 func TestAppHeaderPropagationTrustsProxy(t *testing.T) {
 	app := gofytest.New(t,
@@ -90,6 +94,9 @@ func TestAppHeaderPropagationTrustsProxy(t *testing.T) {
 	}
 }
 
+// WithHeaderPropagation disabled means identity headers are not collected;
+// RequestID still writes the trace id into the context for downstream clients to
+// propagate.
 // 未启用 WithHeaderPropagation 时不采集身份头；但 RequestID 仍会把 trace id
 // 写入 context，供下游客户端透传。
 func TestAppHeaderPropagationIsOptIn(t *testing.T) {

@@ -82,6 +82,8 @@ func TestTerminalErrorEncoderWithoutErrorOrStack(t *testing.T) {
 	}
 }
 
+// BaseFields and logger.With fields are baked into the encoder by zap through the
+// Add* methods, so both the error block and plain entries must carry them.
 // BaseFields 和 logger.With 的字段由 zap 通过 Add* 烘焙进编码器，error 块和
 // 普通条目都必须带上它们。
 func TestTerminalErrorEncoderKeepsBakedFields(t *testing.T) {
@@ -175,6 +177,7 @@ func TestColorAllowedModes(t *testing.T) {
 		{mode: "always", file: f, want: true},
 		{mode: "ALWAYS", file: f, want: true},
 		{mode: "never", file: f, want: false},
+		// A nil file means a file sink, which stays uncolored in every mode.
 		// 文件 sink 传 nil，任何模式都不着色。
 		{mode: "always", file: nil, want: false},
 		{mode: "auto", file: nil, want: false},

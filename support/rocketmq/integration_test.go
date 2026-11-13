@@ -14,6 +14,8 @@ import (
 // Run them with:
 //
 //	GOFY_TEST_ROCKETMQ_ENDPOINT=127.0.0.1:8081 go test ./support/rocketmq -run Integration
+// 这些测试需要可访问的 RocketMQ 5.x proxy gRPC 端点。Producer 会按 broker 默认
+// 策略自动创建 topic，无需手工准备。运行方式见上方命令。
 
 func testEndpoint(t *testing.T) string {
 	t.Helper()
@@ -97,6 +99,7 @@ func TestIntegrationPublishConsume(t *testing.T) {
 	}
 
 	// Give the worker a moment to acknowledge before shutting down.
+	// 关闭前留给 worker 一点时间完成 ack。
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	if err := <-consumeDone; err != nil {

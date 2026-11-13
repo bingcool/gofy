@@ -4,6 +4,9 @@
 // Load decodes the whole file into a typed struct. LoadDocument returns a
 // read-only view whose GetString/GetInt/GetBool methods read one key by path,
 // for settings that do not deserve a struct field.
+// 包 config 是一个可选的 YAML 加载器，应用可以完全不用它，按自己的方式加载配置。
+// Load 把整个文件解码进有类型的结构体；LoadDocument 返回只读视图，用
+// GetString/GetInt/GetBool 按路径读取单个键，适合不值得单独定义字段的设置。
 package config
 
 import (
@@ -29,30 +32,36 @@ type options struct {
 }
 
 // Option customizes Load.
+// Option 定制 Load 的行为。
 type Option func(*options) error
 
 // WithExpandEnv enables ${VAR} expansion (enabled by default).
+// WithExpandEnv 开启 ${VAR} 展开（默认开启）。
 func WithExpandEnv(enabled bool) Option {
 	return func(o *options) error { o.expandEnv = enabled; return nil }
 }
 
 // WithAllowMissingEnv replaces missing ${VAR} with an empty string instead of
 // failing (disabled by default).
+// WithAllowMissingEnv 把缺失的 ${VAR} 替换成空串而不是报错（默认关闭）。
 func WithAllowMissingEnv(enabled bool) Option {
 	return func(o *options) error { o.allowMissing = enabled; return nil }
 }
 
 // WithStrict rejects YAML keys that do not map to a struct field.
+// WithStrict 拒绝无法映射到结构体字段的 YAML 键，用于尽早发现拼写错误。
 func WithStrict(enabled bool) Option {
 	return func(o *options) error { o.strict = enabled; return nil }
 }
 
 // WithApplyDefaults applies `default:"..."` tags before decoding.
+// WithApplyDefaults 在解码前应用 `default:"..."` tag。
 func WithApplyDefaults(enabled bool) Option {
 	return func(o *options) error { o.applyDefaults = enabled; return nil }
 }
 
 // WithValidate runs the config's Validate method and validate tags.
+// WithValidate 运行配置的 Validate 方法与 validate tag 校验。
 func WithValidate(enabled bool) Option {
 	return func(o *options) error { o.validate = enabled; return nil }
 }
@@ -61,6 +70,8 @@ var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // Load reads path into T, applying defaults, environment expansion and
 // validation. It never mutates process-level state.
+// Load 把 path 读入 T，依次应用默认值、环境变量展开与校验；它从不修改进程级
+// 状态，因此在同一进程里加载多份配置是安全的。
 func Load[T any](ctx context.Context, path string, opts ...Option) (*T, error) {
 	o, data, err := readConfig(ctx, path, opts)
 	if err != nil {
@@ -99,6 +110,8 @@ func Load[T any](ctx context.Context, path string, opts ...Option) (*T, error) {
 
 // readConfig resolves options and returns the file content with environment
 // variables expanded. Both Load and LoadDocument share it.
+// readConfig 解析选项并返回展开环境变量后的文件内容，Load 与 LoadDocument 共用；
+// ctx 已取消或 path 为空时直接报错。
 func readConfig(ctx context.Context, path string, opts []Option) (options, []byte, error) {
 	o := options{expandEnv: true, applyDefaults: true, validate: true}
 	for _, opt := range opts {

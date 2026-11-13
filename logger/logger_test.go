@@ -76,6 +76,9 @@ func TestNewWritesJSONWithBaseFields(t *testing.T) {
 	}
 }
 
+// color=always only affects stdout/stderr; error entries written to a file stay
+// plain JSON without ANSI codes, and the stacktrace stays single-line escaped so
+// log collectors can parse it.
 // color=always 只影响 stdout/stderr；写进文件的 error 仍是无 ANSI 的 JSON，
 // stacktrace 保持单行转义，方便日志采集。
 func TestColorAlwaysKeepsFileOutputPlain(t *testing.T) {

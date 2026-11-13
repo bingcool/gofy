@@ -14,52 +14,81 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// CellType is the read type of one column during import.
 // CellType 决定导入时一列单元格的读取类型。
 type CellType int
 
 const (
+	// CellString reads as a string (the default), preserving leading zeros and
+	// long identifiers.
 	// CellString 按字符串读取（默认），保留前导零与长编号。
 	CellString CellType = iota
+	// CellInt reads an integer and fails on decimals or non-numeric input.
 	// CellInt 读取整数，小数或非数字报错。
 	CellInt
+	// CellFloat reads a float; integers are returned as float64 as well.
 	// CellFloat 读取浮点数，整数也会返回 float64。
 	CellFloat
+	// CellTime converts an Excel date serial into time.Time and requires a real
+	// date cell.
 	// CellTime 把 Excel 日期序列号转成 time.Time，要求单元格是真实日期。
 	CellTime
 )
 
+// ImportSpec declares one Excel read or import.
 // ImportSpec 声明一次 Excel 读取或导入。
 type ImportSpec struct {
+	// SheetName uses the first sheet when empty; a named sheet must exist.
 	// SheetName 为空时使用第一个 sheet；指定名称必须存在。
 	SheetName string
+	// HeaderRow is the 1-based header row; 0 means there is no header.
 	// HeaderRow 是表头所在行（1 基）；0 表示没有表头。
 	HeaderRow int
+	// DataStartRow is the 1-based first data row; 0 means the row after the
+	// header (the first row when there is no header).
 	// DataStartRow 是数据起始行（1 基）；0 表示表头下一行（无表头时第一行）。
 	DataStartRow int
+	// ExpectedHeaders, when non-empty, is compared column by column against the
+	// file header for template validation.
 	// ExpectedHeaders 非空时与文件表头逐列严格比较，用于模板校验。
 	ExpectedHeaders []string
+	// CellTypes overrides the read type by 0-based column index; columns not
+	// overridden are read as strings.
 	// CellTypes 按 0 基列号覆盖读取类型，未覆盖的列按字符串读取。
 	CellTypes map[int]CellType
+	// SkipEmptyRows skips rows that are entirely empty; nil means true.
 	// SkipEmptyRows 是否跳过整行为空的行；nil 默认 true。
 	SkipEmptyRows *bool
+	// NormalizeCells normalises a row before it reaches HandleRow; the returned
+	// column count must match the header.
 	// NormalizeCells 在交给 HandleRow 前做行级归一化，返回列数必须与表头一致。
 	NormalizeCells func(cells []any, rowNumber int) ([]any, error)
+	// HandleRow processes rows one at a time and is only used by Import; Read does
+	// not need it.
 	// HandleRow 逐行处理数据，仅在 Import 中使用；Read 不需要它。
 	HandleRow func(row Row) error
+	// AfterImport runs after all rows are processed, for flushing the last batch.
 	// AfterImport 在全部行处理完后调用，用于刷最后一批数据。
 	AfterImport func(rowCount int) error
 }
 
+// Row is one imported data row.
 // Row 是一行导入数据。
 type Row struct {
+	// RowNumber is the 1-based row number shown by Excel, usable directly in logs
+	// and error messages.
 	// RowNumber 是 Excel 界面行号（1 基），可直接用于日志或错误提示。
 	RowNumber int
+	// Cells is the 0-based cell list, already padded to the header width.
 	// Cells 是 0 基的单元格列表，已按表头宽度补齐。
 	Cells []any
+	// Values maps header text to values; it is an empty map when there is no
+	// header.
 	// Values 是表头文本到值的映射；没有表头时为空 map。
 	Values map[string]any
 }
 
+// Cell returns the value at the 0-based column index, or def when missing.
 // Cell 按 0 基列号取值，缺失时返回 def。
 func (r Row) Cell(index int, def any) any {
 	if index < 0 || index >= len(r.Cells) {
@@ -71,6 +100,7 @@ func (r Row) Cell(index int, def any) any {
 	return def
 }
 
+// Value returns the value for the header text, or def when missing.
 // Value 按表头文本取值，缺失时返回 def。
 func (r Row) Value(header string, def any) any {
 	if value, ok := r.Values[header]; ok && value != nil {
@@ -79,11 +109,14 @@ func (r Row) Value(header string, def any) any {
 	return def
 }
 
+// IsEmpty reports whether the whole row is empty (every cell is nil or blank
+// text).
 // IsEmpty 判断整行是否为空（所有单元格为 nil 或空白文本）。
 func (r Row) IsEmpty() bool {
 	return isBlankRow(r.Cells)
 }
 
+// ReadResult is the result of Read; every data row is kept in memory.
 // ReadResult 是 Read 的结果，全部数据行驻留内存。
 type ReadResult struct {
 	Path            string

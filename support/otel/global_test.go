@@ -17,6 +17,8 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+// recordingHandler records the errors delivered to the OTel global error
+// handler, proving the Provider did not replace the process-level ErrorHandler.
 // recordingHandler 记录 OTel 全局错误处理器收到的错误，用于证明 Provider
 // 没有替换进程级 ErrorHandler。
 type recordingHandler struct {
@@ -39,6 +41,7 @@ func (h *recordingHandler) count() int {
 	return len(h.errs)
 }
 
+// failingExporter simulates an unreachable collector.
 // failingExporter 模拟不可达的 collector。
 type failingExporter struct {
 	err error
@@ -50,6 +53,8 @@ func (e failingExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) e
 
 func (e failingExporter) Shutdown(context.Context) error { return nil }
 
+// injectTraceparent returns the traceparent injected by the global propagator;
+// an empty string means TraceContext is not installed.
 // injectTraceparent 返回全局 propagator 注入的 traceparent；空字符串表示
 // propagator 未安装 TraceContext。
 func injectTraceparent(p propagation.TextMapPropagator) string {
@@ -63,6 +68,8 @@ func injectTraceparent(p propagation.TextMapPropagator) string {
 	return carrier["traceparent"]
 }
 
+// saveGlobals restores the OTel global state after the test so other tests in
+// the same process are not affected.
 // saveGlobals 在测试结束后恢复 OTel 全局状态，避免影响同进程的其他测试。
 func saveGlobals(t *testing.T) {
 	t.Helper()
@@ -76,6 +83,8 @@ func saveGlobals(t *testing.T) {
 	})
 }
 
+// With Global=false, neither creating nor shutting down a Provider touches
+// ErrorHandler, TracerProvider or Propagator.
 // Global=false 时创建与关闭 Provider 都不改动 ErrorHandler、TracerProvider
 // 和 Propagator。
 func TestNonGlobalProviderLeavesProcessGlobalsUntouched(t *testing.T) {
@@ -119,6 +128,9 @@ func TestNonGlobalProviderLeavesProcessGlobalsUntouched(t *testing.T) {
 	}
 }
 
+// Two Global=false Providers coexist in one process: both export normally,
+// export failures are logged to their own loggers, and the one-minute dedup
+// still applies.
 // 两个 Global=false Provider 共存在同一进程：都能正常导出，导出失败分别
 // 记录到各自的 logger，并且一分钟去重仍然生效。
 func TestNonGlobalProvidersLogExportFailuresIndependently(t *testing.T) {
@@ -150,7 +162,7 @@ func TestNonGlobalProvidersLogExportFailuresIndependently(t *testing.T) {
 		_ = p.ForceFlush(context.Background())
 	}
 	export(pA)
-	export(pA) // 一分钟内第二次失败应被去重
+	export(pA) // the second failure within a minute must be deduplicated; 一分钟内第二次失败应被去重
 	export(pB)
 
 	entriesA := logsA.All()
@@ -169,6 +181,10 @@ func TestNonGlobalProvidersLogExportFailuresIndependently(t *testing.T) {
 	}
 }
 
+// With Global=true all four process-level settings are installed together: the
+// global Tracer uses this Provider's SDK, the global propagator injects
+// traceparent, and the global ErrorHandler reports to this Provider's logger
+// instead of the previous handler.
 // Global=true 时四项进程级设置一起安装：全局 Tracer 走本 Provider 的 SDK，
 // 全局 propagator 注入 traceparent，全局 ErrorHandler 记录到本 Provider
 // 的 logger 而不是之前的处理器。
@@ -217,6 +233,9 @@ func TestGlobalProviderInstallsProcessGlobals(t *testing.T) {
 	}
 }
 
+// The one-minute dedup applies to the errorHandler directly: repeated errors
+// inside the window only increment suppressed, and after the window one entry
+// is logged again carrying the suppressed count.
 // 一分钟去重直接作用于 errorHandler：窗口内的重复错误只累加 suppressed，
 // 窗口过去后带 suppressed 计数再记录一次。
 func TestErrorHandlerDedupesWithinMinute(t *testing.T) {

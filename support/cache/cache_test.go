@@ -77,6 +77,7 @@ func TestSetWithoutExpiry(t *testing.T) {
 	if ttl, exists, err := c.TTL(ctx, "forever"); err != nil || !exists || ttl != 0 {
 		t.Fatalf("TTL = %v, %v, %v", ttl, exists, err)
 	}
+	// Negative TTLs are treated as "no expiry", matching the PHP cache.
 	// 负数与 PHP 缓存实现一致，按“不过期”处理。
 	if err := c.Set(ctx, "negative", "value", -time.Second); err != nil {
 		t.Fatalf("Set negative ttl: %v", err)
@@ -104,6 +105,7 @@ func TestSetJSONAndGetJSON(t *testing.T) {
 		t.Fatalf("GetJSON = %+v, %v, %v", got, ok, err)
 	}
 
+	// A missing key leaves the destination untouched.
 	// key 不存在时不修改目标值。
 	got = want
 	ok, err = c.GetJSON(ctx, "missing", &got)
