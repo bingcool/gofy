@@ -89,7 +89,7 @@
 | D5 | 默认不选主：分区型靠消费组，抢占型靠 claim | 选主解决"谁是唯一"，不解决"旧 leader 迟到写入"，最终仍要幂等 |
 | D6 | `lease` 只用于全局型动作，且必须带 fencing token | 把选主风险关进最小的笼子 |
 | D7 | claim 只实现 MySQL 8（`SKIP LOCKED`） | 生产确定是 MySQL 8；方言抽象留接口，不提前实现 |
-| D8 | 优雅退出预算 `shutdown_timeout` 默认 25s | 小于 k8s 默认 `terminationGracePeriodSeconds: 30`，留 5s 给强杀 |
+| D8 | 优雅退出预算：worker 的 drain 默认 20s，进程预算由它推导（drain + 5s） | 小于 k8s 默认 `terminationGracePeriodSeconds: 30`，留余量给强杀；HTTP 的 `shutdown_timeout`（默认 10s）保持原义，两者不共用 |
 | D9 | worker 不复用 `support.Module` | Module 是 HTTP 装配单位（`Register(*Router)`），复用会把路由拖进无 HTTP 的进程 |
 | D10 | Redis 队列由框架提供 `Consume`，不留给项目写 `for { Pop }` | 空轮询退避、失败重投、panic 兜底三件事各写一遍必然走样；一处实现、一处修 bug |
 | D11 | 不做框架内 cron 调度器 | 周期节奏由 worker 内部 ticker 控制，或交给 k8s CronJob；框架调度器与 CronJob 双跑会产生"同一动作两份" |
@@ -216,16 +216,16 @@ func WorkerGroup() string
 
 ### 3.8 日志分目录
 
-现有 `applyLogPaths`（`examples/demo-service/app/config/log.go`）只有 script / http 两支，需补第三支：
+`applyLogPaths`（`examples/demo-service/app/config/log.go`）原有 script / http 两支，已补第三支（**已实现**）：
 
 ```go
-// worker 分支：一个分组一个目录，一个 worker 一组文件
-// storage/log/worker/<group>/<name>.log
-// storage/log/worker/<group>/<name>-error.log
-// storage/log/worker/<group>/<name>-system_error.log
+// worker 分支：一个分组一个目录
+// storage/log/worker/{date}/<group>/info.log
+// storage/log/worker/{date}/<group>/error.log
+// storage/log/worker/{date}/<group>/system_error.log
 ```
 
-`{date}` 仍由 logger 在滚动时替换；实例序号（`#0`、`#1`）只进日志字段，不进文件名，避免滚动切分过碎。
+`{date}` 由 logger 在滚动时替换；worker 名与实例序号（`order/order-scan#1`）只进日志字段，不进文件名——配置加载阶段只能拿到 `--group`，拿不到组内全部 worker 名，而且按实例切文件会让滚动碎片化。
 
 ---
 
@@ -306,6 +306,8 @@ func IdentityFrom(ctx context.Context) (Identity, bool)
 
 实例身份是 claim 的 `owner` 来源（`<host>-<name>-<index>`），也是日志字段，避免"N 个实例日志分不清是谁"。
 
+一个实例会被 `concurrency` 个 goroutine 并发调用 `Run`，因此实现必须无共享可变状态：状态放在 `Run` 内部，或用 `worker.Func` 的闭包。`worker.Func` 天然满足这一约束。
+
 各类型的正确并发姿势（与现有实现对齐）：
 
 | 类型 | 并发单位 | 建议 | 依据 |
@@ -357,20 +359,19 @@ type Policy struct {
 
 ### 4.7 使用示例：与 script 相同的装配方式
 
-worker 的装配位置和 `script` 完全一致——都在 `main` 里，用同一套 service/repository 构造，区别只是宿主的生命周期：
+worker 的注册位置和 `script` 一致——都在 `main` 里构造分组、交给 `gofy.New`；区别只是宿主的生命周期。数据库不归 `main` 管（`WithDatabase` 由框架建池），因此 worker 通过 `worker.RuntimeFrom(ctx)` 取 Runtime，取法与脚本接收 `Runtime` 参数一致：
 
 ```go
-// main.go 中，HTTP 与 worker 共享同一批 service 实例的构造方式
-svc := order.NewService(order.NewRepository(db))
-
-scan := worker.Func("order-scan", func(ctx context.Context) error {
-	return scanLoop(ctx, svc) // 与 HTTP handler 调用同一个 service 方法
-})
-consume := worker.Func("order-consumer", func(ctx context.Context) error {
-	return consumeLoop(ctx, svc)
-})
-
-orderGroup, err := worker.NewGroup("order", scan, consume)
+// main.go：分组在 New 之前构造，名字与并发在配置里声明
+orderGroup, err := worker.NewGroup("order",
+	worker.Func("order-scan", func(ctx context.Context) error {
+		rt, ok := worker.RuntimeFrom(ctx) // 与脚本的 rt 参数同源
+		if !ok || rt.DB == nil {
+			return errors.New("order-scan: database is required")
+		}
+		return scanLoop(ctx, order.NewRepository(rt.DB))
+	}),
+)
 if err != nil {
 	return err
 }
@@ -379,6 +380,7 @@ app, err := gofy.New(
 	gofy.WithName("demo-service"),
 	gofy.WithDatabase(cfg.DB[config.DefaultDatabase]),
 	gofy.WithWorkerGroups(orderGroup),
+	gofy.WithWorkerConcurrency(map[string]int{"order/order-scan": cfg.Worker.Scan.Concurrency}),
 )
 ```
 
@@ -386,7 +388,7 @@ app, err := gofy.New(
 
 - worker 只依赖 service/repository，**不依赖 `support.Router`、`*gin.Context`、HTTP middleware**。
 - 需要"当前时间/当前用户"这类请求级信息时，从消息体或任务行读取，不从 context 里找 HTTP 值。
-- 构造失败（DB 连不上、MQ 认证失败）在 `main` 里直接返回错误，不要留到 `Run` 里再报——早失败比半启动好。
+- 构造失败（分组名非法、并发小于 1）在 `main` 里直接返回错误；连接类失败（DB、MQ）在 `Run` 里暴露，由重启策略处理——早失败指编程错误，不是网络抖动。
 
 
 ---
@@ -741,6 +743,8 @@ worker:
           ttl: 15s
 ```
 
+上层结构由应用定义，框架不解析这一段：`main` 读出来，用 `gofy.WithWorkerConcurrency` 把 `groups.<g>.<w>.concurrency` 映射成 `"<g>/<w>": n`。这样配置键随业务命名走，框架只认 `group/worker → 实例数` 这一种输入。`drain_timeout` 属于框架，用 `WithWorkerDrainTimeout` 设置。
+
 ### 8.2 默认值
 
 | 键 | 默认 | 约束 |
@@ -859,7 +863,7 @@ HPA 建议只对 claim/AMQP 类开，指标用 `gofy_claim_backlog` 而不是 CP
 | T3-3 | 并发实例与错误策略：`concurrency` 起 N 个实例，`Policy` 实现指数退避与 `max_restarts` | §4.3/§4.4 | T3-2 | 单测：注入必失败的 worker，重启次数与退避序列符合预期 |
 | T3-4 | 优雅退出：`consumeCtx` / `drainCtx` 两级 context + drain 预算 + 关闭顺序 | §3.6/§5.5 | T3-3 | 集成测试：SIGTERM 后日志顺序为 `stop consume → drained → closed`，总耗时 ≤ `shutdown_timeout` |
 | T3-5 | 进程标识与日志：`systemenv.IsWorkerService/WorkerGroup`、pid 文件、`applyLogPaths` 增 worker 分支 | §3.7/§3.8 | T3-1 | `worker --group=order` 生成 `storage/log/worker/order/*.log` 与 `app/demo-service-worker-order.pid`（demo 的 `pid_file` 为 `app/demo-service.pid`）；同名启动第二个进程返回 `ErrAlreadyRunning` |
-| T3-6 | 示例改造：demo-service 增加一个 claim 示例 worker（先用手写 SQL 占位）+ 一个 kafka 示例 worker | §3.4 | T3-5 | `cd examples/demo-service && make check` 通过；`go run . worker --group=order` 可消费并优雅退出 |
+| T3-6 | 示例改造：demo-service 增加 `order` 分组（`order-scan` 用 DB 统计占位到 claim + `order-heartbeat` 演示无依赖任务），MQ 示例随 T3-9 的适配器一起补 | §3.4 | T3-5 | `cd examples/demo-service && make check` 通过；`go run . worker --group=order` 起 2+1 个实例，SIGTERM 后日志出现 `stopped` 且退出码 0 |
 
 **M3 里程碑**：T3-1…T3-6 全关 → 常驻服务有独立进程形态，能停得干净。
 
@@ -919,9 +923,15 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 
 | ID | 状态 | 产物 / 复核方式 |
 | --- | --- | --- |
-| T3-10 | 已完成（2026-11-14） | `support/queues/consume.go`、`support/queues/consume_test.go`；`go test -race -count=1 ./support/queues/` 通过；覆盖空轮询、失败重投、重试耗尽、丢弃、panic、空闲停机六条路径 |
+| T3-1 | 已完成（2026-11-14） | `internal/commandline/worker.go`、`worker_host.go`；`worker --list` 输出 GROUP/WORKER/CONCURRENCY，`--group` 缺失返回 `ErrUsage`、未知分组返回 `ErrWorkerGroupNotFound` |
+| T3-2 | 已完成（2026-11-14） | `support/worker/{worker,identity,policy,runtime,runner}.go`；`go test -race ./support/worker/` 覆盖组名校验、重名、Subset、空并发 |
+| T3-3 | 已完成（2026-11-14） | `runner.supervise` + `Policy`：指数退避、±20% 抖动、`MaxRestarts`；用例覆盖「重启到成功」「触顶退出」「ExitOnError 立即退出」「提前返回 nil 视为违约」 |
+| T3-4 | 已完成（2026-11-14） | `Runner.Run` 两级 context：`runCtx` 停止拉取、`drainCtx = WithoutCancel + deadline`；用例断言 drain 期间 `DrainContext` 仍有效且 Runner 等在途任务结束 |
+| T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/order/info-*.log`，pid 文件用 `-worker-order` 后缀并在退出时清理 |
+| T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker.go`、`config.yaml` 的 `worker.scan` 段；实测 `worker --group=order` 起 `order-scan#0/#1` 与 `order-heartbeat`，SIGTERM 后两组日志均为 `stopped`、退出码 0 |
+| T3-10 | 已完成（2026-11-14） | `support/queues/consume.go`、`consume_test.go`；`go test -race -count=1 ./support/queues/` 通过；覆盖空轮询、失败重投、重试耗尽、丢弃、panic、空闲停机六条路径 |
 
-其余条目未开始。
+其余条目（T3-7/T3-8/T3-9/T3-11、T3-12…T3-16）未开始。P0 已全关，`make check` EXIT=0。
 
 ---
 
