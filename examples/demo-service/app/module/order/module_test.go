@@ -372,7 +372,7 @@ func TestListOrderDefaultsAndPagination(t *testing.T) {
 		t.Fatalf("first order = %+v", list.List[0])
 	}
 
-	rr = app.GET("/api/v1/order/orders?user_id=100&page_size=101")
+	rr = app.GET("/api/v1/order/orders?user_id=100&page_size=10001")
 	gofytest.Status(t, rr, http.StatusBadRequest)
 	details, _ := gofytest.RawJSON(t, rr)["details"].(map[string]any)
 	if msg, _ := details["page_size"].(string); msg == "" {

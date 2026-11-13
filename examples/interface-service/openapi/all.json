@@ -449,7 +449,7 @@
             }
           },
           {
-            "description": "每页条数，最大 100",
+            "description": "每页条数，最大10000",
             "example": 20,
             "in": "query",
             "name": "page_size",
@@ -964,7 +964,7 @@
             }
           },
           {
-            "description": "每页条数，最大 100",
+            "description": "每页条数，最大10000",
             "example": 20,
             "in": "query",
             "name": "page_size",
