@@ -215,8 +215,9 @@ type RepositoryDeclare struct {
 只在启动期串行执行，不支持并发的首次取用。工厂执行时 `app/io` 还没 `Start`，
 快照还没发布，仓库在每次查询时解析 `appio.WithContext(ctx).DB()`；`Start` 发布
 新快照后自动使用新资源。请求进入时中间件把当时的快照固定进 ctx，一次请求不会
-横跨 `Reload` 换连接。脚本模式不经过模块生命周期，`script/fix_order.go` 调用前
-把 `rt.DB` 临时发布成快照（`appio.PublishDB`），结束后恢复原快照。
+横跨 `Reload` 换连接。脚本也跑同一套 `app/io` 装配：`script/register.go` 的
+`withIO` 在 `Run` 前后 `Start`/`Stop` 模块，脚本里的仓库因此取到本代完整快照
+（`db`、`redis`、`amqp`、`kafka`、`rocketmq`、`uuidint`），与请求一致。
 
 service 包不能反向 import 模块根或容器（import 方向是
 `container → module → service`），所以依赖只在构造期由容器显式传入。没有包级

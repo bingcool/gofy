@@ -7,8 +7,8 @@
 // Db 就是框架托管的 db.default（Runtime.DB），order、product 由 app/io 包
 // 按 db.order、db.product 在启动时打开；配置里没有的实例保持 nil。
 // 其余名字（如 selectDb）注册进 registry，首次 NewIO 时才建连。
-// 脚本模式不经过模块生命周期，脚本里用 script.Runtime.DB 发布一个只有
-// default 的快照（见 appio.PublishDB）。
+// 脚本与请求一样跑完整的 app/io 装配代（见 script/register.go），拿到的也是本代
+// 命名实例；只有单元测试用 NewSet 发布一个只带 default 的快照。
 package db
 
 import (

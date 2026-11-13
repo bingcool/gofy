@@ -45,8 +45,8 @@ func Current() *Snapshot { return current.Load() }
 // Publish 把 s 发布为当前一代；s 为 nil 时撤回发布（脚本结束、测试清理）。
 func Publish(s *Snapshot) { current.Store(s) }
 
-// PublishDB 发布一个只带默认数据库的快照。脚本和单元测试不执行 app/io 模块
-// 生命周期，用 rt.DB 或测试连接走这条路径。
+// PublishDB 发布一个只带默认数据库的快照。单元测试不执行 app/io 模块生命周期，
+// 用测试连接走这条路径；脚本与请求都跑 Registry/Start，不用它。
 func PublishDB(db *gorm.DB) {
 	Publish(&Snapshot{db: appdb.NewSet(db)})
 }

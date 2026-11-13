@@ -442,7 +442,7 @@ err := gofydb.Transaction(ctx, appio.WithContext(ctx).DB, func(ctx context.Conte
 
 这样既满足“一个请求绑定一个资源代际”，又不破坏已经落地的“无状态 Repository + Service 持有依赖”决策，也不需要把 Container 类型塞进框架。
 
-> 说明：请求级固定是严格语义；如果业务能接受“同一请求的两次非事务查询可能落在相邻两代”（例如只读展示场景），可以只做第 1 步的原子快照而不加中间件。两种方案都不能保留无锁读取包变量的现状。非 HTTP 路径（脚本、后台消费者）没有请求中间件，`WithContext` 应回退到 `Current()`，脚本模式仍可直接使用 `script.Runtime.DB`。
+> 说明：请求级固定是严格语义；如果业务能接受“同一请求的两次非事务查询可能落在相邻两代”（例如只读展示场景），可以只做第 1 步的原子快照而不加中间件。两种方案都不能保留无锁读取包变量的现状。非 HTTP 路径（脚本、后台消费者）没有请求中间件，`WithContext` 应回退到 `Current()`；脚本通过 demo 的 `withIO` 跑同一套 `app/io` 装配，`WithContext` 拿到的是脚本本代的完整快照。
 
 Demo 现有单测直接给 `appdb.Db` 赋值（`order_repository_test.go`、`product_repository_test.go`、`module_test.go` 等）。改造后这些测试应改为安装一个测试用 `Snapshot`，否则测试仍在无锁写包级变量，`-race` 会继续报告。
 

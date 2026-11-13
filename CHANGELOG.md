@@ -34,8 +34,11 @@ All notable changes to this project are documented here. The format follows
   pins that snapshot into the request context at entry, and
   `appio.WithContext(ctx)` resolves repositories, services and the rate limiter
   against the same generation even if a reload publishes a successor
-  mid-request. Scripts and tests publish with `appio.PublishDB` /
-  `appio.Publish` and restore the previous snapshot. Generation-bound lookups
+  mid-request. Scripts run the same generation: the demo's `script.Register`
+  wraps DB-backed scripts so `app/io` is started and stopped around every run,
+  giving the shared service and repository code a complete generation; scripts
+  declaring `WithoutDatabase` keep their own wiring. Tests still pin a
+  connection with `appio.PublishDB`. Generation-bound lookups
   no longer go through package-level registries: `db`/`redis`/`amqp`/`kafka`/
   `rocketmq` `Set.NewIO` resolve that generation's `Registry`,
   `Snapshot.DBNewIO` / `RedisNewIO` / `AMQPNewIO` / `KafkaNewIO` /

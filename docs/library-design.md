@@ -2797,8 +2797,11 @@ rocketmq、uuidint 的 `Set`（各自用本代 `NewRegistry` 建连），全部�
 取号不再依赖包级 Registry。RocketMQ 的 `app/io` 只发布 producer 句柄；需要消费时
 业务用配置里的 `Config` 调用 `rocketmq.NewConsumer`。
 
-脚本模式不经过模块生命周期：`appio.PublishDB(rt.DB)` 发布只带 db.default 的
-快照；需要命名实例时，按脚本自己打开的客户端走 `WithClient`（见 `script/gen_uuid.go`）。
+脚本与请求走同一套装配：`script/register.go` 的 `withIO` 在 `Run` 前后
+`appio.NewModule(...).Start` / `Stop`，脚本里的 `service`、`repository` 因此取到
+本代完整快照（含命名实例）。声明 `WithoutDatabase` 的脚本不进入这条路径，自己
+打开需要的客户端（见 `script/gen_uuid.go` 的 `WithClient`）。`appio.PublishDB`
+只留给单元测试。
 
 ### 9.4 `app/container` 与 `app/module/order/module.go`
 
@@ -2979,8 +2982,9 @@ func (m *Module) Register(r *support.Router) error {
 
 仓库不持有连接和日志：每次查询从 `app/io` 安装的 `db.Db` 解析连接（ctx 事务优先），
 容器构建时 `app/io` 尚未 `Start`、句柄还是 nil 也没关系，等 `Start` 安装连接后
-仓库自动使用新句柄，热更新也会切到新连接。脚本模式没有模块生命周期，
-`script/fix_order.go` 调用前把 `rt.DB` 临时发布到 `appdb.Db`，结束后恢复。
+仓库自动使用新句柄，热更新也会切到新连接。脚本也有装配代：`script/register.go`
+的 `withIO` 在 `Run` 前后 `Start` / `Stop` `app/io` 模块，`fix-order` 直接复用
+已发布的快照，不再手工发布 `rt.DB`。
 
 装配关系收敛为三层：`app/container`（仓库 + service + 模块工厂）→ 模块根
 （`NewModule` + `Register`）→ 各层实现。`service/dependencies.go` 的 `Dependencies`
@@ -3449,8 +3453,34 @@ import (
 
 func Register(cfg *config.Config) []gofyscript.Script {
     return []gofyscript.Script{
-        FixOrder(),
+        withIO(cfg, FixOrder()),
     }
+}
+```
+
+`withIO` 在 `Run` 前后启动、关闭 `app/io` 模块，脚本因此借到完整的一代快照：
+
+```go
+func withIO(cfg *config.Config, s gofyscript.Script) gofyscript.Script {
+    if s.WithoutDatabase {
+        return s
+    }
+    run := s.Run
+    s.Run = func(ctx context.Context, rt *gofyscript.Runtime, fs *pflag.FlagSet) error {
+        if rt.DB == nil {
+            return apperr.Internal("database is not configured")
+        }
+        module := appio.NewModule(rt, cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt)
+        if err := module.Start(ctx); err != nil {
+            return apperr.Internal("start io module").WithCause(err)
+        }
+        runErr := run(ctx, rt, fs)
+        if stopErr := module.Stop(ctx); stopErr != nil && runErr == nil {
+            return apperr.Internal("stop io module").WithCause(stopErr)
+        }
+        return runErr
+    }
+    return s
 }
 ```
 
@@ -3463,7 +3493,6 @@ import (
     "github.com/bingcool/gofy/apperr"
     gofyscript "github.com/bingcool/gofy/script"
     "github.com/spf13/pflag"
-    appdb "github.com/yourorg/demo-service/app/io/db"
     "github.com/yourorg/demo-service/app/module/order/repository"
     orderservice "github.com/yourorg/demo-service/app/module/order/service"
     "go.uber.org/zap"
@@ -3491,14 +3520,6 @@ func FixOrder() gofyscript.Script {
                 rt.Logger.Info("fix order dry-run, no data changed", zap.Uint64("order_id", id))
                 return nil
             }
-            if rt.DB == nil {
-                return apperr.Internal("database is not configured")
-            }
-            // 脚本模式不执行 app/io 生命周期，仓库按 app/io 句柄取连接，
-            // 因此把脚本连接发布到句柄，结束后恢复原值。
-            prev := appdb.Db
-            appdb.Db = rt.DB
-            defer func() { appdb.Db = prev }()
             rows, err := (&repository.OrderRepository{}).CancelPending(ctx, id, orderservice.StatusPending, orderservice.StatusCancelled)
             if err != nil {
                 return apperr.Internal("fix order failed").WithCause(err)

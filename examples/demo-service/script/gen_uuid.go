@@ -16,13 +16,14 @@ import (
 
 // GenUUID generates distributed IDs with support/uuidint.
 //
-// 脚本模式不经过模块生命周期，app/io 的 redis 注册表不会启动；这里按配置打开
-// 选中的 redis 实例，把客户端直接交给生成器（与 app/io 相同的 WithClient 路径），
-// 因此脚本能验证真实配置、而不依赖 HTTP 进程。
+// 脚本只校验 Redis 与生成器，不碰 service 层，因此声明 WithoutDatabase 跳过
+// app/io 装配代（否则会被迫连接 MySQL、Kafka 等无关实例），自己按配置打开选中
+// 的 redis 实例，把客户端直接交给生成器（与 app/io 相同的 WithClient 路径）。
 func GenUUID(cfg *config.Config) gofyscript.Script {
 	return gofyscript.Script{
-		Name:  "gen-uuid",
-		Short: "generate distributed ids from Redis",
+		Name:            "gen-uuid",
+		Short:           "generate distributed ids from Redis",
+		WithoutDatabase: true,
 		Flags: func(fs *pflag.FlagSet) {
 			fs.Int("count", 5, "how many ids to generate")
 			fs.String("redis", "", "redis instance alias (default: uuidint.redis_instance_name)")
