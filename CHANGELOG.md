@@ -14,9 +14,9 @@ All notable changes to this project are documented here. The format follows
   (one local replace). `gofy new interface-service` now needs only the
   sibling api library checkout and embeds a 43-file template snapshot.
 - `gofy new interface-service`: scaffolding for a project contract module.
-  The command embeds a 51-file snapshot of `examples/interface-service`, rewrites the
-  module path and every import, points the two local replaces at sibling `gofy` /
-  `gofy-interface-api` checkouts with portable relative paths, runs `go mod tidy` and
+  The command embeds a 43-file snapshot of `examples/interface-service`, rewrites the
+  module path and every import, points the single local replace at the sibling
+  `gofy-interface-api` checkout with a portable relative path, runs `go mod tidy` and
   initialises git so the generated project's first command can be `make check`.
   `make sync-contract-template` regenerates the embedded snapshot.
 - `support/generation`: the publish-and-pin mechanism behind the demo's IO
@@ -743,6 +743,14 @@ All notable changes to this project are documented here. The format follows
   silently with exit code 2. Script flags report the corrected form
   (`--order-id=1222`), and script `Run` errors reach `App.Logger()` because the
   runtime logger is now exposed on the app.
+
+### Removed
+
+- The legacy `gofy-interface-service` contract repository has been deleted by
+  its owner. No `go.mod`, build script or Makefile target references it, and all
+  four gates still pass after removal. The import mapping in
+  `docs/interface-api-split-design.md` §10 is kept for historical links; the
+  legacy design documents remain as historical records.
 
 ## [1.0.0] - 2026-11-03
 

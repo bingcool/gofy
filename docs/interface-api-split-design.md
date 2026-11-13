@@ -13,8 +13,8 @@
 > 状态仍为**待评审**。
 >
 > 实施记录（2026-11-13）：§11.7 记录 M0 / M1 与 P2 可执行项的落地结果；
-> §4.7 / §5.1 按实施结果补充真实契约集成测试的归属。发布、旧仓库下线与 CI
-> 仍待确认，状态保持**待评审**。
+> §4.7 / §5.1 按实施结果补充真实契约集成测试的归属。旧契约仓库已删除、
+> T2-1 关闭；发布与 CI 仍待确认，状态保持**待评审**。
 
 ---
 
@@ -855,11 +855,14 @@ check-all: check example-contracts
    - demo 的 `order/README.md`、`product/README.md`、`header_propagation_test.go` 等注释中的模块名。
 3. 验证：`make check-all`（含 example、example-contracts 与 guards；需要并排 checkout api 库）。
 
-### 阶段 5：旧仓库下线
+### 阶段 5：旧仓库下线（已关闭）
 
-1. 旧仓库 README 顶部加迁移说明，指向 `gofy-interface-api` 与各项目契约模块。
-2. 打一个最终 tag（或归档），不再接受业务契约变更。
-3. 迁移文档中保留一份“旧路径 → 新路径”对照表（即本文附录）。
+旧契约仓库 `gofy-interface-service` 已由所有者删除，不再保留迁移 README 或最终 tag。
+实施时以「无任何引用」为下线判据：
+
+1. 所有 `go.mod` 不再引用旧仓库（§8.4 第三条，已核验）。
+2. 删除后四套门禁复跑仍全绿，确认没有隐式路径依赖。
+3. §10 的“旧路径 → 新路径”映射表保留，供历史链接换算；历史设计文档按 §2.3 原样保留。
 
 ### 阶段 6（可选）：工具与模板
 
@@ -929,7 +932,7 @@ cd examples/demo-service && make check
 
 - 用 `examples/interface-service` 作为模板复制出一个临时项目，改写 module path 后 `make check` 通过；
 - 复制出的项目把 `openapi.DemoServiceYAML` 挂到 gofy 服务上，`/docs` 可访问；
-- 旧仓库 `gofy-interface-service` 不再被任何 `go.mod` 引用。
+- 旧仓库 `gofy-interface-service` 不再被任何 `go.mod` 引用（已达成：仓库已删除，删除后四套门禁复跑全绿）。
 
 ---
 
@@ -944,7 +947,7 @@ cd examples/demo-service && make check
 | R5 | 两套版本号 | 升级组合增多 | 发布顺序固定；项目显式固定 api 库版本；api 库 README 维护兼容矩阵 |
 | R6 | `yourorg` 示例路径被直接用于生产 | `go get` 失败或误用共享路径 | 模板 README 首行提示；阶段 6 提供脚手架自动改写 module path |
 | R7 | `Prefixes` 从 Makefile 移到代码 | 部署前缀与服务器分组可能不一致 | 以项目 `cmd/openapi` 为唯一默认值；临时覆盖仍走 `-prefix`；adapter 测试继续校验分组前缀 |
-| R8 | 旧仓库下线后历史链接失效 | 文档、CI、依赖指向旧地址 | 旧仓库保留迁移 README；本文附录保留映射表 |
+| R8 | 旧仓库下线后历史链接失效 | 文档、CI、依赖指向旧地址 | **已关闭**：仓库已删除且无任何 `go.mod` 引用；§10 映射表保留路径对照，历史链接按映射表换算 |
 | R9 | 库侧测试依赖 `appinterface`，项目侧 `check` 又漏了测试 | 阶段 1 编译失败；迁移后契约/DTO/docgen golden 测试退出所有门禁，回归能力下降 | §4.7 的 fixture 与测试归属矩阵；库/项目两侧 `make check` 都含 test-race；§8.1/§8.2 逐项核对覆盖不流失 |
 | R10 | 默认 `make check` 依赖尚未建立的第三仓库 | 只改框架代码的贡献者门禁直接失败，绕过检查成为常态 | `example-contracts` 只进 `check-all`；默认 `check` 自足；CI 双仓 checkout 仅用于 `check-all` |
 | R11 | golden 的 git pathspec 写成仓库根相对路径 | diff 永远为空，生成器漂移静默通过门禁 | 在 `cd` 后的目录内用 `-- openapi` 或 `:/` 根前缀，并补 `git status --porcelain` 检查新增文件 |
@@ -1057,14 +1060,14 @@ cd examples/demo-service && make check
 
 | ID | 任务 | 来源 | 前置 | 完成判据 |
 | --- | --- | --- | --- | --- |
-| T2-1 | 旧仓库下线：迁移 README、最终 tag、保留 §10 映射表 | §7 阶段 5 | M1 | 旧仓库不再被任何 `go.mod` 引用（§8.4） |
+| T2-1 | 旧仓库下线（仓库已删除；无迁移 README / 最终 tag） | §7 阶段 5 | M1 | 目录不存在、所有 `go.mod` 0 引用、删除后四套门禁仍 EXIT=0；§10 映射表保留 |
 | T2-2 | 版本发布与兼容矩阵：按 `gofy → api 库 → 项目契约 → 业务服务` 打 tag、更新 CHANGELOG、api 库 README 维护兼容矩阵（R5） | §4.6、§9 R5 | M1 | 两级 semver tag 可被 `go list -m -versions` 查到（私有仓库等价手段） |
 | T2-3 | 端到端模板验收：复制模板 → 改写 module path → `make check` → 挂载 `openapi.DemoServiceYAML` 访问 `/docs` | §8.4 | T1-1 | §8.4 三条全部通过 |
 | T2-4 | 可选 CI：双仓 checkout + `make check-all`（§6.5 的 YAML）；不启用时 `make check` 仍是唯一门禁 | §6.5 | T1-5 | CI job 绿；或明确记录「不启用 CI」的决策 |
 | T2-5 | `gofy new interface-service` 脚手架：复制模板并自动 `go mod edit -module`（R6） | §7 阶段 6、§9 R6 | T2-3 | 生成的项目首条命令即 `make check` 通过，且不含 `yourorg` 残留 |
 | T2-6 | 条件性评估：`docgen.Command -routes` 动态加载、`client/nacos` 拆独立 module（R1、开放问题 5） | §7 阶段 6、§9 | 仅在出现非 gofy 消费方时启动 | 有书面评估结论；不启动也需记录原因 |
 
-**M2 里程碑**：T2-1 / T2-2 完成 → 拆分正式收口。
+**M2 里程碑**：T2-1 已关闭（仓库已删除）；T2-2 完成 → 拆分正式收口。
 
 ### 11.4 `internal/testcontract` 最小 fixture 规格（T0-3）
 
@@ -1131,7 +1134,7 @@ cd examples/demo-service && make check
 
 **P2 · 收尾与可选（M2）**
 
-- [!] T2-1 旧仓库下线 — 外部不可逆动作，待用户确认；前置核验已完成：所有 `go.mod` 均不再引用 `gofy-interface-service`（`grep -rn --include='go.mod'` 结果为空）
+- [x] T2-1 旧仓库下线 — **用户已删除 `gofy-interface-service` 仓库**；无需迁移 README / 最终 tag。核验：目录不存在、全部 `go.mod` 与活跃代码/脚本 0 处引用、删除后 gofy `make check` / `check-all` / api 库 `make check` / 契约模块 `make check` 四套均 EXIT=0；§10 映射表与历史设计文档按 §2.3 保留
 - [!] T2-2 版本发布与兼容矩阵 — 需打两级 semver tag 并改 CHANGELOG，待用户确认
 - [x] T2-3 端到端模板验收 — 复制 `examples/interface-service` → 改写为 `gitlab.acme.com/platform/contracts` → `go mod tidy` → **`make check` EXIT=0**；`openapi.DemoServiceYAML` 经 `docsui.Handler` 挂载后 `/docs` 与 `/openapi.json` 均 200 且返回完整规范（探针 EXIT=0）；`yourorg` 残留 0 个文件；§8.4 三条全部通过
 - [!] T2-4 可选 CI — 双仓 checkout 属外部动作，待用户决定是否启用；当前决策记录见 §11.8，**不启用 CI**，`make check` 仍是唯一默认门禁
@@ -1147,7 +1150,7 @@ cd examples/demo-service && make check
 
 **里程碑**：M0 ✅ 达成（T0 全关，api 库 `make check` 全绿）；M1 ✅ 全关
 （四套门禁 EXIT=0，76 个基线测试零流失）；M2 ⏸ 可执行项 T2-3 / T2-5 / T2-6 已关闭，
-正式收口待 T2-1 / T2-2 / T2-4 的外部确认。
+T2-1 已关闭；正式收口待 T2-2 / T2-4 的外部确认。
 
 ### 11.8 T2-6 条件性评估结论（2026-11-13）
 

@@ -1,5 +1,9 @@
 # 拆分迁移基线（T0-1）
 
+> **归档提示（2026-11-13）**：旧仓库已删除，下面的路径与哈希仅作 T0-1 历史基线保留，
+> 不再可复核。当前生成物基线以 `examples/interface-service/openapi/` 与 `make check-all`
+> 的 golden 为准。
+
 - 冻结时间：2026-11-13
 - 依据：`docs/interface-api-split-design.md` §7 阶段 0 / §11.1 T0-1
 

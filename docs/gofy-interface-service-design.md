@@ -1,5 +1,9 @@
 # gofy-interface-service 详细技术方案（v1）
 
+> **归档提示（2026-11-13）**：`gofy-interface-service` 仓库已删除，本文仅作历史设计记录保留，
+> 不再按本文执行任何迁移步骤。仓库定位、目录结构与依赖规则以
+> [拆分方案](./interface-api-split-design.md) 为准；旧路径到新路径的换算见其 §10 映射表。
+
 > 状态：**待评审**（2026-11-04）
 >
 > 关联文档：[gofy Library 详细设计](./library-design.md)
