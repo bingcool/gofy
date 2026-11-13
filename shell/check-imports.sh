@@ -71,5 +71,8 @@ fi
 if go list -deps ./... | grep -q 'github.com/bingcool/gofy-interface-api'; then
   fail "gofy must not depend on gofy-interface-api"
 fi
+if go list -deps ./... | grep -q 'github.com/bingcool/gofy-interface-gofy'; then
+  fail "gofy must not depend on gofy-interface-gofy"
+fi
 
 echo "import guards passed"

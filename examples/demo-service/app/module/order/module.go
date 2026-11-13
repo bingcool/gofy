@@ -12,7 +12,7 @@
 package order
 
 import (
-	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
+	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderroute"
 
 	"github.com/bingcool/gofy/support"

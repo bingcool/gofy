@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy"
-	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
+	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
 	"github.com/yourorg/demo-service/app/container"

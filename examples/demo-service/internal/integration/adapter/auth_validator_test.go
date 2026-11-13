@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
+	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/support"
 	"github.com/gin-gonic/gin"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"

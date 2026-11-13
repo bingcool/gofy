@@ -13,8 +13,8 @@ import (
 
 	gofynacos "github.com/bingcool/gofy/support/nacos"
 
-	nacos "github.com/bingcool/gofy-interface-api/client/nacos"
 	"github.com/bingcool/gofy-interface-api/contracts/common/types"
+	nacos "github.com/bingcool/gofy-interface-gofy/client/nacos"
 	"github.com/yourorg/interface-service/appinterface/demoservice"
 	"github.com/yourorg/interface-service/appinterface/demoservice/demoserviceclient"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"

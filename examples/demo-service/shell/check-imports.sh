@@ -14,7 +14,8 @@ appio_prefix="$module/app/io"
 contract_prefix="github.com/yourorg/interface-service"
 api_contracts_prefix="github.com/bingcool/gofy-interface-api/contracts"
 api_client_prefix="github.com/bingcool/gofy-interface-api/client"
-api_adapter_prefix="github.com/bingcool/gofy-interface-api/adapter"
+adapter_prefix="github.com/bingcool/gofy-interface-gofy/adapter"
+adapter_client_prefix="github.com/bingcool/gofy-interface-gofy/client"
 support_prefix="github.com/bingcool/gofy/support"
 framework_prefix="github.com/bingcool/gofy"
 
@@ -60,8 +61,8 @@ while IFS='|' read -r pkg imports; do
         dep_layer=${dl%%/*}
         ;;
       "$contract_prefix"* | "$api_contracts_prefix"*) cat="contract" ;;
-      "$api_client_prefix"*) cat="client" ;;
-      "$api_adapter_prefix"*) cat="adapter" ;;
+      "$api_client_prefix"* | "$adapter_client_prefix"*) cat="client" ;;
+      "$adapter_prefix"*) cat="adapter" ;;
       "$appio_prefix"*) cat="appio" ;;
       "$support_prefix"*) cat="support" ;;
       "$framework_prefix"*) cat="framework" ;;

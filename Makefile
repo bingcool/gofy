@@ -4,6 +4,7 @@ PKGS    := ./...
 EXAMPLE := examples/demo-service
 EXAMPLE_CONTRACTS := examples/interface-service
 API_LIBRARY := ../gofy-interface-api
+ADAPTER_LIBRARY := ../gofy-interface-gofy
 
 .PHONY: all fmt fmt-check vet test test-race example example-contracts sync-contract-template check-all guards cgo-free check build clean
 
@@ -26,6 +27,8 @@ test-race:
 	$(GO) test $(GOFLAGS) -race -count=1 $(PKGS)
 
 example:
+	@test -d $(API_LIBRARY) || { echo "gofy-interface-api not found at $(API_LIBRARY); see README"; exit 1; }
+	@test -d $(ADAPTER_LIBRARY) || { echo "gofy-interface-gofy not found at $(ADAPTER_LIBRARY); see README"; exit 1; }
 	cd $(EXAMPLE) && $(GO) build ./... && $(GO) vet ./... && $(GO) test $(GOFLAGS) -race -count=1 ./...
 
 example-contracts:

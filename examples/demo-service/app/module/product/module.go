@@ -12,7 +12,7 @@
 package product
 
 import (
-	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
+	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/module/product/controller"
 	"github.com/yourorg/demo-service/app/module/product/service"

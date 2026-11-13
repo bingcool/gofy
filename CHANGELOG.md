@@ -746,6 +746,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Split the gofy-specific adapter into a new `gofy-interface-gofy` module.
+  `gofy-interface-api` is now framework independent: its go.mod only requires
+  kin-openapi, swgui and yaml.v3, with no replace and no gofy/gin dependency.
+  `adapter/gofy` and `client/nacos` moved to the new module; demo-service gained
+  one require and one replace; the import guard and refcheck rules were updated.
+  See docs/interface-api-split-design.md §12.
+
 - Document why `examples/demo-service/go.mod` must keep its own
   `gofy-interface-api` replace: Go only honours replace directives in the main
   module, and `v0.0.0` is an unpublished placeholder. §5.3 / §6.2 / §11.8

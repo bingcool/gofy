@@ -6,6 +6,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/bingcool/gofy v0.0.0
 	github.com/bingcool/gofy-interface-api v0.0.0
+	github.com/bingcool/gofy-interface-gofy v0.0.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/pflag v1.0.6
@@ -119,5 +120,6 @@ require (
 replace (
 	github.com/bingcool/gofy => ../..
 	github.com/bingcool/gofy-interface-api => ../../../gofy-interface-api
+	github.com/bingcool/gofy-interface-gofy => ../../../gofy-interface-gofy
 	github.com/yourorg/interface-service => ../interface-service
 )
