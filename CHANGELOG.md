@@ -746,7 +746,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- Split the gofy-specific adapter into a new `gofy-interface-gofy` module.
+- Split the gofy-specific adapter into a new `gofy-adapter` module.
   `gofy-interface-api` is now framework independent: its go.mod only requires
   kin-openapi, swgui and yaml.v3, with no replace and no gofy/gin dependency.
   `adapter/gofy` and `client/nacos` moved to the new module; demo-service gained

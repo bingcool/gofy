@@ -5,7 +5,7 @@
 
 本模块持有项目的业务契约 `appinterface/` 与生成物 `openapi/`；框架无关的共享
 基础设施（`contracts`、`client`、`docgen`、`docsui`）来自
-`github.com/bingcool/gofy-interface-api`，gofy 适配层在 `gofy-interface-gofy`。
+`github.com/bingcool/gofy-interface-api`，gofy 适配层在 `gofy-adapter`。
 
 ```bash
 make check     # fmt/vet/test/test-race/refcheck/golden

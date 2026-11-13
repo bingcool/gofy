@@ -15,8 +15,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/bingcool/gofy"
+	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
-	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
 	goredis "github.com/redis/go-redis/v9"

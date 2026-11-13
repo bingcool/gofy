@@ -5,7 +5,7 @@ Nacos 集成包，直接调用 Nacos Open API，不引入 SDK，包含三部分�
 - **配置中心**：启动时把远端配置同步成本地 YAML 文件，之后用长轮询保持更新；
 - **服务注册**：把当前进程注册为临时实例并维持心跳，退出时注销；
 - **服务发现相关配置**：解析 `application.yaml` 的 `discovery_service_client`，
-  供客户端（如 `gofy-interface-gofy/client/nacos`）使用。
+  供客户端（如 `gofy-adapter/client/nacos`）使用。
 
 推荐沿用 swoolefy 的两文件布局：`nacos.yaml` 只放服务器连接，`application.yaml`
 放配置中心项、注册信息、发现策略与监听开关。

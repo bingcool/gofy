@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
+	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
 	"github.com/bingcool/gofy-interface-api/contracts/common/types"
-	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/yourorg/demo-service/app/module/product/service"
 	"github.com/yourorg/interface-service/appinterface/demoservice"

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
+	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
 	"github.com/bingcool/gofy-interface-api/contracts/common/types"
-	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/yourorg/demo-service/app/module/order/service"
 	"github.com/yourorg/interface-service/appinterface/demoservice"

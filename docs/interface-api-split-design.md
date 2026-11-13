@@ -609,7 +609,7 @@ gofy.WithModules(
 )
 ```
 
-这里 `gofyadapter` 来自 `github.com/bingcool/gofy-interface-gofy/adapter/gofy`（§12），`openapi` 来自项目模块。库不再提供任何项目的规范。
+这里 `gofyadapter` 来自 `github.com/bingcool/gofy-adapter/adapter/gofy`（§12），`openapi` 来自项目模块。库不再提供任何项目的规范。
 
 ### 5.6 Makefile
 
@@ -685,7 +685,7 @@ check: fmt-check vet test test-race refcheck golden
 | --- | --- | --- |
 | `github.com/bingcool/gofy-interface-service/apicore/contracts/...` | `github.com/bingcool/gofy-interface-api/contracts/...` | api 库 |
 | `github.com/bingcool/gofy-interface-service/apicore/client/...` | `github.com/bingcool/gofy-interface-api/client/...` | api 库 |
-| `github.com/bingcool/gofy-interface-service/apicore/adapter/gofy` | `github.com/bingcool/gofy-interface-gofy/adapter/gofy` | 适配层库（§12） |
+| `github.com/bingcool/gofy-interface-service/apicore/adapter/gofy` | `github.com/bingcool/gofy-adapter/adapter/gofy` | 适配层库（§12） |
 | `github.com/bingcool/gofy-interface-service/docgen` | `github.com/bingcool/gofy-interface-api/docgen` | api 库 |
 | `github.com/bingcool/gofy-interface-service/docsui` | `github.com/bingcool/gofy-interface-api/docsui` | api 库 |
 | `github.com/bingcool/gofy-interface-service/appinterface/...` | `github.com/yourorg/interface-service/appinterface/...` | 项目 |
@@ -743,8 +743,8 @@ replace (
 contract_prefix="github.com/yourorg/interface-service"
 api_contracts_prefix="github.com/bingcool/gofy-interface-api/contracts"
 api_client_prefix="github.com/bingcool/gofy-interface-api/client"
-adapter_prefix="github.com/bingcool/gofy-interface-gofy/adapter"
-adapter_client_prefix="github.com/bingcool/gofy-interface-gofy/client"
+adapter_prefix="github.com/bingcool/gofy-adapter/adapter"
+adapter_client_prefix="github.com/bingcool/gofy-adapter/client"
 ```
 
 分类逻辑按**子目录**区分，不能把整个 api 库归为一类：
@@ -1001,7 +1001,7 @@ cd examples/demo-service && make check
 | --- | --- |
 | `github.com/bingcool/gofy-interface-service/apicore/contracts` | `github.com/bingcool/gofy-interface-api/contracts` |
 | `github.com/bingcool/gofy-interface-service/apicore/client` | `github.com/bingcool/gofy-interface-api/client` |
-| `github.com/bingcool/gofy-interface-service/apicore/adapter/gofy` | `github.com/bingcool/gofy-interface-gofy/adapter/gofy`（§12） |
+| `github.com/bingcool/gofy-interface-service/apicore/adapter/gofy` | `github.com/bingcool/gofy-adapter/adapter/gofy`（§12） |
 | `github.com/bingcool/gofy-interface-service/apicore/cmd` | `github.com/bingcool/gofy-interface-api/cmd` |
 | `github.com/bingcool/gofy-interface-service/docgen` | `github.com/bingcool/gofy-interface-api/docgen` |
 | `github.com/bingcool/gofy-interface-service/docsui` | `github.com/bingcool/gofy-interface-api/docsui` |
@@ -1169,7 +1169,7 @@ cd examples/demo-service && make check
 - [!] T2-4 可选 CI — 双仓 checkout 属外部动作，待用户决定是否启用；当前决策记录见 §11.8，**不启用 CI**，`make check` 仍是唯一默认门禁
 - [x] T2-5 `gofy new interface-service` 脚手架 — `cmd/gofy/interface_service.go` 实现子命令（`--module/--dir/--local-root/--force/--no-git`），`cmd/gofy/contract-template/` 内嵌 43 文件快照（`.tmpl` 避免被 Go 工具链编译），生成时改写 module path 与全部 import、按相对路径重写唯一的 api 库 replace（同时支持 replace 块与单行写法）、执行 `go mod tidy` 并初始化 git 供 golden 使用；`shell/sync-contract-template.sh` + `make sync-contract-template` 保持快照同步；CLI 单测 5 项通过，**生成项目首条命令 `make check` EXIT=0**、`yourorg` 残留 0
 - [x] T2-6 条件性评估 — 书面结论见 §11.8：两项均**不启动**并记录触发条件（其中「拆适配层」的触发条件后来成立，已由 T2-7 重启，见 §12）
-- [x] T2-7 适配层独立与 gofy 解耦 — **方案 A 落地**：新建 `gofy-interface-gofy` 接管 `adapter/gofy` + `client/nacos`，api 库 `go.mod` 变为 3 个纯第三方 require、零 replace、零 gofy / 零 gin；demo-service 11 个文件改 import、go.mod 加 1 require + 1 replace；gofy 根 `example` 目标与反向依赖守卫同步；五套门禁全绿，详见 §12
+- [x] T2-7 适配层独立与 gofy 解耦 — **方案 A 落地**：新建 `gofy-adapter` 接管 `adapter/gofy` + `client/nacos`，api 库 `go.mod` 变为 3 个纯第三方 require、零 replace、零 gofy / 零 gin；demo-service 11 个文件改 import、go.mod 加 1 require + 1 replace；gofy 根 `example` 目标与反向依赖守卫同步；五套门禁全绿，详见 §12
 
 **依赖修正（用户确认后追加）**：契约模块的生产与测试代码均不依赖 gofy 框架，但
 `internal/integration/**` 曾把 gofy/gin 作为测试依赖带入 `go.mod`。已把这 8 个测试
@@ -1224,7 +1224,7 @@ YAML 双 checkout 执行，并把 `check-all` 设为发布门禁。此决策需�
 
 | 方案 | 否决/采纳理由 |
 | --- | --- |
-| A 独立 `gofy-interface-gofy` | **采纳**：代码几乎零改写，api 库与 gofy 互不依赖，可并行独立发布 |
+| A 独立 `gofy-adapter` | **采纳**：代码几乎零改写，api 库与 gofy 互不依赖，可并行独立发布 |
 | C 下沉到 demo-service | 不新增仓库，但适配层失去共享，第二个项目要复制约 800 行 |
 | E 移入 gofy 仓库 | gofy 会反向依赖 api 库，不满足「互不依赖」 |
 | B 接口反转 | `support.Router` 是具体 struct 且 `Group()` 返回具体类型，无法隐式实现接口；需重构约 800 行并长期维护两套抽象 |
@@ -1235,14 +1235,14 @@ YAML 双 checkout 执行，并把 `check-all` 设为发布门禁。此决策需�
 ### 12.2 新拓扑
 
 ```text
-gofy  <-require-  gofy-interface-gofy  -require->  gofy-interface-api  <-require-  项目契约模块
+gofy  <-require-  gofy-adapter  -require->  gofy-interface-api  <-require-  项目契约模块
   ^                       ^                              ^                            ^
   +-----------------------+------------------------------+----------------------------+
                               业务服务 demo-service
 ```
 
 - `gofy` 与 `gofy-interface-api` **互不依赖**；
-- `gofy-interface-gofy` 单独承担全部框架耦合（`support`、`apperr`、
+- `gofy-adapter` 单独承担全部框架耦合（`support`、`apperr`、
   `gofy/support/nacos`、gin）；
 - 项目契约模块只依赖 api 库，生产与测试依赖图中 gofy 包数仍为 0；
 - 业务服务依赖四者：gofy、api 库、适配层库、契约模块。
@@ -1264,7 +1264,7 @@ internal 六类目录，并对**全库含 `_test.go`** 拒绝 `github.com/bingco
 与 `github.com/gin-gonic/gin`；原 `adapter/gofy`、`client/nacos` 两条规则删除。
 前缀比较带尾部斜杠，避免误伤 `github.com/bingcool/gofy-interface-api`。
 
-`gofy-interface-gofy` 自带 `shell/check-imports.sh`：禁止项目契约模块
+`gofy-adapter` 自带 `shell/check-imports.sh`：禁止项目契约模块
 `github.com/yourorg/**`、禁止 api 库已迁出的 adapter / nacos 路径、禁止 `func init()`。
 其 `go.mod` 保留两条本地 replace（gofy 与 api 库），发布时删除并固定版本。
 
@@ -1272,14 +1272,14 @@ internal 六类目录，并对**全库含 `_test.go`** 拒绝 `github.com/bingco
 
 | 内容 | 去向 / 改动 |
 | --- | --- |
-| `adapter/gofy/{bind,options,docs,errors}.go` + fixture 测试 | `gofy-interface-gofy/adapter/gofy` |
-| `client/nacos/{resolver.go,resolver_test.go,README.md}` | `gofy-interface-gofy/client/nacos` |
+| `adapter/gofy/{bind,options,docs,errors}.go` + fixture 测试 | `gofy-adapter/adapter/gofy` |
+| `client/nacos/{resolver.go,resolver_test.go,README.md}` | `gofy-adapter/client/nacos` |
 | `internal/testcontract/fixture.go` | 新库复制一份（Go `internal` 不可跨 module 访问） |
 | demo-service 11 个文件的 import 前缀 | 改为新 module path |
 | demo-service `go.mod` | 新增 1 条 require + 1 条 replace（共 4 条 replace） |
 | demo-service `shell/check-imports.sh` | `adapter` / `client` 分类前缀改指新库 |
 | gofy 根 `Makefile` | `example` 目标前置检查两个同级库目录 |
-| gofy 根 `shell/check-imports.sh` | 增加对 `gofy-interface-gofy` 的反向依赖守卫 |
+| gofy 根 `shell/check-imports.sh` | 增加对 `gofy-adapter` 的反向依赖守卫 |
 
 契约模块、`cmd/gofy` 脚手架与 43 文件模板快照**未改动**：契约模块不 import
 适配层，`gofy new interface-service --local-root` 仍只需并排的 api 库。
@@ -1288,11 +1288,11 @@ T2-5 生成项目首条命令 `make check` 复验仍 EXIT=0。
 ### 12.5 发布链
 
 `gofy` 与 `gofy-interface-api` 可**并行独立发布**（互不依赖）→
-`gofy-interface-gofy` 固定两者版本 → 项目契约模块 → 业务服务。
+`gofy-adapter` 固定两者版本 → 项目契约模块 → 业务服务。
 api 库不再需要 §4.6 的「删除 replace、固定 gofy 最低版本」这一步。
 
 代价是本地联调需要三个并排仓库（gofy / gofy-interface-api /
-gofy-interface-gofy），`make check` 的 `example` 目标会对缺失目录给出明确报错；
+gofy-adapter），`make check` 的 `example` 目标会对缺失目录给出明确报错；
 §9 R10 记录的「默认门禁依赖同级仓库」风险随之从 1 个库扩展到 2 个库。
 
 ### 12.6 验收（T2-7 `[x]`）

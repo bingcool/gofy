@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 	"github.com/bingcool/gofy-interface-api/contracts/common/errcode"
 	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
-	gofyadapter "github.com/bingcool/gofy-interface-gofy/adapter/gofy"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/gin-gonic/gin"
