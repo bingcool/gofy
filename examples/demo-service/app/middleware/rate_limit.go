@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
+	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/frameworkcontext"

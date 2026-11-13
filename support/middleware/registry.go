@@ -10,7 +10,7 @@ import (
 )
 
 // Registry holds the one-to-one mapping from middleware logical name to
-// middleware instance for gofy-interface-service contract routes: the contract
+// middleware instance for project contract routes: the contract
 // only names a middleware (group.Use("audit") or Route.Use("cors")), App
 // registers built-in and application-level instances during startup assembly,
 // and the adapter resolves instances by name while binding routes.
@@ -26,7 +26,7 @@ import (
 // An alias can never be overwritten: registering a duplicate returns an error,
 // so two middleware cannot silently fight over the same name. All methods are
 // safe for concurrent use.
-// Registry 保存「中间件逻辑名 → 中间件实例」的一一映射，供 gofy-interface-service
+// Registry 保存「中间件逻辑名 → 中间件实例」的一一映射，供项目契约（appinterface）
 // 的契约路由使用：契约里只写名字（group.Use("audit") 或 Route.Use("cors")），
 // App 在启动装配时把内建与应用层实例注册进来，adapter 绑定路由时按名字查出实例。
 //

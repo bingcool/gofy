@@ -1,7 +1,7 @@
 // Package order wires the demo order module.
 //
 // Layering convention:
-//   - controller speaks the gofy-interface-service contract and never imports
+//   - controller speaks the project contract and never imports
 //     model / repository / innerapi;
 //   - service implements innerapi.OrderAPI, accepts plain values and returns
 //     innerapi views, touching model only in its view conversion;
@@ -12,8 +12,8 @@
 package order
 
 import (
-	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderroute"
+	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
+	"github.com/yourorg/interface-service/appinterface/demoservice/orderroute"
 
 	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/module/order/controller"

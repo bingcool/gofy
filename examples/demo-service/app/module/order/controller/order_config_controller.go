@@ -3,10 +3,10 @@ package controller
 import (
 	"context"
 
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	"github.com/yourorg/interface-service/appinterface/demoservice"
+	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
+	"github.com/yourorg/interface-service/appinterface/demoservice/orderresponse"
 )
 
 var _ demoservice.ConfigService = (*OrderConfigController)(nil)

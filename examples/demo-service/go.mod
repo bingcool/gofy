@@ -5,10 +5,11 @@ go 1.26.0
 require (
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/bingcool/gofy v0.0.0
-	github.com/bingcool/gofy-interface-service v0.0.0
+	github.com/bingcool/gofy-interface-api v0.0.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/pflag v1.0.6
+	github.com/yourorg/interface-service v0.0.0
 	go.uber.org/zap v1.27.0
 	gorm.io/gorm v1.31.2
 )
@@ -75,7 +76,7 @@ require (
 	github.com/valyala/fastrand v1.1.0 // indirect
 	github.com/vearutop/statigz v1.4.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
-	go.mongodb.org/mongo-driver/v2 v2.9.1 // indirect
+	go.mongodb.org/mongo-driver/v2 v2.9.2-0.20260911210157-d46ac2e02a79 // indirect
 	go.opencensus.io v0.22.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.72.0 // indirect
@@ -112,5 +113,6 @@ require (
 
 replace (
 	github.com/bingcool/gofy => ../..
-	github.com/bingcool/gofy-interface-service => ../../../gofy-interface-service
+	github.com/bingcool/gofy-interface-api => ../../../gofy-interface-api
+	github.com/yourorg/interface-service => ../interface-service
 )

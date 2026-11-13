@@ -113,6 +113,7 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "write into a non-empty directory")
 	cmd.Flags().StringVar(&replace, "replace", "", "add a local replace directive for github.com/bingcool/gofy")
 	cmd.Flags().StringVar(&goVersion, "go", "1.24", "go directive in go.mod")
+	cmd.AddCommand(newInterfaceServiceCmd())
 	return cmd
 }
 

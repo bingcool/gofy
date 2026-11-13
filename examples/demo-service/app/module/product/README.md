@@ -2,7 +2,7 @@
 
 演示模块：产品能力有两条出口。
 
-- **HTTP**：绑定 `gofy-interface-service` 的 `productroute.Products` 分组，暴露
+- **HTTP**：绑定项目契约的 `productroute.Products` 分组，暴露
   只读接口 `GET /api/v1/product/products/{id}` 与
   `GET /api/v1/product/products`（分页）。controller 只做契约 ↔ service 映射。
 - **innerapi**：向其它模块发布 `ProductAPI`。订单 service 下单时经它读取产品、

@@ -4,7 +4,7 @@ Gin 中间件集合：请求 ID、访问日志、异常恢复、Body 上限、CO
 安全响应头与请求头透传。业务通常不直接 `engine.Use`，而是通过根包的
 `gofy.With*` 选项交给 App 按固定顺序安装。
 
-本 README 重点说明这些中间件在 **gofy-interface-service** 场景下如何接入：
+本 README 重点说明这些中间件在 **项目契约模块（interface-service）** 场景下如何接入：
 服务端如何保护契约路由，客户端如何在向下游调用时透传请求头与身份。
 
 ## 一、中间件清单
@@ -84,7 +84,7 @@ gofy.WithAccessLogOptions(middleware.AccessLogOptions{
 3. 写入 request context 的两层 key：
    - `support.ContextWithRequestID`：业务用
      `support.RequestIDFromContext(ctx)` 读取；
-   - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-service/apicore/client` 会从
+   - `headerpropagation` 的 `X-Trace-Id`：`gofy-interface-api/client` 会从
      同一个 context key 自动注入下游请求，不需要手工调用
      `client.ContextWithRequestID`。
 
@@ -99,9 +99,9 @@ func (h *Handler) Do(c *gin.Context) {
 即使没有启用 `WithHeaderPropagation`，这一层透传仍然生效；启用后
 `HeaderPropagation` 会用上游 `X-Trace-Id` 或当前 req_id 继续补齐其余身份头。
 
-## 三、在 gofy-interface-service 服务端使用
+## 三、在业务服务端使用
 
-gofy-interface-service 的契约路由通过 `adapter/gofy.BindGroup`（按分组）或
+项目契约的路由通过 `adapter/gofy.BindGroup`（按分组）或
 `BindAll`（按路由集合）绑定到 `support.Router`。中间件分两层：
 
 ### 1. App 级（全局，所有契约路由生效）
@@ -258,7 +258,7 @@ gofy.WithMiddlewareRegistrar(func(m gofy.MiddlewareRegistration) error {
 })
 ```
 
-## 四、在 gofy-interface-service 客户端侧
+## 四、在契约客户端侧
 
 服务端中间件与客户端通过固定 context key 对接，客户端本身不依赖 gofy：
 
@@ -303,7 +303,7 @@ router := support.NewRouter(engine, support.RouterConfig{
 router.Use(rateLimitMW, jwtMW) // 只作用于模块路由
 ```
 
-gofy-interface-service 的 `adapter/gofy/bind_test.go` 与
+gofy-interface-api 的 `adapter/gofy/fixture_test.go` 与
 `adapter/gofy/middleware_registry_test.go` 就是用这种最小方式验证契约绑定：
 `engine.Use(middleware.RequestID(support.DefaultRequestIDHeader))` 后直接调用
 `gofyadapter.BindAll` / `BindGroup`，后者覆盖 Router 注册表解析、显式映射覆盖、

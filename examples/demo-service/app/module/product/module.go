@@ -4,7 +4,7 @@
 //   - innerapi is the pure contract published to other modules;
 //   - service implements innerapi.ProductAPI and owns the use cases;
 //   - repository owns persistence and the model type, returning model only;
-//   - controller speaks the gofy-interface-service product contract.
+//   - controller speaks the project product contract.
 //
 // 模块根把产品 controller 绑定到契约的 Products 分组；产品能力同时通过
 // innerapi 发布给订单模块。service 由装配根（app/container）构造，模块根只
@@ -12,11 +12,11 @@
 package product
 
 import (
-	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productroute"
+	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
 	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/module/product/controller"
 	"github.com/yourorg/demo-service/app/module/product/service"
+	"github.com/yourorg/interface-service/appinterface/demoservice/productroute"
 	"go.uber.org/zap"
 )
 

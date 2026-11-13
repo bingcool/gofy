@@ -1,0 +1,1180 @@
+{
+  "components": {
+    "schemas": {
+      "CommonEnvelope": {
+        "properties": {
+          "code": {
+            "example": 0,
+            "format": "int32",
+            "type": "integer"
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "msg": {
+            "example": "success",
+            "type": "string"
+          },
+          "req_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "msg"
+        ],
+        "type": "object"
+      },
+      "CommonErrorEnvelope": {
+        "properties": {
+          "code": {
+            "example": 40401,
+            "format": "int32",
+            "type": "integer"
+          },
+          "data": {
+            "example": null,
+            "nullable": true
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "msg": {
+            "example": "order not found",
+            "type": "string"
+          },
+          "req_id": {
+            "example": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "msg",
+          "data"
+        ],
+        "type": "object"
+      },
+      "CommonPagingListDataOfDemoserviceOrderDTO": {
+        "properties": {
+          "list": {
+            "description": "当前页数据",
+            "items": {
+              "$ref": "#/components/schemas/DemoserviceOrderDTO"
+            },
+            "type": "array"
+          },
+          "total": {
+            "description": "总条数",
+            "example": 125,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "list",
+          "total"
+        ],
+        "type": "object"
+      },
+      "CommonPagingListDataOfDemoserviceProductDTO": {
+        "properties": {
+          "list": {
+            "description": "当前页数据",
+            "items": {
+              "$ref": "#/components/schemas/DemoserviceProductDTO"
+            },
+            "type": "array"
+          },
+          "total": {
+            "description": "总条数",
+            "example": 125,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "list",
+          "total"
+        ],
+        "type": "object"
+      },
+      "DemoserviceCreateOrderItem": {
+        "properties": {
+          "num": {
+            "description": "数量",
+            "example": 2,
+            "format": "int32",
+            "maximum": 999,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sku_id": {
+            "description": "SKU ID",
+            "example": "90001",
+            "format": "uint64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "num",
+          "sku_id"
+        ],
+        "type": "object"
+      },
+      "DemoserviceCreateOrderRequest": {
+        "properties": {
+          "amount": {
+            "description": "金额，单位：分",
+            "example": 1999,
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "items": {
+            "description": "订单明细",
+            "items": {
+              "$ref": "#/components/schemas/DemoserviceCreateOrderItem"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "remark": {
+            "description": "备注",
+            "example": "尽快发货",
+            "maxLength": 255,
+            "type": "string"
+          },
+          "user_id": {
+            "description": "用户ID",
+            "example": "10001",
+            "format": "uint64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount",
+          "items",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "DemoserviceCreateOrderResponse": {
+        "properties": {
+          "order": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DemoserviceOrderDTO"
+              }
+            ],
+            "description": "已创建的订单",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "DemoserviceGetConfigResponse": {
+        "properties": {
+          "auth_required": {
+            "description": "是否要求 Bearer Token",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "auth_required"
+        ],
+        "type": "object"
+      },
+      "DemoserviceGetOrderResponse": {
+        "properties": {
+          "order": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DemoserviceOrderDTO"
+              }
+            ],
+            "description": "订单详情",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "DemoserviceGetProductResponse": {
+        "properties": {
+          "product": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DemoserviceProductDTO"
+              }
+            ],
+            "description": "产品详情",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "DemoserviceOrderDTO": {
+        "properties": {
+          "amount": {
+            "description": "金额，单位：分",
+            "example": 1999,
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_at": {
+            "description": "创建时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "订单ID",
+            "example": "1234567890123456789",
+            "format": "uint64",
+            "type": "string"
+          },
+          "paid_at": {
+            "description": "支付时间；未支付为 null",
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "remark": {
+            "description": "备注",
+            "example": "尽快发货",
+            "type": "string"
+          },
+          "status": {
+            "description": "订单状态",
+            "enum": [
+              "pending",
+              "paid",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "user_id": {
+            "description": "用户ID",
+            "example": "10001",
+            "format": "uint64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount",
+          "created_at",
+          "id",
+          "status",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "DemoserviceProductDTO": {
+        "properties": {
+          "id": {
+            "description": "产品ID",
+            "example": "90001",
+            "format": "uint64",
+            "type": "string"
+          },
+          "name": {
+            "description": "产品名称",
+            "example": "Gofy T-Shirt",
+            "type": "string"
+          },
+          "on_sale": {
+            "description": "是否上架；下架产品仍在列表中可查，但不能下单",
+            "type": "boolean"
+          },
+          "price": {
+            "description": "单价，单位：分",
+            "example": 9900,
+            "format": "int64",
+            "type": "integer"
+          },
+          "stock": {
+            "description": "可用库存",
+            "example": 120,
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "on_sale",
+          "price",
+          "stock"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "Interface Service API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/api/v1/order/config": {
+      "get": {
+        "operationId": "GetConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CommonEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DemoserviceGetConfigResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "查询订单模块配置",
+        "tags": [
+          "demoservice"
+        ]
+      }
+    },
+    "/api/v1/order/orders": {
+      "get": {
+        "operationId": "ListOrders",
+        "parameters": [
+          {
+            "description": "创建时间起（RFC3339）",
+            "in": "query",
+            "name": "created_from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "创建时间止（RFC3339）",
+            "in": "query",
+            "name": "created_to",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "页码，从 1 开始",
+            "example": 1,
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "每页条数，最大 100",
+            "example": 20,
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "订单状态",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "用户ID",
+            "example": "10001",
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CommonEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/CommonPagingListDataOfDemoserviceOrderDTO"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 42900,
+                  "data": null,
+                  "msg": "too many requests",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "too many requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "分页查询订单",
+        "tags": [
+          "demoservice"
+        ]
+      },
+      "post": {
+        "operationId": "CreateOrder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoserviceCreateOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CommonEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DemoserviceCreateOrderResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 42900,
+                  "data": null,
+                  "msg": "too many requests",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "too many requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "创建订单",
+        "tags": [
+          "demoservice"
+        ]
+      }
+    },
+    "/api/v1/order/orders/{id}": {
+      "delete": {
+        "operationId": "CancelOrder",
+        "parameters": [
+          {
+            "description": "订单ID",
+            "example": "1234567890123456789",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40401,
+                  "data": null,
+                  "msg": "order not found",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "order not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40402,
+                  "data": null,
+                  "msg": "order already closed",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "order already closed"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 42900,
+                  "data": null,
+                  "msg": "too many requests",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "too many requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "取消订单",
+        "tags": [
+          "demoservice"
+        ]
+      },
+      "get": {
+        "description": "按订单ID查询订单；订单不存在返回 40401。",
+        "operationId": "GetOrder",
+        "parameters": [
+          {
+            "description": "订单ID",
+            "example": "1234567890123456789",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CommonEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DemoserviceGetOrderResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40401,
+                  "data": null,
+                  "msg": "order not found",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "order not found"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 42900,
+                  "data": null,
+                  "msg": "too many requests",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "too many requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "查询订单详情",
+        "tags": [
+          "demoservice"
+        ]
+      }
+    },
+    "/api/v1/product/products": {
+      "get": {
+        "description": "按创建顺序倒序分页返回产品，包含下架产品。",
+        "operationId": "ListProducts",
+        "parameters": [
+          {
+            "description": "页码，从 1 开始",
+            "example": 1,
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "每页条数，最大 100",
+            "example": 20,
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CommonEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/CommonPagingListDataOfDemoserviceProductDTO"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "分页查询产品",
+        "tags": [
+          "demoservice",
+          "demoservice.product"
+        ]
+      }
+    },
+    "/api/v1/product/products/{id}": {
+      "get": {
+        "description": "按产品ID查询产品；产品不存在返回 60001。",
+        "operationId": "GetProduct",
+        "parameters": [
+          {
+            "description": "产品ID",
+            "example": "90001",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uint64",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CommonEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DemoserviceGetProductResponse"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40001,
+                  "data": null,
+                  "msg": "invalid argument",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "invalid argument"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 40100,
+                  "data": null,
+                  "msg": "unauthorized",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 60001,
+                  "data": null,
+                  "msg": "product not found",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "product not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 50000,
+                  "data": null,
+                  "msg": "internal error",
+                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CommonErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "查询产品详情",
+        "tags": [
+          "demoservice",
+          "demoservice.product"
+        ]
+      }
+    }
+  }
+}

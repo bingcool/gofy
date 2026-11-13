@@ -2,7 +2,7 @@
 
 演示模块：用 `gofy` 的模块机制挂载一组订单 HTTP 路由，同时展示
 controller / service / innerapi / repository / model 的五包分层边界。HTTP 契约来自
-`github.com/bingcool/gofy-interface-service`，只在 controller 出现；模块间调用走对方 `innerapi`
+`github.com/yourorg/interface-service`，只在 controller 出现；模块间调用走对方 `innerapi`
 契约。分层取舍的权威说明见
 [`docs/module-layering-design.md`](../../../../docs/module-layering-design.md)。
 
@@ -58,7 +58,7 @@ order/
 | `DELETE` | `/api/v1/order/orders/{id}` | `CancelOrder` | 取消订单 | `204`，无响应体 |
 | `GET` | `/api/v1/order/config` | `GetConfig` | 查询订单模块配置 | `200` + `GetConfigResponse` |
 
-路由描述符定义在 `gofy-interface-service` 的
+路由描述符定义在 `examples/interface-service` 的
 `appinterface/demoservice/orderroute`，本模块通过
 `gofyadapter.BindGroup` 按分组绑定，不在业务代码里重复写路径和参数校验。
 
@@ -655,7 +655,7 @@ repository 来建 SQLite 库。包依赖成环由 `go build` 兜底（innerapi �
 `appdb.Default()`、`appredis.Cache()` 等包级访问器或自行 `Publish` 都会被拒绝。
 这三层代码在 HTTP、脚本、守护进程之间共用，取法只能有一种。
 
-新增路由时，先在 `gofy-interface-service` 里补契约描述符，再在
+新增路由时，先在 `examples/interface-service` 里补契约描述符，再在
 `gofyadapter.BindGroup` 的绑定范围内实现 controller 方法即可；路径、校验和
 错误声明都不需要在业务模块里重复。契约新增中间件别名时，在 `app/middleware`
 里导出对应的 `NameXxx` 常量，并在 `Register` 的 `entries` 里加一行；业务模块

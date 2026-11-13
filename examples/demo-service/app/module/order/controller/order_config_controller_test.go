@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
 )
 
 func TestGetConfigOutput(t *testing.T) {

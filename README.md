@@ -174,7 +174,7 @@ app, err := gofy.New(
 ## 服务间请求头透传
 
 A → B → C 的调用链中，gofy 在入口把白名单请求头写入 request context，
-`gofy-interface-service` 的客户端发起下游调用时从同一个 context 读取并注入，业务代码不需要手工搬运。
+`gofy-interface-api/client` 的客户端发起下游调用时从同一个 context 读取并注入，业务代码不需要手工搬运。
 
 ```go
 app, err := gofy.New(
@@ -693,7 +693,7 @@ NACOS_DATA_ID=gofy-service NACOS_GROUP=GO_GROUP go run . start
 ## Nacos 服务注册与发现
 
 `support/nacos` 同时实现了 Naming API：`App` 在监听端口可用后把自身注册到 Nacos，
-退出时注销。客户端侧（`gofy-interface-service/apicore/client/nacos`）按服务名解析实例并
+退出时注销。客户端侧（`gofy-interface-api/client/nacos`）按服务名解析实例并
 做负载均衡。
 
 **服务注册**
@@ -756,7 +756,7 @@ app, err := gofy.New(
 | `NACOS_DISCOVERY_HEALTHY_ONLY` | 是否只返回健康实例 | `true` |
 | `NACOS_DISCOVERY_CLUSTERS` | 只发现指定集群，逗号分隔 | 空（全部） |
 
-**客户端服务发现（gofy-interface-service）**
+**客户端服务发现（gofy-interface-api）**
 
 `client/nacos.Resolver` 实现了 `client.Resolver`：按服务名调用 `instance/list`，
 在本地缓存实例列表；Nacos 不可达时在 `stale_ttl` 内继续使用最后一次成功的结果；
@@ -764,9 +764,9 @@ app, err := gofy.New(
 
 ```go
 import (
-    "github.com/bingcool/gofy-interface-service/appinterface/demoservice/demoserviceclient"
-    "github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
-    resolvernacos "github.com/bingcool/gofy-interface-service/apicore/client/nacos"
+    "github.com/yourorg/interface-service/appinterface/demoservice/demoserviceclient"
+    "github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
+    resolvernacos "github.com/bingcool/gofy-interface-api/client/nacos"
 )
 
 resolver, err := resolvernacos.NewFromFiles("nacos.yaml", "application.yaml")
@@ -834,8 +834,9 @@ PostgreSQL、Redis、AMQP、Kafka、RocketMQ 客户端也都是纯 Go。`make gu
 `CgoFiles`；需要 cgo 的 `-race` 只在 `test-race` 中启用。仓库不包含
 GitHub Actions，`make check` 是唯一门禁。
 
-`examples/demo-service` 通过 `replace github.com/bingcool/gofy-interface-service => ../../../gofy-interface-service`
-消费契约模块，本地需要把 `gofy-interface-service` 仓库放在 `gofy` 的同级目录。
+`examples/demo-service` 通过 `replace` 指向本地的 `gofy`、`gofy-interface-api` 与
+`examples/interface-service`（见 `examples/demo-service/go.mod`）；本地需要把 `gofy-interface-api`
+仓库放在 `gofy` 的同级目录。
 
 MySQL 集成测试默认跳过，需显式开启：
 

@@ -6,9 +6,8 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy"
-	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
-	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productdto"
+	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
+	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
 	"github.com/yourorg/demo-service/app/container"
@@ -17,6 +16,7 @@ import (
 	"github.com/yourorg/demo-service/app/module/product"
 	"github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
+	"github.com/yourorg/interface-service/appinterface/demoservice/productdto"
 	"go.uber.org/zap"
 )
 

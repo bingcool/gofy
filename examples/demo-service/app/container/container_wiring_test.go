@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
+	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
 )

@@ -3,8 +3,8 @@ package controller
 import (
 	"testing"
 
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderenum"
 	"github.com/yourorg/demo-service/app/module/order/service"
+	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
 // TestStatusMappingConsistency 保证 service 的领域状态常量与契约枚举一一对应，

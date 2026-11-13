@@ -45,13 +45,13 @@ const (
 
 // ContextKey is the context key holding the propagated headers.
 //
-// gofy-interface-service/apicore/client reads the same key, so the client can
+// gofy-interface-api/client reads the same key, so the client can
 // forward the headers it captured without importing the server side. The literal
 // must stay identical in both repositories; changing it breaks propagation
 // across the deployment boundary, so treat it as an API contract.
 // ContextKey 是存放透传 Header 的 context key。
 //
-// gofy-interface-service/apicore/client 读取同一个 key，这样客户端无需 import 服务端
+// gofy-interface-api/client 读取同一个 key，这样客户端无需 import 服务端
 // 即可转发其采集到的 Header。该字面量必须在两个仓库中保持一致；修改会破坏
 // 跨部署边界的透传，因此应把它当作 API 契约对待。
 const ContextKey = "gofy.header_propagation.headers"

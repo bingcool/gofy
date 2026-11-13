@@ -67,4 +67,9 @@ if go list -deps ./support/image | grep -q "$root_pkg/logger"; then
   fail "support/image must not depend on logger"
 fi
 
+# gofy 框架库不得反向依赖契约基础设施库。
+if go list -deps ./... | grep -q 'github.com/bingcool/gofy-interface-api'; then
+  fail "gofy must not depend on gofy-interface-api"
+fi
+
 echo "import guards passed"

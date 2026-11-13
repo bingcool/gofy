@@ -26,7 +26,7 @@ var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 //   - the ID goes into the request context via support.ContextWithRequestID, so
 //     business code can read it directly;
 //   - it is also merged into headerpropagation's X-Trace-Id, which the
-//     gofy-interface-service client forwards downstream on its own, so no manual
+//     gofy-interface-api client forwards downstream on its own, so no manual
 //     ContextWithRequestID call is needed.
 //
 // RequestID 读取（或生成）请求 ID，并保证同一个 ID 能传到下游服务：
@@ -35,7 +35,7 @@ var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 //   - 没有或格式非法时生成 UUID；
 //   - 写入 gin context（响应包络 req_id）、请求/响应头 X-Trace-ID；
 //   - 写入 request context 的 support.ContextWithRequestID，业务可直接读取；
-//   - 同时合并进 headerpropagation 的 X-Trace-Id，gofy-interface-service 的
+//   - 同时合并进 headerpropagation 的 X-Trace-Id，gofy-interface-api 的
 //     客户端会自动把该值带给下游，不需要再手工调用 ContextWithRequestID。
 func RequestID(header string) gin.HandlerFunc {
 	header = strings.TrimSpace(header)

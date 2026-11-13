@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `gofy new interface-service`: scaffolding for a project contract module.
+  The command embeds a 51-file snapshot of `examples/interface-service`, rewrites the
+  module path and every import, points the two local replaces at sibling `gofy` /
+  `gofy-interface-api` checkouts with portable relative paths, runs `go mod tidy` and
+  initialises git so the generated project's first command can be `make check`.
+  `make sync-contract-template` regenerates the embedded snapshot.
 - `support/generation`: the publish-and-pin mechanism behind the demo's IO
   snapshot is now a framework package. `generation.NewSet[T](name)` keeps one
   current generation in an `atomic.Pointer`, `Publish`/`Current` swap and read

@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 
-	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
-	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
-	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/types"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productdto"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productrequest"
-	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productresponse"
+	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
+	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-api/contracts/common/types"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/yourorg/demo-service/app/module/product/service"
+	"github.com/yourorg/interface-service/appinterface/demoservice"
+	"github.com/yourorg/interface-service/appinterface/demoservice/productdto"
+	"github.com/yourorg/interface-service/appinterface/demoservice/productrequest"
+	"github.com/yourorg/interface-service/appinterface/demoservice/productresponse"
 	"go.uber.org/zap"
 )
 

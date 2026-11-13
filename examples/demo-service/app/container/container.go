@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"sync"
 
-	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
-	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
+	gofyadapter "github.com/bingcool/gofy-interface-api/adapter/gofy"
+	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"

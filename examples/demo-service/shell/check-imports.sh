@@ -11,7 +11,10 @@ fail() {
 module="github.com/yourorg/demo-service"
 module_prefix="$module/app/module/"
 appio_prefix="$module/app/io"
-contract_prefix="github.com/bingcool/gofy-interface-service"
+contract_prefix="github.com/yourorg/interface-service"
+api_contracts_prefix="github.com/bingcool/gofy-interface-api/contracts"
+api_client_prefix="github.com/bingcool/gofy-interface-api/client"
+api_adapter_prefix="github.com/bingcool/gofy-interface-api/adapter"
 support_prefix="github.com/bingcool/gofy/support"
 framework_prefix="github.com/bingcool/gofy"
 
@@ -56,7 +59,9 @@ while IFS='|' read -r pkg imports; do
         dl=${dl#/}
         dep_layer=${dl%%/*}
         ;;
-      "$contract_prefix"*) cat="contract" ;;
+      "$contract_prefix"* | "$api_contracts_prefix"*) cat="contract" ;;
+      "$api_client_prefix"*) cat="client" ;;
+      "$api_adapter_prefix"*) cat="adapter" ;;
       "$appio_prefix"*) cat="appio" ;;
       "$support_prefix"*) cat="support" ;;
       "$framework_prefix"*) cat="framework" ;;
