@@ -8,6 +8,11 @@
   - `https://github.com/bingcool/gofy-interface-service`（`main`，复核基线 `2a45feb`）
 - 方案性质：基于当前架构的修正与可靠性优化
 - 总体原则：**小步改造、保留现有架构、遵循 Go 语言习惯、不按其他框架的功能清单做对等扩展**
+- 实施状态：**已落地**
+- 实施完成：2026-11-13
+- 实施提交：
+  - `gofy`：`f992c8b`（2026-11-13 13:26）
+  - `gofy-interface-service`：`864e50e`（2026-11-13 13:26）
 
 ---
 
@@ -47,6 +52,32 @@
 - `P1-06`（Contract Module 路径）保留编号，但性质是**发布阻塞项**，不是运行期可靠性风险。
 - `P1-02` 的核心工作从“新建实例 API”改为“内部改用实例 API + 按实例名并发初始化”。
 - `P2-06`（中间件顺序）从“缺陷修复”降级为“顺序契约与测试补齐”。
+
+### 0.4 实施结果（2026-11-13）
+
+本方案已按 §16 的阶段 A–E 实施并提交；除 P1-06 的发布动作（打 tag、固定正式版本、移除 `replace`）外全部落地，两个仓库的回归均通过。
+
+| 事项 | 状态 | 落地说明 |
+|---|---|---|
+| P1-01 Reload 代际隔离 | 已落地 | HTTP Handler 按 Generation 发布；请求持有 lease，旧代在途请求排空后才 Stop/Close；新代启动失败不影响旧代；Reload 与 Shutdown 串行化 |
+| P1-01 Demo 请求级 IO 快照 | 已落地 | `app/io` 用不可变 `Snapshot` + `atomic.Pointer` 发布；入口中间件把快照固定进 context，仓储与服务在一次请求内只使用同一代句柄 |
+| P1-02 Registry 实例 API | 已落地 | DB/PG/SQLite/Redis/AMQP/Kafka/RocketMQ 内部统一走实例 API；包级入口仅作兼容；同名并发首次初始化合并为一次，不同名并行 |
+| P1-03 Client 地址选择 | 已落地 | 删除 Client 侧 30 秒单地址缓存；每次调用与重试都重新 Resolve，502/503/504 同样触发重新选址；Nacos Resolver 支持并发刷新与 stale 列表 |
+| P1-04 SQL 日志参数化 | 已落地 | GORM Logger 实现 `ParamsFilter`，慢查询与错误日志输出占位符模板，不展开真实参数 |
+| P1-05 Kafka 提交语义 | 已落地 | 新增 `CommitMode`，默认 manual；`DisableAutoCommit` 标记弃用；补充分区、失败消息与提交失败测试 |
+| P1-06 Contract Module 路径 | 部分落地 | 模块路径已改为 `github.com/bingcool/gofy-interface-service`，两仓库导入全部同步；打 tag、固定正式版本、移除 `replace`、独立下载验证属于发布动作，尚未执行 |
+| P2-01 认证声明校验 | 已落地 | 契约显式声明 `auth` 中间件；`AuthValidator` 在启动期校验，缺失即报错 |
+| P2-02 OpenAPI Optional Auth | 已落地 | `AuthOptional` 生成允许认证与匿名两种情况的 Security 结构 |
+| P2-03 流式接口边界 | 已落地 | 文档化既有 `ResponseKind` 与服务端实现的边界，本轮不新增流式能力 |
+| P2-04 OTel 全局副作用 | 已落地 | 默认 `Global=false` 不触碰进程级 Provider/Propagator/ErrorHandler；导出失败经注入 logger 去重上报 |
+| P2-05 质量门禁 | 已落地 | `make check` 覆盖 fmt、vet、race、示例构建/测试、导入守卫与 cgo-free；示例模块增加 `go vet` |
+| P2-06 中间件顺序契约 | 已落地 | `buildHTTPWith` 记录完整顺序与位置理由；测试固定可见顺序、panic 响应与访问日志、Recovery 覆盖边界，以及 Reload 失败/并发场景 |
+
+回归结果：
+
+- `gofy`：`make check` 退出码 0（含 race 测试、demo 构建与 cgo-free 构建）。
+- `examples/demo-service`：`go build ./...`、`go vet ./...`、`go test -race ./...` 通过。
+- `gofy-interface-service`：`make check` 的 fmt、vet、test-race、refcheck 通过；`golden` 重新生成的 OpenAPI 产物与提交版本无差异。
 
 ---
 
@@ -1106,6 +1137,8 @@ Recovery 只能捕获它之后的链路。RequestID、Trace、HeaderPropagation�
 
 ## 16. 推荐实施顺序
 
+> 本节顺序已按计划执行完毕，逐项结果见 §0.4。
+
 ### 阶段 A：建立测试基线
 
 1. 固定审计基线：Gofy `43a7920`、Contract `2a45feb`。
@@ -1306,6 +1339,8 @@ A 框架资源 Close（默认 DB/Logger/Telemetry）
 ```
 
 ## 20. 最终结论
+
+**实施状态：本方案已于 2026-11-13 落地（提交见文首），以下为最终结论与后续演进方向。**
 
 Gofy 当前不需要推倒重来。现有 `App` 生命周期、模块工厂、Container、Service/Repository 分层、Context 事务传播以及独立 Contract 仓库都值得保留。
 
