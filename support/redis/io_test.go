@@ -3,10 +3,12 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/bingcool/gofy/support/redis"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 func clearRegistry(t *testing.T) {
@@ -181,5 +183,115 @@ func TestCloseAllIO(t *testing.T) {
 	}
 	if err := client.Ping(ctx).Err(); err == nil {
 		t.Fatal("client still answers after CloseAllIO")
+	}
+}
+
+func TestConcurrentFirstOpenReturnsOneClient(t *testing.T) {
+	mr := miniredis.RunT(t)
+	reg, err := redis.NewRegistry(map[string]redis.Config{"default": {Addr: mr.Addr()}})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+
+	const callers = 100
+	clients := make([]*goredis.Client, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			clients[i], errs[i] = reg.NewIO(context.Background(), "default")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < callers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("NewIO[%d]: %v", i, errs[i])
+		}
+		if clients[i] != clients[0] {
+			t.Fatalf("caller %d got a different client", i)
+		}
+	}
+}
+
+func TestRegistriesKeepTheirOwnClients(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+	cfg := map[string]redis.Config{"default": {Addr: mr.Addr()}}
+
+	first, err := redis.NewRegistry(cfg)
+	if err != nil {
+		t.Fatalf("NewRegistry(first): %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := redis.NewRegistry(cfg)
+	if err != nil {
+		t.Fatalf("NewRegistry(second): %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	firstClient, err := first.NewIO(ctx, "default")
+	if err != nil {
+		t.Fatalf("first.NewIO: %v", err)
+	}
+	secondClient, err := second.NewIO(ctx, "default")
+	if err != nil {
+		t.Fatalf("second.NewIO: %v", err)
+	}
+	if firstClient == secondClient {
+		t.Fatal("two registries share one client")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
+	}
+	if err := firstClient.Ping(ctx).Err(); err == nil {
+		t.Fatal("first client still answers after its registry closed")
+	}
+	if err := secondClient.Ping(ctx).Err(); err != nil {
+		t.Fatalf("second client broke when the first registry closed: %v", err)
+	}
+}
+
+func TestCloseRacingNewIOLeavesNoOpenRegistry(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		reg, err := redis.NewRegistry(map[string]redis.Config{"default": {Addr: mr.Addr()}})
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for j := 0; j < 8; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				client, err := reg.NewIO(ctx, "default")
+				if err == nil && client == nil {
+					t.Error("NewIO returned a nil client without an error")
+				}
+				if err != nil && !errors.Is(err, redis.ErrNotConfigured) {
+					t.Errorf("NewIO during Close = %v", err)
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = reg.Close()
+		}()
+		close(start)
+		wg.Wait()
+		if _, err := reg.NewIO(ctx, "default"); !errors.Is(err, redis.ErrNotConfigured) {
+			t.Fatalf("NewIO after Close = %v, want ErrNotConfigured", err)
+		}
 	}
 }

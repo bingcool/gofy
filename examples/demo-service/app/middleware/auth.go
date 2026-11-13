@@ -14,6 +14,12 @@ import (
 // 模块不需要再传任何认证选项。
 const NameAuth = "auth"
 
+// NameOptionalAuth 是“可选认证”中间件的逻辑名：有凭证则校验、无凭证放行。
+// demo 目前没有路由声明 AuthOptional，也没有注册该别名；容器的启动校验会用
+// 这个名字判定 Optional 路由，新增 Optional 路由前需要先注册实现，
+// 不能直接复用 NameAuth（Required 与 Optional 的放行语义不同）。
+const NameOptionalAuth = "optional-auth"
+
 // JWTConfig 描述契约里显式声明的 "auth" 中间件使用的 Bearer Token 校验参数，
 // 映射到 support/jwtauth.Config。
 type JWTConfig struct {

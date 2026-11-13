@@ -550,7 +550,7 @@ HTTP POST /api/v1/order/orders
 `examples/demo-service/shell/check-imports.sh` 改为按层校验（仍只查非测试文件）：
 
 1. `controller`：只允许 import 本模块 `service` 与 HTTP 契约包
-   （`gofy/gofy-interface-service/...`）；禁止任何 `model` / `repository` / `innerapi` /
+   （`github.com/bingcool/gofy-interface-service/...`）；禁止任何 `model` / `repository` / `innerapi` /
    其他模块包；
 2. `service`：禁止 import HTTP 契约包；禁止 import 其他模块 `service` / `repository` /
    `model`；允许本模块 `innerapi`（实现）与其他模块 `innerapi`（调用）；

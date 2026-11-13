@@ -401,8 +401,11 @@ SimpleConsumer（v5 没有 push consumer），支持 Tag / SQL92 过滤、逐条
 `support/db`、`support/pg`、`support/sqlite`、`support/redis`、`support/amqp`、
 `support/kafka`、`support/rocketmq` 还支持命名
 实例：启动时用 `Configure(map[string]Config)` 注册配置别名，之后任意位置用
-`NewIO(ctx, "default")` 按需建连并缓存。每次 `Configure` 生成一代注册表，
-`Close` 只关闭本代连接，因此热更新可以先启动新模块再关闭旧模块：
+`NewIO(ctx, "default")` 按需建连并缓存。首次建连在注册表锁外执行（不同别名
+并行、同名合并），失败不缓存；每次 `Configure` 生成一代注册表，`Close` 只关闭
+本代连接，因此热更新可以先启动新模块再关闭旧模块。包级 `NewIO` /
+`CloseAllIO` 是单 App 的便捷入口，同一进程内多个 App 需要隔离时持有
+`*Registry` 用 `reg.NewIO` / `reg.Close`：
 
 ```go
 reg, err := redis.Configure(map[string]redis.Config{
@@ -428,10 +431,10 @@ AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼
 
 分布式自增 ID 用 `support/uuidint`：Lua 把 Redis `TIME` 的毫秒前缀与段内序号
 拼成 `int64`（趋势递增、同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套
-Lua 和 ID 布局。`New` 可通过 `WithInstance("cache")` 注入 `support/redis` 的
-命名实例（每次取号懒解析，热更新自动切换），也支持 `WithClient` 直接注入
-客户端、备用连接降级、批量取号，以及可选的本地预取池（`WithPool` 配合
-`StartPool`/`StopPool`，降低 Redis QPS）。见
+Lua 和 ID 布局。`New` 可用 `WithClient` 注入本代客户端，或用
+`WithInstance("cache")` 走 `support/redis` 命名实例（每次取号经包级 `NewIO`
+懒解析，适合单 App 脚本）；还支持备用连接降级、批量取号，以及可选的本地预取池
+（`WithPool` 配合 `StartPool`/`StopPool`，降低 Redis QPS）。见
 [support/uuidint/README.md](support/uuidint/README.md)。
 
 ```go
@@ -663,9 +666,9 @@ app, err := gofy.New(
 
 ```go
 import (
-    "gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
-    "gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-    resolvernacos "gofy/gofy-interface-service/apicore/client/nacos"
+    "github.com/bingcool/gofy-interface-service/appinterface/demoservice/demoserviceclient"
+    "github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+    resolvernacos "github.com/bingcool/gofy-interface-service/apicore/client/nacos"
 )
 
 resolver, err := resolvernacos.NewFromFiles("nacos.yaml", "application.yaml")
@@ -730,7 +733,7 @@ PostgreSQL、Redis、AMQP、Kafka、RocketMQ 客户端也都是纯 Go。`make cg
 和 CI 的 guards 会检查依赖图中没有 `CgoFiles`；需要 cgo 的 `-race` 只在
 `test-race` 中启用。
 
-`examples/demo-service` 通过 `replace gofy/gofy-interface-service => ../../../gofy-interface-service`
+`examples/demo-service` 通过 `replace github.com/bingcool/gofy-interface-service => ../../../gofy-interface-service`
 消费契约模块，本地需要把 `gofy-interface-service` 仓库放在 `gofy` 的同级目录。
 
 MySQL 集成测试默认跳过，需显式开启：

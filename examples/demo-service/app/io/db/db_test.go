@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -21,23 +22,19 @@ func TestOpenPublishesDefaultOnly(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	set.Install()
-	t.Cleanup(func() {
-		mu.Lock()
-		Db, OrderDb, ProductDb = nil, nil, nil
-		mu.Unlock()
-	})
+	t.Cleanup(func() { current.Store(nil) })
 
-	if Db != defaultDB {
-		t.Fatal("Db does not point at the framework connection")
+	if Default() != defaultDB {
+		t.Fatal("Default does not point at the framework connection")
 	}
-	if OrderDb != nil || ProductDb != nil {
+	if set.Instance(InstanceOrder) != nil || set.Instance(InstanceProduct) != nil {
 		t.Fatal("unconfigured instances must stay nil")
 	}
 	if err := set.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if Db != defaultDB {
-		t.Fatal("Close must not clear the framework connection")
+	if Default() != nil {
+		t.Fatal("Close must withdraw the generation it installed")
 	}
 }
 
@@ -57,15 +54,19 @@ func TestOpenRegistersLazyInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	set.Install()
 	t.Cleanup(func() { _ = set.Close() })
 
-	// 懒加载实例未配置包级句柄，只能通过 NewIO 取用；此处应尝试建连并失败。
+	// 包级 NewIO 读当前一代 Set；懒加载实例首次访问才建连，应失败并带上实例名。
 	_, err = NewIO(context.Background(), "selectDb")
 	if err == nil {
 		t.Skip("unexpectedly connected to 127.0.0.1:1")
 	}
 	if !strings.Contains(err.Error(), "selectDb") {
 		t.Fatalf("NewIO error = %v, want the instance name", err)
+	}
+	if _, err := set.NewIO(context.Background(), "missing"); !errors.Is(err, gofydb.ErrUnknownInstance) {
+		t.Fatalf("Set.NewIO(missing) = %v, want ErrUnknownInstance", err)
 	}
 	if _, err := NewIO(context.Background(), "missing"); err == nil {
 		t.Fatal("NewIO accepted an unregistered instance")
@@ -97,9 +98,7 @@ func TestIntegrationOpenNamedInstances(t *testing.T) {
 		t.Fatalf("default: %v", err)
 	}
 	t.Cleanup(func() {
-		mu.Lock()
-		Db, OrderDb, ProductDb = nil, nil, nil
-		mu.Unlock()
+		current.Store(nil)
 		_ = gofydb.Close(defaultDB)
 	})
 
@@ -118,7 +117,12 @@ func TestIntegrationOpenNamedInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lazy selectDb: %v", err)
 	}
-	for name, pool := range map[string]*gorm.DB{"default": Db, "order": OrderDb, "product": ProductDb, "selectDb": selectDB} {
+	for name, pool := range map[string]*gorm.DB{
+		"default":  Default(),
+		"order":    set.Instance(InstanceOrder),
+		"product":  set.Instance(InstanceProduct),
+		"selectDb": selectDB,
+	} {
 		if pool == nil {
 			t.Fatalf("%s handle is nil", name)
 		}
@@ -130,7 +134,7 @@ func TestIntegrationOpenNamedInstances(t *testing.T) {
 	if err := set.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if OrderDb != nil || ProductDb != nil {
+	if Default() != nil {
 		t.Fatal("extra handles were not cleared")
 	}
 }

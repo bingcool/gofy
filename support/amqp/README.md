@@ -108,8 +108,11 @@ client, err := amqp.NewIO(ctx, "default") // 业务代码：从当前一代取�
   表示禁用全部实例（`NewIO` 返回 `ErrUnknownInstance`）。
 - 未注册的名称返回 `ErrUnknownInstance`；未调用 `Configure`，或当前一代已经
   关闭，返回 `ErrNotConfigured`。
-- 建连失败不会缓存，下一次 `NewIO` 会重新尝试；并发调用安全，同一别名只建
-  一个 `Client`。
+- 建连失败不会缓存，下一次 `NewIO` 会重新尝试。
+- 首次建连在注册表锁外执行：不同别名的连接并行初始化，互不阻塞；同一别名的
+  并发首次调用只建一个 `Client`，其余调用等待同一次结果。
+- `Close` 开始后不再发布新连接：已经开始、在 `Close` 之后才完成的连接会被立即
+  关闭，调用方得到 `ErrNotConfigured`。
 - 每次 `Configure` 生成新一代注册表。旧一代的 `Close` 只关闭它自己打开的
   连接，不影响已经切换到新一代的调用方；demo 热更新依赖这个顺序（新模块先
   启动、旧模块后关闭）。
@@ -118,6 +121,9 @@ client, err := amqp.NewIO(ctx, "default") // 业务代码：从当前一代取�
   服务的旧代。
 - 包级 `CloseAllIO()` 关闭当前一代并清空；持有 `Configure` 返回值时直接用
   `reg.Close()` 更精确。
+- 包级 `NewIO` / `CloseAllIO` 是单 App、单 Registry 的便捷入口：同一进程内多个
+  Registry 都 `Install` 时，包级调用只看最后安装的那一代，不承诺多 App 隔离；
+  需要代际隔离时用 `reg.NewIO` 与 `reg.Close`。
 
 不调用 `Configure` 时，包的行为与 `New`/`Wrap`/`Close` 完全一致，不产生全局状态。
 

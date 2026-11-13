@@ -58,10 +58,12 @@ func WithClient(client *goredis.Client) Option {
 }
 
 // WithInstance uses a named instance from support/redis as the primary source.
-// The alias is resolved on every call through redis.NewIO, so a reload that
-// installs a new generation is picked up without rebuilding the Generator.
-// Without WithClient or WithInstance the alias "default" is used. It cannot be
-// combined with WithClient.
+// The alias is resolved on every call through the package-level redis.NewIO, so
+// it follows the last Registry installed in the process, not a specific
+// generation. It is the compatibility path for single-App scripts; components
+// that own per-generation connections should pass WithClient with that
+// generation's client instead. Without WithClient or WithInstance the alias
+// "default" is used. It cannot be combined with WithClient.
 func WithInstance(name string) Option {
 	return func(s *settings) error {
 		name = strings.TrimSpace(name)

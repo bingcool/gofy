@@ -91,8 +91,11 @@ db, err := gofydb.NewIO(ctx, "order") // 业务代码：从当前一代取用
   使用 `zap.NewNop()`，所有别名共享同一个 logger。
 - 未注册的名称返回 `ErrUnknownInstance`；未调用 `Configure`，或当前一代已经
   关闭，返回 `ErrNotConfigured`。
-- 建连失败不会缓存，下一次 `NewIO` 会重新尝试；并发调用安全，同一别名只打开
-  一个连接池。
+- 建连失败不会缓存，下一次 `NewIO` 会重新尝试。
+- 首次建连在注册表锁外执行：不同别名的连接并行初始化，互不阻塞；同一别名的
+  并发首次调用只打开一个连接池，其余调用等待同一次结果。
+- `Close` 开始后不再发布新连接：已经开始、在 `Close` 之后才完成的连接会被立即
+  释放，调用方得到 `ErrNotConfigured`。
 - 每次 `Configure` 生成新一代注册表。旧一代的 `Close` 只关闭它自己打开的
   连接池，不影响已经切换到新一代的调用方；demo 热更新依赖这个顺序（新模块先
   启动、旧模块后关闭）。
@@ -101,6 +104,9 @@ db, err := gofydb.NewIO(ctx, "order") // 业务代码：从当前一代取用
   服务的旧代。
 - 包级 `CloseAllIO()` 关闭当前一代并清空；持有 `Configure` 返回值时直接用
   `reg.Close()` 更精确。
+- 包级 `NewIO` / `CloseAllIO` 是单 App、单 Registry 的便捷入口：同一进程内多个
+  Registry 都 `Install` 时，包级调用只看最后安装的那一代，不承诺多 App 隔离；
+  需要代际隔离时用 `reg.NewIO` 与 `reg.Close`。
 
 `db.default` 由框架的 `WithDatabase` 创建和关闭，业务应继续使用 `Runtime.DB`
 或 `App` 注入的 `*gorm.DB`；把同一个别名再放进注册表会得到第二个连接池。
@@ -119,6 +125,7 @@ db:
   ping_timeout: 5s
   slow_threshold: 200ms
   log_level: warn        # silent | error | warn | info
+  log_parameter_values: false
   prepare_stmt: false
 ```
 
@@ -132,6 +139,7 @@ db:
 | `PingTimeout` | 启动时 `Ping` 的超时 | `5s` |
 | `SlowThreshold` | 慢 SQL 阈值 | `200ms` |
 | `LogLevel` | GORM 日志级别，`warning` 等同 `warn` | `warn` |
+| `LogParameterValues` | 是否在日志中展开 SQL 参数值 | `false` |
 | `PrepareStmt` | 是否缓存预编译语句 | `false` |
 
 `Validate()` 在连接前检查：
@@ -207,6 +215,11 @@ func WithContext(ctx context.Context, fallback *gorm.DB) *gorm.DB
 SQL 日志使用 `component=gorm` 的 zap 字段，包含 `elapsed`、`rows`、`sql`；
 错误和慢 SQL 还会附加 `error` 或 `threshold`。日志通过传入的 `zap.Logger`
 输出，便于和应用的访问日志、业务日志统一。
+
+默认不在日志中输出参数值：Logger 实现 `gorm.ParamsFilter`，慢 SQL 和失败 SQL
+只记录带 `?` 占位符的模板，手机号、邮箱、Token 等查询条件不会进入日志。
+只有本地排查确实需要完整参数时才设置 `log_parameter_values: true`，生产环境
+不应开启。
 
 ## 配置与安全
 

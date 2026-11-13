@@ -186,6 +186,46 @@ func TestRecoveryMapsHandledError(t *testing.T) {
 	}
 }
 
+// TestRecoveryBoundaryIsDownstreamOnly 固定 Recovery 的覆盖边界：它只捕获安装
+// 之后的链路。装在外层的中间件 panic 会继续向上抛给 net/http；外层 AccessLog
+// 仍能记录内层 panic 转换后的最终 500。App 装配顺序依赖这两个性质。
+func TestRecoveryBoundaryIsDownstreamOnly(t *testing.T) {
+	t.Run("outer panic escapes", func(t *testing.T) {
+		engine := newGin()
+		engine.Use(func(*gin.Context) { panic("outer boom") })
+		engine.Use(middleware.Recovery(zap.NewNop(), support.NewResponder(support.ResponderConfig{})))
+		engine.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Fatal("panic before Recovery was swallowed")
+			}
+		}()
+		engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	})
+
+	t.Run("access log records recovered panic", func(t *testing.T) {
+		core, logs := observer.New(zapcore.InfoLevel)
+		engine := newGin()
+		engine.Use(middleware.AccessLog(zap.New(core), middleware.DefaultAccessLogOptions()))
+		engine.Use(middleware.Recovery(zap.NewNop(), support.NewResponder(support.ResponderConfig{})))
+		engine.GET("/panic", func(*gin.Context) { panic("boom") })
+
+		rr := httptest.NewRecorder()
+		engine.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/panic", nil))
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rr.Code)
+		}
+		entries := logs.FilterMessage("http access").All()
+		if len(entries) != 1 {
+			t.Fatalf("access log entries = %d, want 1", len(entries))
+		}
+		if got, ok := entries[0].ContextMap()["status"]; !ok || got != int64(http.StatusInternalServerError) {
+			t.Fatalf("access log status = %v, want 500", got)
+		}
+	})
+}
+
 func TestCORSValidation(t *testing.T) {
 	_, err := middleware.CORS(support.CORSConfig{
 		AllowOrigins:     []string{"*"},

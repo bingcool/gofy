@@ -44,26 +44,36 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
+		Publish(nil)
 	})
 
-	if appdb.Db != rt.DB {
-		t.Fatal("db.Db does not point at the runtime connection")
+	if appdb.Default() != rt.DB {
+		t.Fatal("db.Default does not point at the runtime connection")
 	}
-	if appredis.RateLimit == nil {
+	if Current() == nil || Current().DB() != rt.DB {
+		t.Fatal("the published snapshot does not carry the runtime connection")
+	}
+	if appredis.RateLimit() == nil {
 		t.Fatal("redis.RateLimit was not installed")
 	}
-	if err := appredis.RateLimit.Ping(ctx).Err(); err != nil {
+	if err := appredis.RateLimit().Ping(ctx).Err(); err != nil {
 		t.Fatalf("ping ratelimit: %v", err)
 	}
 	viaIO, err := appredis.NewIO(ctx, appredis.InstanceRateLimit)
 	if err != nil {
 		t.Fatalf("redis.NewIO: %v", err)
 	}
-	if viaIO != appredis.RateLimit {
+	if viaIO != appredis.RateLimit() {
 		t.Fatal("redis.NewIO does not return the installed instance")
 	}
-	if appuuidint.Default == nil {
+	pinned, err := Current().RedisNewIO(ctx, appredis.InstanceRateLimit)
+	if err != nil {
+		t.Fatalf("snapshot RedisNewIO: %v", err)
+	}
+	if pinned != appredis.RateLimit() {
+		t.Fatal("snapshot RedisNewIO does not resolve this generation's instance")
+	}
+	if appuuidint.Default() == nil {
 		t.Fatal("uuidint.Default was not installed")
 	}
 	raw, err := mr.Get("demo:uuid")
@@ -73,7 +83,7 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	if raw != "5" {
 		t.Fatalf("uuid pool warm fill = %q, want 5", raw)
 	}
-	id, err := appuuidint.Default.Get(ctx)
+	id, err := appuuidint.Default().Get(ctx)
 	if err != nil {
 		t.Fatalf("uuidint.Get: %v", err)
 	}
@@ -87,11 +97,14 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if appuuidint.Default != nil {
+	if appuuidint.Default() != nil {
 		t.Fatal("uuidint.Default was not cleared")
 	}
-	if appredis.RateLimit != nil {
+	if appredis.RateLimit() != nil {
 		t.Fatal("redis.RateLimit was not cleared")
+	}
+	if Current() != nil {
+		t.Fatal("Stop did not withdraw the published snapshot")
 	}
 	if _, err := appredis.NewIO(ctx, appredis.InstanceRateLimit); !errors.Is(err, gofyredis.ErrNotConfigured) {
 		t.Fatalf("redis.NewIO after Stop = %v, want ErrNotConfigured", err)
@@ -141,20 +154,20 @@ func TestStartInstallsAMQPInstance(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
+		Publish(nil)
 	})
 
-	if appamqp.Default == nil {
+	if appamqp.Default() == nil {
 		t.Fatal("amqp.Default was not installed")
 	}
-	if client := appamqp.Get(appamqp.DefaultInstance); client != appamqp.Default {
+	if client := appamqp.Get(appamqp.DefaultInstance); client != appamqp.Default() {
 		t.Fatal("Get(default) does not return the installed handle")
 	}
 
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if appamqp.Default != nil {
+	if appamqp.Default() != nil {
 		t.Fatal("amqp.Default was not cleared")
 	}
 }
@@ -194,20 +207,20 @@ func TestStartInstallsKafkaInstance(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
+		Publish(nil)
 	})
 
-	if appkafka.Default == nil {
+	if appkafka.Default() == nil {
 		t.Fatal("kafka.Default was not installed")
 	}
-	if client := appkafka.Get(appkafka.DefaultInstance); client != appkafka.Default {
+	if client := appkafka.Get(appkafka.DefaultInstance); client != appkafka.Default() {
 		t.Fatal("Get(default) does not return the installed handle")
 	}
 
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if appkafka.Default != nil {
+	if appkafka.Default() != nil {
 		t.Fatal("kafka.Default was not cleared")
 	}
 }
@@ -240,20 +253,20 @@ func TestStartInstallsRocketMQInstance(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = m.Stop(ctx)
-		appdb.Db, appdb.OrderDb, appdb.ProductDb = nil, nil, nil
+		Publish(nil)
 	})
 
-	if approcketmq.Default == nil {
+	if approcketmq.Default() == nil {
 		t.Fatal("rocketmq.Default was not installed")
 	}
-	if client := approcketmq.Get(approcketmq.DefaultInstance); client != approcketmq.Default {
+	if client := approcketmq.Get(approcketmq.DefaultInstance); client != approcketmq.Default() {
 		t.Fatal("Get(default) does not return the installed handle")
 	}
 
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if approcketmq.Default != nil {
+	if approcketmq.Default() != nil {
 		t.Fatal("rocketmq.Default was not cleared")
 	}
 }

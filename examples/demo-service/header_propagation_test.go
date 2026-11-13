@@ -8,10 +8,10 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/demoserviceclient"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support"
-	"gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
 )
 
 type propagationResponse struct {

@@ -8,12 +8,12 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/frameworkcontext"
 	"github.com/gin-gonic/gin"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/yourorg/demo-service/app/middleware"
-	"gofy/gofy-interface-service/apicore/contracts/common/endpoint"
 )
 
 // 数值直接取自契约：Limit/WindowSeconds 写 1/60，第二个请求就 429，

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -152,5 +153,71 @@ func TestCloseAllIO(t *testing.T) {
 	}
 	if _, err := pg.NewIO(context.Background(), "default"); !errors.Is(err, pg.ErrNotConfigured) {
 		t.Fatalf("NewIO after CloseAllIO = %v, want ErrNotConfigured", err)
+	}
+}
+
+func TestRegistriesKeepTheirOwnInstances(t *testing.T) {
+	cfg := pg.Config{
+		DSN:         "postgres://app:secret@127.0.0.1:1/app?sslmode=disable&connect_timeout=1",
+		PingTimeout: 200 * time.Millisecond,
+	}
+	first, err := pg.NewRegistry(map[string]pg.Config{"order": cfg}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry(first): %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := pg.NewRegistry(map[string]pg.Config{"product": cfg}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry(second): %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	ctx := context.Background()
+	if _, err := first.NewIO(ctx, "product"); !errors.Is(err, pg.ErrUnknownInstance) {
+		t.Fatalf("first.NewIO(product) = %v, want ErrUnknownInstance", err)
+	}
+	if _, err := second.NewIO(ctx, "order"); !errors.Is(err, pg.ErrUnknownInstance) {
+		t.Fatalf("second.NewIO(order) = %v, want ErrUnknownInstance", err)
+	}
+}
+
+func TestCloseRacingNewIOLeavesNoOpenRegistry(t *testing.T) {
+	ctx := context.Background()
+	cfg := pg.Config{
+		DSN:         "postgres://app:secret@127.0.0.1:1/app?sslmode=disable&connect_timeout=1",
+		PingTimeout: 200 * time.Millisecond,
+	}
+	for i := 0; i < 10; i++ {
+		reg, err := pg.NewRegistry(map[string]pg.Config{"order": cfg}, nil)
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for j := 0; j < 8; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				pool, err := reg.NewIO(ctx, "order")
+				if err == nil && pool == nil {
+					t.Error("NewIO returned a nil pool without an error")
+				}
+				if err != nil && !errors.Is(err, pg.ErrNotConfigured) && !strings.Contains(err.Error(), `"order"`) {
+					t.Errorf("NewIO during Close = %v", err)
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = reg.Close()
+		}()
+		close(start)
+		wg.Wait()
+		if _, err := reg.NewIO(ctx, "order"); !errors.Is(err, pg.ErrNotConfigured) {
+			t.Fatalf("NewIO after Close = %v, want ErrNotConfigured", err)
+		}
 	}
 }

@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/bingcool/gofy/core"
@@ -16,24 +14,6 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
-
-// handlerSwap lets Reload replace the route table while the process keeps its
-// listener.
-type handlerSwap struct {
-	inner atomic.Value // http.Handler
-}
-
-func newHandlerSwap(h http.Handler) *handlerSwap {
-	s := &handlerSwap{}
-	s.Store(h)
-	return s
-}
-
-func (s *handlerSwap) Store(h http.Handler) { s.inner.Store(h) }
-
-func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.inner.Load().(http.Handler).ServeHTTP(w, r)
-}
 
 // ReloadSpec describes what Reload replaces. Nil fields keep their current
 // value.
@@ -116,6 +96,11 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		a.mu.Unlock()
 		return fmt.Errorf("%w: reload requires a running server", ErrNotRunning)
 	}
+	oldGen := a.gen
+	if oldGen == nil {
+		a.mu.Unlock()
+		return fmt.Errorf("%w: reload requires a running server", ErrNotRunning)
+	}
 	env := a.opts.env
 	lg, ownLogger := a.logger, a.ownLogger
 	systemLogger := a.systemLogger
@@ -138,16 +123,13 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	for _, m := range injected {
 		injectedNames[m.Name()] = struct{}{}
 	}
-	oldStarted := make([]support.Module, 0, len(a.started))
 	injectedStarted := make([]support.Module, 0, len(injected))
 	for _, m := range a.started {
 		if _, ok := injectedNames[m.Name()]; ok {
 			// Injected instances keep running across the swap; remember them
 			// so Shutdown still stops them.
 			injectedStarted = append(injectedStarted, m)
-			continue
 		}
-		oldStarted = append(oldStarted, m)
 	}
 	timeout := a.opts.shutdownTimeout
 	a.mu.Unlock()
@@ -237,9 +219,6 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		discard()
 		return fmt.Errorf("%w: reload requires a running server", ErrNotRunning)
 	}
-	oldLogger, oldOwnLogger := a.logger, a.ownLogger
-	oldSystemLogger := a.systemLogger
-	oldDB, oldOwnDB := a.db, a.ownDB
 	a.opts.env = env
 	if spec.Log != nil {
 		a.opts.logConfig = *spec.Log
@@ -260,33 +239,19 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	a.rt = rt
 	a.modules = modules
 	a.started = allStarted
+
+	newGen := newGeneration(oldGen.id+1, engine)
+	newGen.started = started
+	newGen.db, newGen.ownDB = db, ownDB
+	newGen.logger, newGen.systemLogger, newGen.ownLogger = lg, systemLogger, ownLogger
+	a.gen = newGen
+	a.handlerRef.Store(newGen)
 	a.mu.Unlock()
 
-	// Requests already in flight finish on the old engine; new requests use
-	// the rebuilt routes.
-	a.handlerRef.Store(engine)
-
-	// Retire the old modules only after the swap, using a background context so
-	// a cancelled caller cannot leave them running. Their errors do not undo the
-	// reload; they are logged and returned so the caller can report them.
-	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	errs := stopModuleList(stopCtx, oldStarted, timeout)
-	cancel()
-	for _, err := range errs {
-		lg.Error("module stop after reload failed", zap.Error(err))
-	}
-	if oldOwnDB && oldDB != db {
-		if err := gofydb.Close(oldDB); err != nil {
-			lg.Error("close previous database after reload failed", zap.Error(err))
-			errs = append(errs, err)
-		}
-	}
-	if oldOwnLogger && oldLogger != lg {
-		_ = logger.Sync(oldLogger)
-		if oldSystemLogger != nil && oldSystemLogger != oldLogger {
-			_ = logger.Sync(oldSystemLogger)
-		}
-	}
+	// Requests already in flight on the old generation keep their lease; new
+	// requests enter the new one. The old modules and resources are released
+	// only after those requests finish (or the drain timeout expires).
+	errs := retireGeneration(context.Background(), oldGen, newGen, timeout, lg)
 
 	lg.Info("application reloaded",
 		zap.String("env", env),

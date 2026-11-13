@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	gofydb "github.com/bingcool/gofy/support/db"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/module/product/model"
 	"gorm.io/gorm"
 )
@@ -24,15 +24,15 @@ const StatusOnSale int8 = 1
 // model 永远不出模块。仓库不声明接口，只有一种 GORM 实现，测试用纯 Go SQLite
 // 跑真实 SQL。
 //
-// 仓库不持有连接和日志：每次查询按需解析 app/io 安装的 db.Db，装配早于
-// app/io.Start 也安全，Reload 换连接后自动生效；日志由调用方 service 用
-// rt.Logger 记录。
+// 仓库不持有连接和日志：每次查询从 ctx 取请求固定的 IO 快照，没有固定值时
+// 回退到当前一代；装配早于 app/io.Start 也安全，一次请求内的多次查询始终
+// 落在同一代连接上。日志由调用方 service 用 rt.Logger 记录。
 type ProductRepository struct{}
 
-// conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
+// conn 优先使用 ctx 中的事务；没有事务时用请求快照的默认数据库。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
-	return gofydb.WithContext(ctx, appdb.Db)
+	return gofydb.WithContext(ctx, appio.FromContext(ctx).DB())
 }
 
 // FindByID returns one product or ErrNotFound.

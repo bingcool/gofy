@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"sync/atomic"
+
+	"github.com/bingcool/gofy/support/internal/instanceinit"
 )
 
 // ErrUnknownInstance is returned when the requested name is not registered.
@@ -19,13 +20,16 @@ var ErrUnknownInstance = errors.New("kafka: unknown instance")
 // so a reload can build a new Registry, start using it, and close the previous
 // one without disturbing in-flight users of the old clients.
 //
+// Clients open outside the registry lock: different names initialize in
+// parallel, concurrent callers of one name share a single attempt, and a failed
+// attempt is retried by the next call. Prefer the instance Registry for
+// per-generation isolation.
+//
 // Consumers are not cached here: NewConsumer derives a separate client per
 // consumer group from the client returned by NewIO.
 type Registry struct {
-	mu      sync.Mutex
 	configs map[string]Config
-	clients map[string]*Client
-	closed  bool
+	slots   *instanceinit.Slots[*Client]
 }
 
 var current atomic.Pointer[Registry]
@@ -48,7 +52,12 @@ func Configure(configs map[string]Config) (*Registry, error) {
 func NewRegistry(configs map[string]Config) (*Registry, error) {
 	reg := &Registry{
 		configs: make(map[string]Config, len(configs)),
-		clients: make(map[string]*Client, len(configs)),
+		slots: instanceinit.New(func(name string, client *Client) error {
+			if err := client.Close(); err != nil {
+				return fmt.Errorf("kafka instance %q: %w", name, err)
+			}
+			return nil
+		}),
 	}
 	for name, cfg := range configs {
 		name = strings.TrimSpace(name)
@@ -69,12 +78,7 @@ func (r *Registry) Install() {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.closed {
-		current.Store(r)
-	}
+	r.slots.Publish(func() { current.Store(r) })
 }
 
 // NewIO returns the client registered under name in the current generation,
@@ -105,25 +109,21 @@ func (r *Registry) NewIO(ctx context.Context, name string) (*Client, error) {
 	}
 	name = strings.TrimSpace(name)
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
+	client, err := r.slots.Get(ctx, name, func(ctx context.Context) (*Client, error) {
+		cfg, ok := r.configs[name]
+		if !ok {
+			return nil, fmt.Errorf("%w %q", ErrUnknownInstance, name)
+		}
+		client, err := New(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("kafka instance %q: %w", name, err)
+		}
+		return client, nil
+	})
+	if errors.Is(err, instanceinit.ErrClosed) {
 		return nil, ErrNotConfigured
 	}
-	if client := r.clients[name]; client != nil {
-		return client, nil
-	}
-	cfg, ok := r.configs[name]
-	if !ok {
-		return nil, fmt.Errorf("%w %q", ErrUnknownInstance, name)
-	}
-	client, err := New(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("kafka instance %q: %w", name, err)
-	}
-	r.clients[name] = client
-	return client, nil
+	return client, err
 }
 
 // Close releases the clients opened by this generation and stops it from
@@ -132,24 +132,6 @@ func (r *Registry) Close() error {
 	if r == nil {
 		return nil
 	}
-
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return nil
-	}
-	r.closed = true
-	clients := r.clients
-	r.clients = nil
-	r.mu.Unlock()
-
 	current.CompareAndSwap(r, nil)
-
-	var errs []error
-	for name, client := range clients {
-		if err := client.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("kafka instance %q: %w", name, err))
-		}
-	}
-	return errors.Join(errs...)
+	return r.slots.Close()
 }

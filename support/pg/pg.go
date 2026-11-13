@@ -32,7 +32,11 @@ type Config struct {
 	PingTimeout     time.Duration `yaml:"ping_timeout" default:"5s"`
 	SlowThreshold   time.Duration `yaml:"slow_threshold" default:"200ms"`
 	LogLevel        string        `yaml:"log_level" default:"warn"` // silent|error|warn|info
-	PrepareStmt     bool          `yaml:"prepare_stmt" default:"false"`
+	// LogParameterValues logs expanded SQL arguments instead of placeholders.
+	// The default false keeps phone numbers, emails, tokens and other values
+	// out of slow and failed query logs; enable it only for local debugging.
+	LogParameterValues bool `yaml:"log_parameter_values" default:"false"`
+	PrepareStmt        bool `yaml:"prepare_stmt" default:"false"`
 }
 
 // Validate checks the config without connecting.
@@ -167,8 +171,10 @@ type gormLogger struct {
 	logger        *zap.Logger
 	level         gormlogger.LogLevel
 	slowThreshold time.Duration
-	parameterized bool
+	logParameters bool
 }
+
+var _ gorm.ParamsFilter = (*gormLogger)(nil)
 
 func newGormLogger(logger *zap.Logger, cfg Config) gormlogger.Interface {
 	level := gormlogger.Warn
@@ -184,7 +190,18 @@ func newGormLogger(logger *zap.Logger, cfg Config) gormlogger.Interface {
 		logger:        logger.With(zap.String("component", "gorm")),
 		level:         level,
 		slowThreshold: cfg.SlowThreshold,
+		logParameters: cfg.LogParameterValues,
 	}
+}
+
+// ParamsFilter implements gorm.ParamsFilter. Returning a nil var list makes the
+// dialector skip expansion, so Trace logs the statement template with its
+// placeholders instead of the actual arguments.
+func (g *gormLogger) ParamsFilter(_ context.Context, sql string, params ...interface{}) (string, []interface{}) {
+	if g.logParameters {
+		return sql, params
+	}
+	return sql, nil
 }
 
 func (g *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
@@ -217,9 +234,6 @@ func (g *gormLogger) Trace(_ context.Context, begin time.Time, fc func() (string
 	}
 	elapsed := time.Since(begin)
 	sql, rows := fc()
-	if g.parameterized {
-		sql = ""
-	}
 	fields := []zap.Field{
 		zap.Duration("elapsed", elapsed),
 		zap.Int64("rows", rows),

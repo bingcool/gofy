@@ -1,18 +1,19 @@
 // Package uuidint exposes the demo's distributed ID generator.
 //
-// 业务代码直接使用包级句柄 uuidint.Default.Get(ctx)；句柄由 app/io 在启动时
-// 通过 support/uuidint 构建并发布，生成器本身不持有连接：每次取号经
-// support/redis 的命名实例别名懒解析，热更新后自动用新连接。
+// 业务代码通过快照取生成器（appio.FromContext(ctx).UUID()），无请求上下文时用
+// Default()；句柄由 app/io 在启动时构建并发布。生成器优先绑定本代 Redis Set 的
+// 客户端（support/uuidint 的 WithClient），每次取号直接使用这一代连接，不受
+// 之后 Reload 安装的新 Registry 影响。
 package uuidint
 
 import (
 	"context"
-	"errors"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	gofyuuidint "github.com/bingcool/gofy/support/uuidint"
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -30,13 +31,15 @@ type Config struct {
 	PoolInterval time.Duration `yaml:"pool_interval" default:"1s"`
 }
 
-// Default is the generator published by app/io; nil when disabled.
-var Default *gofyuuidint.Generator
+// current 指向当前一代的 Set；发布和读取都不再持有互斥锁。
+var current atomic.Pointer[Set]
 
-var mu sync.RWMutex
+// Default 返回当前一代的生成器；未启用时为 nil。
+func Default() *gofyuuidint.Generator { return current.Load().Generator() }
 
-// Set holds one generation of the generator. It owns no Redis connection: the
-// alias is resolved by support/redis on every call.
+// Set holds one generation of the generator. When the generation Redis Set has
+// the configured instance, the generator is bound to that client; otherwise it
+// falls back to resolving the alias through support/redis on every call.
 type Set struct {
 	gen *gofyuuidint.Generator
 }
@@ -46,8 +49,14 @@ func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	_, err := c.newGenerator(zap.NewNop())
+	_, err := c.newGenerator(zap.NewNop(), nil)
 	return err
+}
+
+// RedisInstanceName returns the Redis alias after applying defaults; app/io uses
+// it to pick this generation's client before building the generator.
+func (c Config) RedisInstanceName() string {
+	return c.withDefaults().RedisInstance
 }
 
 func (c Config) withDefaults() Config {
@@ -75,15 +84,19 @@ func (c Config) withDefaults() Config {
 	return out
 }
 
-func (c Config) newGenerator(logger *zap.Logger) (*gofyuuidint.Generator, error) {
+// newGenerator builds the generator. A non-nil client pins it to this
+// generation's Redis connection; nil keeps the alias-resolution path, which
+// Validate uses because it runs before any connection exists.
+func (c Config) newGenerator(logger *zap.Logger, client *goredis.Client) (*gofyuuidint.Generator, error) {
 	c = c.withDefaults()
-	if c.RedisInstance == "" {
-		return nil, errors.New("uuidint: redis_instance_name is required")
-	}
 	opts := []gofyuuidint.Option{
-		gofyuuidint.WithInstance(c.RedisInstance),
 		gofyuuidint.WithTTL(c.TTL),
 		gofyuuidint.WithRetry(c.RetryTimes, c.RetryInterval),
+	}
+	if client != nil {
+		opts = append(opts, gofyuuidint.WithClient(client))
+	} else {
+		opts = append(opts, gofyuuidint.WithInstance(c.RedisInstance))
 	}
 	if c.PoolSize > 0 {
 		opts = append(opts, gofyuuidint.WithPool(c.PoolSize, c.PoolInterval))
@@ -96,12 +109,14 @@ func (c Config) newGenerator(logger *zap.Logger) (*gofyuuidint.Generator, error)
 	return gofyuuidint.New(c.Key, opts...)
 }
 
-// Open builds the generator for cfg. A disabled config returns an empty Set.
-func Open(cfg Config, logger *zap.Logger) (*Set, error) {
+// Open builds the generator for cfg. client is this generation's Redis client
+// for RedisInstanceName; when nil the generator falls back to resolving the
+// alias through support/redis. A disabled config returns an empty Set.
+func Open(cfg Config, logger *zap.Logger, client *goredis.Client) (*Set, error) {
 	if !cfg.Enabled {
 		return &Set{}, nil
 	}
-	gen, err := cfg.newGenerator(logger)
+	gen, err := cfg.newGenerator(logger, client)
 	if err != nil {
 		return nil, err
 	}
@@ -124,30 +139,24 @@ func (s *Set) Start(ctx context.Context) error {
 	return s.gen.StartPool(ctx)
 }
 
-// Install publishes the generator to the package handle.
+// Install publishes this generation to the package handle.
 func (s *Set) Install() {
 	if s == nil {
 		return
 	}
-	mu.Lock()
-	Default = s.gen
-	mu.Unlock()
+	current.Store(s)
 }
 
-// Close stops the pool and clears the handle when it still points at this set,
-// so a reload that already installed a new generator keeps it intact. No Redis
-// connection is owned here.
+// Close stops the pool and clears the handle only while it still points at this
+// set, so a reload that already installed a new generator keeps it intact. No
+// Redis connection is owned here.
 func (s *Set) Close() error {
 	if s == nil {
 		return nil
 	}
+	current.CompareAndSwap(s, nil)
 	if s.gen != nil {
 		s.gen.StopPool()
 	}
-	mu.Lock()
-	if Default == s.gen {
-		Default = nil
-	}
-	mu.Unlock()
 	return nil
 }

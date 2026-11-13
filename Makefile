@@ -24,7 +24,7 @@ test-race:
 	$(GO) test $(GOFLAGS) -race -count=1 $(PKGS)
 
 example:
-	cd $(EXAMPLE) && $(GO) build ./... && $(GO) test $(GOFLAGS) -race -count=1 ./...
+	cd $(EXAMPLE) && $(GO) build ./... && $(GO) vet ./... && $(GO) test $(GOFLAGS) -race -count=1 ./...
 
 guards:
 	./shell/check-imports.sh

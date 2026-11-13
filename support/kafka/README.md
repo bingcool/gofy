@@ -94,8 +94,11 @@ client, err := kafka.NewIO(ctx, "default") // 业务代码：从当前一代取�
   表示禁用全部实例（`NewIO` 返回 `ErrUnknownInstance`）。
 - 未注册的名称返回 `ErrUnknownInstance`；未调用 `Configure`，或当前一代已经
   关闭，返回 `ErrNotConfigured`。
-- 建连失败不会缓存，下一次 `NewIO` 会重新尝试；并发调用安全，同一别名只建
-  一个客户端。
+- 建连失败不会缓存，下一次 `NewIO` 会重新尝试。
+- 首次建连在注册表锁外执行：不同别名的连接并行初始化，互不阻塞；同一别名的
+  并发首次调用只建一个客户端，其余调用等待同一次结果。
+- `Close` 开始后不再发布新连接：已经开始、在 `Close` 之后才完成的客户端会被
+  立即关闭，调用方得到 `ErrNotConfigured`。
 - 每次 `Configure` 生成新一代注册表。旧一代的 `Close` 只关闭它自己打开的
   连接，不影响已经切换到新一代的调用方；demo 热更新依赖这个顺序（新模块先
   启动、旧模块后关闭）。
@@ -104,6 +107,9 @@ client, err := kafka.NewIO(ctx, "default") // 业务代码：从当前一代取�
   服务的旧代。
 - 包级 `CloseAllIO()` 关闭当前一代并清空；持有 `Configure` 返回值时直接用
   `reg.Close()` 更精确。
+- 包级 `NewIO` / `CloseAllIO` 是单 App、单 Registry 的便捷入口：同一进程内多个
+  Registry 都 `Install` 时，包级调用只看最后安装的那一代，不承诺多 App 隔离；
+  需要代际隔离时用 `reg.NewIO` 与 `reg.Close`。
 - 注册表只缓存生产用的 `Client`；`NewConsumer` 仍然按消费者组单独建客户端，
   这些消费者需要各自 `Close`。
 
@@ -156,11 +162,11 @@ err = producer.PublishJSON(ctx, order, kafka.PublishOptions{
 
 ```go
 consumer, err := kafka.NewConsumer(client, kafka.ConsumerConfig{
-    Topic:             "order.created",
-    Group:             "order-group",
-    DisableAutoCommit: true, // 处理成功后再提交位点
-    AutoOffsetReset:   "earliest",
-    SessionTimeout:    45 * time.Second,
+    Topic:           "order.created",
+    Group:           "order-group",
+    // 默认 commit_mode: manual，处理成功后才提交位点
+    AutoOffsetReset: "earliest",
+    SessionTimeout:  45 * time.Second,
     OnPartitionsAssigned: func(ctx context.Context, assigned map[string][]int32) {
         logger.Info("partitions assigned", zap.Any("partitions", assigned))
     },
@@ -186,24 +192,25 @@ err = consumer.Consume(ctx, func(ctx context.Context, record *kgo.Record) error 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `Topic` / `Group` | 必填 | 订阅的 topic 与消费者组 |
-| `DisableAutoCommit` | `false` | 关闭后改为手动提交，默认开启自动提交 |
-| `AutoCommitInterval` | `200ms` | 自动提交间隔 |
+| `CommitMode` | `manual` | `manual` 只提交处理成功的位点；`auto` 由 franz-go 周期提交已拉取位点 |
+| `DisableAutoCommit` | `false` | 已弃用；`true` 等价于 `commit_mode: manual`，`false` 不再表示自动提交 |
+| `AutoCommitInterval` | `200ms` | 自动提交间隔，仅 `commit_mode: auto` 生效 |
 | `AutoOffsetReset` | `earliest` | 无位点时从最早或最新开始，可选 `latest` |
 | `SessionTimeout` | `45s` | 消费者组会话超时 |
 | `OnPartitionsAssigned` / `OnPartitionsRevoked` | 无 | rebalance 钩子，仅对受管客户端生效 |
 
 处理与位点语义：
 
-- **默认错误策略是 at-least-once**：处理函数返回错误时，先提交此前成功的位点，
-  再让 `Consume` 返回该错误。失败消息没有提交，重启并重新加入组后会从最后提交
-  的位点重新投递。适合“宁可重复、不可丢失”的业务。
+- **默认 `commit_mode: manual`，投递语义是 at-least-once**：处理函数返回错误时，
+  先提交此前成功的位点，再让 `Consume` 返回该错误。失败消息没有提交，重启并重新
+  加入组后会从最后提交的位点重新投递。适合“宁可重复、不可丢失”的业务。
 - `DiscardOnError: true` 时上报错误后跳过该条消息，并提交其位点，用于病态消息
-  （poison message）需要人工介入的场景。
+  （poison message）需要人工介入的场景；该条消息按 at-most-once 处理。
 - 处理函数 panic 会被恢复成错误，并按上面的策略处理，堆栈通过 `OnError`
   上报。
-- 自动提交会周期性提交**已拉取**的位点，处理失败的消息也可能被提交。需要精确
-  控制时关闭 `DisableAutoCommit` 之外的自动提交（即设置 `DisableAutoCommit:
-  true`），由本包在处理成功后同步提交。代价是吞吐略低。
+- `commit_mode: auto` 必须显式配置：franz-go 会周期性提交**已拉取**的位点，
+  处理失败的消息也可能已被提交。只适合副作用可重复执行、丢失单条消息可接受的
+  场景（缓存刷新、配置同步等），订单、支付等业务保持默认 `manual`。
 - `AutoCommitReset` 只在组内没有已提交位点时生效；`earliest` 适合首次上线，
   `latest` 适合只处理新消息。
 - franz-go 在后台维护心跳和 rebalance，不需要像 librdkafka 那样调大
@@ -214,8 +221,8 @@ err = consumer.Consume(ctx, func(ctx context.Context, record *kgo.Record) error 
 
 ## 手动提交与重平衡
 
-关闭自动提交后，本包按分区批次提交最后一个成功处理的位点。如果希望在失去分区
-前提交当前进度，可以使用 `OnPartitionsRevoked`：
+默认的 `commit_mode: manual` 下，本包按分区批次提交最后一个成功处理的位点。
+如果希望在失去分区前提交当前进度，可以使用 `OnPartitionsRevoked`：
 
 ```go
 OnPartitionsRevoked: func(ctx context.Context, revoked map[string][]int32) {

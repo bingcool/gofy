@@ -8,6 +8,41 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Generation lease and reload drain: the HTTP handler now swaps between whole
+  generations instead of a bare router. Each request acquires a lease on the
+  generation it entered; `Reload` publishes the new generation first, then
+  retires the old one, whose modules and resources are released only after its
+  in-flight requests finish or `WithShutdownTimeout` (default 10s) expires.
+  Requests racing a retire retry on the successor (a persistent race answers
+  503 rather than entering a shutting-down generation), and a failed
+  new-generation start discards only the resources that generation opened.
+  `Handler`/`Run`/`Execute` keep serving from the same listener.
+- `examples/demo-service`: request-level IO snapshot. `app/io` publishes an
+  immutable `Snapshot` of one generation's `db` / `redis` / `amqp` / `kafka` /
+  `rocketmq` / `uuidint` handles through `atomic.Pointer`; `appio.Middleware()`
+  pins that snapshot into the request context at entry, and
+  `appio.FromContext(ctx)` resolves repositories, services and the rate limiter
+  against the same generation even if a reload publishes a successor
+  mid-request. Scripts and tests publish with `appio.PublishDB` /
+  `appio.Publish` and restore the previous snapshot. Generation-bound lookups
+  no longer go through package-level registries: `db`/`redis`/`amqp`/`kafka`/
+  `rocketmq` `Set.NewIO` resolve that generation's `Registry`,
+  `Snapshot.DBNewIO` / `RedisNewIO` / `AMQPNewIO` / `KafkaNewIO` /
+  `RocketMQNewIO` expose the same lookup on a pinned snapshot, the uuidint
+  generator is built with `support/uuidint.WithClient` from the generation's
+  Redis client (and the script opens its own client), and the rate limiter
+  resolves Redis via the pinned snapshot. The `app/io/*.NewIO` package
+  functions remain for context-free callers and read the installed `Set`.
+- Named-instance registries (`support/db`, `support/pg`, `support/sqlite`,
+  `support/redis`, `support/amqp`, `support/kafka`, `support/rocketmq`):
+  first-time initialization is per name and runs outside the registry lock.
+  Different names open in parallel; concurrent first calls for one name share a
+  single attempt and receive the same handle; a failed attempt is not cached,
+  so the next call retries; a `Close` that starts while an open is in flight
+  releases the late connection instead of publishing it, and the caller gets
+  `ErrNotConfigured`. `Install` is ignored once `Close` has started. Package
+  level `NewIO` / `CloseAllIO` stay as single-app compatibility entry points;
+  `reg.NewIO` / `reg.Close` are the generation-isolation boundary.
 - `gofy.WithAccessLogOptions(opts middleware.AccessLogOptions)`: enables the
   access log with an explicit configuration instead of the fixed
   `DefaultAccessLogOptions()`. The supplied options apply literally (no merge
@@ -435,9 +470,56 @@ All notable changes to this project are documented here. The format follows
   `ProductService`, the service and repository gained paged listing, and the
   module root returns `Prefix() == ""` and binds the group. Product errors use
   the new 60000-60999 band (`ErrCodeProductNotFound = 60001`).
+- Middleware order is an explicit contract. `buildHTTPWith` documents the
+  assembly order (RequestID → Telemetry Trace → HeaderPropagation →
+  SecurityHeaders → AccessLog → CORS → Recovery → BodyLimit → app middleware →
+  probes → base router → registrars → module routes) and the reasons for each
+  position. Tests fix the observable order, the recovered-panic path (Envelope,
+  access-log 500, retained `req_id`) and the boundary that panics raised before
+  `Recovery` are not caught. `make check` also runs `go vet` for the demo
+  module now.
 
 ### Changed
 
+- `gofy-interface-service` now declares
+  `module github.com/bingcool/gofy-interface-service`, matching the repository,
+  and every import in that repository and in `examples/demo-service` was
+  updated. It still requires `github.com/bingcool/gofy v0.0.0` with a local
+  `replace` because neither repository has a release tag yet; removing the
+  replace, pinning a published version and dropping the sibling-directory
+  assumption remain release steps.
+- `support/otel`: a provider no longer touches process-wide OpenTelemetry state
+  unless `Config.Global` is true. Export failures are reported through the
+  provider's logger with the existing one-minute dedupe, so the default
+  `Global=false` can coexist with other instrumentation in the same process.
+  `Global=true` installs the error handler, tracer provider and propagator
+  together; `Shutdown` never restores or closes the process-wide values, and
+  only one App per process should enable it.
+- `support/db`, `support/pg`, `support/sqlite`: SQL logs keep the statement
+  template instead of expanded arguments. The custom GORM logger now implements
+  `gorm.ParamsFilter` and returns a nil var list by default, so slow queries and
+  failed queries log placeholders (`?` / `$n`) plus `elapsed`, `rows` and
+  `error`/`threshold`, but not phone numbers, emails, tokens or other values.
+  The dead `parameterized` field is replaced by `Config.LogParameterValues`
+  (default `false`); setting it to `true` restores expansion for local
+  debugging only and must not be used in production.
+- `support/kafka`: consumer offset commits are now manual by default. The new
+  `ConsumerConfig.CommitMode` (`CommitModeManual` / `CommitModeAuto`) states the
+  delivery contract directly: manual (the zero value) commits only records the
+  handler accepted, so a failed record is redelivered; auto lets franz-go
+  commit polled offsets on `AutoCommitInterval` and can drop a failed record, so
+  it must be requested explicitly. `DisableAutoCommit` is deprecated: `true`
+  still means manual, but `false` no longer enables auto commits — set
+  `commit_mode: auto` to keep the old behavior. Unknown modes fail in
+  `NewConsumer` with `ErrInvalidCommitMode`.
+- Package-level named-instance helpers (`Configure`, `NewIO`, `CloseAllIO` in
+  `support/db`, `pg`, `sqlite`, `redis`, `amqp`, `kafka`, `rocketmq`) and
+  `support/uuidint.WithInstance` are now documented as single-app compatibility
+  entry points: they follow the last installed `Registry` in the process and do
+  not promise isolation between several apps or reload generations. No API was
+  removed; generation-aware code should use `reg.NewIO` / `reg.Close` and
+  `uuidint.WithClient`. These entry points are candidates for deprecation in a
+  future release, not in this one.
 - the shell-script directories were renamed from `scripts/` to `shell/` in both
   this repository and `examples/demo-service`, so the name states what they
   hold. `check-imports.sh` moved with them; `make guards` (root `Makefile` and
@@ -453,8 +535,9 @@ All notable changes to this project are documented here. The format follows
   key also carries the method and route, so one endpoint cannot exhaust
   another's quota. Counting always goes through `support/ratelimit.Store`: each
   route's middleware resolves the Redis alias declared in the contract
-  (`RateLimit.RedisAlias`, defaulting to `ratelimit`) and wraps
-  `redis.NewIO(ctx, alias)` in `redisstore`, so several instances share one set
+  (`RateLimit.RedisAlias`, defaulting to `ratelimit`) through the request-pinned
+  `app/io` snapshot (`appio.FromContext(ctx).RedisNewIO`) and wraps the client
+  in `redisstore`, so several instances share one set
   of counters. Resolution is lazy and cached per route, because route binding
   runs before `app/io` opens Redis and a reload must bind the new generation to
   its own connection; failures are not cached. Invalid contract numbers, an

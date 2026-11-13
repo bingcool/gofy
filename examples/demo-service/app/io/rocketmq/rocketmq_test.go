@@ -16,7 +16,7 @@ func TestOpenSkipsDisabledInstances(t *testing.T) {
 	set.Install()
 	t.Cleanup(func() { _ = set.Close() })
 
-	if Default != nil {
+	if Default() != nil {
 		t.Fatal("disabled default instance was installed")
 	}
 	if client := Get(DefaultInstance); client != nil {

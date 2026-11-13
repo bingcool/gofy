@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	gofydb "github.com/bingcool/gofy/support/db"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"gorm.io/gorm"
 )
@@ -18,15 +18,15 @@ var ErrNotFound = errors.New("order not found")
 // 这个具体类型，不再声明接口：仓库只有一种实现，接口除了让测试塞 fake 之外
 // 没有带来替换价值，测试改用纯 Go SQLite 跑真实 SQL。
 //
-// 仓库不持有连接和日志：每次查询按需解析 app/io 安装的 db.Db，模块工厂
-// 早于 app/io.Start 运行也安全，Reload 换连接后自动生效；日志由 service
-// 用 rt.Logger 记录。
+// 仓库不持有连接和日志：每次查询从 ctx 取请求固定的 IO 快照，没有固定值时
+// 回退到当前一代；模块工厂早于 app/io.Start 运行也安全，一次请求内的多次
+// 查询始终落在同一代连接上。日志由 service 用 rt.Logger 记录。
 type OrderRepository struct{}
 
-// conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
+// conn 优先使用 ctx 中的事务；没有事务时用请求快照的默认数据库。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
-	return gofydb.WithContext(ctx, appdb.Db)
+	return gofydb.WithContext(ctx, appio.FromContext(ctx).DB())
 }
 
 // FindByID returns one order or ErrNotFound.

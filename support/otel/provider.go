@@ -105,6 +105,10 @@ func WithSpanExporter(exporter sdktrace.SpanExporter) Option {
 // the collector; export failures are retried in the background and reported
 // through the logger. A disabled Config returns a disabled Provider without
 // creating an exporter.
+//
+// 进程级全局设置（ErrorHandler、TracerProvider、TextMapPropagator）只在
+// Config.Global 为 true 时安装；Global=false 时创建和关闭 Provider 都不会
+// 改动它们。同一进程如果要运行多个互不干扰的 App，必须保持 Global=false。
 func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -159,7 +163,10 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 		return nil, err
 	}
 
-	otelapi.SetErrorHandler(&errorHandler{logger: po.logger})
+	// 导出失败由本 Provider 自己记录，不依赖进程级 ErrorHandler：Global=false
+	// 时也能看到失败，而且不会因为多个 App 争抢全局处理器而互相覆盖。
+	report := &errorHandler{logger: po.logger}
+	exporter = &loggingExporter{next: exporter, report: report}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(samplerFor(cfg)),
@@ -172,6 +179,9 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 	)
 	propagator := defaultPropagator()
 	if cfg.Global {
+		// 全局模式下四项设置一起安装；ErrorHandler 也只在此时替换。与导出包装
+		// 共用同一个 report，重复错误在去重窗口内不会打印两次。
+		otelapi.SetErrorHandler(report)
 		otelapi.SetTracerProvider(tp)
 		otelapi.SetTextMapPropagator(propagator)
 	}
@@ -416,6 +426,25 @@ func (c Config) tlsConfig() (*tls.Config, error) {
 
 func hasScheme(endpoint string) bool {
 	return strings.Contains(endpoint, "://")
+}
+
+// loggingExporter 包装真实 exporter：导出失败先用 Provider 的 logger 记录，
+// 再把错误原样交回 BatchSpanProcessor。Global=false 时也能看到导出问题，
+// 不需要覆盖进程级 ErrorHandler；Global=true 时与全局处理器共用同一个
+// errorHandler，去重窗口内不会打印两次。
+type loggingExporter struct {
+	next   sdktrace.SpanExporter
+	report *errorHandler
+}
+
+func (e *loggingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	err := e.next.ExportSpans(ctx, spans)
+	e.report.Handle(err)
+	return err
+}
+
+func (e *loggingExporter) Shutdown(ctx context.Context) error {
+	return e.next.Shutdown(ctx)
 }
 
 // errorHandler forwards OTel internal errors to zap and suppresses repeats for

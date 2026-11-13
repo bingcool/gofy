@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy/support/sqlite"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
 	productmodel "github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
@@ -14,8 +14,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// newProductService 用纯 Go 内存 SQLite 建真实仓库，把连接发布成 app/io 句柄，
-// 不连外部 MySQL；仓库本身不持连接，因此每个用例结束后恢复句柄即可。
+// newProductService 用纯 Go 内存 SQLite 建真实仓库，把连接发布成 app/io 快照，
+// 不连外部 MySQL；仓库本身不持连接，因此每个用例结束后恢复快照即可。
 func newProductService(t *testing.T) *service.ProductService {
 	t.Helper()
 	conn, err := sqlite.New(context.Background(), sqlite.Config{
@@ -40,9 +40,9 @@ func newProductService(t *testing.T) *service.ProductService {
 	if err := conn.Create(&products).Error; err != nil {
 		t.Fatalf("seed products: %v", err)
 	}
-	prev := appdb.Db
-	appdb.Db = conn
-	t.Cleanup(func() { appdb.Db = prev })
+	prev := appio.Current()
+	appio.PublishDB(conn)
+	t.Cleanup(func() { appio.Publish(prev) })
 	return service.NewProductService(service.Dependencies{
 		Products: &productrepo.ProductRepository{},
 		Logger:   zap.NewNop(),

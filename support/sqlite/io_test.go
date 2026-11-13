@@ -5,10 +5,12 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bingcool/gofy/support/sqlite"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func clearRegistry(t *testing.T) {
@@ -172,5 +174,107 @@ func TestCloseAllIO(t *testing.T) {
 	}
 	if _, err := sqlite.NewIO(context.Background(), "default"); !errors.Is(err, sqlite.ErrNotConfigured) {
 		t.Fatalf("NewIO after CloseAllIO = %v, want ErrNotConfigured", err)
+	}
+}
+
+func TestConcurrentFirstOpenReturnsOnePool(t *testing.T) {
+	reg, err := sqlite.NewRegistry(map[string]sqlite.Config{"main": {DSN: tempDSN(t)}}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+
+	const callers = 100
+	pools := make([]*gorm.DB, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			pools[i], errs[i] = reg.NewIO(context.Background(), "main")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < callers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("NewIO[%d]: %v", i, errs[i])
+		}
+		if pools[i] != pools[0] {
+			t.Fatalf("caller %d got a different pool", i)
+		}
+	}
+}
+
+func TestRegistriesKeepTheirOwnPools(t *testing.T) {
+	ctx := context.Background()
+	first, err := sqlite.NewRegistry(map[string]sqlite.Config{"main": {DSN: tempDSN(t)}}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry(first): %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := sqlite.NewRegistry(map[string]sqlite.Config{"main": {DSN: tempDSN(t)}}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry(second): %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	firstPool, err := first.NewIO(ctx, "main")
+	if err != nil {
+		t.Fatalf("first.NewIO: %v", err)
+	}
+	secondPool, err := second.NewIO(ctx, "main")
+	if err != nil {
+		t.Fatalf("second.NewIO: %v", err)
+	}
+	if firstPool == secondPool {
+		t.Fatal("two registries share one pool")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
+	}
+	if err := secondPool.Exec("CREATE TABLE t (id INTEGER)").Error; err != nil {
+		t.Fatalf("second pool broke when the first registry closed: %v", err)
+	}
+}
+
+func TestCloseRacingNewIOLeavesNoOpenRegistry(t *testing.T) {
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		reg, err := sqlite.NewRegistry(map[string]sqlite.Config{"main": {DSN: ":memory:"}}, nil)
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for j := 0; j < 8; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				pool, err := reg.NewIO(ctx, "main")
+				if err == nil && pool == nil {
+					t.Error("NewIO returned a nil pool without an error")
+				}
+				if err != nil && !errors.Is(err, sqlite.ErrNotConfigured) {
+					t.Errorf("NewIO during Close = %v", err)
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = reg.Close()
+		}()
+		close(start)
+		wg.Wait()
+		if _, err := reg.NewIO(ctx, "main"); !errors.Is(err, sqlite.ErrNotConfigured) {
+			t.Fatalf("NewIO after Close = %v, want ErrNotConfigured", err)
+		}
 	}
 }

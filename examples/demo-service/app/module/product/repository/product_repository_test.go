@@ -4,23 +4,22 @@ import (
 	"context"
 	"testing"
 
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	"gorm.io/gorm"
 )
 
-func TestConnResolvesInstalledHandle(t *testing.T) {
-	prev := appdb.Db
-	t.Cleanup(func() { appdb.Db = prev })
-	appdb.Db = nil
+func TestConnResolvesInstalledSnapshot(t *testing.T) {
+	t.Cleanup(func() { appio.Publish(nil) })
+	appio.Publish(nil)
 
 	r := &ProductRepository{}
 	if got := r.conn(context.Background()); got != nil {
-		t.Fatal("conn should be nil before app/io installs the handle")
+		t.Fatal("conn should be nil before app/io publishes a snapshot")
 	}
 
 	db := &gorm.DB{}
-	appdb.Db = db
+	appio.PublishDB(db)
 	if got := r.conn(context.Background()); got != db {
-		t.Fatal("conn did not resolve db.Db after install")
+		t.Fatal("conn did not resolve the published snapshot")
 	}
 }

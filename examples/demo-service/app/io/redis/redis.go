@@ -1,8 +1,8 @@
 // Package redis exposes the demo's named Redis instances.
 //
-// 业务代码直接使用包级句柄：redis.Cache.Get(...)、redis.Session.Get(...)、
-// redis.RateLimit.Ping(...) 等。句柄由 app/io 包在启动时通过
-// Open/Install 填充，关停时清空；enabled 为 false 的实例保持 nil。
+// 业务代码通过快照取连接（appio.FromContext(ctx).Redis(name)），
+// 无请求上下文时用 Cache()、Session()、RateLimit()。当前一代的 Set 用
+// atomic.Pointer 整体发布，enabled 为 false 的实例保持 nil。
 package redis
 
 import (
@@ -11,7 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/bingcool/gofy"
 	gofyotel "github.com/bingcool/gofy/support/otel"
@@ -38,14 +38,17 @@ type Instance struct {
 // Config maps instance names to their connection settings.
 type Config map[string]Instance
 
-// 业务可直接取用的实例句柄；对应实例未启用或未启动时为 nil。
-var (
-	Cache     *goredis.Client
-	Session   *goredis.Client
-	RateLimit *goredis.Client
-)
+// current 指向当前一代的 Set；发布和读取都不再持有互斥锁。
+var current atomic.Pointer[Set]
 
-var mu sync.RWMutex
+// Cache 返回当前一代的 cache 实例；未启用时为 nil。
+func Cache() *goredis.Client { return current.Load().Client(InstanceCache) }
+
+// Session 返回当前一代的 session 实例；未启用时为 nil。
+func Session() *goredis.Client { return current.Load().Client(InstanceSession) }
+
+// RateLimit 返回当前一代的 ratelimit 实例；未启用时为 nil。
+func RateLimit() *goredis.Client { return current.Load().Client(InstanceRateLimit) }
 
 // Set holds one generation of connections. Open builds it, Install publishes it
 // to the package handles and Close releases it.
@@ -113,45 +116,49 @@ func Open(ctx context.Context, cfg Config, rt *gofy.Runtime) (*Set, error) {
 	return set, nil
 }
 
-// Install publishes the set to the package handles.
+// Client returns this generation's client for name; nil when the instance is
+// not enabled.
+func (s *Set) Client(name string) *goredis.Client {
+	if s == nil {
+		return nil
+	}
+	return s.clients[name]
+}
+
+// Install publishes this generation to the package handles.
 func (s *Set) Install() {
 	if s == nil {
 		return
 	}
-	mu.Lock()
-	Cache = s.clients[InstanceCache]
-	Session = s.clients[InstanceSession]
-	RateLimit = s.clients[InstanceRateLimit]
-	mu.Unlock()
+	current.Store(s)
 }
 
-// Close releases this generation. Handles are cleared only when they still
-// point at this set, so a reload that already installed new connections keeps
-// them intact.
+// Close releases this generation. The installed pointer is cleared only while
+// it still points at this set, so a reload that already installed new
+// connections keeps them intact.
 func (s *Set) Close() error {
 	if s == nil {
 		return nil
 	}
-	mu.Lock()
-	if Cache == s.clients[InstanceCache] {
-		Cache = nil
-	}
-	if Session == s.clients[InstanceSession] {
-		Session = nil
-	}
-	if RateLimit == s.clients[InstanceRateLimit] {
-		RateLimit = nil
-	}
-	mu.Unlock()
-
+	current.CompareAndSwap(s, nil)
 	return s.registry.Close()
 }
 
-// NewIO returns the client registered under name in the installed generation.
-// It is a thin wrapper over support/redis, so business code that already
-// imports this package can use the same alias lookup as the library.
+// NewIO returns the client registered under name in this generation, opening
+// the connection on first use. An instance that is not enabled is not part of
+// the registry, so the lookup reports ErrUnknownInstance.
+func (s *Set) NewIO(ctx context.Context, name string) (*goredis.Client, error) {
+	if s == nil || s.registry == nil {
+		return nil, gofyredis.ErrNotConfigured
+	}
+	return s.registry.NewIO(ctx, name)
+}
+
+// NewIO resolves name in the installed generation. It stays for callers that
+// have no request context (scripts); request paths go through the snapshot so
+// the lookup cannot cross a reload.
 func NewIO(ctx context.Context, name string) (*goredis.Client, error) {
-	return gofyredis.NewIO(ctx, name)
+	return current.Load().NewIO(ctx, name)
 }
 
 func isSupported(name string) bool {

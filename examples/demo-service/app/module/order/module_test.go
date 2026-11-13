@@ -15,11 +15,16 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/bingcool/gofy"
+	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderdto"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderenum"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/yourorg/demo-service/app/container"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
 	"github.com/yourorg/demo-service/app/module/order/model"
@@ -28,11 +33,6 @@ import (
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
-	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
 	"gorm.io/gorm"
 )
 
@@ -109,9 +109,9 @@ func newTestServices(t *testing.T) (*service.OrderService, *service.OrderConfigS
 	pool := panicPool{ConnPool: conn.ConnPool}
 	conn.ConnPool = pool
 	conn.Statement.ConnPool = pool
-	prev := appdb.Db
-	appdb.Db = conn
-	t.Cleanup(func() { appdb.Db = prev })
+	prev := appio.Current()
+	appio.PublishDB(conn)
+	t.Cleanup(func() { appio.Publish(prev) })
 	ctr := container.NewContainer()
 	ctr.Init(zap.NewNop())
 	return ctr.OrderService(), ctr.OrderConfigService()

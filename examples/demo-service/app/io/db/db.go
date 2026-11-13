@@ -1,17 +1,21 @@
 // Package db exposes the demo's named MySQL-protocol connections.
 //
-// 业务代码直接使用包级句柄：db.Db、db.OrderDb、db.ProductDb。
+// 业务代码不直接读包级变量：请求内通过 app/io 的快照取连接
+// （appio.FromContext(ctx).DB()），无请求上下文时用 Default()。当前一代的
+// Set 用 atomic.Pointer 整体发布，读写不再共享可变包变量。
+//
 // Db 就是框架托管的 db.default（Runtime.DB），order、product 由 app/io 包
 // 按 db.order、db.product 在启动时打开；配置里没有的实例保持 nil。
 // 其余名字（如 selectDb）注册进 registry，首次 NewIO 时才建连。
-// 脚本模式不经过模块生命周期，脚本里直接用 script.Runtime.DB。
+// 脚本模式不经过模块生命周期，脚本里用 script.Runtime.DB 发布一个只有
+// default 的快照（见 appio.PublishDB）。
 package db
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"sync/atomic"
 
 	"github.com/bingcool/gofy"
 	gofydb "github.com/bingcool/gofy/support/db"
@@ -20,14 +24,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// 业务可直接取用的实例句柄；Db 由框架托管，其余实例未配置时为 nil。
-var (
-	Db        *gorm.DB
-	OrderDb   *gorm.DB
-	ProductDb *gorm.DB
+// 已打开的实例名，与配置里的 db.<name> 一一对应。
+const (
+	InstanceOrder   = "order"
+	InstanceProduct = "product"
 )
 
-var mu sync.RWMutex
+// current 指向当前一代的 Set；发布和读取都不再持有互斥锁。
+var current atomic.Pointer[Set]
+
+// Default 返回当前一代的 db.default；尚未安装时为 nil。
+func Default() *gorm.DB {
+	return current.Load().Default()
+}
 
 // Set holds one generation of connections. Open builds it, Install publishes it
 // and Close releases the extra instances; the default connection belongs to the
@@ -37,6 +46,37 @@ type Set struct {
 	registry  *gofydb.Registry
 	order     *gorm.DB
 	product   *gorm.DB
+}
+
+// NewSet builds a generation that carries only db.default and owns no extra
+// pool. It is the script/test path: the caller publishes a pool the framework
+// opened instead of running the io module lifecycle.
+func NewSet(defaultDB *gorm.DB) *Set {
+	return &Set{defaultDB: defaultDB}
+}
+
+// Default returns the framework-managed db.default of this generation.
+func (s *Set) Default() *gorm.DB {
+	if s == nil {
+		return nil
+	}
+	return s.defaultDB
+}
+
+// Instance returns the eagerly opened pool for name; nil when the instance is
+// not configured in this generation.
+func (s *Set) Instance(name string) *gorm.DB {
+	if s == nil {
+		return nil
+	}
+	switch name {
+	case InstanceOrder:
+		return s.order
+	case InstanceProduct:
+		return s.product
+	default:
+		return nil
+	}
 }
 
 // Open opens db.order and db.product eagerly. defaultDB is the framework-managed
@@ -89,11 +129,11 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 		return pool, nil
 	}
 
-	if set.order, err = open("order"); err != nil {
+	if set.order, err = open(InstanceOrder); err != nil {
 		_ = registry.Close()
 		return nil, err
 	}
-	if set.product, err = open("product"); err != nil {
+	if set.product, err = open(InstanceProduct); err != nil {
 		_ = registry.Close()
 		return nil, err
 	}
@@ -102,40 +142,43 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 	return set, nil
 }
 
-// NewIO returns the pool registered under name in the installed generation.
-// It is a thin wrapper over support/db. db.default is framework-managed, so
-// it is not part of the registry; use Db or Runtime.DB for the default pool.
-func NewIO(ctx context.Context, name string) (*gorm.DB, error) {
-	return gofydb.NewIO(ctx, name)
+// NewIO returns the pool registered under name in this generation, opening the
+// connection on first use. db.default is framework-managed and stays out of the
+// registry; use Default for it. A script snapshot built with NewSet owns no
+// registry, so it reports ErrNotConfigured.
+func (s *Set) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
+	if s == nil || s.registry == nil {
+		return nil, gofydb.ErrNotConfigured
+	}
+	return s.registry.NewIO(ctx, name)
 }
 
-// Install publishes the set to the package handles.
+// NewIO resolves name in the installed generation. It stays for callers that
+// have no request context (scripts); request paths go through the snapshot so
+// the lookup cannot cross a reload.
+func NewIO(ctx context.Context, name string) (*gorm.DB, error) {
+	return current.Load().NewIO(ctx, name)
+}
+
+// Install publishes this generation. Readers see the whole set or the previous
+// one, never a half-updated handle.
 func (s *Set) Install() {
 	if s == nil {
 		return
 	}
-	mu.Lock()
-	Db = s.defaultDB
-	OrderDb = s.order
-	ProductDb = s.product
-	mu.Unlock()
+	current.Store(s)
 }
 
-// Close releases every extra pool of this generation. Handles are cleared only
-// when they still point at this set, so a reload that already installed new
-// connections keeps them intact.
+// Close releases every extra pool of this generation. The installed pointer is
+// cleared only while it still points at this set, so a reload that already
+// installed new connections keeps them intact.
 func (s *Set) Close() error {
 	if s == nil {
 		return nil
 	}
-	mu.Lock()
-	if OrderDb == s.order {
-		OrderDb = nil
+	current.CompareAndSwap(s, nil)
+	if s.registry == nil {
+		return nil
 	}
-	if ProductDb == s.product {
-		ProductDb = nil
-	}
-	mu.Unlock()
-
 	return s.registry.Close()
 }

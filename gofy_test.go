@@ -2,6 +2,7 @@ package gofy_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"github.com/bingcool/gofy/logger"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/headerpropagation"
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/pflag"
@@ -62,6 +64,25 @@ type recorder struct {
 type prefixModule struct {
 	testModule
 	prefix string
+}
+
+// blockingStartModule 在 Start 中等待 release，用来让 Reload 停在发布新代
+// 之前，制造与 Shutdown 的竞争窗口。
+type blockingStartModule struct {
+	*testModule
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingStartModule) Start(ctx context.Context) error {
+	m.order.add("start:" + m.name)
+	close(m.entered)
+	select {
+	case <-m.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *prefixModule) Prefix() string { return m.prefix }
@@ -303,6 +324,169 @@ func TestRecoveryWritesSystemErrorLogOnly(t *testing.T) {
 	}
 	if strings.Contains(string(mustReadFile(t, errorPath)), "panic recovered") {
 		t.Fatal("panic was written to error.log")
+	}
+}
+
+// TestMiddlewareOrderContract 固定 buildHTTPWith 的中间件安装顺序：框架内建
+// 中间件先于业务全局中间件执行，业务全局中间件先于模块分组/路由中间件，最后
+// 才是 handler。任何调整若改变相对顺序都会在这里失败。
+func TestMiddlewareOrderContract(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		observed []string
+	)
+	record := func(name string) {
+		mu.Lock()
+		observed = append(observed, name)
+		mu.Unlock()
+	}
+	marker := func(name string, checks ...func(*gin.Context)) support.Middleware {
+		return func(c *gin.Context) {
+			for _, check := range checks {
+				check(c)
+			}
+			record(name)
+			c.Next()
+		}
+	}
+	// 业务中间件可见的框架副作用，用来确认内建中间件已经执行过。
+	assertBuiltinsRan := func(c *gin.Context) {
+		if c.GetString(support.RequestIDKey) == "" {
+			t.Error("business middleware ran before RequestID")
+		}
+		if got := headerpropagation.HeadersFromContext(c.Request.Context()).Get(headerpropagation.HeaderTraceID); got == "" {
+			t.Error("business middleware ran before HeaderPropagation")
+		}
+		if c.Writer.Header().Get("X-Content-Type-Options") == "" {
+			t.Error("business middleware ran before SecurityHeaders")
+		}
+		if c.Writer.Header().Get("Access-Control-Allow-Origin") == "" {
+			t.Error("business middleware ran before CORS")
+		}
+		if _, err := io.ReadAll(c.Request.Body); err == nil {
+			t.Error("business middleware ran before BodyLimit")
+		}
+	}
+
+	module := &testModule{
+		name: "contract",
+		reg: func(r *support.Router) error {
+			r.Use(marker("group"))
+			r.POST("/order", func(c *gin.Context) {
+				record("handler")
+				c.Status(http.StatusNoContent)
+			}, marker("route"))
+			return nil
+		},
+	}
+	app, err := gofy.New(
+		gofy.WithName("middleware-order"),
+		gofy.WithPIDFile(""),
+		gofy.WithAccessLog(false),
+		gofy.WithRecovery(true),
+		gofy.WithHeaderPropagation(true),
+		gofy.WithSecurityHeaders(support.SecurityHeadersConfig{}),
+		gofy.WithCORS(support.CORSConfig{AllowOrigins: []string{"example.com"}}),
+		gofy.WithMaxBodyBytes(1024),
+		gofy.WithMiddleware(marker("app-1", assertBuiltinsRan), marker("app-2")),
+		gofy.WithModules(module),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := app.Handler(context.Background())
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/contract/order", strings.NewReader(strings.Repeat("a", 2048)))
+	req.Header.Set("Origin", "https://example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), observed...)
+	mu.Unlock()
+	want := []string{"app-1", "app-2", "group", "route", "handler"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("middleware order = %v, want %v", got, want)
+	}
+}
+
+// TestPanicResponseKeepsEnvelopeAndAccessLog 证明 panic 经过 Recovery 后仍是
+// 统一 Envelope，外层 AccessLog 记录最终 500，且 req_id 没有丢。trace_id 只在
+// 启用 telemetry 时写入访问日志，这里不覆盖。
+func TestPanicResponseKeepsEnvelopeAndAccessLog(t *testing.T) {
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "info.log")
+
+	module := &testModule{
+		name: "panic",
+		reg: func(r *support.Router) error {
+			r.GET("/boom", func(*gin.Context) { panic("boom: hunter2") })
+			return nil
+		},
+	}
+	app, err := gofy.New(
+		gofy.WithName("panic-contract"),
+		gofy.WithPIDFile(""),
+		gofy.WithAccessLog(true),
+		gofy.WithRecovery(true),
+		gofy.WithLogConfig(logger.Config{
+			Outputs:            []string{infoPath},
+			ErrorOutputs:       []string{infoPath},
+			SystemErrorOutputs: []string{infoPath},
+		}),
+		gofy.WithModules(module),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := app.Handler(context.Background())
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/panic/boom", nil)
+	req.Header.Set(support.DefaultRequestIDHeader, "test-trace-001")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rr.Code)
+	}
+	if body := rr.Body.String(); strings.Contains(body, "hunter2") || strings.Contains(body, "goroutine") {
+		t.Fatalf("panic details leaked: %s", body)
+	}
+	var envelope struct {
+		Code  int    `json:"code"`
+		Msg   string `json:"msg"`
+		ReqID string `json:"req_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if envelope.Code != 50000 || envelope.Msg != "internal server error" {
+		t.Fatalf("envelope = %+v, want 50000/internal server error", envelope)
+	}
+	if envelope.ReqID != "test-trace-001" {
+		t.Fatalf("req_id = %q, want test-trace-001", envelope.ReqID)
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	logs := string(mustReadFile(t, infoPath))
+	if !strings.Contains(logs, `"msg":"http access"`) || !strings.Contains(logs, `"status":500`) {
+		t.Fatalf("access log missing the recovered 500: %s", logs)
+	}
+	if !strings.Contains(logs, `"req_id":"test-trace-001"`) {
+		t.Fatalf("access log lost req_id: %s", logs)
 	}
 }
 
@@ -764,6 +948,283 @@ func TestReloadSwapsRoutesInPlace(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
+// TestReloadDrainsInFlightRequests 证明旧代模块要等在途请求释放租约后才停止，
+// 而新代路由在排空期间已可对外服务。
+func TestReloadDrainsInFlightRequests(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	slow := func(*gofy.Runtime) (support.Module, error) {
+		return &testModule{
+			name:  "drain",
+			order: events,
+			reg: func(r *support.Router) error {
+				r.GET("/slow", func(c *gin.Context) {
+					close(entered)
+					<-release
+					events.add("finish:slow")
+					c.String(http.StatusOK, "old")
+				})
+				return nil
+			},
+		}, nil
+	}
+	app, err := gofy.New(
+		gofy.WithName("reload-drain"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(slow),
+		gofy.WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	respCh := make(chan string, 1)
+	go func() {
+		resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/drain/slow")
+		if err != nil {
+			respCh <- "error: " + err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		respCh <- string(body)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the handler")
+	}
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- app.Reload(context.Background(), gofy.ReloadSpec{
+			ModuleFactories: []gofy.ModuleFactory{reloadFactory("v2", events)},
+		})
+	}()
+
+	// The successor is published before the drain, so new requests are served
+	// by it while the old request is still running.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if getText(t, port, "/reload/ping") == "v2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("new routes were not published while the old request was in flight")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-reloadDone:
+		t.Fatalf("Reload returned before the in-flight request drained: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := countEvents(events, "stop:drain"); got != 0 {
+		t.Fatalf("old module stopped while a request was in flight (count = %d)", got)
+	}
+
+	close(release)
+	if got := <-respCh; got != "old" {
+		t.Fatalf("in-flight response = %q, want old", got)
+	}
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reload did not finish after the request drained")
+	}
+	if got := countEvents(events, "stop:drain"); got != 1 {
+		t.Fatalf("old module stop count after drain = %d, want 1", got)
+	}
+	// 旧模块 Stop 必须晚于在途 handler 返回，否则旧请求会在资源关闭后继续执行。
+	finishAt, stopAt := -1, -1
+	for i, event := range events.snapshot() {
+		switch event {
+		case "finish:slow":
+			finishAt = i
+		case "stop:drain":
+			stopAt = i
+		}
+	}
+	if finishAt < 0 || stopAt < 0 || finishAt > stopAt {
+		t.Fatalf("event order = %v, want finish:slow before stop:drain", events.snapshot())
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
+// TestReloadStartFailureKeepsOldGeneration 证明新代模块启动失败时旧代继续服务，
+// 失败的新代不会进入已启动列表，也不会触发 Stop。
+func TestReloadStartFailureKeepsOldGeneration(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	app, err := gofy.New(
+		gofy.WithName("reload-start-failure"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(reloadFactory("v1", events)),
+		gofy.WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	bad := func(*gofy.Runtime) (support.Module, error) {
+		return &testModule{
+			name:  "reload",
+			order: events,
+			start: errors.New("module boom"),
+			reg: func(r *support.Router) error {
+				r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, "v2") })
+				return nil
+			},
+		}, nil
+	}
+	if err := app.Reload(context.Background(), gofy.ReloadSpec{
+		ModuleFactories: []gofy.ModuleFactory{bad},
+	}); err == nil || !strings.Contains(err.Error(), "module boom") {
+		t.Fatalf("Reload error = %v, want module start failure", err)
+	}
+	if got := getText(t, port, "/reload/ping"); got != "v1" {
+		t.Fatalf("old generation stopped serving after a failed reload: %q", got)
+	}
+	if got := countEvents(events, "stop:reload"); got != 0 {
+		t.Fatalf("failed generation was stopped %d times, want 0", got)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+	if got := countEvents(events, "stop:reload"); got != 1 {
+		t.Fatalf("old module stop count = %d, want 1", got)
+	}
+}
+
+// TestReloadAndShutdownSerialize 让 Reload 停在新代 Start 中，再并发触发
+// Shutdown：cleanup 必须等 Reload 完成后才停模块，新旧两代各 Stop 一次。
+func TestReloadAndShutdownSerialize(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	v1 := func(*gofy.Runtime) (support.Module, error) {
+		return &testModule{
+			name:  "reload-v1",
+			order: events,
+			reg: func(r *support.Router) error {
+				r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, "v1") })
+				return nil
+			},
+		}, nil
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	v2 := func(*gofy.Runtime) (support.Module, error) {
+		return &blockingStartModule{
+			testModule: &testModule{
+				name:  "reload-v2",
+				order: events,
+				reg: func(r *support.Router) error {
+					r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, "v2") })
+					return nil
+				},
+			},
+			entered: entered,
+			release: release,
+		}, nil
+	}
+	app, err := gofy.New(
+		gofy.WithName("reload-shutdown-race"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(v1),
+		gofy.WithShutdownTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- app.Reload(context.Background(), gofy.ReloadSpec{
+			ModuleFactories: []gofy.ModuleFactory{v2},
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reload never entered the new module Start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- app.Shutdown(context.Background()) }()
+
+	// Shutdown 现在等 Reload 释放 reloadMu；放行后两代各停一次，不允许重复 Stop。
+	close(release)
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reload did not finish")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not finish")
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+
+	if got := countEvents(events, "stop:reload-v1"); got != 1 {
+		t.Fatalf("old module stop count = %d, want 1", got)
+	}
+	if got := countEvents(events, "stop:reload-v2"); got != 1 {
+		t.Fatalf("new module stop count = %d, want 1", got)
 	}
 }
 

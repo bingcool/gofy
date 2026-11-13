@@ -2,7 +2,7 @@
 
 演示模块：用 `gofy` 的模块机制挂载一组订单 HTTP 路由，同时展示
 controller / service / innerapi / repository / model 的五包分层边界。HTTP 契约来自
-`gofy/gofy-interface-service`，只在 controller 出现；模块间调用走对方 `innerapi`
+`github.com/bingcool/gofy-interface-service`，只在 controller 出现；模块间调用走对方 `innerapi`
 契约。分层取舍的权威说明见
 [`docs/module-layering-design.md`](../../../../docs/module-layering-design.md)。
 
@@ -213,9 +213,10 @@ type RepositoryDeclare struct {
 （每个服务一个 `sync.Once`，重复取用返回同一实例）。构造期间再次取用同一个槽
 会被判定为依赖成环，直接 panic 并带上服务名，不会让 `sync.Once` 静默死锁；装配
 只在启动期串行执行，不支持并发的首次取用。工厂执行时 `app/io` 还没 `Start`，
-`db.Db` 仍是 nil，仓库在每次查询时解析句柄；`Start` 安装新连接后自动使用新句柄。
-脚本模式不经过模块生命周期，`script/fix_order.go` 调用前把 `rt.DB` 临时发布到
-`appdb.Db`。
+快照还没发布，仓库在每次查询时解析 `appio.FromContext(ctx).DB()`；`Start` 发布
+新快照后自动使用新资源。请求进入时中间件把当时的快照固定进 ctx，一次请求不会
+横跨 `Reload` 换连接。脚本模式不经过模块生命周期，`script/fix_order.go` 调用前
+把 `rt.DB` 临时发布成快照（`appio.PublishDB`），结束后恢复原快照。
 
 service 包不能反向 import 模块根或容器（import 方向是
 `container → module → service`），所以依赖只在构造期由容器显式传入。没有包级
@@ -327,7 +328,7 @@ type OrderService struct {
 - 依赖只在构造期由 `app/container` 注入：service 不持有包级状态，也不在运行期
   查找其他 service；代际切换由新建容器完成；
 - 必填依赖（`Orders`、`Products`）由容器保证非 nil；`Logger` 允许为 nil；
-- 测试用纯 Go 内存 SQLite 跑真实仓库（零值构造，内存库发布成 `appdb.Db`），
+- 测试用纯 Go 内存 SQLite 跑真实仓库（零值构造，内存库发布成 `app/io` 快照），
   通过 `container.NewContainer()` + `Init` 按需装配 service，不连外部 MySQL
   （见 `module_test.go` 与 `app/container/*_test.go`）。
 
@@ -378,16 +379,19 @@ product/
 
 ```go
 func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
-    return gofydb.WithContext(ctx, appdb.Db)
+    return gofydb.WithContext(ctx, appio.FromContext(ctx).DB())
 }
 ```
 
-订单 service 的 `Create` 用 `gofydb.Transaction(ctx, appdb.Db, fn)` 开启事务，
-事务会放进传给 `fn` 的 context；扣库存与建订单都在 `fn` 里用同一个 ctx，产品
-仓库从 ctx 取到同一个事务：
+`appio.FromContext(ctx)` 优先取请求进入时固定的快照，没有时回退到当前已发布的
+快照，因此脚本、消费者这类不经过 HTTP 中间件的调用也能拿到连接。
+
+订单 service 的 `Create` 用 `gofydb.Transaction(ctx, appio.FromContext(ctx).DB(), fn)`
+开启事务，事务会放进传给 `fn` 的 context；扣库存与建订单都在 `fn` 里用同一个
+ctx，产品仓库从 ctx 取到同一个事务：
 
 ```go
-err := gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
+err := gofydb.Transaction(ctx, appio.FromContext(ctx).DB(), func(ctx context.Context) error {
     for _, it := range items {
         if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
             return translateProductErr(it.SkuID, err)
@@ -406,7 +410,7 @@ err := gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
 
 - 嵌套 `Transaction` 复用外层事务，不创建 savepoint；内层错误冒泡到外层，由最外层
   统一回滚，内层成功也不会提前提交；
-- 没有事务时 `WithContext` 回退到 `appdb.Db`；ctx 中的事务永远优先；
+- 没有事务时 `WithContext` 回退到 `appio.FromContext(ctx).DB()`；ctx 中的事务永远优先；
 - 跨模块只读调用（如 `validateItems` 的 `ListByIDs`）可以不显式开事务；需要一致性
   的多步读写（扣库存 + 建订单）必须传入同一个 ctx；
 - `Create` 里任一 SKU 扣库存失败或建订单失败，整个事务回滚，已扣的库存一并恢复；
@@ -586,8 +590,8 @@ go test ./app/module/order/...
 
 测试不需要外部数据库：repository 不声明接口，`module_test.go` 用纯 Go 的内存
 SQLite（`support/sqlite`，`DSN: ":memory:"`）建订单表和产品表并塞入固定数据
-（订单 1、产品 90001 上架 / 90002 下架），把内存库发布成 `appdb.Db`（测试结束
-恢复）。`newTestServices` 通过 `container.NewContainer()` + `Init` 按需构造
+（订单 1、产品 90001 上架 / 90002 下架），把内存库发布成 `app/io` 快照（测试
+结束恢复）。`newTestServices` 通过 `container.NewContainer()` + `Init` 按需构造
 产品、订单与配置 service，再用 `gofytest.New` 启动一个只挂载 order 模块的测试应用。
 panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id = 9999`
 的查询抛出，验证 Recovery 不泄漏内部信息；`panicPool` 还补了 `BeginTx` 委托给

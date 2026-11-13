@@ -6,21 +6,21 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy"
+	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productdto"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
 	"github.com/yourorg/demo-service/app/container"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/product"
 	"github.com/yourorg/demo-service/app/module/product/model"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
-	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
-	"gofy/gofy-interface-service/appinterface/demoservice/productdto"
 )
 
-// newTestApp 用纯 Go SQLite 建产品表并发布为 app/io 句柄，再按 demo-service 的
+// newTestApp 用纯 Go SQLite 建产品表并发布为 app/io 快照，再按 demo-service 的
 // 装配方式启动测试 App：产品模块绑定契约分组，应用层中间件通过
 // WithMiddlewareRegistrar 注册进框架创建的共享注册表（分组声明了
 // "audit"、"auth" 两个别名）。
@@ -48,9 +48,9 @@ func newTestApp(t *testing.T) *gofytest.App {
 	if err := conn.Create(&seeds).Error; err != nil {
 		t.Fatalf("seed products: %v", err)
 	}
-	prev := appdb.Db
-	appdb.Db = conn
-	t.Cleanup(func() { appdb.Db = prev })
+	prev := appio.Current()
+	appio.PublishDB(conn)
+	t.Cleanup(func() { appio.Publish(prev) })
 
 	ctr := container.NewContainer()
 	ctr.Init(zap.NewNop())

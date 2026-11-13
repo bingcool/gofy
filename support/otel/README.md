@@ -62,7 +62,7 @@ otel:
   environment: prod
   attributes:                     # 额外资源属性
     team: commerce
-  global: false                   # true 时同时安装进程级 provider/propagator
+  global: false                   # true 时安装进程级 ErrorHandler/provider/propagator
   batch:
     timeout: 5s
     max_queue_size: 2048
@@ -215,14 +215,17 @@ context 中没有有效 span 时返回原 logger / 空字段，不会给日志�
 
 ## 生命周期、错误与全局状态
 
-- `New` 不连接 collector；导出失败由 SDK 在后台重试。OTel 内部错误转到
-  配置的 logger，并对相同错误做 1 分钟限流（附带 `suppressed` 计数），
-  避免 collector 不可达时刷日志。
+- `New` 不连接 collector；导出失败由 SDK 在后台重试。Provider 自己包装
+  exporter，在 `ExportSpans` 返回错误时用配置的 logger 记录，并对相同错误做
+  1 分钟限流（附带 `suppressed` 计数），避免 collector 不可达时刷日志。
+  这个过程不依赖进程级 `ErrorHandler`，因此 `global: false` 时同样可见。
 - `Shutdown` 在 `ShutdownTimeout` 内 flush 并释放导出器，可重复调用；
   `ForceFlush` 用于测试或关停前的主动上报。
-- `Config.Global` 为 true 时把 provider 和 propagator 安装为进程级默认值，
-  供未显式接线的第三方库使用。一个进程只承载一个 App 时才可以打开；
-  `Shutdown` 不会反向清除全局 provider，因为其他组件可能仍持有引用。
+- `Config.Global` 为 true 时把 `ErrorHandler`、tracer provider 和 propagator
+  一起安装为进程级默认值，供未显式接线的第三方库使用；为 false 时创建和
+  关闭 Provider 都不改动这三项。一个进程只承载一个 App 时才可以打开
+  `global`，多个 App 会互相覆盖全局设置。
+  `Shutdown` 不会反向清除或关闭全局 provider，因为其他组件可能仍持有引用。
 - `Headers` 中的值（如 collector token）只随导出发送，不写日志、不出现在
   span 属性里。
 

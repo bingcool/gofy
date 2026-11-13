@@ -74,8 +74,10 @@ type App struct {
 	serving   bool
 	// handlerRef is the http.Handler given to the server. run installs a
 	// handlerSwap here so Reload can replace the route table without rebinding
-	// the listener; Handler mode has no server and leaves it nil.
+	// the listener; Handler mode has no server and leaves it nil. gen is the
+	// generation currently published inside it.
 	handlerRef *handlerSwap
+	gen        *generation
 	modules    []support.Module
 	started    []support.Module
 

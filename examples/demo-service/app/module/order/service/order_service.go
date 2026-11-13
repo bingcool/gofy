@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	gofydb "github.com/bingcool/gofy/support/db"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"
@@ -64,7 +64,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 		return nil, err
 	}
 	var created *model.Order
-	err = gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
+	err = gofydb.Transaction(ctx, appio.FromContext(ctx).DB(), func(ctx context.Context) error {
 		for _, it := range items {
 			if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
 				return translateProductErr(it.SkuID, err)

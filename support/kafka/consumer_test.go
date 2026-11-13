@@ -20,6 +20,7 @@ func TestConsumerConfigValidate(t *testing.T) {
 		{"missing topic", ConsumerConfig{Group: "g"}, "topic is required"},
 		{"missing group", ConsumerConfig{Topic: "orders"}, "consumer group is required"},
 		{"bad offset reset", ConsumerConfig{Topic: "orders", Group: "g", AutoOffsetReset: "middle"}, "auto_offset_reset"},
+		{"bad commit mode", ConsumerConfig{Topic: "orders", Group: "g", CommitMode: "batch"}, "commit_mode"},
 		{"negative interval", ConsumerConfig{Topic: "orders", Group: "g", AutoCommitInterval: -time.Second}, "negative"},
 		{"negative session timeout", ConsumerConfig{Topic: "orders", Group: "g", SessionTimeout: -time.Second}, "negative"},
 	}
@@ -60,6 +61,44 @@ func TestConsumerConfigDefaults(t *testing.T) {
 	}
 	if cfg.SessionTimeout != 45*time.Second {
 		t.Fatalf("session timeout = %s", cfg.SessionTimeout)
+	}
+	if cfg.CommitMode != CommitModeManual {
+		t.Fatalf("commit mode = %q, want manual", cfg.CommitMode)
+	}
+}
+
+func TestConsumerConfigCommitMode(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  ConsumerConfig
+		want CommitMode
+	}{
+		{"zero value is manual", ConsumerConfig{}, CommitModeManual},
+		{"legacy true is manual", ConsumerConfig{DisableAutoCommit: true}, CommitModeManual},
+		{"legacy false no longer opts into auto", ConsumerConfig{DisableAutoCommit: false}, CommitModeManual},
+		{"explicit auto is trimmed and lowered", ConsumerConfig{CommitMode: " AUTO "}, CommitModeAuto},
+		{"explicit commit mode wins", ConsumerConfig{CommitMode: CommitModeAuto, DisableAutoCommit: true}, CommitModeAuto},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.withDefaults().CommitMode; got != tc.want {
+				t.Fatalf("commit mode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewConsumerKeepsAutoCommitMode(t *testing.T) {
+	consumer, err := NewConsumer(Wrap(newLazyRawClient(t)), ConsumerConfig{
+		Topic:      "orders",
+		Group:      "g",
+		CommitMode: CommitModeAuto,
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	if got := consumer.Config().CommitMode; got != CommitModeAuto {
+		t.Fatalf("commit mode = %q, want auto", got)
 	}
 }
 

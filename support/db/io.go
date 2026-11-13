@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+
+	"github.com/bingcool/gofy/support/internal/instanceinit"
 )
 
 var (
@@ -25,12 +26,15 @@ var (
 // Configure installs a new generation and returns it; NewIO uses the most
 // recently installed generation. The framework-managed db.default is not part
 // of the registry: use Runtime.DB (or the application's own handle) for it.
+//
+// Pools open outside the registry lock: different names initialize in parallel,
+// concurrent callers of one name share a single attempt, and a failed attempt is
+// retried by the next call. Configure/NewIO/Close are the only entry points;
+// prefer the instance Registry for per-generation isolation.
 type Registry struct {
-	mu      sync.Mutex
 	configs map[string]Config
-	dbs     map[string]*gorm.DB
 	logger  *zap.Logger
-	closed  bool
+	slots   *instanceinit.Slots[*gorm.DB]
 }
 
 var current atomic.Pointer[Registry]
@@ -56,8 +60,13 @@ func NewRegistry(configs map[string]Config, logger *zap.Logger) (*Registry, erro
 	}
 	reg := &Registry{
 		configs: make(map[string]Config, len(configs)),
-		dbs:     make(map[string]*gorm.DB, len(configs)),
 		logger:  logger,
+		slots: instanceinit.New(func(name string, pool *gorm.DB) error {
+			if err := Close(pool); err != nil {
+				return fmt.Errorf("db instance %q: %w", name, err)
+			}
+			return nil
+		}),
 	}
 	for name, cfg := range configs {
 		name = strings.TrimSpace(name)
@@ -78,12 +87,7 @@ func (r *Registry) Install() {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.closed {
-		current.Store(r)
-	}
+	r.slots.Publish(func() { current.Store(r) })
 }
 
 // NewIO returns the pool registered under name in the current generation,
@@ -114,25 +118,21 @@ func (r *Registry) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
 	}
 	name = strings.TrimSpace(name)
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.closed {
+	pool, err := r.slots.Get(ctx, name, func(ctx context.Context) (*gorm.DB, error) {
+		cfg, ok := r.configs[name]
+		if !ok {
+			return nil, fmt.Errorf("%w %q", ErrUnknownInstance, name)
+		}
+		pool, err := New(ctx, cfg, r.logger)
+		if err != nil {
+			return nil, fmt.Errorf("db instance %q: %w", name, err)
+		}
+		return pool, nil
+	})
+	if errors.Is(err, instanceinit.ErrClosed) {
 		return nil, ErrNotConfigured
 	}
-	if db := r.dbs[name]; db != nil {
-		return db, nil
-	}
-	cfg, ok := r.configs[name]
-	if !ok {
-		return nil, fmt.Errorf("%w %q", ErrUnknownInstance, name)
-	}
-	db, err := New(ctx, cfg, r.logger)
-	if err != nil {
-		return nil, fmt.Errorf("db instance %q: %w", name, err)
-	}
-	r.dbs[name] = db
-	return db, nil
+	return pool, err
 }
 
 // Close releases the pools opened by this generation and stops it from opening
@@ -141,24 +141,6 @@ func (r *Registry) Close() error {
 	if r == nil {
 		return nil
 	}
-
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return nil
-	}
-	r.closed = true
-	dbs := r.dbs
-	r.dbs = nil
-	r.mu.Unlock()
-
 	current.CompareAndSwap(r, nil)
-
-	var errs []error
-	for name, db := range dbs {
-		if err := Close(db); err != nil {
-			errs = append(errs, fmt.Errorf("db instance %q: %w", name, err))
-		}
-	}
-	return errors.Join(errs...)
+	return r.slots.Close()
 }

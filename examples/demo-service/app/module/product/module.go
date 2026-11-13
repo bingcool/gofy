@@ -12,12 +12,12 @@
 package product
 
 import (
+	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productroute"
 	"github.com/bingcool/gofy/support"
 	"github.com/yourorg/demo-service/app/module/product/controller"
 	"github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
-	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
-	"gofy/gofy-interface-service/appinterface/demoservice/productroute"
 )
 
 // Module is the product module root.

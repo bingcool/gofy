@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/frameworkcontext"
@@ -12,8 +13,7 @@ import (
 	"github.com/bingcool/gofy/support/ratelimit/redisstore"
 	"github.com/gin-gonic/gin"
 	goredis "github.com/redis/go-redis/v9"
-	appredis "github.com/yourorg/demo-service/app/io/redis"
-	"gofy/gofy-interface-service/apicore/contracts/common/endpoint"
+	appio "github.com/yourorg/demo-service/app/io"
 )
 
 const (
@@ -36,15 +36,15 @@ const (
 // 存放在哪个 Redis 命名实例。没有声明 Spec.RateLimit 的路由 adapter 不会
 // 调用回调，也就完全不限流。
 //
-// 计数固定存放在 Redis：中间件在首次请求时用 redisstore 包住
-// redis.NewIO(ctx, alias) 的客户端，见 redisLimiter。要换计数存储，只需替换
-// redisLimiter 或注入不同的 RedisClient，契约与路由绑定都不用改。
+// 计数固定存放在 Redis：中间件在首次请求时用 redisstore 包住本代快照解析出的
+// 客户端，见 redisLimiter。要换计数存储，只需替换 redisLimiter 或注入不同的
+// RedisClient，契约与路由绑定都不用改。
 type RateLimiter struct {
 	// Responder 渲染 429 / 503；nil 时使用框架默认响应。App 装配根传入的
 	// Responder 与全局错误信封一致，限流响应才能带同样的 code/msg/req_id。
 	Responder support.Responder
-	// RedisClient 按别名解析 Redis 客户端，默认 app/io/redis.NewIO：从
-	// support/redis 注册表里取出该代安装的命名实例，实例未启用时返回错误。
+	// RedisClient 按别名解析 Redis 客户端，默认取请求固定的 app/io 快照
+	// （appio.FromContext(ctx).RedisNewIO）：解析不会跨 Reload 换到下一代。
 	// 测试注入 miniredis 客户端，避免依赖真实 Redis。
 	RedisClient func(ctx context.Context, alias string) (*goredis.Client, error)
 }
@@ -92,13 +92,15 @@ func redisAlias(alias string) string {
 	return alias
 }
 
-// redisClient 返回客户端解析函数。默认走 app/io/redis.NewIO，它读取
-// support/redis 注册表里该代安装的连接；装配根或测试可以通过字段覆盖。
+// redisClient 返回客户端解析函数。默认从 app/io 快照取本代 Redis 注册表，
+// 装配根或测试可以通过字段覆盖。
 func (r RateLimiter) redisClient() func(ctx context.Context, alias string) (*goredis.Client, error) {
 	if r.RedisClient != nil {
 		return r.RedisClient
 	}
-	return appredis.NewIO
+	return func(ctx context.Context, alias string) (*goredis.Client, error) {
+		return appio.FromContext(ctx).RedisNewIO(ctx, alias)
+	}
 }
 
 // rateLimitKeyFunc 按 RateKey 选择计数主体；未声明或未知的 Key 按客户端 IP
@@ -160,10 +162,10 @@ func firstNonEmpty(values ...string) string {
 // redisLimiter 用 Redis 计数，替契约声明的这条路由维护滑窗。
 //
 // 为什么延迟构建：App 启动和 Reload 都先执行模块工厂并绑定路由，再执行各模块
-// 的 Start；demo 的 Redis 连接由 app/io 模块在 Start 里打开并安装到
-// support/redis 注册表。绑定阶段执行 NewIO 只会拿到“实例未配置”，所以客户端
-// 与框架中间件必须在第一次请求时才构建。Reload 时新代中间件由新代容器创建，
-// 首次请求解析到的自然是新代安装的客户端，旧连接随旧模块 Stop 退役。
+// 的 Start；demo 的 Redis 连接由 app/io 模块在 Start 里打开并随快照一起发布。
+// 绑定阶段解析只会拿到“快照/实例未配置”，所以客户端与框架中间件必须在第一次
+// 请求时才构建。Reload 时新代中间件由新代容器创建，请求中间件固定的快照也是
+// 新代，旧连接随旧模块 Stop 退役。
 //
 // 并发与失败语义：
 //   - 首次解析用互斥锁串行，成功后缓存，后续请求直接复用框架中间件；
@@ -177,7 +179,7 @@ type redisLimiter struct {
 	alias string
 	// responder 渲染 429 / 503；nil 时使用框架默认响应。
 	responder support.Responder
-	// redis 按别名解析客户端，默认 app/io/redis.NewIO。
+	// redis 按别名解析客户端，默认从请求固定的 app/io 快照解析。
 	redis func(ctx context.Context, alias string) (*goredis.Client, error)
 
 	// mu 保护 handler 的首次构建；handler 非 nil 后不再重复构建。

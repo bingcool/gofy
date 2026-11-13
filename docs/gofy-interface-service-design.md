@@ -216,7 +216,7 @@ gofy/
 
 ```text
 gofy-interface-service/
-├── go.mod                          # module gofy/gofy-interface-service
+├── go.mod                          # module github.com/bingcool/gofy-interface-service
 ├── go.sum
 ├── README.md
 ├── Makefile
@@ -404,7 +404,7 @@ check: vet refcheck generate generate-client
 `go.mod` 基线：
 
 ```text
-module gofy/gofy-interface-service
+module github.com/bingcool/gofy-interface-service
 
 go 1.26.0
 
@@ -426,7 +426,7 @@ require (
 
 | 项 | 规则 |
 | --- | --- |
-| module path | `gofy/gofy-interface-service` |
+| module path | `github.com/bingcool/gofy-interface-service` |
 | 公共契约层 | `apicore/contracts/**`，随 module 版本升级，业务方不得修改 |
 | 业务契约层 | `appinterface/{domain}service/**`，唯一可扩展目录，如 `appinterface/demoservice` |
 | Go 包名 | `{domain}service`，如 `demoservice` |
@@ -465,8 +465,8 @@ package orderdto
 import (
 	"time"
 
-	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-	"gofy/gofy-interface-service/apicore/contracts/common/types"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderenum"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/types"
 )
 
 // OrderDTO 订单详情。
@@ -513,9 +513,9 @@ Request 只描述一次 HTTP 调用的入参，按来源拆分 tag：
 package orderrequest
 
 import (
-	"gofy/gofy-interface-service/appinterface/demoservice/orderenum"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
-	"gofy/gofy-interface-service/apicore/contracts/common/types"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderenum"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/types"
 )
 
 // GetOrderRequest 查询订单。
@@ -864,7 +864,7 @@ func New(code Code, status int, message string) Fault {
 ```go
 package demoservice
 
-import "gofy/gofy-interface-service/apicore/contracts/common/errcode"
+import "github.com/bingcool/gofy-interface-service/apicore/contracts/common/errcode"
 
 const (
 	ErrCodeOrderNotFound errcode.Code = 40401
@@ -884,7 +884,7 @@ package gofyadapter
 
 import (
 	"github.com/bingcool/gofy/apperr"
-	"gofy/gofy-interface-service/apicore/contracts/common/errcode"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/errcode"
 )
 
 func Error(f errcode.Fault) *apperr.Error {
@@ -1029,10 +1029,10 @@ package demoservice
 import (
 	"context"
 
-	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderdto"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 // Service 是订单契约的服务端接口。业务实现必须满足该接口。
@@ -1051,12 +1051,12 @@ type Service interface {
 package orderroute
 
 import (
-	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/ordererror"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/apicore/contracts/common/endpoint"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderdto"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/ordererror"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 var (
@@ -1126,9 +1126,9 @@ var (
 package orderroute
 
 import (
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/apicore/contracts/common/endpoint"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/endpoint"
 )
 
 // GetConfig GET /config
@@ -1173,7 +1173,7 @@ func Routes() []endpoint.Descriptor {
 ```go
 package orderresponse
 
-import "gofy/gofy-interface-service/appinterface/demoservice/orderdto"
+import "github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderdto"
 
 // GetOrderResponse 查询订单返回。
 type GetOrderResponse struct {
@@ -1571,11 +1571,11 @@ package order
 import (
 	"context"
 
-	"gofy/gofy-interface-service/appinterface/demoservice"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderdto"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 type Handler struct {
@@ -1724,11 +1724,19 @@ func BindChunked[Req any](
 )
 ```
 
-> **实现状态（gofy v0.1）：** gofy 的 `support` 尚未提供 `sse.Stream`、`support.Download`、`chunked.Writer`。
-> `apicore/adapter/gofy.BindAll` 对 `KindSSE`/`KindDownload`/`KindChunked` 会在启动时返回聚合错误
-> （`response kind ... is not supported by the gofy adapter`），不会静默降级为 JSON。
-> 客户端 `client.StreamSSE`/`DownloadFile`/`StreamChunked` 已实现，可用于调用其他服务的这类路由；
-> 服务端绑定待 gofy 补齐传输原语后再提供。
+> **实现状态（当前）：** Gofy Adapter 只实现 JSON 信封与 `NoContent`（204）两种响应。
+> `apicore/adapter/gofy.BindAll` 对 `KindSSE`/`KindDownload`/`KindChunked` 会在启动时
+> 返回聚合错误（`response kind ... is not supported by the gofy adapter`），不会静默
+> 注册成 JSON。客户端 `client.StreamSSE`/`DownloadFile`/`StreamChunked` 已实现并通过
+> 测试，可用于调用其他服务的这类路由，但这**不代表服务端端到端支持**。
+>
+> 将来实现服务端流式能力时，以下验收点必须同时满足（当前不在范围内）：
+>
+> - 客户端取消时服务端写流能够退出；
+> - 服务端错误不会在已经开始写流后尝试写第二个 JSON Envelope；
+> - `WriteTimeout` 与长连接配置有明确约定；
+> - Trace Span、RequestID 和 AccessLog 能记录流式请求的结束原因与持续时间；
+> - Download 的 `Content-Disposition`、文件名和 `Content-Type` 有明确安全策略。
 
 契约侧：
 
@@ -1779,8 +1787,12 @@ var DownloadInvoice = endpoint.New[DownloadInvoiceRequest, endpoint.NoBody](endp
 11. `RequestContentType=multipart/form-data` 但 Request 没有文件字段（警告，不阻止）。
 12. 中间件别名（含认证 `"auth"`）既不在 `BindOptions.Middleware`、`BindOptions.Registry`
     也未注册到 App 注册表，或解析结果为 `nil`：分组名由 `BindGroup` 报（错误带
-    分组前缀），路由名由 `BindAll` 报（错误带 `OperationID`）。`Spec.Auth` 本身
-    不参与校验，它只是 OpenAPI 标记。
+    分组前缀），路由名由 `BindAll` 报（错误带 `OperationID`）。
+13. 配置了 `BindOptions.AuthValidator` 时，`AuthRequired` / `AuthOptional` 路由
+    的声明与回调认可的策略不一致（`AuthNone` 不触发回调）。回调收到
+    `endpoint.Spec` 和逻辑名（分组名在前、路由名在后，实例形式的 `Global` /
+    `Routes` 不在其中），只做声明校验，不创建中间件；失败即启动或 Reload 失败。
+    未配置回调时 `Spec.Auth` 仍然只是 OpenAPI 标记。
 
 ---
 
@@ -1893,12 +1905,12 @@ package demoserviceclient
 import (
 	"context"
 
-	"gofy/gofy-interface-service/appinterface/demoservice/orderdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderresponse"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderroute"
-	"gofy/gofy-interface-service/apicore/client"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderdto"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderresponse"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderroute"
+	"github.com/bingcool/gofy-interface-service/apicore/client"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
 )
 
 type Client struct {
@@ -2488,7 +2500,7 @@ package gofyadapter
 
 import (
 	"github.com/bingcool/gofy/support"
-	"gofy/gofy-interface-service/docsui"
+	"github.com/bingcool/gofy-interface-service/docsui"
 	"github.com/gin-gonic/gin"
 )
 
@@ -3088,13 +3100,13 @@ func Middleware(cfg Config) support.Middleware
 **1. 添加依赖：**
 
 ```go
-require gofy/gofy-interface-service v0.1.0
+require github.com/bingcool/gofy-interface-service v0.1.0
 ```
 
 本地联调：
 
 ```go
-replace gofy/gofy-interface-service => ../gofy-interface-service
+replace github.com/bingcool/gofy-interface-service => ../gofy-interface-service
 ```
 
 **2. 删除本地重复 DTO：**
@@ -3156,10 +3168,10 @@ curl -s localhost:8080/openapi.json | jq '.paths | keys'
 
 ```go
 import (
-	"gofy/gofy-interface-service/appinterface/demoservice/demoserviceclient"
-	"gofy/gofy-interface-service/appinterface/demoservice/orderrequest"
-	"gofy/gofy-interface-service/apicore/client"
-	"gofy/gofy-interface-service/apicore/contracts/common/types"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/demoserviceclient"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/orderrequest"
+	"github.com/bingcool/gofy-interface-service/apicore/client"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/types"
 )
 
 c, err := client.New(client.Config{
@@ -3500,7 +3512,7 @@ jobs:
 
 | # | 问题 | 建议 |
 | --- | --- | --- |
-| Q1 | 仓库最终地址 | `gofy/gofy-interface-service` |
+| Q1 | 仓库最终地址 | `github.com/bingcool/gofy-interface-service` |
 | Q2 | 首个接入服务 | order-service |
 | Q3 | Path 前缀模式 | 方案 A：契约写相对路径，gofy 负责前缀 |
 | Q4 | 对外 ID 类型 | 字符串（`types.Uint64String`），从 v1 开始 |

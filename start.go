@@ -138,9 +138,6 @@ func (a *App) run(parent context.Context) error {
 		return a.abort(err)
 	}
 	a.modules = modules
-	// The server keeps this wrapper for its whole life; Reload only swaps the
-	// handler stored inside it, so the listener is never touched.
-	a.handlerRef = newHandlerSwap(engine)
 
 	pidPath, err := a.resolvePIDPath()
 	if err != nil {
@@ -170,6 +167,17 @@ func (a *App) run(parent context.Context) error {
 	if err := a.startModules(rt); err != nil {
 		return a.abort(err)
 	}
+
+	// The first generation owns the factory-built modules; the injected ones
+	// belong to the App and keep running across reloads.
+	gen := newGeneration(1, engine)
+	gen.started = a.factoryStarted()
+	gen.db, gen.ownDB = db, ownDB
+	gen.logger, gen.systemLogger, gen.ownLogger = lg, system, own
+	// The server keeps this wrapper for its whole life; Reload only swaps the
+	// generation stored inside it, so the listener is never touched.
+	a.handlerRef = newHandlerSwap(gen)
+	a.gen = gen
 	a.setState(stateRunning)
 
 	srv := a.newServer(a.handlerRef, lg)
@@ -255,6 +263,26 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		}
 	}
 
+	// 中间件安装顺序是对外契约（docs/library-design.md §3.4.6、§7.1），
+	// 修改时必须同步 TestMiddlewareOrderContract：
+	//
+	//   RequestID → Telemetry Trace → HeaderPropagation → SecurityHeaders
+	//   → AccessLog → CORS → Recovery → BodyLimit
+	//   → App Middleware → healthz/readyz
+	//   → Base Router(RateLimit → JWTAuth)
+	//   → MiddlewareRegistrars → Module Routes
+	//
+	// 关键约束：
+	//   - RequestID 最外层，后续日志、span、透传头都依赖 req_id；
+	//   - Trace 紧跟 RequestID，HeaderPropagation 与 AccessLog 才能读到 OTel
+	//     trace id；
+	//   - AccessLog 在 Recovery 外层，panic 被转成 500 后访问日志记录的仍是
+	//     最终状态码；
+	//   - Recovery 在 CORS 内层，panic 响应仍带跨域头；
+	//   - BodyLimit 必须在任何读取 body 的 handler 之前；
+	//   - App Middleware 与模块路由都在 Recovery 内层，业务 panic 会被捕获；
+	//     Recovery 之前的框架中间件不执行用户代码，其 panic 由 net/http 兜底，
+	//     这里不再加第二层 Recovery，否则会改变 AccessLog 的记录语义。
 	requestID := middleware.RequestID(support.DefaultRequestIDHeader)
 	engine.Use(requestID)
 	if err := register(middleware.NameRequestID, requestID); err != nil {
@@ -481,6 +509,27 @@ func (a *App) startModules(rt *core.Runtime) error {
 		a.started = append(a.started, m)
 	}
 	return nil
+}
+
+// factoryStarted returns the started modules Reload owns, excluding instances
+// injected with WithModules: those belong to the App and keep running across
+// reloads.
+func (a *App) factoryStarted() []support.Module {
+	if len(a.opts.modules) == 0 {
+		return a.started
+	}
+	injectedNames := make(map[string]struct{}, len(a.opts.modules))
+	for _, m := range a.opts.modules {
+		injectedNames[m.Name()] = struct{}{}
+	}
+	started := make([]support.Module, 0, len(a.started))
+	for _, m := range a.started {
+		if _, ok := injectedNames[m.Name()]; ok {
+			continue
+		}
+		started = append(started, m)
+	}
+	return started
 }
 
 // startNacosRegistration publishes this instance once the listener is up. A

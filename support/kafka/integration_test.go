@@ -112,11 +112,10 @@ func TestIntegrationProduceConsumeInOrder(t *testing.T) {
 	}
 
 	consumer, err := NewConsumer(client, ConsumerConfig{
-		Topic:             topic,
-		Group:             group,
-		DisableAutoCommit: true,
-		AutoOffsetReset:   "earliest",
-		SessionTimeout:    10 * time.Second,
+		Topic:           topic,
+		Group:           group,
+		AutoOffsetReset: "earliest",
+		SessionTimeout:  10 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
@@ -161,6 +160,78 @@ func TestIntegrationProduceConsumeInOrder(t *testing.T) {
 	}
 }
 
+func TestIntegrationManualCommitStopsAtFailure(t *testing.T) {
+	brokers := testBrokers(t)
+	client := testClient(t, brokers)
+	topic := testName(t, "manual")
+	group := testName(t, "group")
+	createTopic(t, brokers, topic)
+
+	producer, err := NewProducer(client, ProducerConfig{Topic: topic, FlushTimeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := producer.Publish(context.Background(), []byte(fmt.Sprintf("msg-%d", i)), PublishOptions{Key: "k"}); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+
+	consumer, err := NewConsumer(client, ConsumerConfig{
+		Topic:           topic,
+		Group:           group,
+		AutoOffsetReset: "earliest",
+		SessionTimeout:  10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+
+	consumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	failed := false
+	err = consumer.Consume(consumeCtx, func(_ context.Context, record *kgo.Record) error {
+		if string(record.Value) == "msg-2" && !failed {
+			failed = true
+			return errors.New("boom")
+		}
+		return nil
+	}, ConsumeOptions{})
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Consume error = %v, want handler error", err)
+	}
+	if err := consumer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Manual commits stop at msg-1, so the next consumer must redeliver msg-2.
+	replay, err := NewConsumer(client, ConsumerConfig{
+		Topic:           topic,
+		Group:           group,
+		AutoOffsetReset: "earliest",
+		SessionTimeout:  10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer replay: %v", err)
+	}
+	t.Cleanup(func() { _ = replay.Close() })
+
+	replayCtx, replayCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer replayCancel()
+	var first string
+	err = replay.Consume(replayCtx, func(_ context.Context, record *kgo.Record) error {
+		first = string(record.Value)
+		replayCancel()
+		return nil
+	}, ConsumeOptions{})
+	if err != nil {
+		t.Fatalf("replay Consume: %v", err)
+	}
+	if first != "msg-2" {
+		t.Fatalf("first redelivered record = %q, want msg-2", first)
+	}
+}
+
 func TestIntegrationWrappedConsumer(t *testing.T) {
 	brokers := testBrokers(t)
 	client := testClient(t, brokers)
@@ -192,9 +263,8 @@ func TestIntegrationWrappedConsumer(t *testing.T) {
 	t.Cleanup(func() { _ = wrapped.Close() })
 
 	consumer, err := NewConsumer(wrapped, ConsumerConfig{
-		Topic:             topic,
-		Group:             group,
-		DisableAutoCommit: true,
+		Topic: topic,
+		Group: group,
 	})
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)

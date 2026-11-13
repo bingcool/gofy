@@ -17,8 +17,26 @@ var (
 	ErrGroupRequired = errors.New("kafka: consumer group is required")
 	// ErrInvalidOffsetReset is returned for an unknown auto_offset_reset.
 	ErrInvalidOffsetReset = errors.New("kafka: auto_offset_reset must be earliest or latest")
+	// ErrInvalidCommitMode is returned for an unknown commit_mode.
+	ErrInvalidCommitMode = errors.New("kafka: commit_mode must be manual or auto")
 	// ErrHandlerRequired is returned when Consume receives a nil handler.
 	ErrHandlerRequired = errors.New("kafka: handler is required")
+)
+
+// CommitMode controls how a consumer commits offsets.
+type CommitMode string
+
+const (
+	// CommitModeManual commits only records the handler accepted. A failed
+	// record is not committed, so it is redelivered after a restart, and
+	// records after it wait until it succeeds or is discarded. This is the
+	// default and the safe choice when losing a message is unacceptable.
+	CommitModeManual CommitMode = "manual"
+	// CommitModeAuto lets franz-go commit polled offsets every
+	// AutoCommitInterval regardless of the handler result, so a failed record
+	// may already be committed. Use it only for repeatable side effects such as
+	// cache refreshes or config sync.
+	CommitModeAuto CommitMode = "auto"
 )
 
 // ConsumerConfig describes one consumer group subscription.
@@ -26,14 +44,18 @@ var (
 // The group is part of the client configuration in franz-go, so NewConsumer
 // builds a dedicated client for a managed Client. For a Client built by Wrap,
 // these group settings are not applied: the injected client must already be
-// configured with kgo.ConsumerGroup(Group).
+// configured with kgo.ConsumerGroup(Group) and, for manual mode,
+// kgo.DisableAutoCommit().
 type ConsumerConfig struct {
 	Topic string `yaml:"topic"`
 	Group string `yaml:"group"`
-	// DisableAutoCommit switches to manual commits after each successfully
-	// handled batch. Auto commit is on by default, matching the swoolefy
-	// library; it commits polled offsets, so a failed record may still be
-	// committed. Use manual commits when you need controlled at-least-once.
+	// CommitMode selects manual (default) or auto offset commits. An empty
+	// value means manual.
+	CommitMode CommitMode `yaml:"commit_mode"`
+	// DisableAutoCommit is deprecated: true is equivalent to
+	// CommitModeManual. false no longer enables auto commits, because manual
+	// is the default; set commit_mode: auto to opt in. When both fields are
+	// set, CommitMode wins.
 	DisableAutoCommit bool `yaml:"disable_auto_commit"`
 	// AutoCommitInterval is the auto commit period. Zero uses 200ms.
 	AutoCommitInterval time.Duration `yaml:"auto_commit_interval" default:"200ms"`
@@ -60,6 +82,11 @@ func (c ConsumerConfig) validate() error {
 	default:
 		return ErrInvalidOffsetReset
 	}
+	switch CommitMode(strings.ToLower(strings.TrimSpace(string(c.CommitMode)))) {
+	case "", CommitModeManual, CommitModeAuto:
+	default:
+		return ErrInvalidCommitMode
+	}
 	if c.AutoCommitInterval < 0 || c.SessionTimeout < 0 {
 		return errors.New("kafka: durations must not be negative")
 	}
@@ -71,6 +98,13 @@ func (c ConsumerConfig) withDefaults() ConsumerConfig {
 	out.Topic = strings.TrimSpace(out.Topic)
 	out.Group = strings.TrimSpace(out.Group)
 	out.AutoOffsetReset = strings.ToLower(strings.TrimSpace(out.AutoOffsetReset))
+	out.CommitMode = CommitMode(strings.ToLower(strings.TrimSpace(string(out.CommitMode))))
+	// DisableAutoCommit=true only keeps its old meaning; false must not turn
+	// auto commits back on, otherwise existing configs could silently switch
+	// back after this version changes the default.
+	if out.CommitMode == "" {
+		out.CommitMode = CommitModeManual
+	}
 	if out.AutoOffsetReset == "" {
 		out.AutoOffsetReset = "earliest"
 	}
@@ -95,7 +129,7 @@ func (c ConsumerConfig) clientOptions() []kgo.Opt {
 		kgo.SessionTimeout(c.SessionTimeout),
 		kgo.AutoCommitInterval(c.AutoCommitInterval),
 	}
-	if c.DisableAutoCommit {
+	if c.CommitMode != CommitModeAuto {
 		opts = append(opts, kgo.DisableAutoCommit())
 	}
 	if c.OnPartitionsAssigned != nil {
@@ -188,10 +222,11 @@ func (c *Consumer) Config() ConsumerConfig {
 // Consume polls records and calls handler until ctx is cancelled. A cancelled
 // context returns nil, so Consume can be used directly as a goroutine body.
 //
-// The default error policy is at-least-once: a failed record is not committed,
-// Consume returns the handler error, and a restart rejoins the group from the
-// last commit. Set DiscardOnError to skip poison records instead. Auto commit
-// is convenient but commits polled offsets; disable it for controlled offsets.
+// With the default CommitModeManual, delivery is at-least-once: a failed record
+// is not committed, Consume returns the handler error, and a restart rejoins
+// the group from the last commit. Set DiscardOnError to skip poison records
+// instead. CommitModeAuto lets franz-go commit polled offsets regardless of the
+// handler result and can drop a failed record.
 func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
 	if handler == nil {
 		return ErrHandlerRequired
@@ -289,7 +324,7 @@ func (c *Consumer) process(ctx context.Context, fetches kgo.Fetches, handler Han
 }
 
 func (c *Consumer) commit(ctx context.Context, record *kgo.Record, opts ConsumeOptions) {
-	if record == nil || !c.cfg.DisableAutoCommit || ctx.Err() != nil {
+	if record == nil || c.cfg.CommitMode == CommitModeAuto || ctx.Err() != nil {
 		return
 	}
 	if err := c.raw.CommitRecords(ctx, record); err != nil {

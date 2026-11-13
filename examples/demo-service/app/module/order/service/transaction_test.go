@@ -7,7 +7,7 @@ import (
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/sqlite"
-	appdb "github.com/yourorg/demo-service/app/io/db"
+	appio "github.com/yourorg/demo-service/app/io"
 	ordermodel "github.com/yourorg/demo-service/app/module/order/model"
 	orderrepo "github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"
@@ -47,9 +47,9 @@ func newCompositionDB(t *testing.T) *gorm.DB {
 	}).Error; err != nil {
 		t.Fatalf("seed product: %v", err)
 	}
-	prev := appdb.Db
-	appdb.Db = conn
-	t.Cleanup(func() { appdb.Db = prev })
+	prev := appio.Current()
+	appio.PublishDB(conn)
+	t.Cleanup(func() { appio.Publish(prev) })
 	return conn
 }
 

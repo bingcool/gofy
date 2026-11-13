@@ -7,6 +7,7 @@ import (
 	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/yourorg/demo-service/app/config"
+	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	appscript "github.com/yourorg/demo-service/script"
 )
@@ -40,6 +41,9 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config) []g
 		// 把入口请求的白名单 Header 注入上下文，供 demoserviceclient 转发到下游；
 		// 身份头只有在 WithTrustedProxies 命中的代理转发时才采信。
 		gofy.WithHeaderPropagation(true),
+		// 请求进入时固定当前一代的 IO 快照，Repository 与 Service 用
+		// appio.FromContext(ctx) 取连接：一次请求不会横跨 Reload 换资源。
+		gofy.WithMiddleware(appio.Middleware()),
 		// 应用层中间件（auth/audit/order-audit）在模块绑定路由之前注册。
 		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
 		gofy.WithModuleFactories(reload.factories(cfg)...),

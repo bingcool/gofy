@@ -24,14 +24,14 @@ func TestOpenInstallsEnabledInstances(t *testing.T) {
 	set.Install()
 	t.Cleanup(func() { _ = set.Close() })
 
-	if Cache == nil || Session == nil {
+	if Cache() == nil || Session() == nil {
 		t.Fatal("enabled instances were not installed")
 	}
 	ctx := context.Background()
-	if err := Cache.Set(ctx, "order:1", "cached", 0).Err(); err != nil {
+	if err := Cache().Set(ctx, "order:1", "cached", 0).Err(); err != nil {
 		t.Fatalf("set cache: %v", err)
 	}
-	if _, err := Session.Get(ctx, "order:1").Result(); err != goredis.Nil {
+	if _, err := Session().Get(ctx, "order:1").Result(); err != goredis.Nil {
 		t.Fatalf("session db saw cache key: err = %v", err)
 	}
 }
@@ -47,10 +47,10 @@ func TestOpenInstallsRateLimit(t *testing.T) {
 	set.Install()
 	t.Cleanup(func() { _ = set.Close() })
 
-	if RateLimit == nil {
+	if RateLimit() == nil {
 		t.Fatal("ratelimit instance was not installed")
 	}
-	if err := RateLimit.Ping(context.Background()).Err(); err != nil {
+	if err := RateLimit().Ping(context.Background()).Err(); err != nil {
 		t.Fatalf("ping ratelimit: %v", err)
 	}
 }
@@ -66,7 +66,7 @@ func TestOpenSkipsDisabledInstances(t *testing.T) {
 	set.Install()
 	t.Cleanup(func() { _ = set.Close() })
 
-	if Cache != nil || Session != nil {
+	if Cache() != nil || Session() != nil {
 		t.Fatal("disabled instances were installed")
 	}
 }
@@ -93,7 +93,7 @@ func TestOpenClosesOpenedOnFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "session") {
 		t.Fatalf("Open error = %v", err)
 	}
-	if Cache != nil || Session != nil {
+	if Cache() != nil || Session() != nil {
 		t.Fatal("failed Open installed handles")
 	}
 }
@@ -110,7 +110,7 @@ func TestReloadKeepsNewHandles(t *testing.T) {
 		t.Fatalf("Open first: %v", err)
 	}
 	set1.Install()
-	oldClient := Cache
+	oldClient := Cache()
 
 	set2, err := Open(ctx, Config{
 		"cache": {Enabled: true, Config: gofyredis.Config{Addr: second.Addr()}},
@@ -120,14 +120,14 @@ func TestReloadKeepsNewHandles(t *testing.T) {
 	}
 	set2.Install()
 	t.Cleanup(func() { _ = set2.Close() })
-	if Cache == oldClient {
+	if Cache() == oldClient {
 		t.Fatal("Install did not replace the handle")
 	}
 
 	if err := set1.Close(); err != nil {
 		t.Fatalf("close first: %v", err)
 	}
-	if Cache == nil {
+	if Cache() == nil {
 		t.Fatal("closing the old generation cleared the new handle")
 	}
 }
@@ -155,10 +155,10 @@ func TestIntegrationOpenRateLimit(t *testing.T) {
 	set.Install()
 	t.Cleanup(func() { _ = set.Close() })
 
-	if RateLimit == nil {
+	if RateLimit() == nil {
 		t.Fatal("ratelimit handle is nil")
 	}
-	if err := RateLimit.Ping(ctx).Err(); err != nil {
+	if err := RateLimit().Ping(ctx).Err(); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
 }

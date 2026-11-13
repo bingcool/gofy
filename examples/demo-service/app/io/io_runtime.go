@@ -3,8 +3,9 @@
 // connections: Start opens and installs them, Stop closes them, and a reload
 // rebuilds them together with the module.
 //
-// 业务代码直接使用 app/io/db、app/io/redis、app/io/amqp、app/io/kafka、
-// app/io/rocketmq、app/io/uuidint 的包级句柄，本包只负责生命周期。
+// 业务代码通过 Snapshot 取连接：请求中间件在入口固定当前一代，Repository 与
+// Service 用 FromContext(ctx) 读取；没有请求上下文时回退到 Current()。本包只
+// 负责生命周期与快照发布。
 package io
 
 import (
@@ -38,6 +39,8 @@ type Module struct {
 	kafkaSet    *appkafka.Set
 	rocketmqSet *approcketmq.Set
 	uuidintSet  *appuuidint.Set
+	// snapshot 是本代句柄的只读视图，Start 发布、Stop 只撤回仍指向自己的快照。
+	snapshot *Snapshot
 }
 
 // NewModuleFactory builds the module from the application runtime.
@@ -101,7 +104,8 @@ func (m *Module) Start(ctx context.Context) error {
 		_ = dbSet.Close()
 		return err
 	}
-	uuidintSet, err := appuuidint.Open(m.uuidintCfg, m.rt.Logger)
+	// 生成器绑定本代 Redis 客户端，取号不再依赖最后安装的包级 Registry。
+	uuidintSet, err := appuuidint.Open(m.uuidintCfg, m.rt.Logger, redisSet.Client(m.uuidintCfg.RedisInstanceName()))
 	if err != nil {
 		_ = rocketmqSet.Close()
 		_ = kafkaSet.Close()
@@ -131,12 +135,17 @@ func (m *Module) Start(ctx context.Context) error {
 	rocketmqSet.Install()
 	// uuidint 依赖 redis 的命名实例，放在 redis 安装之后发布。
 	uuidintSet.Install()
+	// 快照在本代全部句柄就绪后一次发布；请求中间件从这里取连接。
+	m.snapshot = newSnapshot(dbSet, redisSet, amqpSet, kafkaSet, rocketmqSet, uuidintSet)
+	Publish(m.snapshot)
 	return nil
 }
 
 // Stop closes this generation. A reload starts the replacement before stopping
-// the old module, so the old handles never clear the new connections.
+// the old module, so the old snapshot is withdrawn only when it is still the
+// published one and the old handles never clear the new connections.
 func (m *Module) Stop(context.Context) error {
+	current.CompareAndSwap(m.snapshot, nil)
 	return errors.Join(
 		m.dbSet.Close(),
 		m.redisSet.Close(),

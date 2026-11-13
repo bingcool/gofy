@@ -59,7 +59,7 @@ Go 侧最终 ID：`id = prefixNumber + incrId`（19 位数字，`int64` 可容�
 | Option | 说明 | 默认 |
 | --- | --- | --- |
 | `WithClient(*goredis.Client)` | 直接用已有客户端作主连接 | — |
-| `WithInstance(name)` | 用 `support/redis` 命名实例作主连接；每次取号经 `redis.NewIO` 懒解析，热更新后自动用新代 | `default` |
+| `WithInstance(name)` | 用 `support/redis` 命名实例作主连接；每次取号经包级 `redis.NewIO` 懒解析，跟随进程内最后安装的一代 Registry（单 App 兼容路径） | `default` |
 | `WithFallbackClients(...)` | 主连接重试耗尽后依次尝试的客户端 | 无 |
 | `WithFallbackInstances(...)` | 主连接重试耗尽后依次尝试的命名实例 | 无 |
 | `WithTTL(time.Duration)` | 计数 key 的 TTL，至少 1s（Redis EXPIRE 只接受整秒） | `15s` |

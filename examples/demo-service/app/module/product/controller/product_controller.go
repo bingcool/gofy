@@ -4,16 +4,16 @@ import (
 	"context"
 	"errors"
 
+	gofyadapter "github.com/bingcool/gofy-interface-service/apicore/adapter/gofy"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/paging"
+	"github.com/bingcool/gofy-interface-service/apicore/contracts/common/types"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productdto"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productrequest"
+	"github.com/bingcool/gofy-interface-service/appinterface/demoservice/productresponse"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"
-	gofyadapter "gofy/gofy-interface-service/apicore/adapter/gofy"
-	"gofy/gofy-interface-service/apicore/contracts/common/paging"
-	"gofy/gofy-interface-service/apicore/contracts/common/types"
-	"gofy/gofy-interface-service/appinterface/demoservice"
-	"gofy/gofy-interface-service/appinterface/demoservice/productdto"
-	"gofy/gofy-interface-service/appinterface/demoservice/productrequest"
-	"gofy/gofy-interface-service/appinterface/demoservice/productresponse"
 )
 
 var _ demoservice.ProductsService = (*ProductController)(nil)

@@ -2,8 +2,14 @@
 // a validated configuration, an OTLP exporter with batch processing, W3C
 // propagation and instrumentation helpers for Gin, net/http, GORM and Redis.
 //
-// The package owns no global state unless Config.Global is enabled. Callers
-// receive a *Provider and decide when to shut it down.
+// The package installs no process-wide state unless Config.Global is enabled.
+// With Global=false a Provider only owns its SDK tracer provider, exporter and
+// propagator; export failures are logged through the Provider's logger. With
+// Global=true it additionally replaces otel.SetErrorHandler,
+// otel.SetTracerProvider and otel.SetTextMapPropagator. Only one App per
+// process may use Global=true; competing Apps would overwrite each other's
+// globals. Callers receive a *Provider and decide when to shut it down;
+// Shutdown never touches the global providers.
 package otel
 
 import (
@@ -85,9 +91,11 @@ type Config struct {
 	// above are appended, so the last value wins in most backends.
 	Attributes map[string]string `yaml:"attributes"`
 
-	// Global installs the provider and propagator as the process-wide OTel
-	// defaults, so third-party libraries can use them without being wired.
-	// Leave it false when the process hosts more than one App.
+	// Global installs the ErrorHandler, tracer provider and propagator as the
+	// process-wide OTel defaults, so third-party libraries can use them without
+	// being wired. Leave it false when the process hosts more than one App:
+	// every Global App overwrites the previous one's globals. Export failures
+	// are logged through the Provider logger in both modes.
 	Global bool `yaml:"global"`
 
 	// Batch controls the batch span processor.

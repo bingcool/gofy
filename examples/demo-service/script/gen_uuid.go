@@ -16,9 +16,9 @@ import (
 
 // GenUUID generates distributed IDs with support/uuidint.
 //
-// 脚本模式不经过模块生命周期，app/io 的 redis 注册表不会启动；这里按配置把
-// 选中的 redis 实例注册进 support/redis，再走与 app/io 相同的 WithInstance
-// 别名路径，因此脚本能验证真实配置、而不依赖 HTTP 进程。
+// 脚本模式不经过模块生命周期，app/io 的 redis 注册表不会启动；这里按配置打开
+// 选中的 redis 实例，把客户端直接交给生成器（与 app/io 相同的 WithClient 路径），
+// 因此脚本能验证真实配置、而不依赖 HTTP 进程。
 func GenUUID(cfg *config.Config) gofyscript.Script {
 	return gofyscript.Script{
 		Name:  "gen-uuid",
@@ -54,6 +54,10 @@ func GenUUID(cfg *config.Config) gofyscript.Script {
 				return apperr.Internal("configure redis").WithCause(err)
 			}
 			defer func() { _ = reg.Close() }()
+			client, err := reg.NewIO(ctx, alias)
+			if err != nil {
+				return apperr.Internal("connect redis").WithCause(err)
+			}
 
 			usePool, _ := fs.GetBool("pool")
 			if !usePool {
@@ -63,7 +67,7 @@ func GenUUID(cfg *config.Config) gofyscript.Script {
 
 			uidCfg.RedisInstance = alias
 			uidCfg.Key = key
-			set, err := appuuidint.Open(uidCfg, rt.Logger)
+			set, err := appuuidint.Open(uidCfg, rt.Logger, client)
 			if err != nil {
 				return apperr.Internal("build uuidint generator").WithCause(err)
 			}

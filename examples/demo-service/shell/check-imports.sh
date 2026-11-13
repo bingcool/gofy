@@ -11,7 +11,7 @@ fail() {
 module="github.com/yourorg/demo-service"
 module_prefix="$module/app/module/"
 appio_prefix="$module/app/io"
-contract_prefix="gofy/gofy-interface-service"
+contract_prefix="github.com/bingcool/gofy-interface-service"
 support_prefix="github.com/bingcool/gofy/support"
 framework_prefix="github.com/bingcool/gofy"
 
