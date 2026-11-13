@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Contract modules are now free of the gofy framework dependency: the
+  `internal/integration/**` tests moved to `examples/demo-service`, so
+  `examples/interface-service/go.mod` only requires `gofy-interface-api`
+  (one local replace). `gofy new interface-service` now needs only the
+  sibling api library checkout and embeds a 43-file template snapshot.
 - `gofy new interface-service`: scaffolding for a project contract module.
   The command embeds a 51-file snapshot of `examples/interface-service`, rewrites the
   module path and every import, points the two local replaces at sibling `gofy` /

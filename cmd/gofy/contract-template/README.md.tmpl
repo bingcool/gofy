@@ -11,5 +11,6 @@ make check     # fmt/vet/test/test-race/refcheck/golden
 make generate  # 重新生成 openapi/*.yaml 与 *.json
 ```
 
-`go.mod` 里的两条 `replace` 仅供仓库内联调（要求 `gofy` 与 `gofy-interface-api`
-并排 checkout）；真实项目发布时删除 replace，改为固定版本。
+本模块**不依赖 `github.com/bingcool/gofy` 框架**：`appinterface/` 与生成物只引用
+`gofy-interface-api` 的纯契约包。`go.mod` 里唯一的 `replace` 指向本地
+`gofy-interface-api` 仓库，仅供联调；发布时删除并固定版本。

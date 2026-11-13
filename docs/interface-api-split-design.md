@@ -217,7 +217,7 @@ module graph 中（Go 1.17+ 图裁剪后通常不写入主模块 `go.mod` 的显
 - 所有项目无法共享同一份 `endpoint` 语义；
 - `refcheck`、`docsui` 等工具在每个项目里各有一份实现。
 
-两模块方案把“共享实现”和“项目资产”分开，代价是多一个仓库和两条 `replace`（本地联调）。
+两模块方案把“共享实现”和“项目资产”分开，代价是多一个仓库和本地 `replace` 联调。
 
 ### 3.4 承载位置选项
 
@@ -427,13 +427,18 @@ gofy-openapi -serve :8090 -spec ./openapi/all.yaml
 | adapter 绑定、中间件别名注册表、认证声明校验 | api 库，改用 fixture | `contracts`、gofy、gin、fixture |
 | docgen 完整 golden（依赖全量 `Routes()`） | 项目契约模块，挂在 `cmd/openapi` 的生成测试里 | 项目 `appinterface` + api 库 `docgen` |
 | 契约 DTO、强类型客户端测试（`contract_test.go`、`demoserviceclient/*_test.go`） | 项目契约模块 | 项目 `appinterface` + api 库 `client` |
-| 真实契约集成测试（原 `adapter/gofy/*_test.go`、`client/*_test.go`、`docgen/docgen_test.go`、nacos 注册 E2E） | 项目契约模块 `internal/integration/**`，仅 `_test.go`，不进 `appinterface/` | 项目 `appinterface` + api 库 + gofy + gin |
+| 真实契约集成测试（原 `adapter/gofy/*_test.go`、`client/*_test.go`、`docgen/docgen_test.go`、nacos 注册 E2E） | 业务服务模块 `examples/demo-service/internal/integration/**`，仅 `_test.go` | 项目 `appinterface` + api 库 + gofy + gin |
 
 **实施补充**：项目契约的 DTO 带枚举、校验 tag 与多层嵌套，机械替换成 fixture 会
 变成「第二份契约」。因此库侧按行为分支用 `internal/testcontract` 重写（adapter 绑定 /
 中间件顺序 / 认证策略、client 重试 / 超时 / resolver / 请求头、docgen schema），
-原 76 个测试函数则**原样落到项目侧**作为真实契约的端到端回归；两者互补，
-`refcheck -mode contracts` 只检查 `appinterface/`，集成测试目录不触碰硬规则 3。
+原 76 个测试函数则**原样落到业务服务模块**（demo-service 本就依赖 gofy/gin）
+作为真实契约的端到端回归；两者互补，`refcheck -mode contracts` 只检查 `appinterface/`。
+
+**依赖修正**：集成测试最初放在契约模块，会把 gofy/gin 变成为测试服务的 `require`。
+已把 `internal/integration/**` 整体移到 demo-service，契约模块 `go.mod` 只剩
+`gofy-interface-api` 一条 require 与一条 replace，`go list -deps -test ./...` 实测
+gofy 包数为 0。76 个测试仍全部运行，无覆盖流失。
 
 **硬规则**：
 
@@ -443,15 +448,16 @@ gofy-openapi -serve :8090 -spec ./openapi/all.yaml
   生成逻辑失去的端到端回归。
 - 两侧门禁都要跑测试：api 库 `make check` 含 `test-race`（§8.1），项目模块
   `make check` 含 `test` / `test-race`（§5.6、§8.2）。
-- `internal/integration/**` 只放 `_test.go` 与测试 stub，不得放生产代码；这些包
-  由项目 `make check` 的 `test` / `test-race` 覆盖，不进入任何发布产物。
+- `examples/demo-service/internal/integration/**` 只放 `_test.go` 与测试 stub；
+  这些包由 demo-service `make check` 的 `test` / `test-race` 覆盖，不进入发布产物，
+  也不会给契约模块引入 gofy 依赖。
 
 **验收**：阶段 1 / 阶段 2 结束时逐项核对上表，确认测试数量与覆盖范围相对拆分前
 没有流失；`go list -deps -test ./...` 在 api 库中不含任何项目契约模块。
 
 **实施核验（T1-2）**：旧仓库 8 个耦合测试共 **76 个 `Test*` 函数**；
 `client/nacos/resolver_test.go` 的 11 个零改写移回 api 库，其余 65 个落到
-`examples/interface-service/internal/integration/**`（含 1 个 nacos E2E 改写为
+`examples/demo-service/internal/integration/**`（含 1 个 nacos E2E 改写为
 黑盒 + 最小 fake server）。**76 → 11 + 65，一个不少**；api 库另有 41 个
 fixture / endpoint / refcheck / docsui 测试。四套门禁全绿，见 §11.7。
 
@@ -484,9 +490,6 @@ examples/interface-service/            module github.com/yourorg/interface-servi
 ├── cmd/
 │   └── openapi/
 │       └── main.go                    项目本地生成器（约 15 行）
-├── internal/integration/              真实契约集成测试（仅 `_test.go`，见 §4.7）
-│   ├── adapter/  client/  docgen/  nacos/
-│   └── ...                            原库侧 8 个耦合测试的落地点
 └── openapi/
     ├── embed.go                       //go:embed all.* / demoservice.*
     ├── all.yaml  all.json
@@ -511,21 +514,17 @@ module github.com/yourorg/interface-service
 
 go 1.26.0
 
-require (
-    github.com/bingcool/gofy-interface-api v0.0.0
-    // github.com/bingcool/gofy v0.0.0 // indirect，由 go mod tidy 根据 api 库补齐
-)
+require github.com/bingcool/gofy-interface-api v0.0.0
 
-replace (
-    github.com/bingcool/gofy => ../..
-    github.com/bingcool/gofy-interface-api => ../../../gofy-interface-api
-)
+replace github.com/bingcool/gofy-interface-api => ../../../gofy-interface-api
 ```
 
-- `appinterface` 不 import gofy，但 api 库的 `adapter/gofy`、`client/nacos` 依赖 gofy，因此 gofy 会以 indirect 形式进入 module graph；本地 `replace` 只对**主模块**生效，所以项目根必须提供这条 replace（api 库自己的 replace 不会被继承）。
+- `appinterface` 与 `cmd/openapi` 都不 import gofy；api 库里只有 `adapter/gofy`、`client/nacos`
+  依赖 gofy，Go 的惰性模块加载让契约模块无需解析这两个包，实测 `go list -deps -test ./...`
+  中 gofy 包数为 0，因此 `go.mod` 里不出现 `github.com/bingcool/gofy`。
 - `cmd/openapi` 只调用 `docgen.Command`，不直接使用 `openapi3.T`，因此项目不需要显式 require kin-openapi；是否保留为 indirect 由 `go mod tidy` 决定。
-- 本地开发要求 `gofy` 与 `gofy-interface-api` 并排 checkout；这与当前 demo-service 依赖 gofy 的方式一致。
-- 真实项目发布时删除两条 `replace`，改为固定版本。
+- 本地开发只需 `gofy-interface-api` 并排 checkout；契约模块不需要 gofy 仓库。
+- 真实项目发布时删除唯一的 `replace`，改为固定 api 库版本。
 - 仓库内的参考模块保留 `replace`，README 明确标注“仅用于仓库内联调”。
 
 ### 5.4 项目本地生成器
@@ -657,8 +656,8 @@ check: fmt-check vet test test-race refcheck golden
 1. 复制 `examples/interface-service` 到新仓库（不要复制 gofy 仓库）。
 2. `go mod edit -module gitlab.company.com/<group>/interface-service`。
 3. 全量替换 import：`github.com/yourorg/interface-service` → 新 module path。
-4. 删除 `replace`（或保留本地联调的两条，按团队习惯）。
-5. `go mod tidy`，确认 requires 为已发布的 `gofy` 与 `gofy-interface-api` 版本。
+4. 删除唯一的 `replace`（或保留本地联调，按团队习惯）。
+5. `go mod tidy`，确认只 require 已发布的 `gofy-interface-api` 版本，且不出现 `github.com/bingcool/gofy`。
 6. 在 `appinterface/` 下按服务建目录，参照 `demoservice` 的分包规则。
 7. 更新 `cmd/openapi/main.go` 的 `Title` 与 `Prefixes`。
 8. 运行 `make check`，然后把 `openapi/` 生成物提交。
@@ -1125,7 +1124,7 @@ cd examples/demo-service && make check
 **P1 · 主干迁移（M1）**
 
 - [x] T1-1 建 `examples/interface-service` — 25 个文件 import 替换，`go mod tidy` / `go build ./...` / `go test ./...` EXIT=0
-- [x] T1-2 接收迁移测试 — **76 个基线测试函数全部恢复**（库侧 `resolver_test.go` 11 个零改写移回 + 项目侧 `internal/integration/**` 65 个），`testdata/migrated/` 暂存目录已删除；库侧新增 `adapter/gofy/fixture_test.go`（8 个）与 `client/fixture_test.go`（9 个）按行为分支覆盖 §4.7 矩阵；项目 `make check` 与库 `make check` 的 `test` / `test-race` 均 EXIT=0，覆盖核验见 §4.7
+- [x] T1-2 接收迁移测试 — **76 个基线测试函数全部恢复**（库侧 `resolver_test.go` 11 个零改写移回 + `examples/demo-service/internal/integration/**` 65 个），`testdata/migrated/` 暂存目录已删除；库侧新增 `adapter/gofy/fixture_test.go`（8 个）与 `client/fixture_test.go`（9 个）按行为分支覆盖 §4.7 矩阵；项目 `make check` 与库 `make check` 的 `test` / `test-race` 均 EXIT=0，覆盖核验见 §4.7
 - [x] T1-3 生成物对齐 — `all.{yaml,json}`、`demoservice.{yaml,json}` 与 T0-1 基线**逐字节一致**（sha256 完全匹配）；`refcheck -mode contracts` 对真实项目通过
 - [x] T1-4 重接 demo-service — import/go.mod/三类 guard 前缀全量替换，`go mod tidy`/`build`/`test` EXIT=0；`gofy make check` 中的 example 通过
 - [x] T1-5 gofy 侧收尾（guard / check-all / 文档） — 根 Makefile 新增 `example-contracts` + `check-all`（默认 `check` 自足）+ `sync-contract-template`，`shell/check-imports.sh` 加反向依赖守卫、`shell/check-contract-template.sh` 加入 `make guards` 防止内嵌快照与模板漂移；README 与 `support/**`、`examples/demo-service/**` 的源码注释、README 中的历史仓库名已按新拓扑润色（`grep` 残留 0 处），api 库 `client` 的默认 User-Agent 同步改为 `gofy-interface-api/<version>`；**`make check` / `make check-all` / api 库 `make check` / 项目 `make check` 四套门禁均 EXIT=0**。`CHANGELOG.md` 与 `docs/` 设计文档中的旧名属历史记录与 §10 import 映射表，按 §2.3 保留不改。
@@ -1136,8 +1135,15 @@ cd examples/demo-service && make check
 - [!] T2-2 版本发布与兼容矩阵 — 需打两级 semver tag 并改 CHANGELOG，待用户确认
 - [x] T2-3 端到端模板验收 — 复制 `examples/interface-service` → 改写为 `gitlab.acme.com/platform/contracts` → `go mod tidy` → **`make check` EXIT=0**；`openapi.DemoServiceYAML` 经 `docsui.Handler` 挂载后 `/docs` 与 `/openapi.json` 均 200 且返回完整规范（探针 EXIT=0）；`yourorg` 残留 0 个文件；§8.4 三条全部通过
 - [!] T2-4 可选 CI — 双仓 checkout 属外部动作，待用户决定是否启用；当前决策记录见 §11.8，**不启用 CI**，`make check` 仍是唯一默认门禁
-- [x] T2-5 `gofy new interface-service` 脚手架 — `cmd/gofy/interface_service.go` 实现子命令（`--module/--dir/--local-root/--force/--no-git`），`cmd/gofy/contract-template/` 内嵌 51 文件快照（`.tmpl` 避免被 Go 工具链编译），生成时改写 module path 与全部 import、按相对路径重写两条 replace、执行 `go mod tidy` 并初始化 git 供 golden 使用；`shell/sync-contract-template.sh` + `make sync-contract-template` 保持快照同步；CLI 单测 5 项通过，**生成项目首条命令 `make check` EXIT=0**、`yourorg` 残留 0
+- [x] T2-5 `gofy new interface-service` 脚手架 — `cmd/gofy/interface_service.go` 实现子命令（`--module/--dir/--local-root/--force/--no-git`），`cmd/gofy/contract-template/` 内嵌 43 文件快照（`.tmpl` 避免被 Go 工具链编译），生成时改写 module path 与全部 import、按相对路径重写唯一的 api 库 replace（同时支持 replace 块与单行写法）、执行 `go mod tidy` 并初始化 git 供 golden 使用；`shell/sync-contract-template.sh` + `make sync-contract-template` 保持快照同步；CLI 单测 5 项通过，**生成项目首条命令 `make check` EXIT=0**、`yourorg` 残留 0
 - [x] T2-6 条件性评估 — 书面结论见 §11.8：两项均**不启动**并记录触发条件
+
+**依赖修正（用户确认后追加）**：契约模块的生产与测试代码均不依赖 gofy 框架，但
+`internal/integration/**` 曾把 gofy/gin 作为测试依赖带入 `go.mod`。已把这 8 个测试
+整体移到 `examples/demo-service`，契约模块 `go.mod` 只剩 `gofy-interface-api`
+（1 require + 1 replace），`go list -deps -test ./...` 中 gofy 包数为 0。CLI
+`--local-root` 现在只需并排的 api 库，模板快照 51 → 43 文件；四套门禁与 T2-5
+生成项目复验均 EXIT=0。
 
 **里程碑**：M0 ✅ 达成（T0 全关，api 库 `make check` 全绿）；M1 ✅ 全关
 （四套门禁 EXIT=0，76 个基线测试零流失）；M2 ⏸ 可执行项 T2-3 / T2-5 / T2-6 已关闭，

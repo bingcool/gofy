@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 func fakeLocalRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, repo := range []string{"gofy", "gofy-interface-api"} {
+	for _, repo := range []string{"gofy-interface-api"} {
 		dir := filepath.Join(root, repo)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -52,7 +53,6 @@ func TestGenerateContractModuleRewritesEverything(t *testing.T) {
 		"go.mod", "go.sum", "Makefile", "README.md",
 		"cmd/openapi/main.go", "cmd/openapi/main_test.go",
 		"appinterface/demoservice/orderroute/order_route.go",
-		"internal/integration/client/client_test.go",
 		"openapi/all.yaml", "openapi/demoservice.yaml", "openapi/embed.go",
 	}
 	for _, name := range want {
@@ -79,8 +79,23 @@ func TestGenerateContractModuleRewritesEverything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 51 {
-		t.Fatalf("generated %d files, want the full 51-file template", count)
+	expected := 0
+	if err := fs.WalkDir(contractTemplateFS, contractTemplateRoot, func(_ string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			expected++
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != expected {
+		t.Fatalf("generated %d files, want the full %d-file template", count, expected)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal/integration")); !os.IsNotExist(err) {
+		t.Fatal("contract module must not carry gofy-dependent integration tests")
 	}
 
 	goMod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
@@ -92,21 +107,23 @@ func TestGenerateContractModuleRewritesEverything(t *testing.T) {
 		t.Fatalf("go.mod module line: %s", text[:min(len(text), 120)])
 	}
 	absDir, _ := filepath.Abs(dir)
-	wantRel, _ := filepath.Rel(absDir, filepath.Join(root, "gofy"))
-	if !strings.Contains(text, contractGofyModule+" => "+filepath.ToSlash(wantRel)) {
-		t.Fatalf("go.mod replace not rewritten with %q:\n%s", wantRel, text[len(text)-260:])
+	if strings.Contains(text, contractGofyModule+" => ") {
+		t.Fatal("contract module must not carry a gofy replace")
+	}
+	if strings.Contains(text, "require github.com/bingcool/gofy v0.0.0") {
+		t.Fatal("contract module must not require the gofy framework")
 	}
 	for _, stale := range []string{
-		contractGofyModule + " => ../..\n",
-		contractAPIModule + " => ../../../gofy-interface-api\n",
+		contractGofyModule + " => ../..",
+		contractAPIModule + " => ../../../gofy-interface-api",
 	} {
 		if strings.Contains(text, stale) {
 			t.Fatalf("go.mod still contains the template replace %q", stale)
 		}
 	}
 	wantAPIRel, _ := filepath.Rel(absDir, filepath.Join(root, "gofy-interface-api"))
-	if !strings.Contains(text, contractAPIModule+" => "+filepath.ToSlash(wantAPIRel)) {
-		t.Fatalf("api replace not rewritten with %q", wantAPIRel)
+	if !strings.Contains(text, "replace "+contractAPIModule+" => "+filepath.ToSlash(wantAPIRel)) {
+		t.Fatalf("api replace not rewritten with %q:\n%s", wantAPIRel, text[len(text)-220:])
 	}
 
 	generator, err := os.ReadFile(filepath.Join(dir, "cmd/openapi/main.go"))
@@ -156,11 +173,10 @@ func TestGenerateContractModuleRejectsNonEmptyDir(t *testing.T) {
 
 func TestApplyContractReplacesAndBannerAreIdempotent(t *testing.T) {
 	replaces := map[string]string{
-		contractGofyModule: "../../gofy",
-		contractAPIModule:  "../../gofy-interface-api",
+		contractAPIModule: "../../gofy-interface-api",
 	}
 	once := applyContractReplaces(
-		"replace (\n\t"+contractGofyModule+" => ../..\n\t"+contractAPIModule+" => ../../../gofy-interface-api\n)\n", replaces)
+		"replace "+contractAPIModule+" => ../../../gofy-interface-api\n", replaces)
 	twice := applyContractReplaces(once, replaces)
 	if once != twice {
 		t.Fatalf("second apply changed the file:\n%s\n---\n%s", once, twice)

@@ -51,11 +51,11 @@ func newInterfaceServiceCmd() *cobra.Command {
 		Use:   "interface-service",
 		Short: "Create a project contract module (appinterface + OpenAPI generator)",
 		Long: "Create a project contract module from the embedded interface-service template.\n" +
-			"The module path and every import are rewritten, local replaces are pointed at\n" +
-			"the sibling gofy / gofy-interface-api checkouts, and go mod tidy is run so the\n" +
+			"The module path and every import are rewritten, the api library replace is\n" +
+			"pointed at the sibling gofy-interface-api checkout, and go mod tidy is run so the\n" +
 			"first command in the generated project can be `make check`.\n" +
 			"从内嵌的 interface-service 模板创建项目契约模块：改写 module path 与全部 import，\n" +
-			"把本地 replace 指向并排的 gofy / gofy-interface-api 仓库，并执行 go mod tidy，\n" +
+			"把本地 replace 指向并排的 gofy-interface-api 仓库，并执行 go mod tidy，\n" +
 			"使生成项目的第一条命令即可执行 `make check`。",
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -97,7 +97,7 @@ func newInterfaceServiceCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&module, "module", "", "Go module path of the new contract project (required)")
 	cmd.Flags().StringVar(&dir, "dir", "", "output directory (default ./interface-service)")
-	cmd.Flags().StringVar(&localRoot, "local-root", "", "directory holding sibling gofy and gofy-interface-api checkouts (default cwd)")
+	cmd.Flags().StringVar(&localRoot, "local-root", "", "directory holding the sibling gofy-interface-api checkout (default cwd)")
 	cmd.Flags().BoolVar(&force, "force", false, "write into a non-empty directory")
 	cmd.Flags().BoolVar(&noGit, "no-git", false, "skip git init/add (needed by the golden check)")
 	return cmd
@@ -119,9 +119,9 @@ func validateContractModule(module string) error {
 }
 
 // generate writes every template file into Dir, rewriting the module path and
-// the two local replace directives. It performs no external commands so unit
+// the api library replace directive. It performs no external commands so unit
 // tests can exercise the file layout without a Go toolchain.
-// generate 把模板文件写入 Dir，改写 module path 与两条本地 replace。它不执行外部
+// generate 把模板文件写入 Dir，改写 module path 与 api 库的本地 replace。它不执行外部
 // 命令，便于单元测试在不依赖 Go 工具链的情况下检查文件布局。
 func (s contractScaffold) generate() error {
 	dir := filepath.Clean(s.Dir)
@@ -169,8 +169,10 @@ func (s contractScaffold) localReplaces(dir string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The contract module no longer needs gofy at all: only the api library
+	// requires a local checkout until it is published with a fixed version.
+	// 契约模块已完全不需要 gofy；在 api 库发布并固定版本前，只有它需要本地 checkout。
 	checks := []struct{ module, repo string }{
-		{contractGofyModule, "gofy"},
 		{contractAPIModule, "gofy-interface-api"},
 	}
 	out := make(map[string]string, len(checks))
@@ -201,9 +203,18 @@ func applyContractReplaces(goMod string, replaces map[string]string) string {
 	lines := strings.Split(goMod, "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		// go.mod allows both a replace block and a standalone "replace X => Y"
+		// line; keep whichever form the template uses.
+		// go.mod 既支持 replace 块也支持单行 "replace X => Y"，保留模板原有写法。
+		prefix := ""
+		if strings.HasPrefix(trimmed, "replace ") {
+			prefix = "replace "
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "replace "))
+		}
 		for module, rel := range replaces {
 			if strings.HasPrefix(trimmed, module+" => ") {
-				lines[i] = "\t" + module + " => " + rel
+				lines[i] = indent + prefix + module + " => " + rel
 				break
 			}
 		}
