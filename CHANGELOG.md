@@ -744,6 +744,13 @@ All notable changes to this project are documented here. The format follows
   (`--order-id=1222`), and script `Run` errors reach `App.Logger()` because the
   runtime logger is now exposed on the app.
 
+### Changed
+
+- Document why `examples/demo-service/go.mod` must keep its own
+  `gofy-interface-api` replace: Go only honours replace directives in the main
+  module, and `v0.0.0` is an unpublished placeholder. §5.3 / §6.2 / §11.8
+  record the three experiments and defer removal to the publish step (T2-2).
+
 ### Removed
 
 - The legacy `gofy-interface-service` contract repository has been deleted by

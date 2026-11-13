@@ -526,6 +526,9 @@ replace github.com/bingcool/gofy-interface-api => ../../../gofy-interface-api
 - 本地开发只需 `gofy-interface-api` 并排 checkout；契约模块不需要 gofy 仓库。
 - 真实项目发布时删除唯一的 `replace`，改为固定 api 库版本。
 - 仓库内的参考模块保留 `replace`，README 明确标注“仅用于仓库内联调”。
+- **`replace` 只对主模块生效**：契约模块自己写的 replace 不会被上游业务服务继承；
+  业务服务即使通过本模块间接依赖 api 库，也必须在自己的 go.mod 里再写一条
+  （规则、实测依据与删除时机见 §6.2）。发布后统一改为固定版本并删除。
 
 ### 5.4 项目本地生成器
 
@@ -706,6 +709,23 @@ replace (
     github.com/yourorg/interface-service => ../interface-service
 )
 ```
+
+> **`gofy-interface-api` 这条 replace 不是冗余（2026-11-13 实测）**。Go 只读取
+> **主模块** go.mod 的 replace，`examples/interface-service/go.mod` 里那条对
+> demo-service 完全无效；「契约模块已 require api 库」只提供版本声明，不提供源码位置。
+>
+> - demo-service 有 6 个生产文件直接 import api 库的 8 个包（`adapter/gofy`、
+>   `client/nacos`、`contracts/common/{endpoint,paging,types,errcode}`、`docgen`），
+>   所以 `require` 也必须是直接依赖，`go mod tidy` 会自动加回；
+> - `v0.0.0` 是本地占位版本、GitHub 上不存在该 tag。删掉 replace 后
+>   `go list -m` 报 `unknown revision v0.0.0`，`go build ./...` 报 5 处
+>   `missing go.sum entry`，`go mod tidy -diff` 尝试联网下载失败；
+> - 改用 `go.work` 也不成立：workspace 把 gofy 根模块纳入同一 module graph 后触发
+>   `google.golang.org/genproto` 的 ambiguous import，build 与 test 均 FAIL。
+>
+> 唯一删除时机是 §4.6 的发布阶段（T2-2）：api 库打 tag 后把 require 改成
+> `github.com/bingcool/gofy-interface-api vX.Y.Z` 并删除对应 replace；契约模块
+> 的 replace 同时删除。届时 demo-service 的 replace 块只剩仍未发布的模块。
 
 ### 6.3 demo 分层 guard 更新
 
@@ -1162,6 +1182,14 @@ T2-1 已关闭；正式收口待 T2-2 / T2-4 的外部确认。
 **消费方现状**：`examples/demo-service` 是唯一业务消费方，契约模块自身是唯一的契约生产方。
 §2.5 的「单项目不拆」判据在此成立，但拆分已完成且四套门禁全绿，回退成本高于维持，
 故结论为**维持三模块现状、不追加拆分**。复核时点：T2-2 发布后，或出现第二个独立消费方时。
+
+**去 replace 决策（2026-11-13，用户确认）**：用户提出 demo-service 不需要
+`replace github.com/bingcool/gofy-interface-api => ../../../gofy-interface-api`，
+理由是契约模块已 require api 库。三轮实测（删 replace、go.work、workspace 隔离）
+均失败，根因是 replace 不继承加 `v0.0.0` 未发布。结论为**保持现状**，
+规则与实测依据写入 §5.3 / §6.2；删除动作并入 T2-2 发布，不新设独立任务。
+让契约模块 re-export `adapter/gofy` 以消去业务服务的直接依赖同样被否决：
+它会把 gofy 重新带回契约模块，推翻「契约模块零 gofy」的结论。
 
 **CI 决策（T2-4）**：仓库无 CI 配置，`make check` 为唯一默认门禁；`make check-all`
 需并排 checkout `gofy-interface-api`。本轮**不启用 CI**，理由是当前只有一个消费方、
