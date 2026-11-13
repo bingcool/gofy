@@ -547,7 +547,8 @@ HTTP POST /api/v1/order/orders
 
 ## 10. import guard 规则（替换现有 §8）
 
-`examples/demo-service/shell/check-imports.sh` 改为按层校验（仍只查非测试文件）：
+`examples/demo-service/shell/check-imports.sh` 改为按层校验（仍只查非测试文件），
+取用规则由 `examples/demo-service/shell/check-io-access.sh` 单独校验：
 
 1. `controller`：只允许 import 本模块 `service` 与 HTTP 契约包
    （`github.com/bingcool/gofy-interface-service/...`）；禁止任何 `model` / `repository` / `innerapi` /
@@ -560,7 +561,12 @@ HTTP POST /api/v1/order/orders
    本模块 `model` + `app/io` + `support`；
 5. `model`：禁止任何 `app/module` / 契约 / `app/io` 依赖；
 6. 删除「一个包最多 import 一个其他模块 repository」旧规则，由规则 2 取代；
-7. 包依赖成环仍由 `go build` 兜底（innerapi 无回边，天然无环）。
+7. 包依赖成环仍由 `go build` 兜底（innerapi 无回边，天然无环）；
+8. `service` 与 `repository` 只允许经 `appio.WithContext(ctx)` 取本代句柄：
+   禁止调用 `appdb.Default` / `appredis.Cache` 等包级访问器，也禁止自行
+   `Publish`。HTTP、脚本、守护进程共用这两层代码，入口负责发布一代，这两层只
+   负责消费，否则同一份代码会出现第二种取法。发布与固定机制来自
+   `support/generation`，`app/io` 只是薄封装。
 
 规则按 `app/module/<name>/<layer>/...` 匹配：模块根（`app/module/<name>`）只做路由
 绑定，`app/container` 只做装配，两者都不在分层检查范围内。容器是唯一允许同时

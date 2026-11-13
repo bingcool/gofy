@@ -554,6 +554,12 @@ client/service，按名字取用（`Get[T]` 带类型检查）；空名字、nil
 都直接报错，每次启动/热更新新建一份，不做包级全局。见
 [support/registry/README.md](support/registry/README.md)。
 
+持有代际资源（DB/Redis 连接等）的服务用 `support/generation` 保证一次请求只
+使用同一代：入口（HTTP 中间件、脚本、守护进程）发布并固定当前代，共享代码只
+调用 `WithContext(ctx)`；Reload 期间固定值优先，旧模块停止时用
+`CompareAndSwap` 只撤回自己那一代。见
+[support/generation/README.md](support/generation/README.md)。
+
 ## Nacos 配置中心
 
 `support/nacos` 直接调用 Nacos Open API（不引入 SDK）：启动时把远端配置写成
@@ -860,6 +866,7 @@ support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全�
 logger/       zap 日志构建（主/system/access）、滚动策略与 GORM 适配
 support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、契约别名注册表
 support/registry/ 通用 name -> instance 注册表（可选；单实现由 app/container 注入）
+support/generation/ 当前一代句柄的原子发布与请求级固定（跨 Reload 不换资源）
 support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
 support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
 support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）

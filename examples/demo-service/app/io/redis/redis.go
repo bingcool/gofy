@@ -1,8 +1,8 @@
 // Package redis exposes the demo's named Redis instances.
 //
-// 业务代码通过快照取连接（appio.WithContext(ctx).Redis(name)），
-// 无请求上下文时用 Cache()、Session()、RateLimit()。当前一代的 Set 用
-// atomic.Pointer 整体发布，enabled 为 false 的实例保持 nil。
+// 业务代码通过快照取连接（appio.WithContext(ctx).Redis(name)），脚本、守护
+// 进程与请求走同一条路径。当前一代的 Set 用 atomic.Pointer 整体发布，
+// enabled 为 false 的实例保持 nil。
 package redis
 
 import (

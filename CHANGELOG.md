@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/generation`: the publish-and-pin mechanism behind the demo's IO
+  snapshot is now a framework package. `generation.NewSet[T](name)` keeps one
+  current generation in an `atomic.Pointer`, `Publish`/`Current` swap and read
+  it without locks, `CompareAndSwap` lets a stopped module withdraw only its own
+  generation, `WithSnapshot` pins a generation to a context and `WithContext`
+  resolves pinned-first with a `Current()` fallback, panicking with the set name
+  when neither exists. `Middleware` pins the entry generation for gin, and
+  several sets in one process stay isolated. `examples/demo-service/app/io` now
+  builds `currentSnapshot = generation.NewSet[Snapshot]("app/io")` and its
+  `Current`/`Publish`/`WithSnapshot`/`WithContext`/`Middleware` delegate to the
+  package, making the demo a usage example rather than the only implementation;
+  `Module.Stop` withdraws its generation through `CompareAndSwap`.
 - `logger.Config.AccessOutputs` (`access_outputs`) and `logger.NewAccess`:
   HTTP access entries can be written to their own outputs instead of the
   application logger. `NewAccess` accepts Info and above (access entries pick
@@ -495,6 +507,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: `appio.WithContext` now panics when neither the
+  context nor the published generation carries a snapshot, instead of returning
+  a nil handle that panicked later inside GORM. Every entry point (request
+  middleware, script `withIO`, io module `Start`) publishes before shared code
+  runs, so a missing generation is a wiring bug and should surface at the first
+  lookup. A new `shell/check-io-access.sh` guard, wired into `make guards` in
+  both the demo and the root Makefile, rejects package-level handle accessors
+  (`appdb.Default()`, `appredis.Cache()`, ...) and self-published snapshots in
+  `service` and `repository` packages, keeping `appio.WithContext(ctx)` the only
+  lookup path for code shared by requests, scripts and daemons.
 - `examples/demo-service`: the `nacos-watch` module now runs its watcher and
   the reload executor on separate goroutines. `Stop` cancels the watcher and
   waits for it to exit before the generation's handles are released, which the

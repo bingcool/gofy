@@ -14,6 +14,7 @@ test:
 
 guards:
 	./shell/check-imports.sh
+	./shell/check-io-access.sh
 
 check: guards test
 

@@ -141,7 +141,8 @@ func Register(cfg *config.Config) []gofyscript.Script {
 取本代快照。为此 `register.go` 用 `withIO` 包一层：`Run` 之前
 `appio.NewModule(...).Start` 打开并发布完整的一代（`db`、`redis`、`amqp`、
 `kafka`、`rocketmq`、`uuidint`），`Run` 返回后 `Stop` 关闭并撤回，与一次请求
-借用已发布一代的方式一致。`fix-order` 因此不需要自己发布快照。
+借用已发布一代的方式一致。`fix-order` 因此不需要自己发布快照。共用代码在入口
+没发布本代时会直接 panic（`appio.WithContext`），不会带着 nil 句柄继续跑。
 
 代价是脚本会按 `config.yaml` 建连全部启用的实例：某个启用中的实例不可达时脚本
 在 `Start` 阶段就失败（退出码 `1`），不会带着缺失的句柄跑下去。只需要少数实例

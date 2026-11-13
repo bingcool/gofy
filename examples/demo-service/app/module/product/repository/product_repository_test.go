@@ -9,13 +9,19 @@ import (
 )
 
 func TestConnResolvesInstalledSnapshot(t *testing.T) {
-	t.Cleanup(func() { appio.Publish(nil) })
+	prev := appio.Current()
+	t.Cleanup(func() { appio.Publish(prev) })
 	appio.Publish(nil)
 
 	r := &ProductRepository{}
-	if got := r.conn(context.Background()); got != nil {
-		t.Fatal("conn should be nil before app/io publishes a snapshot")
-	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("conn did not panic without a published snapshot")
+			}
+		}()
+		_ = r.conn(context.Background())
+	}()
 
 	db := &gorm.DB{}
 	appio.PublishDB(db)

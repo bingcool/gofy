@@ -3,9 +3,15 @@
 // connections: Start opens and installs them, Stop closes them, and a reload
 // rebuilds them together with the module.
 //
+// The publish/pin mechanics come from support/generation; this package only
+// assembles one generation of handles and declares the demo's entry points
+// (Middleware, WithContext, and the module lifecycle).
+//
 // 业务代码通过 Snapshot 取连接：请求中间件在入口固定当前一代，Repository 与
-// Service 用 WithContext(ctx) 读取；没有请求上下文时回退到 Current()。本包只
-// 负责生命周期与快照发布。
+// Service 用 WithContext(ctx) 读取；没有请求上下文时回退到 Current()，两者都没
+// 有说明入口没有发布，直接 panic。发布与固定机制由 support/generation 提供，
+// 本包只负责组装一代句柄并声明 demo 的入口（Middleware、WithContext、模块
+// 生命周期）。
 package io
 
 import (
@@ -158,7 +164,7 @@ func (m *Module) Start(ctx context.Context) error {
 // Stop 关闭本代全部句柄。Reload 先启动新模块再停旧模块，因此只撤回仍指向自己的
 // 快照，旧句柄不会清掉新连接。
 func (m *Module) Stop(context.Context) error {
-	current.CompareAndSwap(m.snapshot, nil)
+	currentSnapshot.CompareAndSwap(m.snapshot, nil)
 	return errors.Join(
 		m.dbSet.Close(),
 		m.redisSet.Close(),

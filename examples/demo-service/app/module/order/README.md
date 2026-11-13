@@ -385,7 +385,8 @@ func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
 ```
 
 `appio.WithContext(ctx)` 优先取请求进入时固定的快照，没有时回退到当前已发布的
-快照，因此脚本、消费者这类不经过 HTTP 中间件的调用也能拿到连接。
+快照，因此脚本、消费者这类不经过 HTTP 中间件的调用也能拿到连接；两者都没有说明
+入口没有发布本代，直接 panic，不会把 nil 连接交给下游。
 
 订单 service 的 `Create` 用 `gofydb.Transaction(ctx, appio.WithContext(ctx).DB(), fn)`
 开启事务，事务会放进传给 `fn` 的 context；扣库存与建订单都在 `fn` 里用同一个
@@ -632,7 +633,7 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
 
 `make guards`（根仓库 `make check` 也会调用）运行
 `examples/demo-service/shell/check-imports.sh`，按层强制 import 边界（规则见
-[`docs/module-layering-design.md`](../../../../docs/module-layering-design.md) §10）：
+[`docs/module-layering-design.md`](../../../../docs/module-layering-design.md) §10）；
 
 | 层 | 允许的跨包 import | 禁止 |
 | --- | --- | --- |
@@ -648,6 +649,11 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
 （`go list` 的 `.Imports` 不含 `_test.go`），可以同时引用多个模块的 model 和
 repository 来建 SQLite 库。包依赖成环由 `go build` 兜底（innerapi 无回边，天然
 无环），guard 不重复检查。
+
+同一轮 guard 还运行 `examples/demo-service/shell/check-io-access.sh`：`service`
+与 `repository` 只能经 `appio.WithContext(ctx)` 取本代句柄，调用
+`appdb.Default()`、`appredis.Cache()` 等包级访问器或自行 `Publish` 都会被拒绝。
+这三层代码在 HTTP、脚本、守护进程之间共用，取法只能有一种。
 
 新增路由时，先在 `gofy-interface-service` 里补契约描述符，再在
 `gofyadapter.BindGroup` 的绑定范围内实现 controller 方法即可；路径、校验和

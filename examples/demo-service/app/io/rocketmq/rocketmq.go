@@ -1,7 +1,7 @@
 // Package rocketmq exposes the demo's named RocketMQ producers.
 //
-// 业务代码通过快照取连接（appio.WithContext(ctx).RocketMQ(name)），无请求上下文
-// 时用 Default() 或 Get("order")。当前一代的 Set 用 atomic.Pointer 整体发布，
+// 业务代码通过快照取连接（appio.WithContext(ctx).RocketMQ(name)），脚本、守护
+// 进程与请求走同一条路径。当前一代的 Set 用 atomic.Pointer 整体发布，
 // enabled 为 false 的实例不建连，因此本地没有 RocketMQ 也能启动。
 //
 // v5 的消费者不属于生产者客户端，且只有拉取模式的 SimpleConsumer：需要消费时

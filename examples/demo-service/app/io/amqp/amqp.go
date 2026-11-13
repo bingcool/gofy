@@ -1,7 +1,7 @@
 // Package amqp exposes the demo's named AMQP (RabbitMQ) connections.
 //
-// 业务代码通过快照取连接（appio.WithContext(ctx).AMQP(name)），无请求上下文
-// 时用 Default() 或 Get("order")。当前一代的 Set 用 atomic.Pointer 整体发布，
+// 业务代码通过快照取连接（appio.WithContext(ctx).AMQP(name)），脚本、守护进程
+// 与请求走同一条路径。当前一代的 Set 用 atomic.Pointer 整体发布，
 // enabled 为 false 的实例不建连，因此本地没有 RabbitMQ 也能启动。
 package amqp
 

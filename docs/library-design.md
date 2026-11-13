@@ -131,6 +131,7 @@ github.com/bingcool/gofy/
 │   ├── securityheaders.go       # 安全响应头配置
 │   ├── middleware/              # 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、别名注册表
 │   ├── registry/                # 通用 name -> instance 注册表（Register/Lookup/Names/Get[T]）
+│   ├── generation/              # 当前一代句柄的发布、请求级固定与按代撤回
 │   ├── ratelimit/               # Store 接口与内存滑窗
 │   │   └── redisstore/          # Redis 共享限流存储
 │   ├── cache/                   # 基于注入 Redis 实例的键值缓存
@@ -185,7 +186,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -197,6 +198,7 @@ gofy (root)
  ├── core
  ├── support ──> apperr, core, support/jwtauth, support/ratelimit
  ├── support/middleware ──> support, support/headerpropagation, support/frameworkcontext
+ ├── support/generation ──> gin
  ├── support/ratelimit/redisstore ──> support/ratelimit, support/redis
  ├── support/cache ──> go-redis
  ├── support/queues ──> go-redis
@@ -1705,6 +1707,37 @@ names := reg.Names()                          // 排序副本，供启动日志
 - 与 `support/middleware.Registry` 分工：后者强类型、只存中间件，由 Router 解析
   契约别名；通用注册表存任意实例，两者不合并。
 
+### 3.7.9 `support/generation`
+
+跨入口的「当前一代」发布与固定机制。热更新时旧一代正在关闭、新请求仍在进入；
+请求一旦进入，就必须从头到尾使用同一代句柄。这套机制原先是 demo `app/io` 的
+内部实现，现在下沉为框架能力，任何持有代际资源的服务都可以复用。
+
+```go
+current := generation.NewSet[Snapshot]("app/io") // 装配根创建一次，进程内复用
+current.Publish(snapshot)                        // 模块 Start：一代就绪后一次发布
+current.CompareAndSwap(snapshot, nil)            // 模块 Stop：只撤回自己那一代
+engine.Use(current.Middleware())                 // HTTP 入口：固定进入时的当前代
+ctx = current.WithSnapshot(ctx, snapshot)        // 脚本 / 守护进程入口：直接固定
+snapshot := current.WithContext(ctx)             // 共享代码：只读固定代
+```
+
+- `Publish(nil)` 撤回发布；`Current()` 在未发布时返回 `nil`；
+- `WithContext` 先取 ctx 固定值，没有才回退 `Current()`；两者都没有直接 panic，
+  信息带 `NewSet` 传入的集合名，避免 nil 句柄在离现场很远的地方解引用；
+- `CompareAndSwap` 供模块 `Stop` 使用：`Reload` 先启动新一代再停旧代，旧代只
+  撤回仍指向自己的那一代，不会抹掉下一代；
+- `Middleware` 在请求入口把当前代固定进 ctx；未发布时原样放行，由
+  `WithContext` 在首次取用时报告；
+- 一个进程可以创建多个 `Set`，不同 `Set` 的固定值互不可见；`Set` 内含原子
+  指针，首次使用后不可复制；
+- 只依赖 `gin`，不读配置、不建连、不打印日志；与 `support/registry`（按名字取
+  装配期实例）职责不同，互不替代；
+- demo 的 `app/io` 是完整示例（见 §9.3.1）：`Snapshot` 汇总一代句柄，
+  `currentSnapshot = generation.NewSet[Snapshot]("app/io")`，导出的
+  `Current` / `Publish` / `WithSnapshot` / `WithContext` / `Middleware` 只是
+  薄封装。
+
 ### 3.8 `script`
 
 ```go
@@ -2776,7 +2809,7 @@ func (s *Snapshot) RedisNewIO(context.Context, string) (*goredis.Client, error)
 func (s *Snapshot) AMQPNewIO/KafkaNewIO/RocketMQNewIO(context.Context, string) (...)
 
 func WithSnapshot(context.Context, *Snapshot) context.Context
-func WithContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()
+func WithContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()；两者都没有直接 panic
 func Middleware() support.Middleware         // 请求入口固定当前一代
 ```
 
@@ -2785,6 +2818,11 @@ o, err := appio.WithContext(ctx).DBInstance("order").WithContext(ctx).First(&ord
 s, err := appio.WithContext(ctx).Redis("cache").Get(ctx, "order:1").Result()
 client, err := appio.WithContext(ctx).RedisNewIO(ctx, "ratelimit") // 首次访问才建连
 ```
+
+发布与固定机制由 `support/generation`（§3.7.9）提供：`app/io` 只是把
+`generation.NewSet[Snapshot]("app/io")` 包一层，`Current` / `Publish` /
+`WithSnapshot` / `WithContext` / `Middleware` 都是薄封装，`Module.Stop` 用
+`CompareAndSwap` 撤回本代。其它服务按同样方式复用，不必再实现一套。
 
 生命周期由 `app/io` 统一管理：`Start` 依次打开 db、redis、amqp、kafka、
 rocketmq、uuidint 的 `Set`（各自用本代 `NewRegistry` 建连），全部就绪后按序

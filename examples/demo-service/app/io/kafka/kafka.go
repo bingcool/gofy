@@ -1,7 +1,7 @@
 // Package kafka exposes the demo's named Kafka connections.
 //
-// 业务代码通过快照取连接（appio.WithContext(ctx).Kafka(name)），无请求上下文
-// 时用 Default() 或 Get("order")。当前一代的 Set 用 atomic.Pointer 整体发布，
+// 业务代码通过快照取连接（appio.WithContext(ctx).Kafka(name)），脚本、守护进程
+// 与请求走同一条路径。当前一代的 Set 用 atomic.Pointer 整体发布，
 // enabled 为 false 的实例不建连，因此本地没有 Kafka 也能启动。Producer 和
 // Consumer 用这里的 Client 创建：Producer 共享连接，Consumer 会为消费者组
 // 单独建一个客户端。

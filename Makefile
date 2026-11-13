@@ -29,6 +29,7 @@ example:
 guards:
 	./shell/check-imports.sh
 	$(EXAMPLE)/shell/check-imports.sh
+	$(EXAMPLE)/shell/check-io-access.sh
 	@if grep -rn "func init()" --include="*.go" *.go apperr core logger support script command config gofytest internal; then \
 		echo "public packages must not use init()"; exit 1; \
 	fi

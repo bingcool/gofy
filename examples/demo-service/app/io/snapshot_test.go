@@ -39,9 +39,19 @@ func TestMiddlewarePinsSnapshotPerRequest(t *testing.T) {
 	if Current() != nil {
 		t.Fatal("test did not withdraw the published snapshot")
 	}
-	if WithContext(context.Background()) != nil {
-		t.Fatal("WithContext fell back to a non-nil snapshot")
-	}
+}
+
+func TestWithContextPanicsWithoutGeneration(t *testing.T) {
+	prev := Current()
+	t.Cleanup(func() { Publish(prev) })
+	Publish(nil)
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithContext did not panic without a published generation")
+		}
+	}()
+	WithContext(context.Background())
 }
 
 func TestSnapshotNewIORequiresGenerationRegistry(t *testing.T) {
