@@ -295,13 +295,14 @@ func TestApplyLogPathsFollowsServiceMode(t *testing.T) {
 		info   string
 		error  string
 		system string
+		access string
 	}{
-		{"http start", []string{"start"}, filepath.Join("storage", "log", "http"), "info.log", "error.log", "system_error.log"},
-		{"http stop", []string{"stop"}, filepath.Join("storage", "log", "http"), "info.log", "error.log", "system_error.log"},
-		{"script", []string{"script", "fix-order", "--order-id=1"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "fix-order.log"), filepath.Join("error", "fix-order.log"), filepath.Join("error", "fix-order-system_error.log")},
-		{"script spaces removed", []string{"script", "Fix Order"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "FixOrder.log"), filepath.Join("error", "FixOrder.log"), filepath.Join("error", "FixOrder-system_error.log")},
-		{"script path characters removed", []string{"script", "../../etc/passwd"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "etcpasswd.log"), filepath.Join("error", "etcpasswd.log"), filepath.Join("error", "etcpasswd-system_error.log")},
-		{"script list", []string{"script", "--list"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "info.log"), filepath.Join("error", "error.log"), filepath.Join("error", "system_error.log")},
+		{"http start", []string{"start"}, filepath.Join("storage", "log", "http"), "info.log", "error.log", "system_error.log", filepath.Join("storage", "log", "access", "access.log")},
+		{"http stop", []string{"stop"}, filepath.Join("storage", "log", "http"), "info.log", "error.log", "system_error.log", filepath.Join("storage", "log", "access", "access.log")},
+		{"script", []string{"script", "fix-order", "--order-id=1"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "fix-order.log"), filepath.Join("error", "fix-order.log"), filepath.Join("error", "fix-order-system_error.log"), ""},
+		{"script spaces removed", []string{"script", "Fix Order"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "FixOrder.log"), filepath.Join("error", "FixOrder.log"), filepath.Join("error", "FixOrder-system_error.log"), ""},
+		{"script path characters removed", []string{"script", "../../etc/passwd"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "etcpasswd.log"), filepath.Join("error", "etcpasswd.log"), filepath.Join("error", "etcpasswd-system_error.log"), ""},
+		{"script list", []string{"script", "--list"}, filepath.Join("storage", "log", "script", "{date}"), filepath.Join("info", "info.log"), filepath.Join("error", "error.log"), filepath.Join("error", "system_error.log"), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -323,6 +324,15 @@ func TestApplyLogPathsFollowsServiceMode(t *testing.T) {
 					t.Fatalf("%s log = %q, want %q", check.name, check.got, check.want)
 				}
 			}
+			if tc.access == "" {
+				if len(cfg.Log.AccessOutputs) != 0 {
+					t.Fatalf("script mode must not write an access log, got %v", cfg.Log.AccessOutputs)
+				}
+				return
+			}
+			if got := cfg.Log.AccessOutputs[len(cfg.Log.AccessOutputs)-1]; got != tc.access {
+				t.Fatalf("access log = %q, want %q", got, tc.access)
+			}
 		})
 	}
 }
@@ -338,5 +348,8 @@ func TestApplyLogPathsKeepsConfiguredOutputs(t *testing.T) {
 
 	if len(cfg.Log.Outputs) != 2 || cfg.Log.Outputs[0] != "stdout" {
 		t.Fatalf("outputs = %v", cfg.Log.Outputs)
+	}
+	if len(cfg.Log.AccessOutputs) != 1 {
+		t.Fatalf("access outputs = %v", cfg.Log.AccessOutputs)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/internal/process"
-	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/middleware"
@@ -51,11 +50,11 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	a.cancel = cancel
 	a.setState(stateRunning)
 
-	lg, system, own, err := a.buildLoggers()
+	lg, system, access, own, err := a.buildLoggers()
 	if err != nil {
 		return nil, a.abort(err)
 	}
-	a.setLogger(lg, system, own)
+	a.setLogger(lg, system, access, own)
 
 	telemetry, err := a.buildTelemetry(runCtx, lg)
 	if err != nil {
@@ -86,7 +85,7 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	})
 	a.rt = rt
 
-	engine, modules, err := a.buildHTTP(rt, lg, system)
+	engine, modules, err := a.buildHTTP(rt, lg, system, access)
 	if err != nil {
 		return nil, a.abort(err)
 	}
@@ -102,11 +101,11 @@ func (a *App) run(parent context.Context) error {
 	ctx, cancel := context.WithCancelCause(parent)
 	a.cancel = cancel
 
-	lg, system, own, err := a.buildLoggers()
+	lg, system, access, own, err := a.buildLoggers()
 	if err != nil {
 		return a.abort(err)
 	}
-	a.setLogger(lg, system, own)
+	a.setLogger(lg, system, access, own)
 
 	telemetry, err := a.buildTelemetry(ctx, lg)
 	if err != nil {
@@ -137,7 +136,7 @@ func (a *App) run(parent context.Context) error {
 	})
 	a.rt = rt
 
-	engine, modules, err := a.buildHTTP(rt, lg, system)
+	engine, modules, err := a.buildHTTP(rt, lg, system, access)
 	if err != nil {
 		return a.abort(err)
 	}
@@ -178,7 +177,7 @@ func (a *App) run(parent context.Context) error {
 	gen := newGeneration(1, engine)
 	gen.started = a.factoryStarted()
 	gen.db, gen.ownDB = db, ownDB
-	gen.logger, gen.systemLogger, gen.ownLogger = lg, system, own
+	gen.logger, gen.systemLogger, gen.accessLogger, gen.ownLogger = lg, system, access, own
 	// The server keeps this wrapper for its whole life; Reload only swaps the
 	// generation stored inside it, so the listener is never touched.
 	// server 整个生命周期都持有这个包装器；Reload 只替换其中存放的 generation，
@@ -247,11 +246,11 @@ func (a *App) run(parent context.Context) error {
 	return reason
 }
 
-func (a *App) buildHTTP(rt *core.Runtime, lg, system *zap.Logger) (*gin.Engine, []support.Module, error) {
-	return a.buildHTTPWith(rt, lg, system, a.opts.moduleFactories, a.opts.modules, a.opts.middlewareRegistrars)
+func (a *App) buildHTTP(rt *core.Runtime, lg, system, access *zap.Logger) (*gin.Engine, []support.Module, error) {
+	return a.buildHTTPWith(rt, lg, system, access, a.opts.moduleFactories, a.opts.modules, a.opts.middlewareRegistrars)
 }
 
-func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories []support.ModuleFactory, injected []support.Module, registrars []MiddlewareRegistrar) (*gin.Engine, []support.Module, error) {
+func (a *App) buildHTTPWith(rt *core.Runtime, lg, system, access *zap.Logger, factories []support.ModuleFactory, injected []support.Module, registrars []MiddlewareRegistrar) (*gin.Engine, []support.Module, error) {
 	gin.SetMode(ginMode(a.opts.http.Mode))
 	engine := gin.New()
 	registry := middleware.NewRegistry()
@@ -350,7 +349,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system *zap.Logger, factories 
 		if a.opts.accessLogOptions != nil {
 			accessLogOpts = *a.opts.accessLogOptions
 		}
-		accessLog := middleware.AccessLog(lg, accessLogOpts)
+		accessLog := middleware.AccessLog(access, accessLogOpts)
 		engine.Use(accessLog)
 		if err := register(middleware.NameAccessLog, accessLog); err != nil {
 			return nil, nil, err
@@ -830,10 +829,7 @@ func (a *App) cleanup() error {
 			}
 		}
 		if a.ownLogger {
-			_ = logger.Sync(a.logger)
-			if a.systemLogger != nil && a.systemLogger != a.logger {
-				_ = logger.Sync(a.systemLogger)
-			}
+			syncLoggers(a.logger, a.systemLogger, a.accessLogger)
 		}
 
 		a.cleanupErr = errors.Join(errs...)

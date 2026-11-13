@@ -574,6 +574,143 @@ func mustReadFile(t *testing.T, path string) []byte {
 	return data
 }
 
+// TestAccessLogUsesSeparateOutputs proves access_outputs separates HTTP access
+// entries from runtime logs: 2xx/5xx access entries and the middleware's own
+// Warn/Error levels land in the access file, while Info/Error runtime entries
+// stay in the application and error files.
+// TestAccessLogUsesSeparateOutputs 证明 access_outputs 把 HTTP 访问日志与运行态
+// 日志分开：2xx/5xx 访问条目及中间件自身的 Warn/Error 落在访问文件，运行态的
+// Info/Error 仍写入应用与错误文件。
+func TestAccessLogUsesSeparateOutputs(t *testing.T) {
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "http", "info.log")
+	errorPath := filepath.Join(dir, "http", "error.log")
+	accessPath := filepath.Join(dir, "access", "access.log")
+
+	module := &testModule{
+		name: "catalog",
+		reg: func(r *support.Router) error {
+			r.GET("/ok", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+			r.GET("/fail", func(c *gin.Context) { c.Status(http.StatusInternalServerError) })
+			return nil
+		},
+	}
+	app, err := gofy.New(
+		gofy.WithName("access-log-split"),
+		gofy.WithPIDFile(""),
+		gofy.WithLogConfig(logger.Config{
+			Outputs:       []string{infoPath},
+			ErrorOutputs:  []string{errorPath},
+			AccessOutputs: []string{accessPath},
+		}),
+		gofy.WithModules(module),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := app.Handler(context.Background())
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	app.Logger().Info("runtime info")
+	app.Logger().Error("runtime error")
+
+	for _, path := range []string{"/catalog/ok", "/catalog/fail"} {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	infoLog := string(mustReadFile(t, infoPath))
+	if !strings.Contains(infoLog, "runtime info") || strings.Contains(infoLog, "http access") {
+		t.Fatalf("runtime info log = %q", infoLog)
+	}
+	errorLog := string(mustReadFile(t, errorPath))
+	if !strings.Contains(errorLog, "runtime error") || strings.Contains(errorLog, "http access") {
+		t.Fatalf("runtime error log = %q", errorLog)
+	}
+	accessLog := string(mustReadFile(t, accessPath))
+	if strings.Count(accessLog, `"msg":"http access"`) != 2 {
+		t.Fatalf("access log = %q", accessLog)
+	}
+	if !strings.Contains(accessLog, `"status":204`) || !strings.Contains(accessLog, `"status":500`) {
+		t.Fatalf("access log lost statuses: %q", accessLog)
+	}
+	if strings.Contains(accessLog, "runtime") {
+		t.Fatalf("access log captured runtime entries: %q", accessLog)
+	}
+}
+
+// TestReloadRebuildsAccessLogger proves Reload replaces the access logger with
+// the new outputs: after the swap, access entries go to the new file and the
+// old file stops growing, while runtime logs follow their own config.
+// TestReloadRebuildsAccessLogger 证明 Reload 会按新配置替换访问 logger：换代后
+// 访问条目写入新文件、旧文件不再增长，运行态日志则跟随各自的配置。
+func TestReloadRebuildsAccessLogger(t *testing.T) {
+	port := freePort(t)
+	dir := t.TempDir()
+	firstInfo := filepath.Join(dir, "first", "info.log")
+	secondInfo := filepath.Join(dir, "second", "info.log")
+	secondAccess := filepath.Join(dir, "access", "access.log")
+
+	app, err := gofy.New(
+		gofy.WithName("reload-access-log"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(reloadFactory("v1", &recorder{})),
+		gofy.WithShutdownTimeout(2*time.Second),
+		gofy.WithLogConfig(logger.Config{Outputs: []string{firstInfo}}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	if got := getText(t, port, "/reload/ping"); got != "v1" {
+		t.Fatalf("before reload: %q", got)
+	}
+
+	err = app.Reload(context.Background(), gofy.ReloadSpec{
+		Log: &logger.Config{Outputs: []string{secondInfo}, AccessOutputs: []string{secondAccess}},
+	})
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := getText(t, port, "/reload/ping"); got != "v1" {
+		t.Fatalf("after reload: %q", got)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+
+	oldLog := string(mustReadFile(t, firstInfo))
+	if strings.Count(oldLog, `"msg":"http access"`) != 1 {
+		t.Fatalf("old logger still received access entries: %q", oldLog)
+	}
+	newLog := string(mustReadFile(t, secondInfo))
+	if !strings.Contains(newLog, "application reloaded") || strings.Contains(newLog, "http access") {
+		t.Fatalf("new runtime log = %q", newLog)
+	}
+	accessLog := string(mustReadFile(t, secondAccess))
+	if !strings.Contains(accessLog, `"msg":"http access"`) || !strings.Contains(accessLog, "/reload/ping") {
+		t.Fatalf("new access log = %q", accessLog)
+	}
+}
+
 func TestModulesStartInOrderAndStopInReverse(t *testing.T) {
 	rec := &recorder{}
 	port := freePort(t)

@@ -135,6 +135,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	env := a.opts.env
 	lg, ownLogger := a.logger, a.ownLogger
 	systemLogger := a.systemLogger
+	accessLogger := a.accessLogger
 	db, ownDB := a.db, a.ownDB
 	startedAt := a.rt.StartedAt
 	runCtx := a.rt.Context()
@@ -190,19 +191,29 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		if len(spec.Log.SystemErrorOutputs) == 0 {
 			newSystem = newLogger
 		}
-		lg, systemLogger, ownLogger, rebuiltLogger = newLogger, newSystem, true, true
+		newAccess, err := logger.NewAccess(*spec.Log)
+		if err != nil {
+			syncLoggers(newLogger, newSystem)
+			return fmt.Errorf("gofy: reload access logger: %w", err)
+		}
+		if len(spec.Log.AccessOutputs) == 0 {
+			newAccess = newLogger
+		}
+		lg, systemLogger, accessLogger, ownLogger, rebuiltLogger = newLogger, newSystem, newAccess, true, true
 	}
 
 	rebuiltDB := false
 	if spec.Database != nil {
 		newDB, err := gofydb.New(ctx, *spec.Database, lg)
 		if err != nil {
-			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger)
+			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger, accessLogger)
 			return fmt.Errorf("gofy: reload database: %w", err)
 		}
 		db, ownDB, rebuiltDB = newDB, true, true
 	}
-	discard := func() { discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger) }
+	discard := func() {
+		discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger, accessLogger)
+	}
 
 	rt := core.NewRuntime(core.RuntimeConfig{
 		Name:           a.opts.name,
@@ -217,7 +228,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		Propagator:     a.telemetry.Propagator(),
 		Tracing:        a.telemetry.Enabled(),
 	})
-	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, factories, injected, registrars)
+	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, accessLogger, factories, injected, registrars)
 	if err != nil {
 		discard()
 		return err
@@ -275,6 +286,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	}
 	a.logger, a.ownLogger = lg, ownLogger
 	a.systemLogger = systemLogger
+	a.accessLogger = accessLogger
 	a.db, a.ownDB = db, ownDB
 	a.rt = rt
 	a.modules = modules
@@ -283,7 +295,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	newGen := newGeneration(oldGen.id+1, engine)
 	newGen.started = started
 	newGen.db, newGen.ownDB = db, ownDB
-	newGen.logger, newGen.systemLogger, newGen.ownLogger = lg, systemLogger, ownLogger
+	newGen.logger, newGen.systemLogger, newGen.accessLogger, newGen.ownLogger = lg, systemLogger, accessLogger, ownLogger
 	a.gen = newGen
 	a.handlerRef.Store(newGen)
 	a.mu.Unlock()
@@ -308,15 +320,12 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 // rejected reload never closes the live database or syncs the live logger.
 // discardReloadResources 只释放本次 Reload 构建的资源，被拒绝的 Reload 因此不会
 // 关闭线上数据库或 Sync 线上 logger。
-func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, system *zap.Logger) {
+func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, system, access *zap.Logger) {
 	if rebuiltDB && db != nil {
 		_ = gofydb.Close(db)
 	}
 	if rebuiltLogger {
-		_ = logger.Sync(lg)
-		if system != nil && system != lg {
-			_ = logger.Sync(system)
-		}
+		syncLoggers(lg, system, access)
 	}
 }
 

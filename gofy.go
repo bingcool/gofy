@@ -47,6 +47,7 @@ type App struct {
 
 	logger       *zap.Logger
 	systemLogger *zap.Logger
+	accessLogger *zap.Logger
 	ownLogger    bool
 
 	mu          sync.Mutex
@@ -141,10 +142,13 @@ func New(opts ...Option) (*App, error) {
 		a.logger = logger.Nop()
 	}
 	// Without a separate system_error_outputs setting, framework errors reuse the
-	// main logger so panics keep landing in error_outputs.
+	// main logger so panics keep landing in error_outputs. The same fallback
+	// applies to access_outputs: without it, access entries stay in the main logger.
 	// 未单独配置 system_error_outputs 时，框架错误沿用主 logger，保持
-	// panic 仍然写入 error_outputs 的既有行为。
+	// panic 仍然写入 error_outputs 的既有行为。access_outputs 同理：未配置时
+	// 访问日志继续写主 logger。
 	a.systemLogger = a.logger
+	a.accessLogger = a.logger
 	return a, nil
 }
 
@@ -207,10 +211,11 @@ func (a *App) getState() appState {
 	return a.state
 }
 
-func (a *App) setLogger(l, system *zap.Logger, own bool) {
+func (a *App) setLogger(l, system, access *zap.Logger, own bool) {
 	a.mu.Lock()
 	a.logger = l
 	a.systemLogger = system
+	a.accessLogger = access
 	a.ownLogger = own
 	a.mu.Unlock()
 }
@@ -255,29 +260,58 @@ func (a *App) resolveWorkDir() (string, error) {
 	return dir, nil
 }
 
-// buildLoggers builds the application logger and the logger for framework-level
-// failures. The system logger falls back to the application logger when
-// system_error_outputs is empty, so panics keep reaching error_outputs.
-// buildLoggers 构建应用 logger 与框架级故障 logger。system_error_outputs 为空
-// 时系统 logger 回退到应用 logger，保证 panic 仍写入 error_outputs；后建的
-// system logger 失败时会先 Sync 已建好的应用 logger。
-func (a *App) buildLoggers() (lg, system *zap.Logger, own bool, err error) {
+// buildLoggers builds the application logger, the logger for framework-level
+// failures and the HTTP access logger. The system logger falls back to the
+// application logger when system_error_outputs is empty; the access logger does
+// the same when access_outputs is empty. Later failures sync what was already
+// built, so an aborted startup leaves no buffered entries behind.
+// buildLoggers 构建应用 logger、框架级故障 logger 与 HTTP 访问日志 logger。
+// system_error_outputs 为空时系统 logger 回退到应用 logger，access_outputs 为空
+// 时访问 logger 同样回退；后续步骤失败会先 Sync 已建好的 logger，启动中止时不会
+// 留下未刷盘的缓冲条目。
+func (a *App) buildLoggers() (lg, system, access *zap.Logger, own bool, err error) {
 	if a.opts.logger != nil {
-		return a.opts.logger, a.opts.logger, false, nil
+		return a.opts.logger, a.opts.logger, a.opts.logger, false, nil
 	}
 	lg, err = logger.New(a.opts.logConfig)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("gofy: build logger: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("gofy: build logger: %w", err)
 	}
 	system, err = logger.NewSystem(a.opts.logConfig)
 	if err != nil {
-		_ = logger.Sync(lg)
-		return nil, nil, false, fmt.Errorf("gofy: build system logger: %w", err)
+		syncLoggers(lg)
+		return nil, nil, nil, false, fmt.Errorf("gofy: build system logger: %w", err)
 	}
 	if len(a.opts.logConfig.SystemErrorOutputs) == 0 {
 		system = lg
 	}
-	return lg, system, true, nil
+	access, err = logger.NewAccess(a.opts.logConfig)
+	if err != nil {
+		syncLoggers(lg, system)
+		return nil, nil, nil, false, fmt.Errorf("gofy: build access logger: %w", err)
+	}
+	if len(a.opts.logConfig.AccessOutputs) == 0 {
+		access = lg
+	}
+	return lg, system, access, true, nil
+}
+
+// syncLoggers flushes every distinct logger exactly once, so fallback aliases
+// (system or access reusing the application logger) are not synced twice.
+// syncLoggers 对每个不同 logger 只刷盘一次；系统或访问 logger 回用到应用 logger
+// 的别名不会被重复 Sync。
+func syncLoggers(loggers ...*zap.Logger) {
+	seen := make(map[*zap.Logger]struct{}, len(loggers))
+	for _, l := range loggers {
+		if l == nil {
+			continue
+		}
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		_ = logger.Sync(l)
+	}
 }
 
 func (a *App) buildDB(ctx context.Context, logger *zap.Logger) (*gorm.DB, bool, error) {

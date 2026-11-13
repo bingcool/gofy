@@ -18,7 +18,8 @@ log:
   # stacktrace 逐帧展开；文件日志永不着色，NO_COLOR 与 Windows 始终关闭。
   color: always
   # 日志文件由 app/config 按启动模式追加：HTTP 写 storage/log/http/<date>/，
-  # 脚本写 storage/log/script/<date>/info/ 和 error/，文件名取自脚本名
+  # 访问日志单独写 storage/log/access/<date>/access.log；脚本写
+  # storage/log/script/<date>/info/ 和 error/，文件名取自脚本名
   # （fix-order-h<H>.log、fix-order.log）；这里保留 stdout 方便本地查看。
   outputs:
     - stdout

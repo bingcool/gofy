@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `logger.Config.AccessOutputs` (`access_outputs`) and `logger.NewAccess`:
+  HTTP access entries can be written to their own outputs instead of the
+  application logger. `NewAccess` accepts Info and above (access entries pick
+  Info/Warn/Error by status and latency, so `Level` does not filter them) and
+  follows `Rotation.Mode` and `DateDir`; an empty list returns a nop logger and
+  the App falls back to the main logger, keeping the previous behaviour. The
+  App builds, syncs, retires and rebuilds this logger alongside the application
+  and system loggers across `Reload`, and the access-log middleware now writes
+  to it. `examples/demo-service` writes `storage/log/access/<date>/access.log`
+  in HTTP mode; runtime logs stay in `storage/log/http/<date>/`, and script
+  mode has no access log.
 - Generation lease and reload drain: the HTTP handler now swaps between whole
   generations instead of a bare router. Each request acquires a lease on the
   generation it entered; `Reload` publishes the new generation first, then

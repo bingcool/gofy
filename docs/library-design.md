@@ -1318,6 +1318,7 @@ type Config struct {
     Outputs            []string          `yaml:"outputs"`                     // stdout|stderr|文件路径
     ErrorOutputs       []string          `yaml:"error_outputs"`               // 仅 error 及以上
     SystemErrorOutputs []string          `yaml:"system_error_outputs"`        // 仅框架捕获的系统错误
+    AccessOutputs      []string          `yaml:"access_outputs"`              // 仅 HTTP 访问日志，为空时复用应用 logger
     TimeLayout         string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
     Rotation           RotationConfig    `yaml:"rotation"`
     BaseFields         map[string]string `yaml:"base_fields"`
@@ -1325,7 +1326,7 @@ type Config struct {
 
 type RotationConfig struct {
     Enabled           bool   `yaml:"enabled"`
-    Mode              string `yaml:"mode" default:"size"`  // size|hourly，仅作用于 Outputs
+    Mode              string `yaml:"mode" default:"size"`  // size|hourly，作用于 Outputs 与 AccessOutputs
     DateDir           bool   `yaml:"date_dir"`             // 按 20261106 这样的日期子目录存放
     DateLayout        string `yaml:"date_layout" default:"20060102"`
     DateDirMaxAgeDays int    `yaml:"date_dir_max_age_days" default:"7"` // 整个日期目录保留天数
@@ -1338,6 +1339,7 @@ type RotationConfig struct {
 
 func New(cfg Config) (*zap.Logger, error)
 func NewSystem(cfg Config) (*zap.Logger, error)
+func NewAccess(cfg Config) (*zap.Logger, error)
 func Nop() *zap.Logger
 func Sync(l *zap.Logger) error
 func (c Config) Validate() error
@@ -1355,7 +1357,7 @@ func (c Config) Validate() error
   得到 `storage/log/script/20261106/info/fix-order.log`；没有占位符时日期目录
   追加在最后一层（`storage/log/script/info/20261106/fix-order.log`）。关闭
   `Rotation.Enabled` 时占位符在打开文件时展开一次。
-- `Mode` 只作用于 `Outputs`（info 流）：
+- `Mode` 只作用于 `Outputs` 与 `AccessOutputs` 这类 info 流：
   - `size`：在当天目录内由 lumberjack 按 `MaxSizeMB` 切割，`MaxBackups`/`Compress` 生效；
   - `hourly`：按小时切换为 `info-h0.log` ... `info-h23.log`，不产生 lumberjack 备份。
 - `ErrorOutputs` / `SystemErrorOutputs` 始终按 `size` 模式滚动，避免 error 日志
@@ -1370,6 +1372,10 @@ func (c Config) Validate() error
 - `SystemErrorOutputs` 非空时，`NewSystem` 返回只接收 `error` 及以上、只写这些目标的 logger；
   App 把它用于 HTTP recovery，panic 不会进入主 logger。为空时回落到主 logger，
   panic 仍写入 `ErrorOutputs`，保持旧行为。
+- `AccessOutputs` 非空时，`NewAccess` 返回只写这些目标的 logger，接收 `Info` 及以上
+  （访问日志按状态码使用 Info/Warn/Error），不受 `Level` 过滤；为空时返回 nop，
+  App 把访问日志回落到主 logger。`App` 自建的访问 logger 与主 logger 一起在
+  Reload 后重新 Sync/替换。
 - `BaseFields` 会作为固定字段附加到每条日志（如 `service`、`env`、`version`）。
 - `Color` 只作用于 `stdout`/`stderr`：`auto`（默认）按 TTY 检测，`always` 供
   IDE 这类非 TTY 控制台强制开启，`never` 关闭；非法值在 `Validate` 阶段报错。
@@ -2203,6 +2209,8 @@ log:
     - /var/log/demo-service/error.log
   system_error_outputs:
     - /var/log/demo-service/system_error.log
+  access_outputs:
+    - /var/log/demo-service/access.log
   rotation:
     enabled: true
     mode: hourly          # info.log 按小时；error/system_error 固定按大小

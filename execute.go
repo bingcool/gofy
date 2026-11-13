@@ -12,7 +12,6 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/console"
-	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/script"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/spf13/pflag"
@@ -141,21 +140,16 @@ func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Ru
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lg, system, ownLogger, err := a.buildLoggers()
+	lg, system, access, ownLogger, err := a.buildLoggers()
 	if err != nil {
 		return err
 	}
 	// Expose it to app.Logger() so main can still log script errors after Execute
 	// returns.
 	// 暴露给 app.Logger()，让 main 在 Execute 返回后仍能记录脚本错误。
-	a.setLogger(lg, system, ownLogger)
+	a.setLogger(lg, system, access, ownLogger)
 	if ownLogger {
-		defer func() {
-			_ = logger.Sync(lg)
-			if system != lg {
-				_ = logger.Sync(system)
-			}
-		}()
+		defer syncLoggers(lg, system, access)
 	}
 
 	runCtx, cancel := context.WithCancelCause(ctx)

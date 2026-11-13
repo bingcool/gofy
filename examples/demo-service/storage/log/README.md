@@ -13,6 +13,9 @@ storage/log/
 │       ├── info-h23.log
 │       ├── error.log         # 按大小切分
 │       └── system_error.log  # 按大小切分
+├── access/                   # HTTP 访问日志，与运行态日志分开
+│   └── 20261106/
+│       └── access-h14.log    # 跟随 rotation.mode
 └── script/                   # script <name>
     └── 20261106/
         ├── info/
@@ -27,10 +30,11 @@ storage/log/
 | `info-h<H>.log` | 当前级别及以上的全部日志（默认 `info`） | 每小时一个文件，`h0` 不补零 |
 | `error.log` | `error` 及以上，便于快速排查失败请求 | 日期目录内按大小 |
 | `system_error.log` | 框架自动捕获的系统级错误，目前是 HTTP recovery 记录的 panic | 日期目录内按大小 |
+| `access-h<H>.log` | 每条 HTTP 请求的访问记录（方法、路径、状态码、耗时等） | 跟随 `rotation.mode`，默认每小时 |
 
-HTTP 模式把这三个文件直接放在日期目录下。脚本模式在日期目录下再分出
-`info/` 和 `error/` 两个流目录，并用脚本名作为文件名，做到**一个脚本
-一个日志文件**：
+HTTP 模式把 `info` / `error` / `system_error` 三个运行态文件直接放在日期目录
+下，访问日志单独放在 `access/`。脚本模式在日期目录下再分出 `info/` 和
+`error/` 两个流目录，并用脚本名作为文件名，做到**一个脚本一个日志文件**：
 
 ```
 script/20261106/info/fix-order-h16.log
@@ -49,12 +53,14 @@ script/20261106/error/fix-order-system_error.log
 `error/error.log`、`error/system_error.log`）。
 
 写入路径由 `app/config.Load` 在每次加载配置时追加，模式目录按
-`systemenv.IsScriptService()` 选择：脚本执行写 `script/`，其余命令写 `http/`。
-因此 Nacos 热更新重新加载配置后仍然落在同一个模式目录和同一个脚本文件，
-不会混写。
+`systemenv.IsScriptService()` 选择：脚本执行写 `script/`，其余命令写 `http/`
+并额外写 `access/`。因此 Nacos 热更新重新加载配置后仍然落在同一个模式目录和
+同一个脚本文件，不会混写。
 
 `config.yaml` 里的 `log.outputs` 会保留，例如 `stdout` 仍然输出到终端；
-模式目录是追加的，不会覆盖已有输出。
+模式目录是追加的，不会覆盖已有输出。`access/` 通过 `log.access_outputs`
+独立配置，未配置时访问日志回落到主 logger（即写进 `http/info.log`、
+`http/error.log`）。
 
 ## 滚动配置
 
@@ -76,9 +82,9 @@ log:
 ```
 
 - `mode: hourly`：`info.log` 变成 `info-h0.log` ... `info-h23.log`，跨小时、
-  跨天都由进程自动切换，不需要重启；
+  跨天都由进程自动切换，不需要重启；`access/access.log` 同样按小时切分；
 - `mode: size`：`info.log` 在当天的日期目录内由 lumberjack 按 `max_size_mb`
-  切分，备份文件也留在同一个日期目录；
+  切分，备份文件也留在同一个日期目录；`access.log` 与 `info.log` 一致；
 - `error.log` 和 `system_error.log` 始终使用 `size` 模式，即使 `mode: hourly`，
   避免每小时产生一个几乎空白的错误文件；
 - `date_dir: false` 时退回平铺结构（如 `http/info-h14.log`），保持旧行为；

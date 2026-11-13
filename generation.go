@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"go.uber.org/zap"
@@ -47,6 +46,7 @@ type generation struct {
 	ownDB        bool
 	logger       *zap.Logger
 	systemLogger *zap.Logger
+	accessLogger *zap.Logger
 	ownLogger    bool
 }
 
@@ -205,10 +205,7 @@ func retireGeneration(ctx context.Context, gen, successor *generation, timeout t
 		}
 	}
 	if gen.ownLogger && gen.logger != nil && (successor == nil || gen.logger != successor.logger) {
-		_ = logger.Sync(gen.logger)
-		if gen.systemLogger != nil && gen.systemLogger != gen.logger {
-			_ = logger.Sync(gen.systemLogger)
-		}
+		syncLoggers(gen.logger, gen.systemLogger, gen.accessLogger)
 	}
 	return errs
 }

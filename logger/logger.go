@@ -26,6 +26,7 @@ type Config struct {
 	Outputs            []string          `yaml:"outputs"`                 // stdout|stderr|file path；可混用多个目标，文件路径的父目录由框架创建
 	ErrorOutputs       []string          `yaml:"error_outputs"`           // error level and above only；只接收 error 及以上级别
 	SystemErrorOutputs []string          `yaml:"system_error_outputs"`    // framework errors only；只接收框架自身产生的错误
+	AccessOutputs      []string          `yaml:"access_outputs"`          // HTTP access entries only；只接收 HTTP 访问日志条目，为空时复用应用 logger
 	TimeLayout         string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
 	Rotation           RotationConfig    `yaml:"rotation"`
 	BaseFields         map[string]string `yaml:"base_fields"`
@@ -35,12 +36,12 @@ type Config struct {
 // RotationConfig 控制文件滚动；只对文件路径生效，stdout/stderr 与空路径不受影响。
 type RotationConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// Mode selects how Outputs files roll: "size" (default, lumberjack) or
-	// "hourly" (info-h0.log ... info-h23.log). ErrorOutputs and
+	// Mode selects how Outputs and AccessOutputs files roll: "size" (default,
+	// lumberjack) or "hourly" (info-h0.log ... info-h23.log). ErrorOutputs and
 	// SystemErrorOutputs always use size rotation to avoid hourly fragments.
-	// Mode 决定 Outputs 文件的滚动方式："size"（默认，交给 lumberjack）或
-	// "hourly"（info-h0.log ... info-h23.log）。ErrorOutputs 与 SystemErrorOutputs
-	// 始终使用 size 滚动，避免错误日志被切成小时碎片而难以排查。
+	// Mode 决定 Outputs 与 AccessOutputs 文件的滚动方式："size"（默认，交给
+	// lumberjack）或 "hourly"（info-h0.log ... info-h23.log）。ErrorOutputs 与
+	// SystemErrorOutputs 始终使用 size 滚动，避免错误日志被切成小时碎片而难以排查。
 	Mode string `yaml:"mode" default:"size"`
 	// DateDir writes each file under a date subdirectory such as 20261106.
 	// DateDir 为 true 时把每个文件写到日期子目录（如 20261106）下；子目录名由 DateLayout 格式化得出。
@@ -82,7 +83,7 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.Rotation.DateLayout, `/\`) {
 		return fmt.Errorf("logger: invalid date_layout %q (must not contain path separators)", c.Rotation.DateLayout)
 	}
-	for _, out := range append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...) {
+	for _, out := range append(append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...), c.AccessOutputs...) {
 		if strings.TrimSpace(out) == "" {
 			return errors.New("logger: output path must not be empty")
 		}
@@ -148,15 +149,53 @@ func NewSystem(cfg Config) (*zap.Logger, error) {
 	return zap.New(zapcore.NewTee(cores...), newOptions(cfg)...), nil
 }
 
+// NewAccess builds the logger for HTTP access entries. It writes Info and above
+// to AccessOutputs and returns a nop logger when the list is empty, so callers
+// can wire it unconditionally. Access entries use Info/Warn/Error by status and
+// latency, so the logger ignores Config.Level and always accepts Info.
+// NewAccess 构建 HTTP 访问日志使用的 logger：把 Info 及以上写到 AccessOutputs，
+// 列表为空时返回 nop logger，调用方无需判空。访问条目按状态码和耗时分流到
+// Info/Warn/Error，因此该 logger 忽略 Config.Level，始终接收 Info。
+func NewAccess(cfg Config) (*zap.Logger, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if len(cfg.AccessOutputs) == 0 {
+		return Nop(), nil
+	}
+	cores := make([]zapcore.Core, 0, len(cfg.AccessOutputs))
+	for _, out := range cfg.AccessOutputs {
+		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
+		if err != nil {
+			return nil, err
+		}
+		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, zap.InfoLevel))
+	}
+	return zap.New(zapcore.NewTee(cores...), newAccessOptions(cfg)...), nil
+}
+
 func newOptions(cfg Config) []zap.Option {
 	opts := []zap.Option{
 		zap.AddCaller(),
 		zap.AddStacktrace(zap.ErrorLevel),
 	}
-	if len(cfg.BaseFields) > 0 {
-		opts = append(opts, zap.Fields(baseFields(cfg.BaseFields)...))
+	return append(opts, baseFieldOptions(cfg)...)
+}
+
+// newAccessOptions leaves out AddStacktrace: a 5xx access entry records a
+// request outcome, not a failure site, so a stack of the middleware would only
+// bloat the access file.
+// newAccessOptions 不加 AddStacktrace：5xx 访问条目记录的是请求结果而不是出错
+// 位置，带上中间件调用栈只会撑大访问日志。
+func newAccessOptions(cfg Config) []zap.Option {
+	return append([]zap.Option{zap.AddCaller()}, baseFieldOptions(cfg)...)
+}
+
+func baseFieldOptions(cfg Config) []zap.Option {
+	if len(cfg.BaseFields) == 0 {
+		return nil
 	}
-	return opts
+	return []zap.Option{zap.Fields(baseFields(cfg.BaseFields)...)}
 }
 
 // Nop returns a logger that discards everything.

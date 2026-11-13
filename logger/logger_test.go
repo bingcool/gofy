@@ -24,6 +24,7 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 		"bad date layout":       {Rotation: logger.RotationConfig{DateLayout: "2006/01/02"}},
 		"negative date dir age": {Rotation: logger.RotationConfig{DateDirMaxAgeDays: -1}},
 		"empty output":          {Outputs: []string{" "}},
+		"empty access output":   {AccessOutputs: []string{" "}},
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -288,6 +289,72 @@ func TestNewSystemWithoutOutputsIsNop(t *testing.T) {
 		t.Fatal("NewSystem returned nil")
 	}
 	lg.Error("discarded")
+}
+
+// AccessOutputs receives access entries only: they bypass Config.Level (an
+// Info access entry is kept even when the runtime level is error) and never
+// leak into the application logger's files.
+// AccessOutputs 只接收访问日志：访问条目不受 Config.Level 过滤（运行级别为
+// error 时 Info 访问日志仍写入），也不会混进应用 logger 的文件。
+func TestNewAccessWritesOnlyAccessEntries(t *testing.T) {
+	dir := t.TempDir()
+	appPath := filepath.Join(dir, "http", "info.log")
+	accessPath := filepath.Join(dir, "access", "access.log")
+
+	cfg := logger.Config{
+		Level:         "error",
+		Encoding:      "json",
+		Outputs:       []string{appPath},
+		AccessOutputs: []string{accessPath},
+	}
+	app, err := logger.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	access, err := logger.NewAccess(cfg)
+	if err != nil {
+		t.Fatalf("NewAccess: %v", err)
+	}
+
+	app.Info("runtime info")
+	app.Error("runtime error")
+	access.Info("http access")
+	access.Error("http access")
+	if err := logger.Sync(app); err != nil {
+		t.Fatalf("Sync app: %v", err)
+	}
+	if err := logger.Sync(access); err != nil {
+		t.Fatalf("Sync access: %v", err)
+	}
+
+	appLog := readFile(t, appPath)
+	if strings.Contains(appLog, "runtime info") {
+		t.Fatalf("level=error should drop runtime info: %q", appLog)
+	}
+	if !strings.Contains(appLog, "runtime error") || strings.Contains(appLog, "http access") {
+		t.Fatalf("application log = %q", appLog)
+	}
+	accessLog := readFile(t, accessPath)
+	if strings.Count(accessLog, "http access") != 2 {
+		t.Fatalf("access log = %q", accessLog)
+	}
+	if strings.Contains(accessLog, "runtime") {
+		t.Fatalf("access log captured runtime entries: %q", accessLog)
+	}
+	if strings.Contains(accessLog, "stacktrace") {
+		t.Fatalf("access log should not carry stacktraces: %q", accessLog)
+	}
+}
+
+func TestNewAccessWithoutOutputsIsNop(t *testing.T) {
+	lg, err := logger.NewAccess(logger.Config{})
+	if err != nil {
+		t.Fatalf("NewAccess: %v", err)
+	}
+	if lg == nil {
+		t.Fatal("NewAccess returned nil")
+	}
+	lg.Info("discarded")
 }
 
 func readFile(t *testing.T, path string) string {
