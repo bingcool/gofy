@@ -492,6 +492,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: the `nacos-watch` module now runs its watcher and
+  the reload executor on separate goroutines. `Stop` cancels the watcher and
+  waits for it to exit before the generation's handles are released, which the
+  single-goroutine form could not do without deadlocking the reload that calls
+  `Stop` from inside the change handler. Notifications are coalesced, so a
+  change arriving during a reload triggers one follow-up pass against the file
+  already on disk; reload errors are logged by the module instead of being
+  returned to `nacos.Watch`, which only logged them anyway.
 - Go comments in this repository, `examples/demo-service` and
   `gofy-interface-service` are now bilingual: every existing comment block
   keeps its English text and gains a Chinese section after it (pure-Chinese
