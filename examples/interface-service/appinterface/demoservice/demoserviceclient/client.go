@@ -95,3 +95,32 @@ func NewWithBaseURL(baseURL string) (*Client, error) {
 	}
 	return New(c), nil
 }
+
+// NewWithBaseURL builds a demo-service client that always calls baseURL, for
+// example "http://10.0.0.5:8080" or "orders.example.com". A missing scheme
+// defaults to http. Nacos is not contacted in this mode, and retries go to the
+// same address.
+// NewWithBaseURL 构造始终调用 baseURL 的客户端，例如 "https://10.0.0.5:8080"。
+// 缺少 scheme 时默认 https；该模式不访问 Nacos，重试也发往同一地址。
+func NewWithBaseURLSSl(baseURL string) (*Client, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return nil, errors.New("demoserviceclient: base URL is required")
+	}
+	// Accept "host:port" and bare hosts; client.Config.BaseURL requires a
+	// scheme, so add the same default the rest of gofy uses.
+	// 接受 "host:port" 与裸主机名；client.Config.BaseURL 要求带 scheme，因此
+	// 补上与 gofy 其他部分一致的默认值 http。
+	if !strings.Contains(baseURL, "://") {
+		baseURL = "https://" + baseURL
+	}
+	// BaseURL wins over Service: the name is kept for symmetry with the other
+	// constructors, but no resolver is involved.
+	// BaseURL 优先于 Service：保留名字只为与其他构造器对称，此处不涉及
+	// resolver，也不会做服务发现。
+	c, err := client.New(client.Config{BaseURL: baseURL, Service: demoservice.ServiceName})
+	if err != nil {
+		return nil, err
+	}
+	return New(c), nil
+}
