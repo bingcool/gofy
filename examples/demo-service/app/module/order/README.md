@@ -344,7 +344,7 @@ product/
 ├── controller/                # 实现 demoservice.ProductsService，映射契约 DTO
 ├── service/
 │   ├── product_service.go     # 实现 innerapi.ProductAPI，返回领域视图
-│   └── deps.go                # Dependencies{Products, Logger}
+│   └── dependencies.go        # Dependencies{Products, Logger}
 ├── innerapi/
 │   └── innerapi.go            # ProductAPI 接口 + Product 视图 + 错误
 ├── repository/

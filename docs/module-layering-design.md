@@ -149,7 +149,7 @@ examples/demo-service/app/
         │   └── product_controller.go # 实现 demoservice.ProductsService，契约 ↔ service 映射
         ├── service/
         │   ├── product_service.go  # 实现 innerapi.ProductAPI；读取 + 分页 + 扣库存；0 行分类
-        │   └── deps.go             # Dependencies（本模块仓库 + Logger）
+        │   └── dependencies.go      # Dependencies（本模块仓库 + Logger）
         ├── innerapi/
         │   └── innerapi.go         # ProductAPI 接口 + Product 视图 + 错误
         ├── repository/

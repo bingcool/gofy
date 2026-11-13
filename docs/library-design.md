@@ -2615,7 +2615,7 @@ demo-service/
 │           │   └── product_controller.go  # 实现 ProductsService，契约 ↔ service 映射
 │           ├── service/
 │           │   ├── product_service.go  # 实现 innerapi.ProductAPI：读取 + 分页 + 扣库存
-│           │   └── deps.go             # Dependencies{Products, Logger}
+│           │   └── dependencies.go      # Dependencies{Products, Logger}
 │           ├── innerapi/
 │           │   └── innerapi.go       # ProductAPI 接口 + Product 视图 + 错误
 │           ├── repository/
