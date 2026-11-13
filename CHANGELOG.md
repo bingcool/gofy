@@ -685,6 +685,12 @@ All notable changes to this project are documented here. The format follows
   field, and the `fix-order` script no longer logs a payment timeout, so
   `script.FixOrder` takes no config argument. The demo OpenAPI golden files
   were regenerated.
+- `README.md` was brought back in sync with the code: the middleware order
+  contract, the generation lease and drain steps in `Reload` (including
+  `ReloadSpec.MiddlewareRegistrars`), the four log streams and
+  `access_outputs`, placeholder-based SQL logging, Kafka `CommitMode`, the
+  `global` opt-in for OTel, `make check` as the only gate (the repository has
+  no GitHub Actions), and the `storage/log/{http,access,script}` demo layout.
 
 ### Fixed
 

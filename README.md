@@ -1,8 +1,9 @@
 # gofy
 
 `gofy` 是一个基于 [gin](https://github.com/gin-gonic/gin) 的轻量、约定优先的 Go 应用框架。
-它提供应用生命周期、类型化 HTTP handler、请求绑定与校验、统一响应包络、日志、
-MySQL（GORM）接入、维护脚本和 CLI，同时没有全局状态、`init()` 副作用和固定配置文件。
+它提供应用生命周期、类型化 HTTP handler、请求绑定与校验、统一响应包络、分类日志、
+MySQL 协议 / PostgreSQL / SQLite（GORM）接入、维护脚本和 CLI，同时没有全局状态、
+`init()` 副作用和固定配置文件。
 
 ## 安装
 
@@ -130,6 +131,45 @@ app, err := gofy.New(
   `api_key`、`signature` 等值替换为 `***`；无法解析的 query 整体记为 `***`。
 
 JWT 只做校验，不签发 token；签发由业务或独立认证服务完成。
+
+### 中间件顺序
+
+全局链的安装顺序是对外契约，从外到内固定为：
+
+```text
+RequestID → Telemetry Trace → HeaderPropagation → SecurityHeaders
+→ AccessLog → CORS → Recovery → BodyLimit → WithMiddleware
+→ /healthz、/readyz → 模块路由（RateLimit → JWTAuth）
+```
+
+- `RequestID` 在最外层，后续日志、span 和透传头都依赖 `req_id`；
+- `Telemetry Trace` 紧跟 `RequestID`，`HeaderPropagation` 与 `AccessLog` 才能读到 OTel trace id；
+- `AccessLog` 在 `Recovery` 外层，panic 被转成 500 后访问日志记录的仍是最终状态码；
+- `Recovery` 在 `CORS` 内层，panic 响应仍带跨域头；
+- `BodyLimit` 必须先于任何读取 body 的 handler；
+- `WithMiddleware` 与模块路由都在 `Recovery` 内层，业务 panic 会被捕获；`RateLimit`、`JWTAuth` 只作用于模块路由。
+
+### 中间件别名
+
+契约路由里的 group/route 中间件只写名字，App 在装配期把「别名 → 实例」注册进
+本代注册表，adapter 绑定时按名字解析。框架按已启用的选项预先登记 `request-id`、
+`access-log`、`cors`、`recovery`、`body-limit`、`rate-limit`、`jwt-auth`、
+`security-headers`、`header-propagation` 等内建别名，应用层用
+`WithMiddlewareRegistrar` 补充：
+
+```go
+app, err := gofy.New(
+    gofy.WithMiddlewareRegistrar(func(reg gofy.MiddlewareRegistration) error {
+        return reg.Registry.Register("audit", auditMiddleware(reg.Runtime.Logger))
+    }),
+    // ...
+)
+```
+
+别名不能为空或重复，重复注册直接让启动/Reload 失败而不是静默覆盖。注册函数在启动和
+每次 Reload 时都面对全新的 `Runtime`、`Responder` 和空注册表，因此喂给这些应用层
+中间件的配置无需重启即可生效；`ReloadSpec.MiddlewareRegistrars` 可以替换这组函数。
+访问日志是全局中间件，不要把它登记成契约别名，否则同一请求会被记录两次。
 
 ## 服务间请求头透传
 
@@ -265,29 +305,42 @@ app, err := gofy.New(
 启用 OTel 时 `X-Trace-Id` 优先使用 OTel trace id。追踪配置在启动时固定，
 修改后需要重启进程。
 
+`global` 默认为 `false`：provider 只持有自己的 tracer provider、exporter 和
+propagator，不改动 `otel.SetErrorHandler` 等进程级状态，因此可以和其它
+instrumentation 共用进程；导出失败经注入的 logger 上报并按一分钟去重。需要让
+`otel.Tracer()` 这类全局入口也返回本 Provider 时显式设置 `global: true`，
+此时同一进程只应有一个 App 打开它。
+
 ## 热更新
 
 `App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
 
 ```go
 err := app.Reload(ctx, gofy.ReloadSpec{
-    Env:             cfg.Env,           // 空字符串表示保持当前值
-    Log:             &cfg.Log,          // 重新构建 logger
-    Database:        &cfg.DB,           // 重新连接数据库
-    ModuleFactories: factories,         // 重新注册路由与模块
+    Env:                  cfg.Env,      // 空字符串表示保持当前值
+    Log:                  &cfg.Log,     // 重建主、system、access 三个 logger
+    Database:             &cfg.DB,      // 重新连接数据库
+    ModuleFactories:      factories,    // 重新注册路由与模块
+    MiddlewareRegistrars: registrars,   // 重建应用层中间件别名表
 })
 ```
 
-执行顺序：校验新配置 → 构建新 logger/DB → 构建新模块并启动 → 原子替换 handler 与
-`Runtime` → 停止旧模块 → 关闭旧的 DB 和 logger。新模块启动失败时回滚，旧服务继续可用。
-`Reload` 只能在服务已启动后调用，否则返回 `ErrNotRunning`；并发调用会串行化。
+执行顺序：校验新配置 → 构建新 logger / system logger / access logger 与 DB →
+构建并启动新模块 → 原子发布新 handler 与 `Runtime` → 旧代在途请求排空 →
+停止旧模块、关闭旧 DB 与旧 logger。新模块启动失败时丢弃已构建的资源，旧服务继续可用。
+
+发布后 handler 立刻指向新一代：新请求进入新代，已在旧代上处理的请求持有租约，
+旧模块和资源要等这些请求结束（或达到 `WithShutdownTimeout` 预算）后才真正释放，
+因此切换期间不会有请求落到已关闭的连接上。`Reload` 只能在服务已启动后调用，
+否则返回 `ErrNotRunning`；并发 `Reload` 之间以及与 `Shutdown` 之间都会串行化。
 
 HTTP 监听地址与超时、pid 文件不在 `ReloadSpec` 中，修改这些内容需要重启进程。
 OpenTelemetry 的 provider 和导出器也在启动时固定，`Reload` 复用同一个实例；
 修改 telemetry 配置需要重启。
 通过 `WithModules` 注入的实例不会被重建：它们继续运行，只在新路由上重新注册，
 因此仍持有创建时捕获的 `Runtime`；需要跟随配置变化的模块请改用 `WithModuleFactories`。
-中间件和 responder 由启动时的选项重新应用，同样不能在 `Reload` 中更换。
+通过 `With*` 选项安装的全局中间件（CORS、限流、JWT、安全头）与 responder 沿用启动
+配置，`Reload` 不能更换；应用层中间件别名可以随 `MiddlewareRegistrars` 重建。
 
 ## 脚手架
 
@@ -360,10 +413,43 @@ log:
   color: always   # IDE 控制台不是 TTY，需要彩色分行错误时显式开启
 ```
 
+### 日志分流
+
+`logger.Config` 把一次写入按用途拆到四个输出列表，同一进程可以同时写多个目标：
+
+| 字段 | 接收范围 | 为空时 |
+| --- | --- | --- |
+| `outputs` | 当前 `level` 及以上的全部日志（运行态日志） | 默认 `stdout` |
+| `error_outputs` | `error` 及以上，便于快速筛出失败请求 | 所有 error 仍写入 `outputs` |
+| `system_error_outputs` | 框架自动捕获的系统错误（目前是 HTTP recovery 记录的 panic） | App 回落到主 logger；直接调用 `NewSystem` 得到 nop |
+| `access_outputs` | 只接收 HTTP 访问条目 | App 回落到主 logger；直接调用 `NewAccess` 得到 nop |
+
+- 访问日志由 `middleware.AccessLog` 产生，`msg` 固定为 `http access`，字段包含
+  `method`、`path`、`status`、`bytes`、`latency_ms`，可按需附带 `req_id`、
+  `trace_id`/`span_id`、`client_ip`、`user_agent` 和脱敏后的 `query`；
+  默认跳过 `/healthz`、`/readyz`。
+- 访问条目按状态码和耗时分流：5xx → `error`，4xx 或超过慢请求阈值 → `warn`，
+  其余 → `info`。`logger.NewAccess` 因此忽略 `level`、始终接收 `info` 及以上，
+  也不附带 `stacktrace`（5xx 记录的是请求结果，不是出错位置）。
+- `access_outputs` 为空时行为与以前一致：访问条目混在主 logger 的
+  `outputs` / `error_outputs` 里；设置后运行态日志和访问日志各写各的文件。
+- 滚动方式对两类 info 流一致：`rotation.mode`（`size` / `hourly`）同时作用于
+  `outputs` 和 `access_outputs`，`rotation.date_dir` 与 `{date}` 占位符同样适用；
+  `error_outputs` / `system_error_outputs` 固定按大小滚动。
+- `WithAccessLogOptions` 不做字段级合并：布尔开关按字面生效，只想改一项时要把
+  其余需要的开关一并设为 `true`（nil 切片和 0 值数值仍由中间件补默认）；
+  `ReloadSpec.Log` 会同时重建主 logger、system logger 和 access logger。
+
+demo-service 的分流结果：HTTP 模式写 `storage/log/http/<date>/`（`info` /
+`error` / `system_error`）和 `storage/log/access/<date>/access.log`；脚本模式写
+`storage/log/script/<date>/{info,error}/`，没有访问日志。完整目录说明见
+[examples/demo-service/storage/log/README.md](examples/demo-service/storage/log/README.md)。
+
 数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
 MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase` 交给 App 托管连接池，
-`WithDB` 注入已有连接。配置项、默认值和日志行为见
-[support/db/README.md](support/db/README.md)。
+`WithDB` 注入已有连接。慢查询和失败查询默认只记录 SQL 模板（`?` / `$n` 占位符）
+与耗时、行数、错误，不展开参数值；`log_parameter_values: true` 只用于本地调试。
+配置项、默认值和日志行为见 [support/db/README.md](support/db/README.md)。
 
 PostgreSQL 连接用 `support/pg`（GORM + `gorm.io/driver/postgres`，底层
 `jackc/pgx/v5`）：API 与 `support/db` 对齐（`New`/`Close`、命名实例
@@ -376,6 +462,9 @@ modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默�
 （SQLite 单写多读），WAL / `busy_timeout` 通过 DSN 的 `_pragma` 参数开启。
 配置与示例见 [support/sqlite/README.md](support/sqlite/README.md)。
 
+三个包共用同一套 SQL 日志行为：`log_level`、`slow_threshold` 与
+`log_parameter_values` 语义一致，慢查询与错误日志同样只输出占位符模板。
+
 Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
 客户端之上的缓存与队列门面。AMQP（RabbitMQ）用 `support/amqp`：支持多 host
 回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、断线重连，以及基于
@@ -384,10 +473,12 @@ TTL + 死信交换机的延迟队列。配置与示例见
 
 Kafka 用 `support/kafka`（纯 Go 的 franz-go，无 cgo）：`New` 连接 seed brokers
 并由 metadata 发现集群，`Wrap` 注入已有客户端；`Producer` 同步发布，同一个 Key
-落到同一分区从而保序；`Consumer` 按消费组订阅，支持自动提交或 `CommitRecords`
-手动提交、earliest/latest 重置位点和 rebalance 回调。处理函数失败默认重新投递
-（at-least-once），`DiscardOnError` 可跳过毒消息。配置与示例见
-[support/kafka/README.md](support/kafka/README.md)。
+落到同一分区从而保序；`Consumer` 按消费组订阅，`CommitMode` 默认 `manual`：
+只提交 handler 处理成功的记录，失败消息不提交、重启后重投（at-least-once）。
+`CommitMode: "auto"` 让 franz-go 按 `AutoCommitInterval` 提交已拉取的位点，
+可能丢掉失败消息，必须显式开启；`DisableAutoCommit` 已弃用并让位于 `CommitMode`。
+earliest/latest 重置位点、rebalance 回调与 `ConsumeOptions.DiscardOnError` 跳过毒消息
+仍然可用。配置与示例见 [support/kafka/README.md](support/kafka/README.md)。
 
 RocketMQ 用 `support/rocketmq`（官方 apache/rocketmq-clients/golang v5，走 gRPC
 proxy，默认 8081，不需要 sidecar）：`New` 启动 producer，可选配置
@@ -580,10 +671,11 @@ NACOS_DATA_ID=gofy-service NACOS_GROUP=GO_GROUP go run . start
 - 文件通过临时文件 + rename 原子替换，权限 `0600`（可能包含密钥），建议加入 `.gitignore`；
 - 内容未变化时不重写文件；监听失败按 `NACOS_LISTENER_FAILED_MS` 重试；
 - 配置变更后的推荐处理是 `App.Reload`：在同一个进程里重建日志、数据库连接和模块，
-  先启动新模块再停止旧模块，最后原子替换 HTTP handler，监听 socket 保持不变；
+  先发布新 handler，等旧代在途请求排空后再停止旧模块，监听 socket 保持不变；
 - 需要在变更时自定义动作（或不使用 `App.Reload`）时用 `nacos.WithOnChange`；
   旧版本示例里的 `WithRestartOnChange` 会发送 SIGTERM，仍然保留但不再是推荐做法；
-- 热更新范围有限：HTTP 地址与超时、pid 文件、中间件和 responder 不会重建；
+- 热更新范围有限：HTTP 地址与超时、pid 文件、`With*` 选项安装的全局中间件和
+  responder 不会重建；
   通过 `WithModules` 注入的模块只重新注册、不重启；Nacos 配置里改了 host/port
   只会打警告，需要真正重启进程才会换监听地址；
 - 启动时 Nacos 不可达或配置非法会让进程启动失败，与 swoolefy 的行为一致；
@@ -723,15 +815,18 @@ gofytest.Status(t, rr, 200)
 运行框架测试：
 
 ```bash
+make check     # fmt-check + vet + test-race + example + guards + cgo-free
 make test-race
-make example   # 构建并测试 examples/demo-service
+make example   # 构建、vet 并测试 examples/demo-service
+make guards    # import 守卫 + 公开包禁止 func init()
 make cgo-free  # CGO_ENABLED=0 构建，并校验依赖图无 cgo 包
 ```
 
 全仓库不使用 cgo：SQLite 用 `glebarez/sqlite`（modernc 纯 Go 实现），MySQL、
-PostgreSQL、Redis、AMQP、Kafka、RocketMQ 客户端也都是纯 Go。`make cgo-free`
-和 CI 的 guards 会检查依赖图中没有 `CgoFiles`；需要 cgo 的 `-race` 只在
-`test-race` 中启用。
+PostgreSQL、Redis、AMQP、Kafka、RocketMQ 客户端也都是纯 Go。`make guards`
+检查导入规则与公开包里没有 `func init()`，`make cgo-free` 检查依赖图中没有
+`CgoFiles`；需要 cgo 的 `-race` 只在 `test-race` 中启用。仓库不包含
+GitHub Actions，`make check` 是唯一门禁。
 
 `examples/demo-service` 通过 `replace github.com/bingcool/gofy-interface-service => ../../../gofy-interface-service`
 消费契约模块，本地需要把 `gofy-interface-service` 仓库放在 `gofy` 的同级目录。
@@ -753,19 +848,23 @@ GOFY_TEST_PG_DSN='postgres://user:pass@127.0.0.1:5432/app?sslmode=disable' \
 ## 目录结构
 
 ```text
-gofy.go, option.go, start.go, execute.go, stop.go   App、生命周期、CLI
+gofy.go, option.go                          App 构造与选项
+start.go, execute.go                        启动、脚本执行与命令入口
+generation.go, reload.go                    代际切换、请求租约与热更新
+stop.go, restart.go, daemon.go, signal.go   停止、重启、后台化与信号
+config.go, errors.go, ui.go                 共享配置类型、退出码与终端输出
 apperr/        业务错误模型
 core/          共享 Runtime（叶子包）
-support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全头配置
-logger/       zap 日志构建与 GORM 适配
 core/systemenv/ 环境、系统与 goroutine 判定
+support/       Router、类型化 handler、Responder、CORS/JWT/限流/安全头配置
+logger/       zap 日志构建（主/system/access）、滚动策略与 GORM 适配
 support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、契约别名注册表
 support/registry/ 通用 name -> instance 注册表（可选；单实现由 app/container 注入）
 support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
 support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
 support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）
 support/redis/ Redis 客户端（go-redis）
-support/nacos/ Nacos 配置拉取、本地生成与变更监听
+support/nacos/ Nacos 配置拉取、本地生成、变更监听与服务注册发现
 support/jwtauth/ HMAC JWT 校验
 support/headerpropagation/ 入口请求头白名单与服务间透传上下文
 support/frameworkcontext/ 统一身份读取（本地认证优先，透传头兜底）
@@ -774,7 +873,7 @@ support/ratelimit/redisstore/  Redis 共享限流存储
 support/cache/  基于注入 Redis 实例的键值缓存门面
 support/queues/ 基于注入 Redis 实例的即时队列与延迟队列
 support/amqp/   AMQP（RabbitMQ）连接、发布、消费与 TTL 延迟队列
-support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go）
+support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go，手动提交位点）
 support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRPC 客户端）
 support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
