@@ -6,6 +6,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/support/nacos"
+	"github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/app/config"
 	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
@@ -25,9 +26,9 @@ func middlewareRegistrar(cfg *config.Config) gofy.MiddlewareRegistrar {
 	}
 }
 
-// appOptions 汇总 demo-service 的启动选项：框架配置、io/order 模块、脚本和
-// 版本信息。热更新会用同一份 reloader 重建模块集合。
-func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config) []gofy.Option {
+// appOptions 汇总 demo-service 的启动选项：框架配置、io/order 模块、脚本、
+// 常驻任务分组和版本信息。热更新会用同一份 reloader 重建模块集合。
+func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, orderGroup *worker.Group) []gofy.Option {
 	return []gofy.Option{
 		gofy.WithName("demo-service"),
 		gofy.WithEnv(systemenv.GetEnv()),
@@ -48,6 +49,11 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config) []g
 		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
 		gofy.WithModuleFactories(reload.factories(cfg)...),
 		gofy.WithScripts(appscript.Register(cfg)...),
+		// 常驻任务只通过 worker 子命令运行，HTTP 进程不会启动它们。
+		gofy.WithWorkerGroups(orderGroup),
+		gofy.WithWorkerConcurrency(map[string]int{
+			"order/order-scan": cfg.Worker.Scan.Concurrency,
+		}),
 		gofy.WithVersionInfo(gofy.VersionInfo{
 			Version:   version,
 			Commit:    commit,

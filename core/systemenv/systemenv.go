@@ -153,6 +153,56 @@ func ScriptName() string {
 	return ""
 }
 
+// IsWorkerService reports whether the current process runs a worker group
+// through the worker subcommand, for example
+// `demo-service worker --group=order`.
+// IsWorkerService 报告当前进程是否通过 worker 子命令运行常驻任务分组，
+// 例如 `demo-service worker --group=order`。
+func IsWorkerService() bool {
+	name, ok := subcommand(os.Args[1:])
+	return ok && name == "worker"
+}
+
+// WorkerGroup returns the --group value of the worker subcommand, so logs and
+// pid files can be separated per group. It accepts both "--group=order" and
+// "--group order"; the result is stripped of spaces and keeps only letters,
+// digits, '-' and '_' so a command-line argument never ends up in a file path.
+// With no group (such as worker --list or worker --help) it returns "".
+// WorkerGroup 返回 worker 子命令的 --group 值，用于按分组区分日志与 pid 文件。
+// 同时支持 "--group=order" 与 "--group order"；返回值去掉空白，只保留字母、
+// 数字、'-' 和 '_'，避免命令行参数直接拼进文件路径。没有分组（例如
+// worker --list、worker --help）时返回空字符串。
+func WorkerGroup() string {
+	args := os.Args[1:]
+	index := -1
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			if arg == "-h" || arg == "--help" {
+				return ""
+			}
+			continue
+		}
+		if arg != "worker" {
+			return ""
+		}
+		index = i
+		break
+	}
+	if index < 0 {
+		return ""
+	}
+	for i := index + 1; i < len(args); i++ {
+		arg := args[i]
+		if value, ok := strings.CutPrefix(arg, "--group="); ok {
+			return sanitizeScriptName(value)
+		}
+		if arg == "--group" && i+1 < len(args) {
+			return sanitizeScriptName(args[i+1])
+		}
+	}
+	return ""
+}
+
 func sanitizeScriptName(name string) string {
 	var b strings.Builder
 	for _, r := range name {

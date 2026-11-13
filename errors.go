@@ -24,7 +24,11 @@ var (
 	ErrUnsupported     = errors.New("gofy: operation not supported on this platform")
 	ErrUnknownCommand  = errors.New("gofy: unknown command")
 	ErrScriptNotFound  = errors.New("gofy: script not found")
-	ErrUsage           = errors.New("gofy: usage error")
+	// ErrWorkerGroupNotFound means `worker --group` named a group the
+	// application never registered.
+	// ErrWorkerGroupNotFound 表示 `worker --group` 指定的分组没有注册过。
+	ErrWorkerGroupNotFound = errors.New("gofy: worker group not found")
+	ErrUsage               = errors.New("gofy: usage error")
 )
 
 // ExitCode maps an error returned by Execute or Run to a process exit code.

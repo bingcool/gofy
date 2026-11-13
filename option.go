@@ -18,6 +18,7 @@ import (
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
+	"github.com/bingcool/gofy/support/worker"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -106,6 +107,14 @@ type options struct {
 	scripts  []script.Script   // maintenance scripts；维护脚本
 	commands []command.Command // 自定义 CLI 命令
 
+	// Worker configuration: groups run only through the worker subcommand, never
+	// with the HTTP server.
+	// worker 相关配置：分组只通过 worker 子命令运行，从不随 HTTP 服务启动。
+	workerGroups      []*worker.Group // 常驻任务分组；`worker --group` 选择
+	workerPolicy      worker.Policy   // 单个实例失败后的重启策略
+	workerConcurrency map[string]int  // "group/worker" → 实例数
+	workerDrain       time.Duration   // 停机时在途任务的完成预算
+
 	shutdownTimeout time.Duration // 关闭预算：HTTP 优雅关闭与模块 Stop 共享的总时长
 
 	// The flags and config objects below drive the built-in middleware and security
@@ -148,6 +157,8 @@ func defaultOptions() options {
 		http:            defaultHTTPConfig(),
 		pidPerm:         0o644,
 		shutdownTimeout: 10 * time.Second,
+		workerPolicy:    worker.DefaultPolicy(),
+		workerDrain:     20 * time.Second,
 		responder:       support.NewResponder(support.ResponderConfig{}),
 		recovery:        true,
 		accessLog:       true,
@@ -462,10 +473,10 @@ func WithScripts(scripts ...script.Script) Option {
 
 // WithCommands registers custom CLI subcommands. Registration validates name
 // format, conflicts with the built-in commands
-// (start/stop/script/version/help/completion), duplicates and a non-nil Run, so an
-// invalid set fails New. Calls accumulate.
+// (start/stop/script/worker/version/help/completion), duplicates and a non-nil
+// Run, so an invalid set fails New. Calls accumulate.
 // WithCommands 注册自定义 CLI 子命令。注册时统一校验名字格式、与内建命令
-// （start/stop/script/version/help/completion）的冲突、重名和 Run 非空，
+// （start/stop/script/worker/version/help/completion）的冲突、重名和 Run 非空，
 // 非法集合在 New 阶段报错。可多次调用累积。
 func WithCommands(cmds ...command.Command) Option {
 	return func(o *options) error {
@@ -473,6 +484,88 @@ func WithCommands(cmds ...command.Command) Option {
 			return err
 		}
 		o.commands = append(o.commands, cmds...)
+		return nil
+	}
+}
+
+// WithWorkerGroups registers long-running worker groups, run through the worker
+// subcommand. A group is the deployment unit: its workers live and die in one
+// process. Validation (group name, worker names, duplicates) happens here, so an
+// invalid group fails New. Calls accumulate; group names must stay unique.
+// WithWorkerGroups 注册常驻任务分组，通过 worker 子命令运行。分组是部署单位：
+// 组内 worker 在同一进程里同生共死。分组名、worker 名与重名都在这里校验，非法
+// 分组会让 New 失败。可多次调用累积，分组名必须唯一。
+func WithWorkerGroups(groups ...*worker.Group) Option {
+	return func(o *options) error {
+		seen := make(map[string]struct{}, len(o.workerGroups)+len(groups))
+		for _, g := range o.workerGroups {
+			seen[g.Name()] = struct{}{}
+		}
+		for _, g := range groups {
+			if g == nil {
+				return fmt.Errorf("gofy: worker group must not be nil")
+			}
+			if _, dup := seen[g.Name()]; dup {
+				return fmt.Errorf("gofy: duplicate worker group %q", g.Name())
+			}
+			seen[g.Name()] = struct{}{}
+			o.workerGroups = append(o.workerGroups, g)
+		}
+		return nil
+	}
+}
+
+// WithWorkerPolicy sets how a failed worker instance is handled (restart with
+// backoff by default). Use ExitOnError for failures a restart cannot fix.
+// WithWorkerPolicy 设置 worker 实例失败后的处理方式（默认按退避重启）；
+// 重启修不好的失败用 ExitOnError。
+func WithWorkerPolicy(policy worker.Policy) Option {
+	return func(o *options) error {
+		o.workerPolicy = policy
+		return nil
+	}
+}
+
+// WithWorkerConcurrency overrides the instance count per worker. Keys are
+// "group/worker"; an unmatched key is ignored only until the group is started,
+// where a typo shows up as the configured worker still running one instance.
+// Values below one fail New.
+// WithWorkerConcurrency 按 worker 覆盖实例数，键为 "group/worker"。未匹配的键
+// 不会报错，因此写错名字只会表现为该 worker 仍按 1 个实例运行。小于 1 的值会让
+// New 失败。
+func WithWorkerConcurrency(concurrency map[string]int) Option {
+	return func(o *options) error {
+		for key, n := range concurrency {
+			if strings.Count(key, "/") != 1 || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") {
+				return fmt.Errorf("gofy: worker concurrency key %q must be group/worker", key)
+			}
+			if n < 1 {
+				return fmt.Errorf("gofy: worker concurrency for %q must be at least 1", key)
+			}
+		}
+		if o.workerConcurrency == nil {
+			o.workerConcurrency = make(map[string]int, len(concurrency))
+		}
+		for key, n := range concurrency {
+			o.workerConcurrency[key] = n
+		}
+		return nil
+	}
+}
+
+// WithWorkerDrainTimeout sets how long in-flight work may still run after a
+// worker process is asked to stop (20s by default). Keep it below the
+// container's terminationGracePeriodSeconds, otherwise the scheduler kills the
+// process mid-drain.
+// WithWorkerDrainTimeout 设置 worker 进程收到停止信号后，在途任务还能运行多久
+// （默认 20s）。它必须小于容器的 terminationGracePeriodSeconds，否则调度器会在
+// drain 完成前强杀进程。
+func WithWorkerDrainTimeout(timeout time.Duration) Option {
+	return func(o *options) error {
+		if timeout <= 0 {
+			return fmt.Errorf("gofy: worker drain timeout must be positive")
+		}
+		o.workerDrain = timeout
 		return nil
 	}
 }

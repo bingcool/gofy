@@ -71,9 +71,11 @@ func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 		Stop:               a.stop,
 		Restart:            a.restart,
 		RunScript:          a.runScript,
+		RunWorker:          a.runWorker,
 		Version:            a.printVersion,
 		Scripts:            scripts,
 		Commands:           custom,
+		WorkerGroups:       a.workerDescriptors(),
 		DefaultPIDFile:     a.opts.pidFile,
 		DefaultStopTimeout: a.opts.shutdownTimeout,
 	})
@@ -83,7 +85,7 @@ func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 
 func (a *App) isKnownCommand(name string) bool {
 	switch name {
-	case "start", "stop", "restart", "script", "version", "help", "completion":
+	case "start", "stop", "restart", "script", "worker", "version", "help", "completion":
 		return true
 	}
 	for _, c := range a.opts.commands {

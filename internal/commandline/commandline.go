@@ -61,10 +61,15 @@ type Deps struct {
 	Stop      func(ctx context.Context, opts StopOptions) error
 	Restart   func(ctx context.Context, opts StopOptions) error
 	RunScript func(ctx context.Context, name string, args []string) error
+	RunWorker func(ctx context.Context, opts WorkerOptions) error
 	Version   func(ctx context.Context, jsonOutput bool) error
 
 	Scripts  []Script
 	Commands []Command
+
+	// WorkerGroups feeds `worker --list`; running a group goes through RunWorker.
+	// WorkerGroups 供 `worker --list` 使用；真正运行分组走 RunWorker。
+	WorkerGroups []WorkerGroup
 
 	DefaultPIDFile     string
 	DefaultStopTimeout time.Duration
@@ -108,6 +113,7 @@ func Build(d Deps) *cobra.Command {
 	root.AddCommand(newStopCmd(d))
 	root.AddCommand(newRestartCmd(d))
 	root.AddCommand(newScriptCmd(d))
+	root.AddCommand(newWorkerCmd(d))
 	root.AddCommand(newVersionCmd(d))
 	for _, spec := range d.Commands {
 		root.AddCommand(newCustomCmd(d, spec))

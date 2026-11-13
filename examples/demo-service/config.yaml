@@ -201,6 +201,13 @@ rocketmq:
     enabled: false
     endpoint: 127.0.0.1:8081
 
+# 常驻任务：`demo-service worker --group=order` 启动。HTTP 服务不会拉起它们，
+# 两者共用同一份 config.yaml、日志与数据库配置。
+worker:
+  scan:
+    concurrency: 2      # 进程内扫描实例数（goroutine），按数据库与下游能力调整
+    interval: 5s        # 两次扫描之间的间隔
+
 pid_file: app/demo-service.pid
 
 # 契约在分组上显式声明了 "auth" 中间件，其内部用框架 JWT

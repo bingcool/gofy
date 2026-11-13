@@ -64,7 +64,12 @@ func main() {
 		envFromProcess: envFromProcess,
 	}
 
-	app, err := gofy.New(appOptions(cfg, reload, nacosCfg)...)
+	orderGroup, err := newOrderWorkerGroup(cfg.Worker.Scan)
+	if err != nil {
+		fatalf("build worker group: %v", err)
+	}
+
+	app, err := gofy.New(appOptions(cfg, reload, nacosCfg, orderGroup)...)
 	if err != nil {
 		fatalf("init application: %v", err)
 	}

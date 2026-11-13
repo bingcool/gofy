@@ -171,6 +171,9 @@ func (o *options) validate() error {
 	if o.shutdownTimeout <= 0 {
 		return fmt.Errorf("gofy: shutdown timeout must be positive")
 	}
+	if o.workerDrain <= 0 {
+		return fmt.Errorf("gofy: worker drain timeout must be positive")
+	}
 	if o.maxBody <= 0 {
 		return fmt.Errorf("gofy: max body bytes must be positive")
 	}

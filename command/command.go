@@ -32,6 +32,7 @@ var reservedNames = map[string]struct{}{
 	"start":      {},
 	"stop":       {},
 	"script":     {},
+	"worker":     {},
 	"version":    {},
 	"help":       {},
 	"completion": {},
