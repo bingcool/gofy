@@ -2656,7 +2656,7 @@ demo-service/
 │           │   └── product_controller.go  # 实现 ProductsService，契约 ↔ service 映射
 │           ├── service/
 │           │   ├── product_service.go  # 实现 innerapi.ProductAPI：读取 + 分页 + 扣库存
-│           │   └── dependencies.go      # Dependencies{Products, Logger}
+│           │   └── dependencies.go      # Dependencies{ProductRepository, Logger}
 │           ├── innerapi/
 │           │   └── innerapi.go       # ProductAPI 接口 + Product 视图 + 错误
 │           ├── repository/
@@ -2956,8 +2956,8 @@ func (l *lazyValue[T]) Get(build func() T) T {
 func (c *Container) ProductService() *productservice.ProductService {
     return c.services.ProductService.Get(func() *productservice.ProductService {
         return productservice.NewProductService(productservice.Dependencies{
-            Products: c.repos.ProductsRepo,
-            Logger:   c.logger(),
+            ProductRepository: c.repos.ProductsRepo,
+            Logger:            c.logger(),
         })
     })
 }

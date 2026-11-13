@@ -44,8 +44,8 @@ func newProductService(t *testing.T) *service.ProductService {
 	appio.PublishDB(conn)
 	t.Cleanup(func() { appio.Publish(prev) })
 	return service.NewProductService(service.Dependencies{
-		Products: &productrepo.ProductRepository{},
-		Logger:   zap.NewNop(),
+		ProductRepository: &productrepo.ProductRepository{},
+		Logger:            zap.NewNop(),
 	})
 }
 

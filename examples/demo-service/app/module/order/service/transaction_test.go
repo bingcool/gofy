@@ -154,8 +154,8 @@ func TestDecreaseStockRejectsUnavailableOrInvalidRequests(t *testing.T) {
 func newOrderService(t *testing.T) *service.OrderService {
 	t.Helper()
 	products := productservice.NewProductService(productservice.Dependencies{
-		Products: &productrepo.ProductRepository{},
-		Logger:   zap.NewNop(),
+		ProductRepository: &productrepo.ProductRepository{},
+		Logger:            zap.NewNop(),
 	})
 	return service.NewOrderService(service.Dependencies{
 		OrderRepository: &orderrepo.OrderRepository{},

@@ -9,8 +9,8 @@ import (
 func (c *Container) ProductService() *productservice.ProductService {
 	return c.services.ProductService.Get(func() *productservice.ProductService {
 		return productservice.NewProductService(productservice.Dependencies{
-			Products: c.repos.ProductsRepo,
-			Logger:   c.logger(),
+			ProductRepository: c.repos.ProductsRepo,
+			Logger:            c.logger(),
 		})
 	})
 }

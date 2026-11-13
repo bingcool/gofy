@@ -345,7 +345,7 @@ product/
 ├── controller/                # 实现 demoservice.ProductsService，映射契约 DTO
 ├── service/
 │   ├── product_service.go     # 实现 innerapi.ProductAPI，返回领域视图
-│   └── dependencies.go        # Dependencies{Products, Logger}
+│   └── dependencies.go        # Dependencies{ProductRepository, Logger}
 ├── innerapi/
 │   └── innerapi.go            # ProductAPI 接口 + Product 视图 + 错误
 ├── repository/
@@ -355,7 +355,7 @@ product/
 ```
 
 `app/container` 的 `ProductService()` 访问器用本次服务的 `RepositoryDeclare.ProductsRepo`
-按需构造 `ProductService`；订单访问器再把它作为 `Dependencies.Products` 传入。
+按需构造 `ProductService`；订单访问器再把它作为 `Dependencies.ProductRepository` 传入。
 `svc` 编译期满足 `var _ productapi.ProductAPI = (*ProductService)(nil)`。
 `Register` 绑定 `productroute.Products` 分组（前缀 `/api/v1/product`，与订单一样
 挂在根 Router）；跨模块注入仍由容器完成，与路由无关。
