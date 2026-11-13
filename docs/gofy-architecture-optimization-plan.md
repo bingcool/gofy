@@ -408,7 +408,7 @@ app/io/amqp.Set / kafka.Set / rocketmq.Set / uuidint.Set
 目标读取语义分两步：
 
 1. **消除数据竞争**：包级句柄的发布改为不可变快照，用 `atomic.Pointer[Snapshot]` 整体替换，而不是在锁内改多个独立变量。所有读取走快照，不再直接读 `appdb.Db`。
-2. **请求级固定（推荐）**：Demo 增加一个应用中间件，在请求进入时读取一次当前快照并写入请求 Context；Repository 与 Service 通过 `appio.FromContext(ctx)` 取连接。这样一次请求内的多次查询始终使用同一代资源，Reload 不会在请求中途切换。
+2. **请求级固定（推荐）**：Demo 增加一个应用中间件，在请求进入时读取一次当前快照并写入请求 Context；Repository 与 Service 通过 `appio.WithContext(ctx)` 取连接。这样一次请求内的多次查询始终使用同一代资源，Reload 不会在请求中途切换。
 
 示意（`app/io` 聚合各子包 Set，不引入新的资源框架）：
 
@@ -419,7 +419,7 @@ type Snapshot struct {
     // AMQP / Kafka / RocketMQ / UUID 等本代句柄
 }
 
-func FromContext(ctx context.Context) *Snapshot // 请求内固定值
+func WithContext(ctx context.Context) *Snapshot // 请求内固定值
 func Current() *Snapshot                        // 带原子读取的兜底
 ```
 
@@ -427,14 +427,14 @@ Repository 保持无状态，不注入资源：
 
 ```go
 func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
-    return gofydb.WithContext(ctx, appio.FromContext(ctx).DB)
+    return gofydb.WithContext(ctx, appio.WithContext(ctx).DB)
 }
 ```
 
 Service 开启事务同样从 Context 快照取默认 DB：
 
 ```go
-err := gofydb.Transaction(ctx, appio.FromContext(ctx).DB, func(ctx context.Context) error {
+err := gofydb.Transaction(ctx, appio.WithContext(ctx).DB, func(ctx context.Context) error {
     // Product API 和 Order Repository 都从 ctx 复用这一个事务。
     return nil
 })
@@ -442,7 +442,7 @@ err := gofydb.Transaction(ctx, appio.FromContext(ctx).DB, func(ctx context.Conte
 
 这样既满足“一个请求绑定一个资源代际”，又不破坏已经落地的“无状态 Repository + Service 持有依赖”决策，也不需要把 Container 类型塞进框架。
 
-> 说明：请求级固定是严格语义；如果业务能接受“同一请求的两次非事务查询可能落在相邻两代”（例如只读展示场景），可以只做第 1 步的原子快照而不加中间件。两种方案都不能保留无锁读取包变量的现状。非 HTTP 路径（脚本、后台消费者）没有请求中间件，`FromContext` 应回退到 `Current()`，脚本模式仍可直接使用 `script.Runtime.DB`。
+> 说明：请求级固定是严格语义；如果业务能接受“同一请求的两次非事务查询可能落在相邻两代”（例如只读展示场景），可以只做第 1 步的原子快照而不加中间件。两种方案都不能保留无锁读取包变量的现状。非 HTTP 路径（脚本、后台消费者）没有请求中间件，`WithContext` 应回退到 `Current()`，脚本模式仍可直接使用 `script.Runtime.DB`。
 
 Demo 现有单测直接给 `appdb.Db` 赋值（`order_repository_test.go`、`product_repository_test.go`、`module_test.go` 等）。改造后这些测试应改为安装一个测试用 `Snapshot`，否则测试仍在无锁写包级变量，`-race` 会继续报告。
 
@@ -559,7 +559,7 @@ App B -> Generation B -> DB Registry B
 
 1. 为 DB、Redis、PG 分别补齐 Registry 实例 API 的并发测试（同名初始化、Close 竞争）。
 2. 保持 `Registry.NewIO()` 只操作自身实例；包级 `NewIO()` 保持现状并标注兼容边界。
-3. Demo 的 `app/io/*.NewIO(ctx, name)` 包装改为从 `FromContext(ctx)` 取本代 Registry，缺失时回退 `Current()`，不再转发到包级入口。
+3. Demo 的 `app/io/*.NewIO(ctx, name)` 包装改为从 `WithContext(ctx)` 取本代 Registry，缺失时回退 `Current()`，不再转发到包级入口。
 4. `support/uuidint` 已有 `WithClient`；Demo 的 `app/io/uuidint` 改用本代 Redis 客户端构建 Generator，`WithInstance` 仅保留为兼容路径并修正注释。
 5. 现有全局 API 暂时保留，文档标注“不承诺多 App 隔离，不用于 Reload 资源切换”。
 6. 在发布说明中列出将来可能废弃的全局入口。
@@ -1155,7 +1155,7 @@ Recovery 只能捕获它之后的链路。RequestID、Trace、HeaderPropagation�
 1. 确认 Generation 的所有权边界（框架拥有的 DB/Logger/Telemetry 与业务 Module 拥有的资源分开）。
 2. 为 Handler 加入 Generation Lease，实现旧代排空后再 Stop/Close。
 3. 保留 Demo 现有的每代 `Set`，在其上增加不可变 `Snapshot` 与 `atomic.Pointer` 发布。
-4. 在 HTTP 入口中间件把当次 `Snapshot` 固定进 `context`，Repository 经 `appio.FromContext(ctx)` 读取；不改为构造函数注入。
+4. 在 HTTP 入口中间件把当次 `Snapshot` 固定进 `context`，Repository 经 `appio.WithContext(ctx)` 读取；不改为构造函数注入。
 5. 把 Demo 的 `app/io/*.NewIO`、限流器和 `uuidint` 改为读取本代实例，内部不再走包级全局指针。
 6. 增加 Reload 成功、失败、超时、Shutdown 竞争测试。
 

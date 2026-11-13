@@ -2776,14 +2776,14 @@ func (s *Snapshot) RedisNewIO(context.Context, string) (*goredis.Client, error)
 func (s *Snapshot) AMQPNewIO/KafkaNewIO/RocketMQNewIO(context.Context, string) (...)
 
 func WithSnapshot(context.Context, *Snapshot) context.Context
-func FromContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()
+func WithContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()
 func Middleware() support.Middleware         // 请求入口固定当前一代
 ```
 
 ```go
-o, err := appio.FromContext(ctx).DBInstance("order").WithContext(ctx).First(&order)
-s, err := appio.FromContext(ctx).Redis("cache").Get(ctx, "order:1").Result()
-client, err := appio.FromContext(ctx).RedisNewIO(ctx, "ratelimit") // 首次访问才建连
+o, err := appio.WithContext(ctx).DBInstance("order").WithContext(ctx).First(&order)
+s, err := appio.WithContext(ctx).Redis("cache").Get(ctx, "order:1").Result()
+client, err := appio.WithContext(ctx).RedisNewIO(ctx, "ratelimit") // 首次访问才建连
 ```
 
 生命周期由 `app/io` 统一管理：`Start` 依次打开 db、redis、amqp、kafka、

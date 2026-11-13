@@ -32,7 +32,7 @@ All notable changes to this project are documented here. The format follows
   immutable `Snapshot` of one generation's `db` / `redis` / `amqp` / `kafka` /
   `rocketmq` / `uuidint` handles through `atomic.Pointer`; `appio.Middleware()`
   pins that snapshot into the request context at entry, and
-  `appio.FromContext(ctx)` resolves repositories, services and the rate limiter
+  `appio.WithContext(ctx)` resolves repositories, services and the rate limiter
   against the same generation even if a reload publishes a successor
   mid-request. Scripts and tests publish with `appio.PublishDB` /
   `appio.Publish` and restore the previous snapshot. Generation-bound lookups
@@ -553,7 +553,7 @@ All notable changes to this project are documented here. The format follows
   another's quota. Counting always goes through `support/ratelimit.Store`: each
   route's middleware resolves the Redis alias declared in the contract
   (`RateLimit.RedisAlias`, defaulting to `ratelimit`) through the request-pinned
-  `app/io` snapshot (`appio.FromContext(ctx).RedisNewIO`) and wraps the client
+  `app/io` snapshot (`appio.WithContext(ctx).RedisNewIO`) and wraps the client
   in `redisstore`, so several instances share one set
   of counters. Resolution is lazy and cached per route, because route binding
   runs before `app/io` opens Redis and a reload must bind the new generation to

@@ -1,6 +1,6 @@
 // Package amqp exposes the demo's named AMQP (RabbitMQ) connections.
 //
-// 业务代码通过快照取连接（appio.FromContext(ctx).AMQP(name)），无请求上下文
+// 业务代码通过快照取连接（appio.WithContext(ctx).AMQP(name)），无请求上下文
 // 时用 Default() 或 Get("order")。当前一代的 Set 用 atomic.Pointer 整体发布，
 // enabled 为 false 的实例不建连，因此本地没有 RabbitMQ 也能启动。
 package amqp
@@ -141,7 +141,7 @@ func (s *Set) NewIO(ctx context.Context, name string) (*gofyamqp.Client, error) 
 // NewIO resolves name in the installed generation. Request paths go through the
 // snapshot so the lookup cannot cross a reload.
 // NewIO 在当前已发布一代里解析 name，供没有请求上下文的调用方使用；请求路径
-// 应走快照（appio.FromContext），避免一次请求跨代取连接。
+// 应走快照（appio.WithContext），避免一次请求跨代取连接。
 func NewIO(ctx context.Context, name string) (*gofyamqp.Client, error) {
 	return current.Load().NewIO(ctx, name)
 }

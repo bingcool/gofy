@@ -115,7 +115,7 @@ func (s *Snapshot) UUID() *gofyuuidint.Generator {
 //
 // DB / DBInstance 与 Redis / AMQP / Kafka / RocketMQ 只返回本代已经打开的句柄；
 // 下面这组方法按别名解析本代 Registry，实例不存在时返回各包的 ErrUnknownInstance。
-// 请求内应始终经 FromContext(ctx) 拿到固定的 Snapshot 再解析，避免解析发生在
+// 请求内应始终经 WithContext(ctx) 拿到固定的 Snapshot 再解析，避免解析发生在
 // Reload 边界、读到下一代 Registry。
 
 // DBNewIO 在本代 Registry 中按别名解析数据库连接（首次访问才建连）。
@@ -168,9 +168,9 @@ func WithSnapshot(ctx context.Context, s *Snapshot) context.Context {
 	return context.WithValue(ctx, snapshotKey{}, s)
 }
 
-// FromContext 返回请求固定的 Snapshot；没有固定值时回退到 Current()。
-// 脚本与后台消费者没有请求中间件，因此回退是必要路径。
-func FromContext(ctx context.Context) *Snapshot {
+// WithContext 返回 ctx 中固定的 Snapshot（由 WithSnapshot 在请求入口写入）；
+// 没有固定值时回退到 Current()。脚本与后台消费者没有请求中间件，因此回退是必要路径。
+func WithContext(ctx context.Context) *Snapshot {
 	if ctx != nil {
 		if s, ok := ctx.Value(snapshotKey{}).(*Snapshot); ok && s != nil {
 			return s

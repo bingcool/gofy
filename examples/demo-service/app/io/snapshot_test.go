@@ -26,7 +26,7 @@ func TestMiddlewarePinsSnapshotPerRequest(t *testing.T) {
 	engine.GET("/", func(c *gin.Context) {
 		// 模拟请求处理中发生 Reload：快照已被下一代替换。
 		Publish(nil)
-		got = FromContext(c.Request.Context())
+		got = WithContext(c.Request.Context())
 		c.Status(http.StatusOK)
 	})
 
@@ -39,8 +39,8 @@ func TestMiddlewarePinsSnapshotPerRequest(t *testing.T) {
 	if Current() != nil {
 		t.Fatal("test did not withdraw the published snapshot")
 	}
-	if FromContext(context.Background()) != nil {
-		t.Fatal("FromContext fell back to a non-nil snapshot")
+	if WithContext(context.Background()) != nil {
+		t.Fatal("WithContext fell back to a non-nil snapshot")
 	}
 }
 

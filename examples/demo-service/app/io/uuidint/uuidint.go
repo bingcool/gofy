@@ -1,6 +1,6 @@
 // Package uuidint exposes the demo's distributed ID generator.
 //
-// 业务代码通过快照取生成器（appio.FromContext(ctx).UUID()），无请求上下文时用
+// 业务代码通过快照取生成器（appio.WithContext(ctx).UUID()），无请求上下文时用
 // Default()；句柄由 app/io 在启动时构建并发布。生成器优先绑定本代 Redis Set 的
 // 客户端（support/uuidint 的 WithClient），每次取号直接使用这一代连接，不受
 // 之后 Reload 安装的新 Registry 影响。

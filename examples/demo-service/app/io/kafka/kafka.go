@@ -1,6 +1,6 @@
 // Package kafka exposes the demo's named Kafka connections.
 //
-// 业务代码通过快照取连接（appio.FromContext(ctx).Kafka(name)），无请求上下文
+// 业务代码通过快照取连接（appio.WithContext(ctx).Kafka(name)），无请求上下文
 // 时用 Default() 或 Get("order")。当前一代的 Set 用 atomic.Pointer 整体发布，
 // enabled 为 false 的实例不建连，因此本地没有 Kafka 也能启动。Producer 和
 // Consumer 用这里的 Client 创建：Producer 共享连接，Consumer 会为消费者组
@@ -143,7 +143,7 @@ func (s *Set) NewIO(ctx context.Context, name string) (*gofykafka.Client, error)
 // NewIO resolves name in the installed generation. Request paths go through the
 // snapshot so the lookup cannot cross a reload.
 // NewIO 在当前已发布一代里解析 name，供没有请求上下文的调用方使用；请求路径
-// 应走快照（appio.FromContext），避免一次请求跨代取连接。
+// 应走快照（appio.WithContext），避免一次请求跨代取连接。
 func NewIO(ctx context.Context, name string) (*gofykafka.Client, error) {
 	return current.Load().NewIO(ctx, name)
 }

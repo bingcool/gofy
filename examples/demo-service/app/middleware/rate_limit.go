@@ -44,7 +44,7 @@ type RateLimiter struct {
 	// Responder 与全局错误信封一致，限流响应才能带同样的 code/msg/req_id。
 	Responder support.Responder
 	// RedisClient 按别名解析 Redis 客户端，默认取请求固定的 app/io 快照
-	// （appio.FromContext(ctx).RedisNewIO）：解析不会跨 Reload 换到下一代。
+	// （appio.WithContext(ctx).RedisNewIO）：解析不会跨 Reload 换到下一代。
 	// 测试注入 miniredis 客户端，避免依赖真实 Redis。
 	RedisClient func(ctx context.Context, alias string) (*goredis.Client, error)
 }
@@ -99,7 +99,7 @@ func (r RateLimiter) redisClient() func(ctx context.Context, alias string) (*gor
 		return r.RedisClient
 	}
 	return func(ctx context.Context, alias string) (*goredis.Client, error) {
-		return appio.FromContext(ctx).RedisNewIO(ctx, alias)
+		return appio.WithContext(ctx).RedisNewIO(ctx, alias)
 	}
 }
 

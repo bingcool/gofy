@@ -71,7 +71,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 		return nil, err
 	}
 	var created *model.Order
-	err = gofydb.Transaction(ctx, appio.FromContext(ctx).DB(), func(ctx context.Context) error {
+	err = gofydb.Transaction(ctx, appio.WithContext(ctx).DB(), func(ctx context.Context) error {
 		for _, it := range items {
 			if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
 				return translateProductErr(it.SkuID, err)

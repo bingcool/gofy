@@ -4,7 +4,7 @@
 // rebuilds them together with the module.
 //
 // 业务代码通过 Snapshot 取连接：请求中间件在入口固定当前一代，Repository 与
-// Service 用 FromContext(ctx) 读取；没有请求上下文时回退到 Current()。本包只
+// Service 用 WithContext(ctx) 读取；没有请求上下文时回退到 Current()。本包只
 // 负责生命周期与快照发布。
 package io
 

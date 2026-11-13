@@ -42,7 +42,7 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config) []g
 		// 身份头只有在 WithTrustedProxies 命中的代理转发时才采信。
 		gofy.WithHeaderPropagation(true),
 		// 请求进入时固定当前一代的 IO 快照，Repository 与 Service 用
-		// appio.FromContext(ctx) 取连接：一次请求不会横跨 Reload 换资源。
+		// appio.WithContext(ctx) 取连接：一次请求不会横跨 Reload 换资源。
 		gofy.WithMiddleware(appio.Middleware()),
 		// 应用层中间件（auth/audit/order-audit）在模块绑定路由之前注册。
 		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),

@@ -34,7 +34,7 @@ type ProductRepository struct{}
 // conn 优先使用 ctx 中的事务；没有事务时用请求快照的默认数据库。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
-	return gofydb.WithContext(ctx, appio.FromContext(ctx).DB())
+	return gofydb.WithContext(ctx, appio.WithContext(ctx).DB())
 }
 
 // FindByID returns one product or ErrNotFound.
