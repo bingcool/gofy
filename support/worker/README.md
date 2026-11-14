@@ -63,7 +63,7 @@ app stop --worker=order               # 按 pid 文件停掉这一组，不碰 H
 | 产物 | 位置 | 由谁决定 |
 | --- | --- | --- |
 | pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid` | 框架（未配置 `pid_file` 则不写） |
-| 日志目录 | 示例落在 `storage/log/worker/<date>/<group>/` | 应用自行分支，用 `systemenv.IsWorkerService()` 判断 |
+| 日志目录 | 示例落在 `storage/log/daemon/<date>/{info,error}/<worker>.log` | 应用自行分支，用 `systemenv.IsWorkerService()` / `WorkerNames()` 判断与命名 |
 | 端口 | 默认不监听；配了 `gofy.WithWorkerHealth(addr)` 才有 `/healthz` | 框架 |
 | 退出码 | 正常停机 0，致命错误按 `gofy.ExitCode` 映射 | 框架 |
 

@@ -1,7 +1,7 @@
 # storage/log
 
 demo-service 的日志目录，按执行模式分目录，参考 swoolefy 的
-`cli` / `script` 日志划分：
+`cli` / `script` / `daemon` 日志划分：
 
 ```
 storage/log/
@@ -16,13 +16,20 @@ storage/log/
 ├── access/                   # HTTP 访问日志，与运行态日志分开
 │   └── 20261106/
 │       └── access-h14.log    # 跟随 rotation.mode
-└── script/                   # script <name>
+├── script/                   # script <name>
+│   └── 20261106/
+│       ├── info/
+│       │   └── fix-order-h16.log
+│       └── error/
+│           ├── fix-order.log
+│           └── fix-order-system_error.log
+└── daemon/                   # worker --group
     └── 20261106/
         ├── info/
-        │   └── fix-order-h16.log
+        │   └── order-consumer-h1.log
         └── error/
-            ├── fix-order.log
-            └── fix-order-system_error.log
+            ├── order-consumer.log
+            └── order-consumer-system_error.log
 ```
 
 | 文件 | 内容 | 切割方式 |
@@ -46,6 +53,21 @@ script/20261106/error/fix-order-system_error.log
 生成 `fix-order.log` 并按大小切分。`error/` 始终按大小切分：
 `fix-order.log` 是脚本的 error 级日志，`fix-order-system_error.log` 是框架
 自动捕获的 panic。两个文件分开，避免业务错误和系统异常混在一起。
+
+daemon 模式（`worker` 子命令）使用与脚本模式相同的 `info/` + `error/` 布局，文件名
+是**运行中的 worker 名**，做到一个 worker 一组文件：
+
+```
+daemon/20261106/info/order-consumer-h1.log
+daemon/20261106/error/order-consumer.log
+daemon/20261106/error/order-consumer-system_error.log
+```
+
+名字来自 `systemenv.WorkerNames()`（`--name`，支持 `--name=a`、`--name a` 与
+`--name=a,b`）。进程只跑一个 worker 时文件名就是它；整组启动时没有唯一的 worker 名，
+退回分组名（如 `order-h1.log`），具体实例仍由日志里的 `worker` 字段区分；
+`worker --list` 这类没有分组的调用落在 `default`。分组名与 worker 名都会先清洗，
+只保留字母、数字、`-` 和 `_`。
 
 脚本名来自 `systemenv.ScriptName()`：取 `script` 后面的第一个非 flag 参数，
 去掉空白，只保留字母、数字、`-` 和 `_`，防止命令行参数影响目录结构。
