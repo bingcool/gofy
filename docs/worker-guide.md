@@ -290,7 +290,7 @@ spec:
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `worker --group=x` 报 unknown group | 分组没注册或名字拼错 | `worker --list` 核对 |
+| `worker --group=x` 报 `worker group not found` | 分组没注册或名字拼错 | `worker --list` 核对 |
 | 进程起来就退出，退出码 0 | `Run` 在 ctx 取消前返回了 nil | 循环必须阻塞到 `ctx.Done()`；这是 `ErrWorkerExited` |
 | 日志文件找不到 | 看错目录 | `storage/log/worker/<date>/info/`，文件名是 worker 名（整组启动是 `worker`） |
 | `stop --worker=x` 报 not running | 未配置 `pid_file`，或组名与启动时不同 | 检查 `app/*-worker-<group>.pid` |

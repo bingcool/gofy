@@ -25,6 +25,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/headerpropagation"
 	"github.com/bingcool/gofy/support/middleware"
+	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
@@ -949,20 +950,14 @@ func TestExecuteScriptFlagWithoutDashesIsUsageError(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	oldArgs, oldStderr := os.Args, os.Stderr
-	t.Cleanup(func() {
-		os.Args = oldArgs
-		os.Stderr = oldStderr
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	var execErr error
+	output := captureStderr(t, func() {
+		os.Args = []string{"cli-test", "script", "demo", "order-id=1222"}
+		execErr = app.Execute(context.Background())
 	})
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Args = []string{"cli-test", "script", "demo", "order-id=1222"}
-	os.Stderr = w
-	execErr := app.Execute(context.Background())
-	os.Stderr = oldStderr
-	_ = w.Close()
 
 	if !errors.Is(execErr, gofy.ErrUsage) {
 		t.Fatalf("Execute error = %v, want ErrUsage", execErr)
@@ -970,10 +965,75 @@ func TestExecuteScriptFlagWithoutDashesIsUsageError(t *testing.T) {
 	if code := gofy.ExitCode(execErr); code != gofy.ExitUsage {
 		t.Fatalf("exit code = %d, want %d", code, gofy.ExitUsage)
 	}
-	output, _ := io.ReadAll(r)
-	if got := string(output); !strings.Contains(got, "leading --") || !strings.Contains(got, "--order-id=1222") {
-		t.Fatalf("stderr = %q, want a leading -- hint", got)
+	if !strings.Contains(output, "leading --") || !strings.Contains(output, "--order-id=1222") {
+		t.Fatalf("stderr = %q, want a leading -- hint", output)
 	}
+}
+
+// TestExecuteUnknownWorkerGroupReportsToStderr covers the failure that used to be
+// silent: the group is looked up before any logger exists, so app.Logger() in main
+// is a Nop and the exit code was the only trace. The message has to name the group.
+// TestExecuteUnknownWorkerGroupReportsToStderr 覆盖原先静默的那类失败：分组在 logger
+// 建立之前就被查表，main 里的 app.Logger() 还是 Nop，只剩退出码可看。错误必须点出分组名。
+func TestExecuteUnknownWorkerGroupReportsToStderr(t *testing.T) {
+	group, err := gofyworker.NewGroup("group1", gofyworker.Func("only", 1, func(context.Context) error {
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	app, err := gofy.New(
+		gofy.WithName("cli-test"),
+		gofy.WithWorkerGroups(group),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	var execErr error
+	output := captureStderr(t, func() {
+		os.Args = []string{"cli-test", "worker", "--group=nope"}
+		execErr = app.Execute(context.Background())
+	})
+
+	if !errors.Is(execErr, gofy.ErrWorkerGroupNotFound) {
+		t.Fatalf("Execute error = %v, want ErrWorkerGroupNotFound", execErr)
+	}
+	if code := gofy.ExitCode(execErr); code != gofy.ExitError {
+		t.Fatalf("exit code = %d, want %d", code, gofy.ExitError)
+	}
+	if !strings.Contains(output, "worker group not found") || !strings.Contains(output, "nope") {
+		t.Fatalf("stderr = %q, want the group name in the message", output)
+	}
+}
+
+// captureStderr runs fn with os.Stderr pointed at a pipe and returns what fn wrote.
+// captureStderr 把 os.Stderr 指向管道后执行 fn，返回 fn 写入的内容。
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = old })
+	fn()
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr pipe: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stderr reader: %v", err)
+	}
+	return string(out)
 }
 
 func TestExecuteStopWithoutPIDFile(t *testing.T) {

@@ -175,7 +175,8 @@ worker:
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `[FAIL] worker: --group is required` | 漏了 `--group` | `worker --list` 看分组名 |
-| 退出码 1、终端没有任何输出 | 已知问题：`--group`/`--name` 写错时在启动前就失败，错误没落到终端 | `worker --list` 核对名字；已知分组仍静默的话属于待修 |
+| 退出码 1，终端打印 `[FAIL] gofy: worker group not found: "x"` | `--group` 写错 | `worker --list` 看有哪些分组 |
+| 退出码 1，终端打印 `[FAIL] worker: unknown worker: "x" in group "group1"` | `--name` 不在该分组里 | `worker --list` 看组内成员 |
 | 进程起来就退出、退出码 0 | `Run` 在 ctx 取消前返回了 nil | 循环必须阻塞到 `ctx.Done()` |
 | 日志找不到 | 目录看错 | `storage/log/worker/<date>/info/`，整组是 `worker-<host>.log` |
 | `stop --worker=x` 报 not running | 未配置 `pid_file`，或分组名与启动时不同 | 查 `app/*-worker-<group>.pid` |

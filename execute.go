@@ -3,7 +3,6 @@ package gofy
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -23,19 +22,29 @@ import (
 // 它从不调用 os.Exit，退出码由调用方根据返回的错误决定。
 func (a *App) Execute(ctx context.Context) error {
 	err := a.ExecuteArgs(ctx, os.Args[1:])
-	// Argument errors happen before the logger is built, so app.Logger() in main is
-	// still Nop. Without an injected logger, write to stderr directly so the user sees
-	// more than the exit code of go run.
-	// 参数错误发生在 logger 构建之前，main 里的 app.Logger() 还是 Nop。
-	// 没有注入 logger 时直接写 stderr，避免用户只看到 go run 的退出码。
-	if err != nil && a.opts.logger == nil && isCLIError(err) {
+	// A failure that happens before any logger exists would leave the exit code as
+	// its only trace: main reports it through app.Logger(), which is still Nop.
+	// Write it to stderr instead, so a mistyped `worker --group` says what is wrong
+	// instead of exiting 1 in silence.
+	// 在 logger 建立之前失败时，退出码会是唯一的痕迹：main 通过 app.Logger() 记录，
+	// 而它此时还是 Nop。这类错误直接写到 stderr，于是 `worker --group` 拼错时会说明
+	// 哪里不对，而不是静默退出 1。
+	if err != nil && a.reportToStderr() {
 		console.New(os.Stderr, os.Stderr).Error("%v", err)
 	}
 	return err
 }
 
-func isCLIError(err error) bool {
-	return errors.Is(err, ErrUsage) || errors.Is(err, ErrUnknownCommand)
+// reportToStderr reports whether the error has nowhere else to go: no logger was
+// injected at construction, and none has been built for a long-running mode.
+// Both halves matter — an injected logger is already reachable from main, and a
+// built one means the code that failed has logged it.
+// reportToStderr 判断错误是否无处可写：构造时没有注入 logger，运行模式也还没构建出
+// logger。两半都必要：注入了 logger 时 main 能记录；已构建时失败点自己会记。
+func (a *App) reportToStderr() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opts.logger == nil && !a.ownLogger
 }
 
 // ExecuteArgs is Execute with explicit arguments, which makes it testable.

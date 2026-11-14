@@ -738,9 +738,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- `Execute` prints usage errors (unknown command, unexpected arguments) to
-  stderr before returning, so a flag missing its leading `--` no longer fails
-  silently with exit code 2. Script flags report the corrected form
+- `Execute` prints an error to stderr whenever no logger exists yet, not just
+  for usage errors: a mistyped `worker --group` used to exit 1 with no message
+  because the group is looked up before the logger is built and `App.Logger()`
+  in main was still a Nop. Usage errors keep reporting the corrected form
   (`--order-id=1222`), and script `Run` errors reach `App.Logger()` because the
   runtime logger is now exposed on the app.
 
