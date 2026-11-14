@@ -54,8 +54,8 @@ script/20261106/error/fix-order-system_error.log
 `fix-order.log` 是脚本的 error 级日志，`fix-order-system_error.log` 是框架
 自动捕获的 panic。两个文件分开，避免业务错误和系统异常混在一起。
 
-worker 模式（`worker` 子命令）使用与脚本模式相同的 `info/` + `error/` 布局，文件名
-是**运行中的 worker 名**，做到一个 worker 一组文件：
+worker 模式（`worker` 子命令）使用与脚本模式相同的 `info/` + `error/` 布局，文件名默认
+是**运行中的 worker 名**（整组启动时为 `worker`）：
 
 ```
 worker/20261106/info/order-consumer-h1.log
@@ -64,16 +64,14 @@ worker/20261106/error/order-consumer-system_error.log
 ```
 
 名字来自 `systemenv.WorkerNames()`（`--name`，支持 `--name=a`、`--name a` 与
-`--name=a,b`）。进程只跑一个 worker 时文件名就是它；整组启动时没有唯一的 worker 名，
-退回分组名（如 `order-h1.log`），具体实例仍由日志里的 `worker` 字段区分；
-`worker --list` 这类没有分组的调用落在 `default`。分组名与 worker 名都会先清洗，
-只保留字母、数字、`-` 和 `_`。
+`--name=a,b`）。进程只跑一个 worker 时文件名就是它；整组启动时一个进程里有多个 worker，
+没有唯一的名字，文件名退回 `worker`（如 `worker-h1.log`），具体是哪个 worker 仍由日志里的
+`worker` 字段区分；`worker --list` 同样落在 `worker`。名字都会先清洗，只保留字母、数字、
+`-` 和 `_`。
 
-多个分组时，日志目录不再按分组分层（早期版本是 `worker/<date>/<group>/info.log`），
-文件名本身就带着分组信息：整组启动用分组名（`order-h1.log`、`report-h1.log`），
-`--name` 启动用 worker 名。因此**同一个应用里 worker 名应全局唯一**——示例里两个分组的 worker 名不同
-（`order-scan`、`report-summary`），同机运行也不会写到同一个文件；新增 worker 时保持
-名字在整个应用里唯一即可。
+文件名不带分组：分组已经出现在每行日志的 `worker` 字段里（`group1/order-scan#0`），
+而按分组命名说明不了这些行是哪个 worker 写的。要按 worker 分文件，就用
+`worker --name=<worker>` 启动；整组启动共用一组文件，靠 `worker` 字段区分。
 
 脚本名来自 `systemenv.ScriptName()`：取 `script` 后面的第一个非 flag 参数，
 去掉空白，只保留字母、数字、`-` 和 `_`，防止命令行参数影响目录结构。

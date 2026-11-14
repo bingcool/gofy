@@ -228,7 +228,7 @@ func WorkerGroup() string
 ```
 
 `{date}` 由 logger 在滚动时替换。文件名取 `systemenv.WorkerNames()`（`--name`）：
-进程只跑一个 worker 时就是它，整组启动时没有唯一的 worker 名，退回分组名（`order.log`），
+进程只跑一个 worker 时就是它；整组启动时一个进程里有多个 worker，没有唯一的名字，文件名为 `worker`（`worker.log`），
 实例序号（`order/order-scan#1`）仍然只进日志字段，避免按实例切文件把滚动打碎。
 最初实现把整组日志写成 `<group>/info.log`；按 worker 命名后文件本身就回答了"这是谁的日志"，
 不必打开去看字段。
@@ -921,7 +921,7 @@ HPA 建议只对 claim/AMQP 类开，指标用 `gofy_claim_backlog` 而不是 CP
 | T3-2 | `support/worker`：`Worker`/`Group`/`Func`/`IdentityFrom` + 组名与重名校验 | §4.1–§4.3 | T3-1 | `go test -race ./support/worker/...` 通过；非法组名、组内重名各有用例 |
 | T3-3 | 并发实例与错误策略：`concurrency` 起 N 个实例，`Policy` 实现指数退避与 `max_restarts` | §4.3/§4.4 | T3-2 | 单测：注入必失败的 worker，重启次数与退避序列符合预期 |
 | T3-4 | 优雅退出：`consumeCtx` / `drainCtx` 两级 context + drain 预算 + 关闭顺序 | §3.6/§5.5 | T3-3 | 集成测试：SIGTERM 后日志顺序为 `stop consume → drained → closed`，总耗时 ≤ `shutdown_timeout` |
-| T3-5 | 进程标识与日志：`systemenv.IsWorkerService/WorkerGroup`、pid 文件、`applyLogPaths` 增 worker 分支 | §3.7/§3.8 | T3-1 | `worker --group=order` 生成 `storage/log/worker/{date}/info/order.log`（带 `--name` 时用 worker 名）与 `app/demo-service-worker-order.pid`（demo 的 `pid_file` 为 `app/demo-service.pid`）；同名启动第二个进程返回 `ErrAlreadyRunning` |
+| T3-5 | 进程标识与日志：`systemenv.IsWorkerService/WorkerGroup`、pid 文件、`applyLogPaths` 增 worker 分支 | §3.7/§3.8 | T3-1 | `worker --group=order` 生成 `storage/log/worker/{date}/info/worker.log`（带 `--name` 时用 worker 名）与 `app/demo-service-worker-order.pid`（demo 的 `pid_file` 为 `app/demo-service.pid`）；同名启动第二个进程返回 `ErrAlreadyRunning` |
 | T3-6 | 示例改造：demo-service 增加 `order` 分组（`order-scan` 用 DB 统计占位到 claim + `order-heartbeat` 演示无依赖任务），MQ 示例随 T3-9 的适配器一起补 | §3.4 | T3-5 | `cd examples/demo-service && make check` 通过；`go run . worker --group=order` 起 2+1 个实例，SIGTERM 后日志出现 `stopped` 且退出码 0 |
 
 **M3 里程碑**：T3-1…T3-6 全关 → 常驻服务有独立进程形态，能停得干净。
@@ -986,7 +986,7 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | T3-2 | 已完成（2026-11-14） | `support/worker/{worker,identity,policy,runtime,runner}.go`；`go test -race ./support/worker/` 覆盖组名校验、重名、Subset、空并发 |
 | T3-3 | 已完成（2026-11-14） | `runner.supervise` + `Policy`：指数退避、±20% 抖动、`MaxRestarts`；用例覆盖「重启到成功」「触顶退出」「ExitOnError 立即退出」「提前返回 nil 视为违约」 |
 | T3-4 | 已完成（2026-11-14） | `Runner.Run` 两级 context：`runCtx` 停止拉取、`drainCtx = WithoutCancel + deadline`；用例断言 drain 期间 `DrainContext` 仍有效且 Runner 等在途任务结束 |
-| T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/info/order-scan-h11.log`（`--name=order-scan`）与 `order-h11.log`（整组），pid 文件用 `-worker-order` 后缀并在退出时清理 |
+| T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/info/order-scan-h11.log`（`--name=order-scan`）与 `worker-h11.log`（整组），pid 文件用 `-worker-order` 后缀并在退出时清理 |
 | T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker/`：`config.go`（公共设置 + 按分组分层的 `Config`）、`worker.go`（`Register` 返回全部组）、`group1/`（`abc_register.go` 装组成员与配置 + `scan.go`、`heartbeat.go`）、`group2/`（`abc_register.go` + `summary.go`）；`config.yaml` 的 `worker.group1.scan` 与 `worker.group2.summary` 段。实测 `worker --list` 列出 group1（order-scan×2、order-heartbeat×1）与 group2（report-summary×1）两组；`--group=group1` 与 `--group=group2` 各自生成 `-worker-<group>.pid` 与独立日志，SIGTERM 后均 `stopped`、退出码 0 |
 | T3-7 | 已完成（2026-11-14） | `support/claim/{claim.go,claim_test.go,claim_integration_test.go}`；真实 MySQL 8.4 上 1000 行 × 2 个并发 owner 零重复、`job` 隔离、`Succeed/Fail` 的 CAS 拒绝过期 owner、回收过期租约后 `attempts` 递增 |
 | T3-8 | 已完成（2026-11-14） | `claim.Hooks{OnClaim,OnReap,OnLeaseLost}`；用例断言租约丢失回调触发；不引入监控库依赖 |

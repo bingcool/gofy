@@ -76,7 +76,7 @@ app, err := gofy.New(
 | 产物 | 位置 | 说明 |
 | --- | --- | --- |
 | pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid` | 未配置 `pid_file` 则不写 |
-| 日志 | `storage/log/worker/<date>/info/<worker>.log`、`error/<worker>.log`、`error/<worker>-system_error.log` | 文件名取 `--name` 指定的 worker；整组启动退回分组名 |
+| 日志 | `storage/log/worker/<date>/info/<worker>.log`、`error/<worker>.log`、`error/<worker>-system_error.log` | 文件名取 `--name` 指定的 worker；整组启动为 `worker` |
 | 端口 | 默认不开；配了 `WithWorkerHealth` 才有 `/healthz` | 只报就绪，不做业务健康 |
 
 ### 3.4 多个分组
@@ -131,7 +131,7 @@ worker:
 | --- | --- | --- |
 | 进程 / Deployment | 是 | 一个分组一个 `worker --group=<g>`，扩缩容、发布互不影响 |
 | pid 文件 | 是 | `-worker-<group>` 后缀，`stop --worker=<g>` 只停该组 |
-| 日志 | 是 | 各自进程写各自的文件；文件名主干是 worker 名，建议带分组前缀保证全局唯一 |
+| 日志 | 是 | 各自进程写各自的文件；`--name` 启动用 worker 名，整组启动用 `worker`，不按分组命名 |
 | 并发数 | 是 | 键为 `group/worker`，写错名字 `New` 直接失败（不再静默退回 1 个实例） |
 | 探针端口 | **否** | `WithWorkerHealth` 是进程级地址；k8s 里每组一个 Pod 不冲突，同机跑两组要换端口或用 `ORDER_CONFIG` 换配置 |
 
@@ -292,7 +292,7 @@ spec:
 | --- | --- | --- |
 | `worker --group=x` 报 unknown group | 分组没注册或名字拼错 | `worker --list` 核对 |
 | 进程起来就退出，退出码 0 | `Run` 在 ctx 取消前返回了 nil | 循环必须阻塞到 `ctx.Done()`；这是 `ErrWorkerExited` |
-| 日志文件找不到 | 看错目录 | `storage/log/worker/<date>/info/`，文件名是 worker 名（整组启动是分组名） |
+| 日志文件找不到 | 看错目录 | `storage/log/worker/<date>/info/`，文件名是 worker 名（整组启动是 `worker`） |
 | `stop --worker=x` 报 not running | 未配置 `pid_file`，或组名与启动时不同 | 检查 `app/*-worker-<group>.pid` |
 | 两个 Pod 处理同一批行 | 没用 claim / 用了 `SELECT` 再 `UPDATE` | 换 `claim.Queue`，别自己写 SQL |
 | 同一个全局任务跑了两次 | 只加锁没带 fencing token | 业务表加 `fence` 列，写入带 `fence < :token` |
