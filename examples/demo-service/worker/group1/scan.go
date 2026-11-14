@@ -59,32 +59,24 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := rt.Logger.With(zap.String("worker", id.String()))
 
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
 		lg.Info("order scan started", zap.Duration("interval", interval))
-		for {
-			select {
-			case <-ctx.Done():
-				lg.Info("order scan stopped")
-				return nil
-			case <-ticker.C:
-				// The count uses the drain context: a shutdown must not abort a
-				// query that is already talking to the database.
-				// 计数使用 drain context：停机不应该中断已经在与数据库交互的查询。
-				queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 3*time.Second)
-				var pending int64
-				err := rt.DB.WithContext(queryCtx).
-					Table("orders").
-					Where("status = ?", string(orderenum.OrderStatusPending)).
-					Count(&pending).Error
-				cancel()
-				if err != nil {
-					lg.Warn("order scan failed", zap.Error(err))
-					continue
-				}
-				lg.Info("order scan tick", zap.Int64("pending", pending))
+		defer lg.Info("order scan stopped")
+
+		return gofyworker.Ticker(ctx, interval, func(ctx context.Context) error {
+			// The count uses the drain context: a shutdown must not abort a
+			// query that is already talking to the database.
+			// 计数使用 drain context：停机不应该中断已经在与数据库交互的查询。
+			queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 3*time.Second)
+			defer cancel()
+			var pending int64
+			if err := rt.DB.WithContext(queryCtx).
+				Table("orders").
+				Where("status = ?", string(orderenum.OrderStatusPending)).
+				Count(&pending).Error; err != nil {
+				return err
 			}
-		}
+			lg.Info("order scan tick", zap.Int64("pending", pending))
+			return nil
+		})
 	})
 }

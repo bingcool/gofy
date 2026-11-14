@@ -15,23 +15,18 @@ import (
 // 的实例存活日志。
 func newHeartbeatWorker() gofyworker.Worker {
 	return gofyworker.Func("order-heartbeat", 1, func(ctx context.Context) error {
-		rt, _ := gofyworker.RuntimeFrom(ctx)
+		rt, ok := gofyworker.RuntimeFrom(ctx)
 		id, _ := gofyworker.IdentityFrom(ctx)
-
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-ticker.C:
-				if rt != nil {
-					rt.Logger.Info("worker heartbeat",
-						zap.String("worker", id.String()),
-						zap.String("host", id.Host),
-					)
-				}
-			}
+		lg := zap.NewNop()
+		if ok && rt.Logger != nil {
+			lg = rt.Logger
 		}
+		return gofyworker.Ticker(ctx, 10*time.Second, func(context.Context) error {
+			lg.Info("worker heartbeat",
+				zap.String("worker", id.String()),
+				zap.String("host", id.Host),
+			)
+			return nil
+		})
 	})
 }

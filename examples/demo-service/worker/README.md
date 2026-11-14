@@ -180,10 +180,13 @@ var scanDefaults = ScanWorkerConfig{
 组内加一个 worker，只动那个分组包：
 
 1. 新建成员文件，例如 `group1/settle.go`，用 `worker.Func("order-settle", 1, run)` 定义；
-2. 参数结构体与它的 `xxxDefaults` 都写在成员文件里（照 `ScanWorkerConfig` + `scanDefaults`），
-   `abc_register.go` 只把 worker 追加进 `NewGroup`；
-3. 在同一个文件的 `NewGroup` 里把它追加进去；
+2. 参数结构体与它的 `xxxDefaults` 也写在成员文件里（照 `ScanWorkerConfig` + `scanDefaults`）；
+3. 在 `abc_register.go` 的 `NewGroup` 里把新 worker 加进参数列表；
 4. `go run . worker --list` 核对，列表里出现新名字即可。
+
+轮询型任务在 `run` 里用 `worker.Ticker(ctx, interval, fn)`：按固定节拍触发，单次失败只记日志、
+panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 会合并成一次）。三个成员文件都是
+这个写法，不必自己写 ticker + select。
 
 ## 新增分组
 

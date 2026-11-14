@@ -286,6 +286,28 @@ func (w *scanWorker) Run(ctx context.Context) error {
 | RocketMQ | 1 个实例 | SDK 内部已有多 pull worker |
 | Redis 队列 / claim 扫表 | 按数据库与下游能力配 2~8 | 每个实例独立 `Pop`/`Claim`，天然可并行 |
 
+## 轮询：Ticker
+
+扫表、汇总、巡检这类"每隔一段时间做一次"的循环，不必每次手写 ticker + select 和错误分支：
+
+```go
+return worker.Ticker(ctx, 5*time.Second, func(ctx context.Context) error {
+	queryCtx, cancel := context.WithTimeout(worker.DrainContext(ctx), 3*time.Second)
+	defer cancel()
+	return scanOnce(queryCtx)
+})
+```
+
+三条语义：
+
+- **失败不中断**：回调返回 error 按 warn 记录（带 `worker` 身份），下一个 tick 照常执行。
+- **panic 不外溢**：单次 panic 恢复后按 error 记录（含 stack），循环继续。
+- **取消即退出**：ctx 取消返回 `nil`，Runner 记为一次正常停机，不会触发重启策略。
+
+`interval` 必须为正、回调不能为空，否则第一次启动就返回错误——把配置错误挡在第一个 tick 之前，
+而不是让循环空转。回调内部要自己决定用不用 `DrainContext`：已经在链路上的查询应该用它，
+停机才不会被切断。
+
 ## 消费者适配器
 
 `support/worker/consumer/` 下四个子包把现成的消费者接到 worker 生命周期上：
@@ -332,6 +354,7 @@ if err != nil {
 | 消息 | `consumer/*` | 消费组把分区/队列分给成员 |
 | Redis 队列 | `support/queues` + `queuesconsumer` | 出队即删除，Lua 原子完成 |
 | 表里 `status=0` 的待办行 | `support/claim` | `FOR UPDATE SKIP LOCKED` 行级抢占 + owner CAS |
+| 定时轮询（扫状态、汇总、巡检） | `worker.Ticker` | 单次失败只记日志，循环不退出 |
 | 绝不能执行两次（对账、日切） | `support/lease` | 选主 + fencing token，旧持有者写入被拒 |
 | 跟随本 HTTP 实例的循环 | `support.Starter` | 本来就该每个副本各跑一份 |
 
@@ -395,6 +418,7 @@ CLI：
 | `ValidName(name)` | 名字是否符合分组/worker 规则 |
 | `Identity` / `IdentityFrom(ctx)` | 实例身份 |
 | `DrainContext(ctx)` | 取 drain context |
+| `Ticker(ctx, interval, fn)` | 常驻定时循环：失败/panic 记日志后继续，ctx 取消返回 nil |
 | `WithRuntime(ctx, rt)` / `RuntimeFrom(ctx)` | 注入/读取宿主 Runtime |
 | `Policy` / `DefaultPolicy()` / `FailureMode` | 重启策略 |
 | `NewRunner(group, RunConfig)` / `(*Runner).Run(ctx)` | 自行托管分组时使用 |

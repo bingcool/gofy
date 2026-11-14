@@ -743,6 +743,13 @@ All notable changes to this project are documented here. The format follows
   belongs to exactly one group, and the process-wide pid/probe/stop granularity
   is unchanged, so a deployment still runs one group per process.
 
+- `support/worker.Ticker(ctx, interval, fn)` wraps the resident polling loop: a
+  failed call is logged at warn and the next tick still runs, a panic is
+  recovered with a stack, and cancellation returns nil so the runner records a
+  clean stop. `interval` and the callback are checked up front, so a zero
+  interval fails at startup instead of spinning. The demo's scan, heartbeat and
+  summary members now use it instead of their own ticker/select blocks.
+
 ### Fixed
 
 - `Execute` prints an error to stderr whenever no logger exists yet, not just

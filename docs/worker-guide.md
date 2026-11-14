@@ -179,29 +179,27 @@ queue, err := claim.New(db, claim.Config{
 
 func scanLoop(ctx context.Context, q *claim.Queue) error {
 	id, _ := worker.IdentityFrom(ctx)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			drain := worker.DrainContext(ctx) // 停机后仍允许在途处理跑完
-			tasks, err := q.Claim(drain, id.String(), 0)
-			if err != nil {
-				return err
-			}
-			for _, task := range tasks {
-				if err := handle(drain, task); err != nil {
-					_ = q.Fail(drain, task, err) // 退避后重试，超限转死亡态
-					continue
-				}
-				_ = q.Succeed(drain, task) // owner CAS 失败返回 ErrLeaseLost
-			}
+	return worker.Ticker(ctx, 2*time.Second, func(ctx context.Context) error {
+		drain := worker.DrainContext(ctx) // 停机后仍允许在途处理跑完
+		tasks, err := q.Claim(drain, id.String(), 0)
+		if err != nil {
+			return err // Ticker 记一条 warn 后继续下一个 tick
 		}
-	}
+		for _, task := range tasks {
+			if err := handle(drain, task); err != nil {
+				_ = q.Fail(drain, task, err) // 退避后重试，超限转死亡态
+				continue
+			}
+			_ = q.Succeed(drain, task) // owner CAS 失败返回 ErrLeaseLost
+		}
+		return nil
+	})
 }
 ```
+
+`worker.Ticker` 管节拍与失败隔离：回调返回错误只记日志，panic 被恢复，循环继续；退出只有一条
+路——ctx 取消。自己写 `ticker` + `select` 时最容易犯的错就是 `return err`，那会让一次数据库抖动
+把整个 worker 交给重启策略。
 
 建表语句用 `claim.DDL("job_task")`，里面带 `idx_claim(job,status,next_run_at,id)`——没有这个索引，`SKIP LOCKED` 会退化成全表扫描加锁。
 

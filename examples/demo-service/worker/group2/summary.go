@@ -60,49 +60,41 @@ func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := rt.Logger.With(zap.String("worker", id.String()))
 
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
 		lg.Info("report summary started", zap.Duration("interval", interval))
-		for {
-			select {
-			case <-ctx.Done():
-				lg.Info("report summary stopped")
-				return nil
-			case <-ticker.C:
-				// The aggregation uses the drain context: a shutdown must not cut
-				// a query that is already on the wire.
-				// 汇总使用 drain context：停机不应该中断已经在执行的查询。
-				queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 10*time.Second)
-				var rows []statusCount
-				err := rt.DB.WithContext(queryCtx).
-					Table("orders").
-					Select("status, COUNT(*) AS total").
-					Group("status").
-					Scan(&rows).Error
-				cancel()
-				if err != nil {
-					lg.Warn("report summary failed", zap.Error(err))
-					continue
-				}
+		defer lg.Info("report summary stopped")
 
-				// Seed every declared status so a zero count still shows up as a
-				// field: a report that drops empty rows looks like missing data.
-				// 先把每个已声明的状态置零，计数为 0 时字段仍然存在：报表丢掉空行会
-				// 像是数据缺失。
-				counts := make(map[string]int64, len(orderenum.AllOrderStatus))
-				for _, status := range orderenum.AllOrderStatus {
-					counts[string(status)] = 0
-				}
-				for _, row := range rows {
-					counts[row.Status] = row.Total
-				}
-				fields := make([]zap.Field, 0, len(orderenum.AllOrderStatus))
-				for _, status := range orderenum.AllOrderStatus {
-					fields = append(fields, zap.Int64(string(status), counts[string(status)]))
-				}
-				lg.Info("report summary tick", fields...)
+		return gofyworker.Ticker(ctx, interval, func(ctx context.Context) error {
+			// The aggregation uses the drain context: a shutdown must not cut
+			// a query that is already on the wire.
+			// 汇总使用 drain context：停机不应该中断已经在执行的查询。
+			queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 10*time.Second)
+			defer cancel()
+			var rows []statusCount
+			if err := rt.DB.WithContext(queryCtx).
+				Table("orders").
+				Select("status, COUNT(*) AS total").
+				Group("status").
+				Scan(&rows).Error; err != nil {
+				return err
 			}
-		}
+
+			// Seed every declared status so a zero count still shows up as a
+			// field: a report that drops empty rows looks like missing data.
+			// 先把每个已声明的状态置零，计数为 0 时字段仍然存在：报表丢掉空行会
+			// 像是数据缺失。
+			counts := make(map[string]int64, len(orderenum.AllOrderStatus))
+			for _, status := range orderenum.AllOrderStatus {
+				counts[string(status)] = 0
+			}
+			for _, row := range rows {
+				counts[row.Status] = row.Total
+			}
+			fields := make([]zap.Field, 0, len(orderenum.AllOrderStatus))
+			for _, status := range orderenum.AllOrderStatus {
+				fields = append(fields, zap.Int64(string(status), counts[string(status)]))
+			}
+			lg.Info("report summary tick", fields...)
+			return nil
+		})
 	})
 }
