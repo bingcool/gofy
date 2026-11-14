@@ -29,7 +29,7 @@ import (
 //   - 绝不能执行两次的动作：用 support/lease 持有租约，并把 token 传给要写的表，
 //     暂停后苏醒的旧持有者的迟到写入会被拒绝。
 func Example() gofyworker.Worker {
-	return gofyworker.Func("example", func(ctx context.Context) error {
+	return gofyworker.Func("example", 1, func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok {
 			return errors.New("worker runtime is missing from the context")

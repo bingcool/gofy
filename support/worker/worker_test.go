@@ -13,7 +13,7 @@ import (
 )
 
 func TestNewGroupValidates(t *testing.T) {
-	ok := worker.Func("order-scan", func(context.Context) error { return nil })
+	ok := worker.Func("order-scan", 1, func(context.Context) error { return nil })
 
 	tests := []struct {
 		name    string
@@ -25,8 +25,8 @@ func TestNewGroupValidates(t *testing.T) {
 		{"bad group name", "Order", []worker.Worker{ok}, worker.ErrInvalidName},
 		{"no workers", "order", nil, worker.ErrNoWorkers},
 		{"nil worker", "order", []worker.Worker{nil}, worker.ErrNilWorker},
-		{"blank worker name", "order", []worker.Worker{worker.Func("", func(context.Context) error { return nil })}, worker.ErrNameRequired},
-		{"bad worker name", "order", []worker.Worker{worker.Func("Order_Scan", func(context.Context) error { return nil })}, worker.ErrInvalidName},
+		{"blank worker name", "order", []worker.Worker{worker.Func("", 1, func(context.Context) error { return nil })}, worker.ErrNameRequired},
+		{"bad worker name", "order", []worker.Worker{worker.Func("Order_Scan", 1, func(context.Context) error { return nil })}, worker.ErrInvalidName},
 		{"duplicate worker", "order", []worker.Worker{ok, ok}, worker.ErrDuplicateWorker},
 	}
 	for _, tc := range tests {
@@ -40,8 +40,8 @@ func TestNewGroupValidates(t *testing.T) {
 }
 
 func TestGroupSubset(t *testing.T) {
-	scan := worker.Func("order-scan", func(context.Context) error { return nil })
-	notify := worker.Func("order-notify", func(context.Context) error { return nil })
+	scan := worker.Func("order-scan", 1, func(context.Context) error { return nil })
+	notify := worker.Func("order-notify", 1, func(context.Context) error { return nil })
 	group, err := worker.NewGroup("order", scan, notify)
 	if err != nil {
 		t.Fatalf("NewGroup: %v", err)
@@ -74,7 +74,7 @@ func TestRunnerRunsInstancesWithIdentity(t *testing.T) {
 		seen []worker.Identity
 	)
 	ready := make(chan struct{}, 4)
-	w := worker.Func("order-scan", func(ctx context.Context) error {
+	w := worker.Func("order-scan", 1, func(ctx context.Context) error {
 		if id, ok := worker.IdentityFrom(ctx); ok {
 			mu.Lock()
 			seen = append(seen, id)
@@ -136,7 +136,7 @@ func TestRunnerRunsInstancesWithIdentity(t *testing.T) {
 
 func TestRunnerRestartsUntilSuccess(t *testing.T) {
 	var calls int32
-	w := worker.Func("flaky", func(ctx context.Context) error {
+	w := worker.Func("flaky", 1, func(ctx context.Context) error {
 		if atomic.AddInt32(&calls, 1) < 3 {
 			return errors.New("transient")
 		}
@@ -171,7 +171,7 @@ func TestRunnerRestartsUntilSuccess(t *testing.T) {
 
 func TestRunnerStopsAfterRestartLimit(t *testing.T) {
 	var calls int32
-	w := worker.Func("broken", func(context.Context) error {
+	w := worker.Func("broken", 1, func(context.Context) error {
 		atomic.AddInt32(&calls, 1)
 		return errors.New("always")
 	})
@@ -198,7 +198,7 @@ func TestRunnerStopsAfterRestartLimit(t *testing.T) {
 
 func TestRunnerExitsOnErrorInFatalMode(t *testing.T) {
 	var calls int32
-	w := worker.Func("broken", func(context.Context) error {
+	w := worker.Func("broken", 1, func(context.Context) error {
 		atomic.AddInt32(&calls, 1)
 		return errors.New("fatal")
 	})
@@ -219,7 +219,7 @@ func TestRunnerExitsOnErrorInFatalMode(t *testing.T) {
 }
 
 func TestRunnerRejectsEarlyReturn(t *testing.T) {
-	w := worker.Func("quick", func(context.Context) error { return nil })
+	w := worker.Func("quick", 1, func(context.Context) error { return nil })
 	runner, err := worker.NewRunner(mustGroup(t, "g", w), worker.RunConfig{
 		DrainTimeout: 100 * time.Millisecond,
 	})
@@ -236,7 +236,7 @@ func TestRunnerRejectsEarlyReturn(t *testing.T) {
 func TestRunnerDrainsBeforeReturning(t *testing.T) {
 	drainAlive := make(chan bool, 1)
 	finished := make(chan time.Time, 1)
-	w := worker.Func("drainy", func(ctx context.Context) error {
+	w := worker.Func("drainy", 1, func(ctx context.Context) error {
 		<-ctx.Done()
 		drain := worker.DrainContext(ctx)
 		select {
@@ -281,7 +281,7 @@ func TestRunnerDrainsBeforeReturning(t *testing.T) {
 }
 
 func TestFuncWithoutRun(t *testing.T) {
-	err := worker.Func("noop", nil).Run(context.Background())
+	err := worker.Func("noop", 1, nil).Run(context.Background())
 	if !errors.Is(err, worker.ErrNilRun) {
 		t.Fatalf("Run error = %v, want ErrNilRun", err)
 	}
@@ -291,7 +291,7 @@ func TestNewRunnerRejectsInvalidInput(t *testing.T) {
 	if _, err := worker.NewRunner(nil, worker.RunConfig{}); !errors.Is(err, worker.ErrNilGroup) {
 		t.Fatalf("NewRunner(nil) error = %v, want ErrNilGroup", err)
 	}
-	group := mustGroup(t, "g", worker.Func("w", func(context.Context) error { return nil }))
+	group := mustGroup(t, "g", worker.Func("w", 1, func(context.Context) error { return nil }))
 	if _, err := worker.NewRunner(group, worker.RunConfig{Concurrency: map[string]int{"w": 0}}); !errors.Is(err, worker.ErrInvalidConcurrency) {
 		t.Fatalf("NewRunner error = %v, want ErrInvalidConcurrency", err)
 	}
@@ -313,4 +313,69 @@ func namesOf(group *worker.Group) []string {
 		names[i] = w.Name()
 	}
 	return names
+}
+
+// TestFuncCarriesConcurrency pins the reason Func takes a count: the worker
+// knows how many instances it needs, so the host does not have to keep a
+// "group/worker" table in sync with it.
+// TestFuncCarriesConcurrency 固定 Func 接收计数的理由：worker 自己知道要跑几个实例，
+// 宿主不必再维护一张与它同步的 "group/worker" 表。
+func TestFuncCarriesConcurrency(t *testing.T) {
+	w := worker.Func("order-scan", 3, func(context.Context) error { return nil })
+	c, ok := w.(worker.Concurrent)
+	if !ok {
+		t.Fatal("Func worker does not implement worker.Concurrent")
+	}
+	if c.Concurrency() != 3 {
+		t.Fatalf("Concurrency() = %d, want 3", c.Concurrency())
+	}
+}
+
+// TestNewGroupRejectsZeroConcurrency keeps the uint8 honest: Func has no error
+// return, so the group is the first place a zero count can be reported.
+// TestNewGroupRejectsZeroConcurrency 守住 uint8 的底线：Func 没有错误返回，分组是第一个
+// 能报出 0 计数的地方。
+func TestNewGroupRejectsZeroConcurrency(t *testing.T) {
+	_, err := worker.NewGroup("order",
+		worker.Func("scan", 0, func(context.Context) error { return nil }),
+	)
+	if !errors.Is(err, worker.ErrInvalidConcurrency) {
+		t.Fatalf("NewGroup error = %v, want ErrInvalidConcurrency", err)
+	}
+}
+
+// TestRunnerUsesWorkerConcurrency is the behaviour the option map used to
+// provide: a worker that declares two instances starts twice with no host
+// configuration at all.
+// TestRunnerUsesWorkerConcurrency 是过去靠选项映射提供的行为：worker 自己声明两个
+// 实例时，完全不需要宿主配置就会启动两次。
+func TestRunnerUsesWorkerConcurrency(t *testing.T) {
+	ready := make(chan struct{}, 3)
+	w := worker.Func("scan", 3, func(ctx context.Context) error {
+		ready <- struct{}{}
+		<-ctx.Done()
+		return nil
+	})
+	runner, err := worker.NewRunner(mustGroup(t, "g", w), worker.RunConfig{
+		DrainTimeout: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-ready:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d instances started, want 3", i)
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }

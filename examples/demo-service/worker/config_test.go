@@ -9,8 +9,11 @@ import (
 	"time"
 
 	gofyconfig "github.com/bingcool/gofy/config"
+	gofyworker "github.com/bingcool/gofy/support/worker"
 
 	appworker "github.com/yourorg/demo-service/worker"
+	"github.com/yourorg/demo-service/worker/group1"
+	"github.com/yourorg/demo-service/worker/group2"
 )
 
 // section mirrors how app/config embeds the worker section: the point of these
@@ -104,11 +107,11 @@ func TestConfigRejectsUnknownWorkerKeys(t *testing.T) {
 	}
 }
 
-// TestRegisterBuildsEveryGroup pins the registration list and the invariant that
-// every concurrency key addresses a worker that actually exists: a renamed
-// worker would otherwise keep the binary building while running one instance.
-// TestRegisterBuildsEveryGroup 固定注册清单，并守住"每个并发键都对应真实存在的
-// worker"这条不变量：worker 改名后二进制仍能编译，但会静默按 1 个实例运行。
+// TestRegisterBuildsEveryGroup pins the registration list and the count each
+// worker carries: the count now lives in Func, so a group that forgets to pass
+// the configured value would silently run one instance.
+// TestRegisterBuildsEveryGroup 固定注册清单与每个 worker 自带的实例数：计数现在由
+// Func 携带，某个分组忘了把配置值传进去时，就会静默只跑一个实例。
 func TestRegisterBuildsEveryGroup(t *testing.T) {
 	cfg := loadSection(t, `worker:
   health_addr: ""
@@ -138,20 +141,36 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 		}
 	}
 
-	for key := range appworker.Concurrency(cfg) {
-		group, name, ok := strings.Cut(key, "/")
-		if !ok {
-			t.Fatalf("concurrency key %q is not group/worker", key)
-		}
-		found := false
-		for _, workerName := range got[group] {
-			if workerName == name {
-				found = true
-				break
+	declared := make(map[string]int, len(got))
+	for _, g := range groups {
+		for _, w := range g.Workers() {
+			if c, ok := w.(gofyworker.Concurrent); ok {
+				declared[g.Name()+"/"+w.Name()] = int(c.Concurrency())
 			}
 		}
-		if !found {
-			t.Fatalf("concurrency key %q addresses no registered worker", key)
+	}
+	wantDeclared := map[string]int{
+		"group1/order-scan":      2,
+		"group1/order-heartbeat": 1,
+		"group2/report-summary":  1,
+	}
+	for key, want := range wantDeclared {
+		if declared[key] != want {
+			t.Fatalf("declared concurrency for %s = %d, want %d (all: %v)", key, declared[key], want, declared)
 		}
+	}
+}
+
+// TestGroupRejectsConcurrencyOverflow guards the conversion into Func's uint8:
+// a value like 300 would otherwise truncate to 44 and start the wrong number of
+// instances without a word.
+// TestGroupRejectsConcurrencyOverflow 守住转成 Func 的 uint8 这一步：300 这样的值
+// 会被截断成 44，悄悄启动错误数量的实例。
+func TestGroupRejectsConcurrencyOverflow(t *testing.T) {
+	if _, err := group1.NewGroup(group1.Config{Scan: group1.ScanWorkerConfig{Concurrency: 300}}); err == nil {
+		t.Fatal("group1.NewGroup accepted concurrency 300")
+	}
+	if _, err := group2.NewGroup(group2.Config{Summary: group2.SummaryWorkerConfig{Concurrency: 0}}); err == nil {
+		t.Fatal("group2.NewGroup accepted concurrency 0")
 	}
 }

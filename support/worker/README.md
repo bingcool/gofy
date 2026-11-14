@@ -29,10 +29,10 @@ worker 在同一进程里同生共死，进程由 `app worker --group=<g>` 启�
 
 ```go
 group, err := worker.NewGroup("order",
-	worker.Func("order-scan", func(ctx context.Context) error {
+	worker.Func("order-scan", 2, func(ctx context.Context) error {
 		return scanLoop(ctx) // 与 HTTP handler 调用同一个 service 方法
 	}),
-	worker.Func("order-consumer", func(ctx context.Context) error {
+	worker.Func("order-consumer", 1, func(ctx context.Context) error {
 		return consumeLoop(ctx)
 	}),
 )
@@ -43,7 +43,6 @@ if err != nil {
 app, err := gofy.New(
 	gofy.WithName("demo-service"),
 	gofy.WithWorkerGroups(group),
-	gofy.WithWorkerConcurrency(map[string]int{"order/order-scan": 2}),
 	gofy.WithWorkerDrainTimeout(20*time.Second),
 )
 ```
@@ -63,7 +62,7 @@ app stop --worker=order               # 按 pid 文件停掉这一组，不碰 H
 | 产物 | 位置 | 由谁决定 |
 | --- | --- | --- |
 | pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid` | 框架（未配置 `pid_file` 则不写） |
-| 日志目录 | 示例落在 `storage/log/worker/<date>/{info,error}/<worker>.log` | 应用自行分支，用 `systemenv.IsWorkerService()` / `WorkerNames()` 判断与命名 |
+| 日志目录 | 示例落在 `storage/log/worker/<date>/{info,error}/<worker>.log` | 应用自行分支，用 `systemenv.IsWorkerService()` / `WorkerNames()` 判断；整组启动没有唯一 worker 名时用 `worker` |
 | 端口 | 默认不监听；配了 `gofy.WithWorkerHealth(addr)` 才有 `/healthz` | 框架 |
 | 退出码 | 正常停机 0，致命错误按 `gofy.ExitCode` 映射 | 框架 |
 
@@ -81,7 +80,7 @@ type Worker interface {
 `Name` 在分组内唯一，遵循 `^[a-z][a-z0-9-]{0,62}$`（与模块名、脚本名同一套规则）。
 `Run` 拥有循环本身，必须**阻塞到 ctx 被取消**，然后释放资源并返回 `nil`。
 
-只要一个函数时用 `worker.Func(name, fn)`，不必为单个字段定义结构体。
+只要一个函数时用 `worker.Func(name, concurrency, fn)`，第二个参数就是这个 worker 默认要跑的实例数，不必为单个字段定义结构体，也不必再写一条宿主选项。
 
 ### Group
 
@@ -99,15 +98,12 @@ type Worker interface {
 在启动时选一个：
 
 ```go
+// orderScan、reportSummary 由 worker.Func(name, n, fn) 构造，计数跟着 worker 走
 order, err := worker.NewGroup("order", orderScan, orderHeartbeat)
 report, err := worker.NewGroup("report", reportSummary)
 
 app, err := gofy.New(
 	gofy.WithWorkerGroups(order, report),
-	gofy.WithWorkerConcurrency(map[string]int{
-		"order/order-scan":      2,
-		"report/report-summary": 1,
-	}),
 )
 ```
 
@@ -117,7 +113,7 @@ app, err := gofy.New(
 | `worker --group=x` | 只启动 x；x 不存在时在构建 logger/DB 之前就返回 `ErrWorkerGroupNotFound` |
 | pid 文件 | 每组独立：`<pid_file>` 加 `-worker-<group>` 后缀 |
 | 日志 | 每组独立进程写自己的文件；文件名主干是 worker 名，建议带分组前缀保证全局唯一 |
-| 并发数 | 键 `group/worker`，`New` 会校验它对应真实存在的 worker，改名后写错直接启动失败 |
+| 并发数 | 由各自的 `Func(name, n, fn)` 声明；`WithWorkerConcurrency` / `--concurrency` 可按 `group/worker` 覆盖 |
 | 探针端口 | **进程级**：`WithWorkerHealth` 一个进程一个地址，同机跑多个分组要换端口；k8s 里每组一个 Pod 则无冲突 |
 
 不提供"一个进程跑多个分组"的开关：分组的语义是组内同生共死、一个分组一个部署单位。
@@ -278,7 +274,9 @@ func (w *scanWorker) Run(ctx context.Context) error {
 }
 ```
 
-并发该开多少按协议不同：
+实例数默认由 worker 自己声明（`Func` 的第二个参数）；宿主用
+`WithWorkerConcurrency` 或 `worker --concurrency` 覆盖，覆盖优先于声明。并发该开多少
+按协议不同：
 
 | 类型 | 建议 | 原因 |
 | --- | --- | --- |
@@ -339,7 +337,7 @@ if err != nil {
 用 worker 包住 `lease.Run` 是最常见的全局型写法：
 
 ```go
-w := worker.Func("settle", func(ctx context.Context) error {
+w := worker.Func("settle", 1, func(ctx context.Context) error {
 	return lease.Run(ctx, locker, "settle-reconcile", lease.RunConfig{
 		TTL:      15 * time.Second,
 		Interval: 5 * time.Minute,
@@ -357,7 +355,7 @@ w := worker.Func("settle", func(ctx context.Context) error {
 | --- | --- |
 | `WithWorkerGroups(groups...)` | 注册分组；非法分组让 `New` 失败，重名分组报错 |
 | `WithWorkerPolicy(policy)` | 覆盖默认重启策略 |
-| `WithWorkerConcurrency(map[string]int)` | 键为 `group/worker`，值为实例数；小于 1、或键对不上已注册的 worker 都让 `New` 失败 |
+| `WithWorkerConcurrency(map[string]int)` | 按 `group/worker` 覆盖 `Func` 声明的实例数；小于 1、或键对不上已注册的 worker 都让 `New` 失败 |
 | `WithWorkerDrainTimeout(d)` | 覆盖 20s 的 drain 预算，必须为正 |
 | `WithWorkerHealth(addr)` | 开启 worker 进程的 `/healthz`（就绪 200、drain 503） |
 
@@ -389,7 +387,8 @@ CLI：
 
 | 符号 | 说明 |
 | --- | --- |
-| `Worker` / `Func(name, fn)` | 常驻任务的接口与函数适配 |
+| `Worker` / `Func(name, n, fn)` | 常驻任务的接口与函数适配，`n` 是默认实例数 |
+| `Concurrent`（可选接口） | worker 自带默认实例数；`Func` 已实现，自定义 Worker 可实现 |
 | `NewGroup(name, workers...)` | 校验并构造分组 |
 | `(*Group).Subset(names)` | 按名字裁剪，返回新分组 |
 | `ValidName(name)` | 名字是否符合分组/worker 规则 |

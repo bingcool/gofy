@@ -82,6 +82,19 @@ type Worker interface {
 	Run(ctx context.Context) error
 }
 
+// Concurrent is implemented by workers that declare their own instance count.
+// It is optional: a Worker without it runs once, and any worker's count can
+// still be overridden by RunConfig.Concurrency (WithWorkerConcurrency or the
+// --concurrency flag).
+// Concurrent 由自带实例数的 worker 实现。它是可选的：没实现的 Worker 只跑 1 个
+// 实例；无论实现与否，RunConfig.Concurrency（WithWorkerConcurrency 或
+// --concurrency）都能覆盖这个数字。
+type Concurrent interface {
+	// Concurrency is how many instances the worker wants by default.
+	// Concurrency 是这个 worker 默认要跑的实例数。
+	Concurrency() uint8
+}
+
 // Group is a set of workers that live and die together in one process.
 // Group 是一组同生共死的 worker，对应一个进程、一个 Deployment。
 type Group struct {
@@ -119,6 +132,13 @@ func NewGroup(name string, workers ...Worker) (*Group, error) {
 		}
 		if _, dup := seen[workerName]; dup {
 			return nil, fmt.Errorf("%w: %q in group %q", ErrDuplicateWorker, workerName, name)
+		}
+		// A worker that declares its own count must declare a usable one:
+		// Func takes a uint8, so zero is the only invalid value it can hold.
+		// 自带实例数的 worker 必须声明一个可用的数字：Func 接收 uint8，因此 0 是它
+		// 唯一可能出现的非法值。
+		if c, ok := w.(Concurrent); ok && c.Concurrency() == 0 {
+			return nil, fmt.Errorf("%w: %q in group %q", ErrInvalidConcurrency, workerName, name)
 		}
 		seen[workerName] = struct{}{}
 	}
@@ -164,19 +184,26 @@ func (g *Group) Subset(names []string) (*Group, error) {
 	return NewGroup(g.name, selected...)
 }
 
-// Func adapts a function to a Worker, which keeps simple tasks free of a
-// one-field struct.
-// Func 把函数适配成 Worker，简单任务因此不必为单个字段定义结构体。
-func Func(name string, run func(ctx context.Context) error) Worker {
-	return funcWorker{name: name, run: run}
+// Func adapts a function to a Worker and carries the instance count the worker
+// wants by default, so a simple task needs neither a one-field struct nor a
+// separate host option. A zero count is rejected when the group is built.
+// Func 把函数适配成 Worker，并带上这个 worker 默认要跑的实例数，简单任务因此既不
+// 必定义结构体，也不必再写一条宿主选项。计数为 0 时在构造分组阶段报错。
+func Func(name string, concurrency uint8, run func(ctx context.Context) error) Worker {
+	return funcWorker{name: name, concurrency: concurrency, run: run}
 }
 
 type funcWorker struct {
-	name string
-	run  func(ctx context.Context) error
+	name        string
+	concurrency uint8
+	run         func(ctx context.Context) error
 }
 
 func (w funcWorker) Name() string { return w.name }
+
+// Concurrency reports how many instances the worker wants by default.
+// Concurrency 返回这个 worker 默认要跑的实例数。
+func (w funcWorker) Concurrency() uint8 { return w.concurrency }
 
 func (w funcWorker) Run(ctx context.Context) error {
 	if w.run == nil {

@@ -38,10 +38,12 @@ type RunConfig struct {
 	// Policy controls restarts; the zero value restarts with defaults.
 	// Policy 控制重启；零值表示按默认策略重启。
 	Policy Policy
-	// Concurrency maps a worker name to its instance count. A missing entry
-	// means one instance; values below one are rejected.
-	// Concurrency 把 worker 名映射到实例数；未配置表示 1 个实例，小于 1 的值
-	// 会被拒绝。
+	// Concurrency maps a worker name to its instance count and overrides the
+	// count the worker declares through Func. A missing entry keeps the
+	// worker's own default (one for workers that declare nothing); values below
+	// one are rejected.
+	// Concurrency 把 worker 名映射到实例数，并覆盖 worker 通过 Func 声明的计数；未配置
+	// 时沿用 worker 自己的默认值（没声明过的按 1 个），小于 1 的值会被拒绝。
 	Concurrency map[string]int
 	// DrainTimeout is how long in-flight work may run after the context is
 	// cancelled; zero means 20s. It must stay below the process shutdown budget
@@ -64,9 +66,17 @@ func (c RunConfig) withDefaults() RunConfig {
 	return c
 }
 
-func (c RunConfig) instances(name string) int {
-	if n, ok := c.Concurrency[name]; ok && n > 0 {
+func (c RunConfig) instances(w Worker) int {
+	if n, ok := c.Concurrency[w.Name()]; ok && n > 0 {
 		return n
+	}
+	// Func carries its own count; anything else that declares one through
+	// Concurrent gets the same treatment, so the host does not have to repeat
+	// what the worker already knows.
+	// Func 自带计数；其它实现 Concurrent 的 worker 同样处理，宿主不必重复 worker
+	// 已经知道的数字。
+	if cw, ok := w.(Concurrent); ok && cw.Concurrency() > 0 {
+		return int(cw.Concurrency())
 	}
 	return 1
 }
@@ -131,7 +141,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	host := cfg.hostname()
 	for _, w := range r.group.Workers() {
-		total := cfg.instances(w.Name())
+		total := cfg.instances(w)
 		for index := 0; index < total; index++ {
 			id := Identity{
 				Group: r.group.Name(),

@@ -182,7 +182,7 @@ func (a *App) workerDescriptors() []commandline.WorkerGroup {
 		for _, w := range workers {
 			infos = append(infos, commandline.WorkerInfo{
 				Name:        w.Name(),
-				Concurrency: a.workerConcurrencyFor(g.Name(), w.Name()),
+				Concurrency: a.workerConcurrencyFor(g.Name(), w),
 			})
 		}
 		out = append(out, commandline.WorkerGroup{Name: g.Name(), Workers: infos})
@@ -190,19 +190,26 @@ func (a *App) workerDescriptors() []commandline.WorkerGroup {
 	return out
 }
 
-// workerConcurrencyFor resolves one worker's instance count from the option
-// map, defaulting to one.
-// workerConcurrencyFor 从选项映射里取单个 worker 的实例数，默认 1。
-func (a *App) workerConcurrencyFor(group, name string) int {
-	if n, ok := a.opts.workerConcurrency[group+"/"+name]; ok && n > 0 {
+// workerConcurrencyFor resolves one worker's instance count: an explicit option
+// wins, then the count the worker declares, then one. `worker --list` uses it,
+// so the table shows what will actually start.
+// workerConcurrencyFor 解析单个 worker 的实例数：显式选项优先，其次 worker 自己声明
+// 的计数，最后是 1。`worker --list` 用它，因此表里显示的就是实际会启动的数量。
+func (a *App) workerConcurrencyFor(group string, w worker.Worker) int {
+	if n, ok := a.opts.workerConcurrency[group+"/"+w.Name()]; ok && n > 0 {
 		return n
+	}
+	if c, ok := w.(worker.Concurrent); ok && c.Concurrency() > 0 {
+		return int(c.Concurrency())
 	}
 	return 1
 }
 
-// workerConcurrency builds the runner's concurrency map, letting the
-// --concurrency flag override every entry.
-// workerConcurrency 构造 Runner 的并发映射，--concurrency 旗标会覆盖所有条目。
+// workerConcurrency builds the runner's override map. Only explicit overrides
+// are included: a worker's own count has to survive when neither the option nor
+// the --concurrency flag mentions it.
+// workerConcurrency 构造 Runner 的覆盖映射。只有显式覆盖才会进表：选项与
+// --concurrency 都没提到某个 worker 时，它自己声明的计数必须保留下来。
 func (a *App) workerConcurrency(group *worker.Group, override int) map[string]int {
 	workers := group.Workers()
 	out := make(map[string]int, len(workers))
@@ -211,7 +218,9 @@ func (a *App) workerConcurrency(group *worker.Group, override int) map[string]in
 			out[w.Name()] = override
 			continue
 		}
-		out[w.Name()] = a.workerConcurrencyFor(group.Name(), w.Name())
+		if n, ok := a.opts.workerConcurrency[group.Name()+"/"+w.Name()]; ok && n > 0 {
+			out[w.Name()] = n
+		}
 	}
 	return out
 }

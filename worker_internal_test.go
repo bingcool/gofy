@@ -40,14 +40,14 @@ func TestWorkerPIDPath(t *testing.T) {
 
 func TestWorkerDescriptorsResolveConcurrency(t *testing.T) {
 	order, err := worker.NewGroup("order",
-		worker.Func("scan", func(context.Context) error { return nil }),
-		worker.Func("notify", func(context.Context) error { return nil }),
+		worker.Func("scan", 1, func(context.Context) error { return nil }),
+		worker.Func("notify", 3, func(context.Context) error { return nil }),
 	)
 	if err != nil {
 		t.Fatalf("NewGroup: %v", err)
 	}
 	settle, err := worker.NewGroup("settle",
-		worker.Func("reconcile", func(context.Context) error { return nil }),
+		worker.Func("reconcile", 1, func(context.Context) error { return nil }),
 	)
 	if err != nil {
 		t.Fatalf("NewGroup: %v", err)
@@ -72,9 +72,12 @@ func TestWorkerDescriptorsResolveConcurrency(t *testing.T) {
 			concurrency[g.Name+"/"+w.Name] = w.Concurrency
 		}
 	}
+	// scan is overridden by the option, notify keeps the count Func carries,
+	// reconcile declares nothing beyond one.
+	// scan 被选项覆盖，notify 保留 Func 自带的计数，reconcile 只声明 1 个。
 	want := map[string]int{
 		"order/scan":       4,
-		"order/notify":     1,
+		"order/notify":     3,
 		"settle/reconcile": 1,
 	}
 	for key, n := range want {
@@ -101,7 +104,7 @@ func TestWithWorkerConcurrencyRejectsBadInput(t *testing.T) {
 
 func TestWithWorkerGroupsRejectsDuplicate(t *testing.T) {
 	build := func() *worker.Group {
-		g, err := worker.NewGroup("order", worker.Func("scan", func(context.Context) error { return nil }))
+		g, err := worker.NewGroup("order", worker.Func("scan", 1, func(context.Context) error { return nil }))
 		if err != nil {
 			t.Fatalf("NewGroup: %v", err)
 		}
@@ -209,7 +212,7 @@ func TestWithWorkerHealthValidatesAddr(t *testing.T) {
 // 改名后留下过期键，没有这道校验时唯一的表现就是那个 worker 只跑一个实例。
 func TestWithWorkerConcurrencyRejectsUnknownWorker(t *testing.T) {
 	group, err := worker.NewGroup("order",
-		worker.Func("scan", func(context.Context) error { return nil }),
+		worker.Func("scan", 1, func(context.Context) error { return nil }),
 	)
 	if err != nil {
 		t.Fatalf("NewGroup: %v", err)
@@ -238,7 +241,7 @@ func TestWithWorkerConcurrencyRejectsUnknownWorker(t *testing.T) {
 // 分组可能在多个地方注册，并发映射完全可能先于它要覆盖的分组声明。
 func TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown(t *testing.T) {
 	group, err := worker.NewGroup("order",
-		worker.Func("scan", func(context.Context) error { return nil }),
+		worker.Func("scan", 1, func(context.Context) error { return nil }),
 	)
 	if err != nil {
 		t.Fatalf("NewGroup: %v", err)

@@ -1,4 +1,4 @@
-package worker
+package group1
 
 import (
 	"context"
@@ -11,12 +11,12 @@ import (
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
-// ScanWorkerConfig controls the order scan worker's rhythm and replica count.
-// It lives here rather than in config.go because only this worker understands
-// it: the shared settings stay in WorkerConfig, the task's own knobs stay with
-// the task.
-// ScanWorkerConfig 控制订单扫描任务的节奏与实例数。它放在这里而不是 config.go，
-// 因为只有这个 worker 懂这些设置：公共设置留在 WorkerConfig，任务自己的旋钮跟着
+// ScanWorkerConfig controls the scan worker's rhythm and replica count. It
+// lives here rather than in the group's abc_register.go because only this worker
+// understands it: the group settings stay in abc_register.go, the task's own
+// knobs stay with the task.
+// ScanWorkerConfig 控制扫描任务的节奏与实例数。它放在这里而不是分组的 abc_register.go，
+// 因为只有这个 worker 懂这些设置：分组的设置留在 abc_register.go，任务自己的旋钮跟着
 // 任务走。
 type ScanWorkerConfig struct {
 	// Concurrency is how many scan instances run inside the worker process.
@@ -27,19 +27,19 @@ type ScanWorkerConfig struct {
 	Interval time.Duration `yaml:"interval" default:"5s"`
 }
 
-// newOrderScanWorker scans pending orders on an interval. Demo's orders table
-// has no claim columns (status is a business value, not a task state), so this
-// only counts; a real queue declares a job table with claim.DDL and calls
+// newScanWorker scans pending orders on an interval. Demo's orders table has no
+// claim columns (status is a business value, not a task state), so this only
+// counts; a real queue declares a job table with claim.DDL and calls
 // claim.Queue.Claim, which is what makes several replicas safe.
-// newOrderScanWorker 按间隔扫描待处理订单。demo 的 orders 表没有认领所需的状态列
-// （status 是业务值，不是任务状态），因此这里只统计；真实的队列用 claim.DDL 建
-// 任务表，再调 claim.Queue.Claim，多副本才安全。
-func newOrderScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
+// newScanWorker 按间隔扫描待处理订单。demo 的 orders 表没有认领所需的状态列（status
+// 是业务值，不是任务状态），因此这里只统计；真实的队列用 claim.DDL 建任务表，再调
+// claim.Queue.Claim，多副本才安全。
+func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 	interval := cfg.Interval
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return gofyworker.Func("order-scan", func(ctx context.Context) error {
+	return gofyworker.Func("order-scan", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok || rt.DB == nil {
 			return errors.New("order-scan: runtime database is required")

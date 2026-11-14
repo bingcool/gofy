@@ -11,7 +11,6 @@ import (
 	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	appscript "github.com/yourorg/demo-service/script"
-	appworker "github.com/yourorg/demo-service/worker"
 )
 
 // middlewareRegistrar 把 app/middleware 里的应用层别名注册进 gofy 启动时创建
@@ -53,8 +52,6 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, gro
 		// 常驻任务只通过 worker 子命令运行，HTTP 进程不会启动它们。这里注册
 		// 全部分组，`worker --group=<分组>` 只运行其中一个。
 		gofy.WithWorkerGroups(groups...),
-		// 并发数由 worker 包按分组名给出，main 不必再抄一遍 "order/order-scan"。
-		gofy.WithWorkerConcurrency(appworker.Concurrency(cfg.Worker)),
 		gofy.WithWorkerHealth(cfg.Worker.HealthAddr),
 		gofy.WithVersionInfo(gofy.VersionInfo{
 			Version:   version,

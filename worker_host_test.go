@@ -59,12 +59,12 @@ func TestExecuteWorkerRunsConcurrentInstancesUntilCanceled(t *testing.T) {
 
 func TestExecuteWorkerNameFilter(t *testing.T) {
 	var primary, secondary int32
-	primaryWorker := worker.Func("primary", func(ctx context.Context) error {
+	primaryWorker := worker.Func("primary", 1, func(ctx context.Context) error {
 		atomic.AddInt32(&primary, 1)
 		<-ctx.Done()
 		return nil
 	})
-	secondaryWorker := worker.Func("secondary", func(ctx context.Context) error {
+	secondaryWorker := worker.Func("secondary", 1, func(ctx context.Context) error {
 		atomic.AddInt32(&secondary, 1)
 		<-ctx.Done()
 		return nil
@@ -104,7 +104,7 @@ func TestExecuteWorkerNameFilter(t *testing.T) {
 // 测试因此能观察到解析出来的并发数。
 func newWorkerApp(t *testing.T, groupName string, started *int32) *gofy.App {
 	t.Helper()
-	group, err := worker.NewGroup(groupName, worker.Func("tick", func(ctx context.Context) error {
+	group, err := worker.NewGroup(groupName, worker.Func("tick", 1, func(ctx context.Context) error {
 		atomic.AddInt32(started, 1)
 		<-ctx.Done()
 		return nil
@@ -145,7 +145,7 @@ func TestExecuteWorkerRunsOnlyTheRequestedGroup(t *testing.T) {
 	var orderStarted, reportStarted int32
 	build := func(name string, started *int32) *worker.Group {
 		t.Helper()
-		group, err := worker.NewGroup(name, worker.Func(name+"-tick", func(ctx context.Context) error {
+		group, err := worker.NewGroup(name, worker.Func(name+"-tick", 1, func(ctx context.Context) error {
 			atomic.AddInt32(started, 1)
 			<-ctx.Done()
 			return nil
@@ -175,6 +175,41 @@ func TestExecuteWorkerRunsOnlyTheRequestedGroup(t *testing.T) {
 	if got := atomic.LoadInt32(&orderStarted); got != 0 {
 		t.Fatalf("order group started %d times while --group=report, want 0", got)
 	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("ExecuteArgs error = %v", err)
+	}
+}
+
+// TestExecuteWorkerUsesFuncConcurrency proves the count travels from Func to the
+// process without any host option, which is what `worker --list` reports too.
+// TestExecuteWorkerUsesFuncConcurrency 证明计数可以从 Func 一路传到进程，无需任何宿主
+// 选项；`worker --list` 报告的也是这个数字。
+func TestExecuteWorkerUsesFuncConcurrency(t *testing.T) {
+	var started int32
+	group, err := worker.NewGroup("order", worker.Func("tick", 2, func(ctx context.Context) error {
+		atomic.AddInt32(&started, 1)
+		<-ctx.Done()
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	app, err := gofy.New(
+		gofy.WithName("worker-test"),
+		gofy.WithWorkerGroups(group),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- app.ExecuteArgs(ctx, []string{"worker", "--group=order"})
+	}()
+
+	waitFor(t, func() bool { return atomic.LoadInt32(&started) == 2 }, "two instances to start")
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("ExecuteArgs error = %v", err)

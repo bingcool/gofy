@@ -41,7 +41,7 @@ worker 与 script 的装配位置相同，都在 `main`，用同一套 service/r
 svc := order.NewService(order.NewRepository(db))
 
 scan, err := worker.NewGroup("order",
-	worker.Func("order-scan", func(ctx context.Context) error {
+	worker.Func("order-scan", 2, func(ctx context.Context) error {
 		return scanLoop(ctx, svc) // 与 HTTP handler 调用同一个 service 方法
 	}),
 )
@@ -53,7 +53,6 @@ app, err := gofy.New(
 	gofy.WithName("demo-service"),
 	gofy.WithDatabase(cfg.DB["default"]),
 	gofy.WithWorkerGroups(scan),
-	gofy.WithWorkerConcurrency(map[string]int{"order/order-scan": 2}),
 	gofy.WithWorkerDrainTimeout(20*time.Second),
 	gofy.WithWorkerHealth("0.0.0.0:9091"), // 可选，配合 readinessProbe
 )
@@ -86,17 +85,17 @@ app, err := gofy.New(
 这样同一个镜像既能当 HTTP 服务，也能按需要跑任意分组，不必为每个分组单独出一个二进制。
 
 ```go
-// worker/worker.go：分组各自一个文件，这里只列清单
+// worker/worker.go：每个分组一个子包，这里只列清单
 func Register(cfg Config) ([]*worker.Group, error) {
-	order, err := newOrderGroup(cfg.Order)
+	first, err := group1.NewGroup(cfg.Group1)
 	if err != nil {
 		return nil, err
 	}
-	report, err := newReportGroup(cfg.Report)
+	second, err := group2.NewGroup(cfg.Group2)
 	if err != nil {
 		return nil, err
 	}
-	return []*worker.Group{order, report}, nil
+	return []*worker.Group{first, second}, nil
 }
 
 // main.go
@@ -104,23 +103,23 @@ groups, err := appworker.Register(cfg.Worker)
 if err != nil {
 	log.Fatalf("build worker groups: %v", err)
 }
-opts = append(opts,
-	gofy.WithWorkerGroups(groups...),
-	gofy.WithWorkerConcurrency(appworker.Concurrency(cfg.Worker)),
-)
+opts = append(opts, gofy.WithWorkerGroups(groups...))
 ```
 
-配置按分组名分层，公共项留在 `worker` 顶层；每个分组块的类型定义在它自己的文件里，加一个
+实例数在分组构造时传给 `worker.Func(name, n, fn)`，所以 `main` 不维护第二张
+`group/worker → n` 的表；要用命令行临时扩缩，再加 `worker --concurrency=<n>`。
+
+配置按分组名分层，公共项留在 `worker` 顶层；每个分组块的类型定义在它自己的子包里，加一个
 worker 不会碰到别的分组：
 
 ```yaml
 worker:
   health_addr: 127.0.0.1:9091   # 进程级：一个分组一个进程
-  order:
+  group1:
     scan:
       concurrency: 2
       interval: 5s
-  report:
+  group2:
     summary:
       concurrency: 1
       interval: 1h
@@ -136,7 +135,14 @@ worker:
 | 并发数 | 是 | 键为 `group/worker`，写错名字 `New` 直接失败（不再静默退回 1 个实例） |
 | 探针端口 | **否** | `WithWorkerHealth` 是进程级地址；k8s 里每组一个 Pod 不冲突，同机跑两组要换端口或用 `ORDER_CONFIG` 换配置 |
 
-新增一个分组只要三步：写一个分组文件（如 `group3_register.go`，含成员 + 它的配置结构）、在 `Register` 的返回列表里加
+分组内的文件就两层：入口 `abc_register.go` 装 `Config` 与 `NewGroup`（分组本身、配置、
+构造都归它），每个 worker 各占一个成员文件（`scan.go`、`heartbeat.go`）。入口带 `abc_`
+前缀是为了排在最上面——裸的 `register.go` 按字母序落在 `heartbeat.go`、`scan.go` 之后，
+看目录时入口沉在最底下；下划线前缀不行，Go 忽略 `_` 或 `.` 开头的文件，`_register.go`
+等于把它从编译里摘掉，`Config` 与 `NewGroup` 随之消失，`Register` 里直接报 `undefined`。
+前缀得是真实字符，`abc_` 就是给排序用的空壳，没有语义。
+
+新增一个分组只要三步：新建一个分组子包（如 `group3/abc_register.go` + 成员文件，含配置结构）、在 `Register` 的返回列表里加
 一项、`config.yaml` 加同名配置块。`main.go` 与部署清单不用改结构——复制一份清单，改
 `--group` 和副本数即可。
 
@@ -218,7 +224,7 @@ consumer := queuesconsumer.New("order-notify", queue, queuesconsumer.Config{
 ```go
 locker, _ := redislease.New(redisClient, redislease.Config{Prefix: "demo:"})
 
-w := worker.Func("settle", func(ctx context.Context) error {
+w := worker.Func("settle", 1, func(ctx context.Context) error {
 	return lease.Run(ctx, locker, "settle:reconcile", lease.RunConfig{
 		TTL:      15 * time.Second, // 续约按 TTL/3 进行
 		Interval: 5 * time.Minute,  // 两次执行之间的间隔

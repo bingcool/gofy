@@ -1,4 +1,4 @@
-package worker
+package group2
 
 import (
 	"context"
@@ -30,18 +30,17 @@ type statusCount struct {
 	Total  int64  `gorm:"column:total"`
 }
 
-// newReportSummaryWorker aggregates orders by status on an interval. It is the
-// second group's only member, which is enough to show the point: it reads the
-// same database as the order group without sharing a process, because the two
-// have different rhythms and are deployed separately.
-// newReportSummaryWorker 按间隔统计各状态订单数。它是 report 分组唯一的成员，足以
-// 说明问题：它读的是与 order 分组相同的库，却不同进程，因为两者节奏不同、分开部署。
-func newReportSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
+// newSummaryWorker aggregates orders by status on an interval. It reads the same
+// database as group1 without sharing a process, which is the point of splitting
+// the two groups: different rhythms, independent deployments.
+// newSummaryWorker 按间隔统计各状态订单数。它与 group1 读同一个库却不同进程，这正是
+// 拆成两个分组的意义：节奏不同、部署独立。
+func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 	interval := cfg.Interval
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	return gofyworker.Func("report-summary", func(ctx context.Context) error {
+	return gofyworker.Func("report-summary", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok || rt.DB == nil {
 			return errors.New("report-summary: runtime database is required")
