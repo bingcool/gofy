@@ -11,20 +11,20 @@ import (
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
-// ScanWorkerConfig controls the scan worker's rhythm and replica count. It
-// lives here rather than in the group's abc_register.go because only this worker
-// understands it: the group settings stay in abc_register.go, the task's own
-// knobs stay with the task.
-// ScanWorkerConfig 控制扫描任务的节奏与实例数。它放在这里而不是分组的 abc_register.go，
-// 因为只有这个 worker 懂这些设置：分组的设置留在 abc_register.go，任务自己的旋钮跟着
-// 任务走。
+// ScanWorkerConfig controls the scan worker's rhythm and replica count. It lives
+// here because it is this worker's own knob: the group passes one in, and nothing
+// outside the package reads it. No yaml tags — the values are set in
+// abc_register.go, not in config.yaml.
+// ScanWorkerConfig 控制扫描任务的节奏与实例数。放在这里是因为它只属于这个 worker：
+// 分组传一个进来，包外没人读它。没有 yaml 标签——值在 abc_register.go 里给，
+// 不来自 config.yaml。
 type ScanWorkerConfig struct {
 	// Concurrency is how many scan instances run inside the worker process.
 	// Concurrency 是 worker 进程内同时运行的扫描实例数。
-	Concurrency int `yaml:"concurrency" default:"2"`
+	Concurrency int
 	// Interval is the pause between two scans.
 	// Interval 是两次扫描之间的间隔。
-	Interval time.Duration `yaml:"interval" default:"5s"`
+	Interval time.Duration
 }
 
 // newScanWorker scans pending orders on an interval. Demo's orders table has no

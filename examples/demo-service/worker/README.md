@@ -16,21 +16,20 @@ repository，因此查询逻辑只有一份。
 
 ```
 worker/
-├── config.go              # 公共设置 + 分组配置（config.yaml 的 worker 段）
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── group1/
-│   ├── abc_register.go    # group1 的 Config 与 NewGroup
+│   ├── abc_register.go    # group1 的 defaults 与 NewGroup
 │   ├── scan.go            # order-scan：扫表
 │   └── heartbeat.go       # order-heartbeat：存活心跳
 └── group2/
-    ├── abc_register.go    # group2 的 Config 与 NewGroup
+    ├── abc_register.go    # group2 的 defaults 与 NewGroup
     └── summary.go         # report-summary：小时级汇总
 ```
 
 `abc_` 前缀只是为了让入口文件排在成员文件之前，没有语义；下划线开头不行，Go 会忽略
-`_register.go`，`Config` 与 `NewGroup` 会跟着从编译里消失。
+`_register.go`，`NewGroup` 会跟着从编译里消失。
 
-每个分组自成一个包，配置结构、构造、成员都在包内。给 group1 加一个 worker，不需要
+每个分组自成一个包，参数、构造、成员都在包内。给 group1 加一个 worker，不需要
 碰 group2 的任何文件。
 
 ## 两个分组各做什么
@@ -91,7 +90,7 @@ $ go run . worker --group='*'
 `stop --worker='*'` 一次停掉全部，任一分组失败会取消其余分组。引号不能省，否则 shell 先
 展开 `*`；也不能和 `--name` 同用——worker 名只属于一个分组，跨组过滤会静默跳过不含它的组。
 
-只跑组内某个 worker，或临时改实例数（不改配置、不改代码）：
+只跑组内某个 worker，或临时改实例数（不改代码）：
 
 ```bash
 go run . worker --group=group1 --name=order-scan
@@ -99,10 +98,9 @@ go run . worker --group=group1 --name=order-scan --name=order-heartbeat
 go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 1 个实例
 ```
 
-`--name` 可重复，也接受逗号分隔；`--concurrency=0`（默认）表示沿用 worker 自己声明的数字
-（或 config.yaml 里同名块的覆盖）。命令行覆盖的
-优先级高于 `worker.Func(name, n, run)` 里声明的数字，但只在本次启动生效：`worker --list`
-显示的是配置里的值，不会跟着 `--concurrency` 变。
+`--name` 可重复，也接受逗号分隔；`--concurrency=0`（默认）表示沿用 `worker.Func(name, n, run)`
+里的数字。覆盖只在本次启动生效：`worker --list` 读的是代码里的值，不会跟着 `--concurrency`
+变。
 
 > 本地调试建议先 `go build -o /tmp/demo .` 再跑二进制：`go run` 会把信号交给 go 工具链，
 > Ctrl+C 下 worker 的 drain 过程和退出码看不准确。
@@ -115,10 +113,13 @@ go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 
 | pid 文件 | `app/demo-service-worker-all.pid` | `--group='*'` 时用这个后缀，`stop --worker='*'` 解析同一个文件 |
 | 日志 | `storage/log/worker/<date>/info/worker-h15.log` | 整组启动写 `worker-<host>.log` |
 | 日志 | `storage/log/worker/<date>/info/order-scan-h15.log` | `--name` 只跑一个 worker 时用它的名字 |
-| 就绪探针 | `http://127.0.0.1:9091/healthz` | 配置 `worker.health_addr` 才有；分组起来返回 200 `ok`，drain 期间 503 |
 
 日志文件不带分组名：分组已经在每行日志的 `worker` 字段里（`group1/order-scan#0`）。
 要一个 worker 一组文件，就用 `--name` 单独起；整组启动共用一份，靠字段区分。
+
+demo 没开就绪探针：`options.go` 里没有 `gofy.WithWorkerHealth`，worker 进程不监听任何
+端口。要接 readinessProbe 就在那里加一行地址，行为是启动前 503、就绪后 200、drain 时
+回到 503。
 
 ## 停止
 
@@ -141,43 +142,33 @@ $ go run . stop --worker='*' --force
 `stop` 的粒度是分组，`stop --worker=group1` 不会碰到 group2，也不会碰 HTTP 进程。
 `restart` 只用于 HTTP 实例，worker 用 `stop` + 重新启动。
 
-## 配置
+## 参数
 
-每个 worker 的参数就定义在它自己的文件里，`default` 标签给出默认值，读代码即可知道会起
-几个实例、多久跑一次：
+每个 worker 的参数就写在它自己的文件里，由分组在 `abc_register.go` 里给值。`config.yaml`
+没有 `worker:` 段，读代码即可知道会起几个实例、多久跑一次：
 
 ```go
 // group1/scan.go
 type ScanWorkerConfig struct {
-	Concurrency int           `yaml:"concurrency" default:"2"` // 进程内扫描实例数
-	Interval    time.Duration `yaml:"interval" default:"5s"`   // 两次扫描的间隔
+	Concurrency int           // 进程内扫描实例数
+	Interval    time.Duration // 两次扫描的间隔
+}
+
+// group1/abc_register.go
+var defaults = ScanWorkerConfig{
+	Concurrency: 2,
+	Interval:    5 * time.Second,
 }
 ```
 
-因此 `config.yaml` 的 `worker` 段只需要进程级设置，不必写分组块：
+改参数就改这个 `defaults`；临时改实例数用 `--group=group1 --concurrency=4`，不必动代码。
+结构体上没有 `yaml` 标签，配置里写 `worker:` 会被严格解码拒绝——它不再是配置来源。
 
-```yaml
-worker:
-  health_addr: 127.0.0.1:9091   # 进程级：一个进程一个端口，同机跑两组要给第二个换端口
-```
+三条约束：
 
-默认值在解码前应用，分组块整段省略也能正常启动（`worker/config_test.go` 的
-`TestConfigAppliesGroupDefaults` 固定了这一点）。要按环境调整时再加同名块覆盖，键名必须
-与 `yaml` 标签一致——严格解码会拒绝拼错的键，而不是静默忽略：
-
-```yaml
-worker:
-  group1:
-    scan:
-      concurrency: 4      # 只覆盖这一项，interval 仍取默认的 5s
-```
-
-四条约束：
-
-- **分组块是可选覆盖，不是必填**：类型来自各分组包，结构体字段而非 map，拼错的键会直接报错。
-- **实例数在 `worker.Func` 里是 `uint8`**：分组构造时校验 `1..255`，越界报错而不是被截断
-  成另一个数字；配置里仍是 `int`，由分组的 `NewGroup` 负责校验后再转换。
-- **`--concurrency` 优先级最高**：命令行 > 配置块 > worker 自己声明的数字，临时压测不必改文件。
+- **实例数在 `worker.Func` 里是 `uint8`**：代码里给的是字面量，超出 `1..255` 编译期就会报错，
+  不会静默截断成另一个数字。
+- **`--concurrency` 优先级最高**：命令行覆盖 worker 自己声明的数字，临时压测不必改文件。
 - **worker 名全应用唯一**：日志文件名取自 worker 名，两个分组用同一个名字会写到同一个
   文件（demo 里是 `order-scan`、`order-heartbeat`、`report-summary`）。
 
@@ -189,16 +180,16 @@ worker:
 组内加一个 worker，只动那个分组包：
 
 1. 新建成员文件，例如 `group1/settle.go`，用 `worker.Func("order-settle", 1, run)` 定义；
-2. 在 `group1/abc_register.go` 的 `NewGroup` 里追加；
-3. 它的配置写在成员文件里（照 `ScanWorkerConfig`），在分组的 `Config` 里加一个字段；
-4. `config.yaml` 加对应块，`go run . worker --list` 核对。
+2. 参数写在成员文件的结构体里（照 `ScanWorkerConfig`），在 `group1/abc_register.go` 的
+   `defaults` 里给值；
+3. 在同一个文件的 `NewGroup` 里把它追加进去；
+4. `go run . worker --list` 核对，列表里出现新名字即可。
 
 ## 新增分组
 
-1. 新建子包 `worker/group3/`，加 `abc_register.go`（`Config` + `NewGroup`）与成员文件；
-2. `worker/config.go` 的 `Config` 加一行 `Group3 group3.Config`，标签为 `yaml:"group3"`；
-3. `worker/worker.go` 的 `Register` 里构造并加进返回列表；
-4. `config.yaml` 加 `worker.group3` 块。
+1. 新建子包 `worker/group3/`，加 `abc_register.go`（`defaults` + `NewGroup`）与成员文件；
+2. `worker/worker.go` 的 `Register` 里构造该分组并加进返回列表；
+3. `go run . worker --list` 核对，`worker --group=group3` 即可启动。
 
 `main.go` 与部署清单不用改结构：复制一份 Deployment，改 `--group=group3` 和副本数即可。
 同一个镜像服务所有分组，因此不必为每个分组单独出一个二进制。
@@ -214,7 +205,7 @@ worker:
 | 日志找不到 | 目录看错 | `storage/log/worker/<date>/info/`，整组是 `worker-<host>.log` |
 | `stop --worker=x` 报 not running | 未配置 `pid_file`，或分组名与启动时不同 | 查 `app/*-worker-<group>.pid` |
 | `--group='*'` 配 `--name` 报 usage error | 通配符按组运行，`--name` 只能指定一个组内的 worker | 改成 `--group=<拥有该 worker 的组>` |
-| `--list` 的数字和实际不同 | 配置改了没重启，或用了 `--concurrency` | 覆盖只在本次启动生效 |
+| `--list` 的数字和实际不同 | 用了 `--concurrency` | 覆盖只在本次启动生效，`--list` 读的是代码里的数字 |
 
 ## 相关文档
 

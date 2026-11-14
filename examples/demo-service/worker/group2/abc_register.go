@@ -6,41 +6,38 @@
 // restart never interrupts the scan loop.
 //
 // The file is abc_register.go for the same reason as in group1: the prefix pins
-// the group's entry point (Config and NewGroup) above summary.go, which a plain
-// register.go would sit below.
+// the group's entry point above summary.go, which a plain register.go would sit
+// below.
 //
 // 包 group2 是第二个 worker 分组：按小时节奏运行的报表任务。
 //
 // 单独成包是为了让部署边界在目录结构里就看得见：group1 与 group2 各自启动独立进程、
 // 各自扩缩，报表重启不会打断扫描循环。
 //
-// 文件名同样是 abc_register.go：前缀把分组的入口（Config 与 NewGroup）钉在 summary.go
-// 之前，裸的 register.go 会落在它后面。
+// 文件名同样是 abc_register.go：前缀把分组的入口钉在 summary.go 之前，裸的
+// register.go 会落在它后面。
 package group2
 
 import (
-	"fmt"
-	"math"
+	"time"
 
 	gofyworker "github.com/bingcool/gofy/support/worker"
 )
 
-// Config holds the settings of group2.
-// Config 保存 group2 的设置。
-type Config struct {
-	Summary SummaryWorkerConfig `yaml:"summary"`
+// defaults is what group2 runs with: one instance per hour. More than one would
+// write the same report twice, so the number is deliberately one.
+// defaults 是 group2 运行时的参数：每小时一个实例。多实例会把同一份报表写两遍，因此
+// 这里刻意就是 1。
+var defaults = SummaryWorkerConfig{
+	Concurrency: 1,
+	Interval:    time.Hour,
 }
 
-// NewGroup builds group2. A count the worker cannot carry as a uint8 is rejected
-// here instead of being silently truncated by the conversion.
-// NewGroup 构造 group2。worker 用 uint8 承载实例数，配置值超出范围时在这里直接报错，
-// 而不是被转换悄悄截断。
-func NewGroup(cfg Config) (*gofyworker.Group, error) {
-	if c := cfg.Summary.Concurrency; c < 1 || c > math.MaxUint8 {
-		return nil, fmt.Errorf("group2: summary.concurrency must be between 1 and %d, got %d", math.MaxUint8, c)
-	}
+// NewGroup builds group2.
+// NewGroup 构造 group2。
+func NewGroup() (*gofyworker.Group, error) {
 	return gofyworker.NewGroup(
 		"group2",
-		newSummaryWorker(cfg.Summary),
+		newSummaryWorker(defaults),
 	)
 }

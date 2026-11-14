@@ -52,7 +52,6 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, gro
 		// 常驻任务只通过 worker 子命令运行，HTTP 进程不会启动它们。这里注册
 		// 全部分组，`worker --group=<分组>` 只运行其中一个。
 		gofy.WithWorkerGroups(groups...),
-		gofy.WithWorkerHealth(cfg.Worker.HealthAddr),
 		gofy.WithVersionInfo(gofy.VersionInfo{
 			Version:   version,
 			Commit:    commit,

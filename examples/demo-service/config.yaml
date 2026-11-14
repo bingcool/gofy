@@ -201,24 +201,9 @@ rocketmq:
     enabled: false
     endpoint: 127.0.0.1:8081
 
-# 常驻任务：部署时一个进程只运行一个分组，`demo-service worker --group=<分组>` 选择
-# 要跑哪个（本地调试可用 `--group='*'` 在一个进程里跑全部）；全部分组注册在同一个
-# 二进制里，因此它们共用这一份 config.yaml。HTTP 服务不会拉起 worker。
-worker:
-  # 就绪探针：分组启动后 200，drain 期间 503。留空则不监听端口。
-  # 一个进程一个端口，同机跑两个分组时给第二个换端口（或用 ORDER_CONFIG 指向另一份
-  # 配置）；k8s 里每个分组各自一个 Pod，端口相同不冲突。
-  health_addr: 127.0.0.1:9091
-  # 分组参数（并发数、节奏）不写在这里：默认值就定义在各 worker 包里，见
-  # group1/scan.go 的 ScanWorkerConfig 与 group2/summary.go 的 SummaryWorkerConfig，
-  # 读代码即可知道会起几个实例、多久跑一次。
-  # 需要按环境覆盖时再加同名块，键名要与结构体的 yaml 标签一致（严格解码会拒绝拼错的键）：
-  #   group1:
-  #     scan:
-  #       concurrency: 4
-  #   group2:
-  #     summary:
-  #       interval: 30m
+# 常驻任务没有配置段：分组清单、并发数与节奏都在 worker/ 目录里，由
+# `demo-service worker --group=<分组>` 启动（本地调试可用 --group='*' 跑全部）。
+# 就绪探针默认不开；需要时在 options.go 里加 gofy.WithWorkerHealth(addr)。
 
 pid_file: app/demo-service.pid
 

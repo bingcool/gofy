@@ -1,7 +1,7 @@
 // Package worker builds the long-running groups started by
 // `demo-service worker --group=<group>`.
 //
-// Each group is a subpackage that owns its members, its config and its
+// Each group is a subpackage that owns its members, its settings and its
 // construction: group1/abc_register.go and group2/abc_register.go build the group
 // (the abc_ prefix keeps that file at the top of the directory, above the member
 // files), and every worker gets a file of its own (scan.go, heartbeat.go,
@@ -10,7 +10,7 @@
 // stays the deployment unit and the same binary serves every deployment.
 // 包 worker 构造 `demo-service worker --group=<分组>` 启动的常驻分组。
 //
-// 每个分组是一个子包，成员、配置与构造都归它自己：group1/abc_register.go 与
+// 每个分组是一个子包，成员、参数与构造都归它自己：group1/abc_register.go 与
 // group2/abc_register.go 负责构造分组（abc_ 前缀让该文件排在目录最上面，在成员文件
 // 之前），每个 worker 各占一个文件（scan.go、heartbeat.go、summary.go），ticker、
 // 日志与错误处理都留在里面。Register 一次构造全部分组，worker 子命令只运行其中一个，
@@ -31,15 +31,18 @@ import (
 
 // Register builds every group the binary knows about, in the order `worker
 // --list` prints them. Adding a group means adding a package and one line here;
-// nothing else in the binary changes.
+// nothing else in the binary changes. It takes no config: each group's settings
+// live in its own package, so there is no file to decode and no second source of
+// truth for numbers like instance counts.
 // Register 构造二进制认识的所有分组，顺序与 `worker --list` 的输出一致。新增一个分组
-// 只需加一个子包加这里一行，二进制其它部分不用改。
-func Register(cfg Config) ([]*gofyworker.Group, error) {
-	first, err := group1.NewGroup(cfg.Group1)
+// 只需加一个子包加这里一行，二进制其它部分不用改。它不接收配置：每个分组的参数就在
+// 自己包里，因此没有文件要解码，实例数这类数字也不会出现第二个来源。
+func Register() ([]*gofyworker.Group, error) {
+	first, err := group1.NewGroup()
 	if err != nil {
 		return nil, err
 	}
-	second, err := group2.NewGroup(cfg.Group2)
+	second, err := group2.NewGroup()
 	if err != nil {
 		return nil, err
 	}

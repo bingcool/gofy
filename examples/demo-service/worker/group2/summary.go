@@ -12,15 +12,17 @@ import (
 )
 
 // SummaryWorkerConfig controls the report summary worker: how many instances
-// run inside the process and how often each one aggregates.
+// run inside the process and how often each one aggregates. No yaml tags — the
+// values are set in abc_register.go, not in config.yaml.
 // SummaryWorkerConfig 控制报表汇总任务：进程内跑几个实例，每个实例多久汇总一次。
+// 没有 yaml 标签——值在 abc_register.go 里给，不来自 config.yaml。
 type SummaryWorkerConfig struct {
 	// Concurrency is how many summary instances run inside the worker process.
 	// Concurrency 是 worker 进程内同时运行的汇总实例数。
-	Concurrency int `yaml:"concurrency" default:"1"`
+	Concurrency int
 	// Interval is the pause between two aggregations.
 	// Interval 是两次汇总之间的间隔。
-	Interval time.Duration `yaml:"interval" default:"1h"`
+	Interval time.Duration
 }
 
 // statusCount is one row of the status breakdown.

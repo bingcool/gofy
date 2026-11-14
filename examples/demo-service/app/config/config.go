@@ -13,7 +13,6 @@ import (
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
 	"github.com/yourorg/demo-service/app/middleware"
-	appworker "github.com/yourorg/demo-service/worker"
 	"strings"
 )
 
@@ -36,7 +35,6 @@ type Config struct {
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
 	JWT      middleware.JWTConfig           `yaml:"jwt"`
-	Worker   appworker.Config               `yaml:"worker"`
 }
 
 // Database returns the named instance; the caller must have checked it exists.
