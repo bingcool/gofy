@@ -1,4 +1,4 @@
-// Package io wires the demo's named MySQL, Redis, AMQP, Kafka and RocketMQ
+// Package appio wires the demo's named MySQL, Redis, AMQP, Kafka and RocketMQ
 // instances into the handles published by their subpackages. It owns the extra
 // connections: Start opens and installs them, Stop closes them, and a reload
 // rebuilds them together with the module.
@@ -12,7 +12,7 @@
 // 有说明入口没有发布，直接 panic。发布与固定机制由 support/generation 提供，
 // 本包只负责组装一代句柄并声明 demo 的入口（Middleware、WithContext、模块
 // 生命周期）。
-package io
+package appio
 
 import (
 	"context"
@@ -20,16 +20,16 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
-	appamqp "github.com/yourorg/demo-service/app/io/amqp"
-	appdb "github.com/yourorg/demo-service/app/io/db"
-	appkafka "github.com/yourorg/demo-service/app/io/kafka"
-	appredis "github.com/yourorg/demo-service/app/io/redis"
-	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
-	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
+	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
+	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
+	appredis "github.com/yourorg/demo-service/app/appio/redis"
+	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
+	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 )
 
-// Module publishes app/io/db, app/io/redis, app/io/amqp, app/io/kafka,
-// app/io/rocketmq and app/io/uuidint handles during startup.
+// Module publishes app/appio/db, app/appio/redis, app/appio/amqp, app/appio/kafka,
+// app/appio/rocketmq and app/appio/uuidint handles during startup.
 // Module 在启动时打开各实例并发布 db、redis、amqp、kafka、rocketmq、uuidint 的
 // 包级句柄；它不注册路由，只负责连接生命周期与快照发布。
 type Module struct {

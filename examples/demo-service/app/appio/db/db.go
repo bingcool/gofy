@@ -1,13 +1,13 @@
 // Package db exposes the demo's named MySQL-protocol connections.
 //
-// 业务代码不直接读包级变量：一律通过 app/io 的快照取连接
+// 业务代码不直接读包级变量：一律通过 app/appio 的快照取连接
 // （appio.WithContext(ctx).DB()），脚本、守护进程与请求走同一条路径。当前一代
 // 的 Set 用 atomic.Pointer 整体发布，读写不再共享可变包变量。
 //
-// Db 就是框架托管的 db.default（Runtime.DB），order、product 由 app/io 包
+// Db 就是框架托管的 db.default（Runtime.DB），order、product 由 app/appio 包
 // 按 db.order、db.product 在启动时打开；配置里没有的实例保持 nil。
 // 其余名字（如 selectDb）注册进 registry，首次 NewIO 时才建连。
-// 脚本与请求一样跑完整的 app/io 装配代（见 script/register.go），拿到的也是本代
+// 脚本与请求一样跑完整的 app/appio 装配代（见 script/register.go），拿到的也是本代
 // 命名实例；只有单元测试用 NewSet 发布一个只带 default 的快照。
 package db
 

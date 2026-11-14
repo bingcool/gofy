@@ -10,7 +10,7 @@ fail() {
 
 module="github.com/yourorg/demo-service"
 module_prefix="$module/app/module/"
-appio_prefix="$module/app/io"
+appio_prefix="$module/app/appio"
 contract_prefix="github.com/yourorg/interface-service"
 api_contracts_prefix="github.com/bingcool/gofy-interface-api/contracts"
 api_client_prefix="github.com/bingcool/gofy-interface-api/client"
@@ -74,7 +74,7 @@ while IFS='|' read -r pkg imports; do
     case "$layer" in
       controller)
         # 只依赖本模块 service 与 HTTP 契约；不碰 model/repository/innerapi/
-        # 其他模块，也不直接取 app/io 句柄。
+        # 其他模块，也不直接取 app/appio 句柄。
         case "$cat" in
           module)
             if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "service" ]; then
@@ -82,13 +82,13 @@ while IFS='|' read -r pkg imports; do
             fi
             ;;
           appio)
-            fail "$pkg must not import $imp: controllers must not reach app/io handles"
+            fail "$pkg must not import $imp: controllers must not reach app/appio handles"
             ;;
         esac
         ;;
       service)
         # 不依赖 HTTP 契约；跨模块只走对方 innerapi，不碰其他模块
-        # service/repository/model；本模块各层与 app/io（开事务）允许。
+        # service/repository/model；本模块各层与 app/appio（开事务）允许。
         case "$cat" in
           contract)
             fail "$pkg must not import $imp: services must not depend on HTTP contracts"
@@ -102,7 +102,7 @@ while IFS='|' read -r pkg imports; do
         ;;
       innerapi)
         # 纯契约：只允许标准库与 support 纯类型，禁止任何 app/module、契约、
-        # app/io、框架与第三方依赖。
+        # app/appio、框架与第三方依赖。
         case "$cat" in
           stdlib | support) ;;
           *)
@@ -111,7 +111,7 @@ while IFS='|' read -r pkg imports; do
         esac
         ;;
       repository)
-        # 只依赖本模块 model + app/io + support；不碰 service/innerapi/契约/
+        # 只依赖本模块 model + app/appio + support；不碰 service/innerapi/契约/
         # 其他模块。
         case "$cat" in
           module)
@@ -125,10 +125,10 @@ while IFS='|' read -r pkg imports; do
         esac
         ;;
       model)
-        # 表结构不依赖任何 app/module、契约或 app/io。
+        # 表结构不依赖任何 app/module、契约或 app/appio。
         case "$cat" in
           module | contract | appio)
-            fail "$pkg must not import $imp: models must not depend on app/module, contracts or app/io"
+            fail "$pkg must not import $imp: models must not depend on app/module, contracts or app/appio"
             ;;
         esac
         ;;

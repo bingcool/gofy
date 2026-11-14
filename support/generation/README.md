@@ -18,7 +18,7 @@ import (
 )
 
 // 装配根创建一次；整个进程生命周期复用（不要每次请求新建）。
-var current = generation.NewSet[Snapshot]("app/io")
+var current = generation.NewSet[Snapshot]("app/appio")
 
 // 模块 Start：本代句柄全部就绪后一次发布。
 current.Publish(snapshot)
@@ -67,9 +67,9 @@ snapshot := current.WithContext(ctx)
 
 ## demo 用法
 
-`examples/demo-service/app/io` 是完整示例：`Snapshot` 汇总一代的 db、redis、
+`examples/demo-service/app/appio` 是完整示例：`Snapshot` 汇总一代的 db、redis、
 amqp、kafka、rocketmq、uuidint 句柄，`currentSnapshot` 就是
-`generation.NewSet[Snapshot]("app/io")`；`Middleware`、`WithContext`、
+`generation.NewSet[Snapshot]("app/appio")`；`Middleware`、`WithContext`、
 `WithSnapshot`、`Current`、`Publish` 都是薄封装，`Module.Stop` 用
 `CompareAndSwap` 撤回本代。脚本侧由 `script/register.go` 的 `withIO` 在
 `Run` 前后执行同一套 `Start` / `Stop`。

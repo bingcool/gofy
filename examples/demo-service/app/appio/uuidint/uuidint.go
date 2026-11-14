@@ -1,7 +1,7 @@
 // Package uuidint exposes the demo's distributed ID generator.
 //
 // 业务代码通过快照取生成器（appio.WithContext(ctx).UUID()），脚本、守护进程与
-// 请求走同一条路径；句柄由 app/io 在启动时构建并发布。生成器优先绑定本代 Redis Set 的
+// 请求走同一条路径；句柄由 app/appio 在启动时构建并发布。生成器优先绑定本代 Redis Set 的
 // 客户端（support/uuidint 的 WithClient），每次取号直接使用这一代连接，不受
 // 之后 Reload 安装的新 Registry 影响。
 package uuidint
@@ -57,9 +57,9 @@ func (c Config) Validate() error {
 	return err
 }
 
-// RedisInstanceName returns the Redis alias after applying defaults; app/io uses
+// RedisInstanceName returns the Redis alias after applying defaults; app/appio uses
 // it to pick this generation's client before building the generator.
-// RedisInstanceName 返回补齐默认值后的 Redis 别名；app/io 先按它取本代客户端，
+// RedisInstanceName 返回补齐默认值后的 Redis 别名；app/appio 先按它取本代客户端，
 // 再构造生成器，取号就固定在这一代连接上。
 func (c Config) RedisInstanceName() string {
 	return c.withDefaults().RedisInstance
@@ -164,7 +164,7 @@ func (s *Set) Install() {
 // set, so a reload that already installed a new generator keeps it intact. No
 // Redis connection is owned here.
 // Close 停止预取池，并只在发布指针仍指向自己时清空句柄，Reload 已安装的新生成器
-// 不受影响。本包不持有 Redis 连接，连接由 app/io 的 Redis Set 释放。
+// 不受影响。本包不持有 Redis 连接，连接由 app/appio 的 Redis Set 释放。
 func (s *Set) Close() error {
 	if s == nil {
 		return nil

@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	gofydb "github.com/bingcool/gofy/support/db"
-	appio "github.com/yourorg/demo-service/app/io"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/module/product/model"
 	"gorm.io/gorm"
 )
@@ -27,7 +27,7 @@ const StatusOnSale int8 = 1
 // 跑真实 SQL。
 //
 // 仓库不持有连接和日志：每次查询从 ctx 取请求固定的 IO 快照，没有固定值时
-// 回退到当前一代；装配早于 app/io.Start 也安全，一次请求内的多次查询始终
+// 回退到当前一代；装配早于 app/appio.Start 也安全，一次请求内的多次查询始终
 // 落在同一代连接上。日志由调用方 service 用 rt.Logger 记录。
 type ProductRepository struct{}
 

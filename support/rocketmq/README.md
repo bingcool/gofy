@@ -12,7 +12,7 @@ remoting 协议和 NameServer 9876，也不需要 sidecar。与 `support/redis`�
 - `Wrap(rmq.Producer)` 注入已经建好的 producer；
 - `NewConsumer(Config, ConsumerConfig)` 按订阅配置单独创建拉取型消费者；
 - 需要按配置别名取用时，用可选的 `Configure` / `NewIO` 命名实例注册表；
-- 多实例也可以由应用装配层负责，例如 demo 的 `app/io/rocketmq`：`default`
+- 多实例也可以由应用装配层负责，例如 demo 的 `app/appio/rocketmq`：`default`
   发布为 `rocketmq.Default`，其它实例用 `rocketmq.Get("名字")` 取用。
 
 v5 与 v2 的关键差异：

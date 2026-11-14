@@ -1,4 +1,4 @@
-package io
+package appio
 
 import (
 	"context"
@@ -61,19 +61,19 @@ func TestSnapshotNewIORequiresGenerationRegistry(t *testing.T) {
 	ctx := context.Background()
 
 	var absent *Snapshot
-	if _, err := absent.DBNewIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
-		t.Fatalf("nil snapshot DBNewIO = %v, want ErrNotConfigured", err)
+	if _, err := absent.DBIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("nil snapshot DBIO = %v, want ErrNotConfigured", err)
 	}
-	if _, err := absent.RedisNewIO(ctx, "ratelimit"); !errors.Is(err, gofyredis.ErrNotConfigured) {
-		t.Fatalf("nil snapshot RedisNewIO = %v, want ErrNotConfigured", err)
+	if _, err := absent.RedisIO(ctx, "ratelimit"); !errors.Is(err, gofyredis.ErrNotConfigured) {
+		t.Fatalf("nil snapshot RedisIO = %v, want ErrNotConfigured", err)
 	}
 
 	// 脚本/单测发布只带 db.default 的快照，没有命名实例注册表。
 	PublishDB(&gorm.DB{})
-	if _, err := Current().DBNewIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
-		t.Fatalf("DBNewIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
+	if _, err := Current().DBIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("DBIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
 	}
-	if _, err := Current().RedisNewIO(ctx, "ratelimit"); !errors.Is(err, gofyredis.ErrNotConfigured) {
-		t.Fatalf("RedisNewIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
+	if _, err := Current().RedisIO(ctx, "ratelimit"); !errors.Is(err, gofyredis.ErrNotConfigured) {
+		t.Fatalf("RedisIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
 	}
 }

@@ -16,9 +16,9 @@ import (
 	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/nacos"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/container"
-	appio "github.com/yourorg/demo-service/app/io"
 )
 
 // reloader rebuilds the modules from a freshly loaded config and applies them

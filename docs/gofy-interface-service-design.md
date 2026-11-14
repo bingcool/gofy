@@ -1638,7 +1638,7 @@ func (c *Container) BindOptions() gofyadapter.BindOptions {
 ```
 
 中间件在首次请求时用 `redisstore.New(redis.NewIO(ctx, alias))` 构建
-`ratelimit.Store` 并缓存：模块工厂完成路由绑定时 `app/io` 尚未打开 Redis，
+`ratelimit.Store` 并缓存：模块工厂完成路由绑定时 `app/appio` 尚未打开 Redis，
 而 `Reload` 时新代中间件必须绑定到新代连接。解析失败不缓存，失败请求按 503
 处理。
 

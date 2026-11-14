@@ -5,7 +5,7 @@
 
 本包不持有全局状态，也不接管客户端生命周期：业务把已经连接的
 `*redis.Client`（或任意 `goredis.Cmdable`）注入进来，关闭仍由业务或
-`app/io` 负责。
+`app/appio` 负责。
 
 ## 快速开始
 
@@ -38,7 +38,7 @@ if err := c.Set(ctx, "order:1", "paid", time.Minute); err != nil {
 value, ok, err := c.Get(ctx, "order:1") // ok=false 表示 key 不存在
 ```
 
-也可以直接注入 `app/io/redis` 发布出来的实例：
+也可以直接注入 `app/appio/redis` 发布出来的实例：
 
 ```go
 c, err := cache.NewRedis(appredis.Cache)

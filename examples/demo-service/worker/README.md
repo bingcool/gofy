@@ -10,7 +10,7 @@
 | worker | `demo-service worker --group=<g>` | 常驻，不监听业务端口 | 扫表、MQ 消费、定时汇总 |
 
 worker 进程没有 HTTP 栈，也不注册路由。轮询类任务通过框架注入的 `Runtime` 拿
-logger 与数据库，MQ 消费者则在 `Run` 里按配置自建连接——worker 进程不运行 `app/io`
+logger 与数据库，MQ 消费者则在 `Run` 里按配置自建连接——worker 进程不运行 `app/appio`
 模块，因此没有现成的连接句柄可以引用，这一点与 HTTP 进程不同。
 
 ## 目录

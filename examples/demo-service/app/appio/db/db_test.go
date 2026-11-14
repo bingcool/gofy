@@ -86,7 +86,7 @@ func TestOpenRejectsInvalidLazyConfig(t *testing.T) {
 // TestIntegrationOpenNamedInstances 需要真实 MySQL：
 //
 //	GOFY_TEST_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parseTime=True&loc=Local' \
-//	  go test ./app/io/db -run Integration -v
+//	  go test ./app/appio/db -run Integration -v
 func TestIntegrationOpenNamedInstances(t *testing.T) {
 	dsn := os.Getenv("GOFY_TEST_MYSQL_DSN")
 	if dsn == "" {

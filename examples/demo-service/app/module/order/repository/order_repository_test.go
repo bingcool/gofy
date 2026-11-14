@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	appio "github.com/yourorg/demo-service/app/io"
+	"github.com/yourorg/demo-service/app/appio"
 	"gorm.io/gorm"
 )
 

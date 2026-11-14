@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	gofydb "github.com/bingcool/gofy/support/db"
-	appio "github.com/yourorg/demo-service/app/io"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"gorm.io/gorm"
 )
@@ -21,7 +21,7 @@ var ErrNotFound = errors.New("order not found")
 // 没有带来替换价值，测试改用纯 Go SQLite 跑真实 SQL。
 //
 // 仓库不持有连接和日志：每次查询从 ctx 取请求固定的 IO 快照，没有固定值时
-// 回退到当前一代；模块工厂早于 app/io.Start 运行也安全，一次请求内的多次
+// 回退到当前一代；模块工厂早于 app/appio.Start 运行也安全，一次请求内的多次
 // 查询始终落在同一代连接上。日志由 service 用 rt.Logger 记录。
 type OrderRepository struct{}
 

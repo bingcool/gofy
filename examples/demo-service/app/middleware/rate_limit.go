@@ -13,7 +13,7 @@ import (
 	"github.com/bingcool/gofy/support/ratelimit/redisstore"
 	"github.com/gin-gonic/gin"
 	goredis "github.com/redis/go-redis/v9"
-	appio "github.com/yourorg/demo-service/app/io"
+	"github.com/yourorg/demo-service/app/appio"
 )
 
 const (
@@ -43,8 +43,8 @@ type RateLimiter struct {
 	// Responder 渲染 429 / 503；nil 时使用框架默认响应。App 装配根传入的
 	// Responder 与全局错误信封一致，限流响应才能带同样的 code/msg/req_id。
 	Responder support.Responder
-	// RedisClient 按别名解析 Redis 客户端，默认取请求固定的 app/io 快照
-	// （appio.WithContext(ctx).RedisNewIO）：解析不会跨 Reload 换到下一代。
+	// RedisClient 按别名解析 Redis 客户端，默认取请求固定的 app/appio 快照
+	// （appio.WithContext(ctx).RedisIO）：解析不会跨 Reload 换到下一代。
 	// 测试注入 miniredis 客户端，避免依赖真实 Redis。
 	RedisClient func(ctx context.Context, alias string) (*goredis.Client, error)
 }
@@ -55,7 +55,7 @@ type RateLimiter struct {
 // 中间件装在路由中间件链最前面（分组中间件之后，BindOptions.Global、
 // spec.Middleware 名字和 Routes[OperationID] 之前），超额请求在这些中间件和
 // handler 执行前就被拒绝。回调本身不做 I/O：Redis 连接在首次请求时才解析，
-// 因此模块工厂可以在 app/io 打开 Redis 之前完成路由绑定。
+// 因此模块工厂可以在 app/appio 打开 Redis 之前完成路由绑定。
 func (r RateLimiter) Callback() func(endpoint.Spec) support.Middleware {
 	return r.middleware
 }
@@ -92,14 +92,14 @@ func redisAlias(alias string) string {
 	return alias
 }
 
-// redisClient 返回客户端解析函数。默认从 app/io 快照取本代 Redis 注册表，
+// redisClient 返回客户端解析函数。默认从 app/appio 快照取本代 Redis 注册表，
 // 装配根或测试可以通过字段覆盖。
 func (r RateLimiter) redisClient() func(ctx context.Context, alias string) (*goredis.Client, error) {
 	if r.RedisClient != nil {
 		return r.RedisClient
 	}
 	return func(ctx context.Context, alias string) (*goredis.Client, error) {
-		return appio.WithContext(ctx).RedisNewIO(ctx, alias)
+		return appio.WithContext(ctx).RedisIO(ctx, alias)
 	}
 }
 
@@ -162,7 +162,7 @@ func firstNonEmpty(values ...string) string {
 // redisLimiter 用 Redis 计数，替契约声明的这条路由维护滑窗。
 //
 // 为什么延迟构建：App 启动和 Reload 都先执行模块工厂并绑定路由，再执行各模块
-// 的 Start；demo 的 Redis 连接由 app/io 模块在 Start 里打开并随快照一起发布。
+// 的 Start；demo 的 Redis 连接由 app/appio 模块在 Start 里打开并随快照一起发布。
 // 绑定阶段解析只会拿到“快照/实例未配置”，所以客户端与框架中间件必须在第一次
 // 请求时才构建。Reload 时新代中间件由新代容器创建，请求中间件固定的快照也是
 // 新代，旧连接随旧模块 Stop 退役。
@@ -179,7 +179,7 @@ type redisLimiter struct {
 	alias string
 	// responder 渲染 429 / 503；nil 时使用框架默认响应。
 	responder support.Responder
-	// redis 按别名解析客户端，默认从请求固定的 app/io 快照解析。
+	// redis 按别名解析客户端，默认从请求固定的 app/appio 快照解析。
 	redis func(ctx context.Context, alias string) (*goredis.Client, error)
 
 	// mu 保护 handler 的首次构建；handler 非 nil 后不再重复构建。

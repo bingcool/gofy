@@ -135,7 +135,7 @@ func TestReloadKeepsNewHandles(t *testing.T) {
 // TestIntegrationOpenRateLimit 需要真实 Redis：
 //
 //	GOFY_TEST_REDIS_ADDR=127.0.0.1:6379 GOFY_TEST_REDIS_PASSWORD=... \
-//	  go test ./app/io/redis -run Integration -v
+//	  go test ./app/appio/redis -run Integration -v
 func TestIntegrationOpenRateLimit(t *testing.T) {
 	addr := os.Getenv("GOFY_TEST_REDIS_ADDR")
 	if addr == "" {

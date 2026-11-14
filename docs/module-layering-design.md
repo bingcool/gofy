@@ -76,7 +76,7 @@
 | --- | --- | --- | --- | --- |
 | `controller` | 契约 ↔ service 映射、错误→HTTP 码、记录意外错误 | 契约 request | 契约 response/DTO | import model / repository / innerapi / 其他模块任何包 |
 | `service` | 业务规则、用例编排、事务边界、日志；实现本模块 innerapi | 本模块 model + plain 入参 + 其他模块 innerapi | 本模块 innerapi 视图 | import HTTP 契约；import 其他模块 service / repository / model |
-| `innerapi` | **模块对外发布的内部 API 契约**：接口 + 只读视图 + 哨兵错误 | — | — | import 任何模块的 service / repository / model / controller、HTTP 契约、app/io |
+| `innerapi` | **模块对外发布的内部 API 契约**：接口 + 只读视图 + 哨兵错误 | — | — | import 任何模块的 service / repository / model / controller、HTTP 契约、app/appio |
 | `repository` | 单聚合数据访问（GORM） | 本模块 model | 本模块 model | import service / innerapi / 契约 / 其他模块任何包 |
 | `model` | 表结构定义 | — | — | 任何业务依赖（仅 `time` / gorm tag） |
 
@@ -87,7 +87,7 @@ service/repository/model，也不 import HTTP 契约。消费方 import 它时�
 
 ### 3.2 import 矩阵（√ 允许，× 禁止）
 
-| 调用方 \ 被调方 | 本模块 model | 本模块 repository | 本模块 service | 本模块 innerapi | 其他模块 innerapi | 其他模块 service/repository/model | HTTP 契约 | app/io 句柄 |
+| 调用方 \ 被调方 | 本模块 model | 本模块 repository | 本模块 service | 本模块 innerapi | 其他模块 innerapi | 其他模块 service/repository/model | HTTP 契约 | app/appio 句柄 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | controller | × | × | √ | × | × | × | √ | × |
 | service | √ | √ | — | √（实现） | √（调用） | × | × | √（开事务） |
@@ -556,17 +556,17 @@ HTTP POST /api/v1/order/orders
 2. `service`：禁止 import HTTP 契约包；禁止 import 其他模块 `service` / `repository` /
    `model`；允许本模块 `innerapi`（实现）与其他模块 `innerapi`（调用）；
 3. `innerapi`：纯契约，禁止 import 任何 `app/module/*/...`（含本模块 service/repository/
-   model）、HTTP 契约、`app/io`；只允许标准库（必要时 `support` 的纯类型）；
+   model）、HTTP 契约、`app/appio`；只允许标准库（必要时 `support` 的纯类型）；
 4. `repository`：禁止 import 任何 `service` / `innerapi` / 契约 / 其他模块包；只允许
-   本模块 `model` + `app/io` + `support`；
-5. `model`：禁止任何 `app/module` / 契约 / `app/io` 依赖；
+   本模块 `model` + `app/appio` + `support`；
+5. `model`：禁止任何 `app/module` / 契约 / `app/appio` 依赖；
 6. 删除「一个包最多 import 一个其他模块 repository」旧规则，由规则 2 取代；
 7. 包依赖成环仍由 `go build` 兜底（innerapi 无回边，天然无环）；
 8. `service` 与 `repository` 只允许经 `appio.WithContext(ctx)` 取本代句柄：
    禁止调用 `appdb.Default` / `appredis.Cache` 等包级访问器，也禁止自行
    `Publish`。HTTP、脚本、守护进程共用这两层代码，入口负责发布一代，这两层只
    负责消费，否则同一份代码会出现第二种取法。发布与固定机制来自
-   `support/generation`，`app/io` 只是薄封装。
+   `support/generation`，`app/appio` 只是薄封装。
 
 规则按 `app/module/<name>/<layer>/...` 匹配：模块根（`app/module/<name>`）只做路由
 绑定，`app/container` 只做装配，两者都不在分层检查范围内。容器是唯一允许同时

@@ -51,13 +51,13 @@
   （[start.go:381](../start.go#L381)、[start.go:427](../start.go#L427)）。
 - 热更新通过 `Reload` 重新执行同一组工厂，模块实例整体替换；旧模块在新模块启动后
   才停止（[reload.go:118](../reload.go#L118)）。
-- `app/io` 模块在 `Start` 阶段才安装 `appdb.Db`、`appdb.OrderDb`、`appdb.ProductDb`
+- `app/appio` 模块在 `Start` 阶段才安装 `appdb.Db`、`appdb.OrderDb`、`appdb.ProductDb`
   等句柄，因此模块工厂执行时这些包级句柄仍是 `nil`
-  （[io_runtime.go](../examples/demo-service/app/io/io_runtime.go)、
-  [db.go](../examples/demo-service/app/io/db/db.go)）。
+  （[io_runtime.go](../examples/demo-service/app/appio/io_runtime.go)、
+  [db.go](../examples/demo-service/app/appio/db/db.go)）。
 - 现有 repository 不持连接，每次查询用 `support/db.WithContext` 回落到 `appdb.Db`
   （[order_repository.go](../examples/demo-service/app/module/order/repository/order_repository.go)）。
-- 虽然 `app/io` 还维护 `db.order`、`db.product` 等命名实例，按本方案 D1，
+- 虽然 `app/appio` 还维护 `db.order`、`db.product` 等命名实例，按本方案 D1，
   order / product 等业务模块统一使用框架托管的 `db.default`，命名实例只服务于
   确实需要独立存储的场景。
 
@@ -271,7 +271,7 @@ reloader.factories(cfg)                                # 只组装工厂列表�
 App.buildHTTPWith
   ├── 构建 Logger / DB / Runtime / middleware registry
   ├── 依次执行 module factories
-  │     ├── appio.NewModuleFactory(...)                # 安装 app/io 句柄的模块
+  │     ├── appio.NewModuleFactory(...)                # 安装 app/appio 句柄的模块
   │     └── order.NewModuleFactory()                   # 新建 Registry，
   │                                                    # 登记 product.products
   └── 依次 Register 所有模块（路由/中间件名解析）
@@ -282,7 +282,7 @@ App.buildHTTPWith
 - 注册表由**消费方工厂**创建，工厂之间没有共享可变状态，也不依赖执行顺序；
   两个模块都需要读同一个仓库时，各自登记自己那一份（实例无状态，见下）；
 - repository 不持有连接：构造不需要连接，每次查询从 `appdb.*` 解析句柄，
-  因此 `app/io.Start` 之前构建 repository 是安全的；
+  因此 `app/appio.Start` 之前构建 repository 是安全的；
 - `Reload` 会重新执行 `factories(cfg)`，工厂再建一份新注册表；旧模块继续持有旧注册表
   直到交换完成，新旧实例不共享可变状态；
 - service 不得把注册表或取出的仓库缓存到包级变量。唯一的包级默认值是
@@ -340,7 +340,7 @@ type RepositoryDeps struct {
 }
 
 // RepoDeps 是模块自带的默认集合。仓库无状态：不持连接和日志，连接推迟到每次查询
-// 才解析，因此包初始化早于 app/io.Start 也安全，Reload 换连接后自动生效。
+// 才解析，因此包初始化早于 app/appio.Start 也安全，Reload 换连接后自动生效。
 var RepoDeps = RepositoryDeps{Orders: &repository.OrderRepository{}}
 ```
 
@@ -350,8 +350,8 @@ var RepoDeps = RepositoryDeps{Orders: &repository.OrderRepository{}}
 
 无状态仓库的取舍（已确认）：
 
-- 仓库不持有连接和日志，每次查询从 `app/io` 句柄解析 `db.Db`（ctx 事务优先），
-  因此装配早于 `app/io.Start`、`Reload` 换连接都自动生效；
+- 仓库不持有连接和日志，每次查询从 `app/appio` 句柄解析 `db.Db`（ctx 事务优先），
+  因此装配早于 `app/appio.Start`、`Reload` 换连接都自动生效；
 - 日志统一在 service/module 层用 `rt.Logger` 记录，仓库只包装并返回错误，
   避免同一失败被记录两次；
 - `RepoDeps` 只放无状态仓库（不持连接、不持注册表），跨装配共享安全；它是唯一被允许的
@@ -515,13 +515,13 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 ### 5.8 生命周期与热更新
 
 - Registry 的生命周期 = 一次装配，由模块工厂新建，`Reload` 后重建；
-- 每次 `Reload` 重新执行工厂并替换 `app/io` 句柄，无状态 repository 下一次查询
+- 每次 `Reload` 重新执行工厂并替换 `app/appio` 句柄，无状态 repository 下一次查询
   自然读到新连接；旧注册表随旧模块一起淘汰；
 - 旧模块在新模块启动完成前继续服务，期间两代 repository 并存是预期行为；
 - 除 `service.RepoDeps` 这份无状态默认集合外，任何 repository 都不允许存到包级变量、
   `Runtime` 或全局 map；注册表本身永远不是包级变量；
 - 后台 worker / 脚本不经过模块装配时，直接构造无状态 repository；脚本没有
-  `app/io` 生命周期，`script/fix_order.go` 把 `rt.DB` 临时发布到 `appdb.Db`
+  `app/appio` 生命周期，`script/fix_order.go` 把 `rt.DB` 临时发布到 `appdb.Db`
   并在调用后恢复，不从请求上下文的注册表拿。
 
 ### 5.9 错误与诊断
@@ -832,10 +832,10 @@ demo 的 `app/**` 业务包不在范围内。demo 目前也没有 `init()`：默
 11. **repository 不注入连接和日志**：删除 `New(db, logger)`、`NewFromHandle(logger)`、
     `newRepository` 以及 struct 的 `db` / `logger` 字段，`OrderRepository` /
     `ProductRepository` 变成零值可用的空结构体；`conn(ctx)` 固定为
-    `gofydb.WithContext(ctx, appdb.Db)`。理由：仓库只有一种连接来源（`app/io` 句柄）
+    `gofydb.WithContext(ctx, appdb.Db)`。理由：仓库只有一种连接来源（`app/appio` 句柄）
     和一种日志来源（service 的 `rt.Logger`），构造函数只是把包级依赖再传一遍。
     删除后 `RepoDeps`、工厂、测试都直接用 `&repository.OrderRepository{}`；脚本模式没有
-    `app/io` 生命周期，`script/fix_order.go` 调用前把 `rt.DB` 发布到 `appdb.Db`
+    `app/appio` 生命周期，`script/fix_order.go` 调用前把 `rt.DB` 发布到 `appdb.Db`
     并在结束后恢复。
 
 ### 11.5 已确认（2026-11-11，P8）

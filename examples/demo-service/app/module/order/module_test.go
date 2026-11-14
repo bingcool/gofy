@@ -20,8 +20,8 @@ import (
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/container"
-	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
 	"github.com/yourorg/demo-service/app/module/order/model"
@@ -100,7 +100,7 @@ func (p panicPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, e
 
 // newTestServices 通过装配根在 SQLite 上构建订单与配置 service：容器同时构造
 // 产品与订单 service，并把产品能力以 innerapi 接口注入订单 service。仓库从
-// app/io 句柄取连接，测试把内存库发布成当前句柄，结束后恢复。
+// app/appio 句柄取连接，测试把内存库发布成当前句柄，结束后恢复。
 func newTestServices(t *testing.T) (*service.OrderService, *service.OrderConfigService) {
 	t.Helper()
 	conn := newTestDB(t)

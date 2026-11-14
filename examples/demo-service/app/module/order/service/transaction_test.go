@@ -7,7 +7,7 @@ import (
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/sqlite"
-	appio "github.com/yourorg/demo-service/app/io"
+	"github.com/yourorg/demo-service/app/appio"
 	ordermodel "github.com/yourorg/demo-service/app/module/order/model"
 	orderrepo "github.com/yourorg/demo-service/app/module/order/repository"
 	"github.com/yourorg/demo-service/app/module/order/service"

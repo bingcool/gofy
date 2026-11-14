@@ -10,7 +10,7 @@
 - `Wrap(*kgo.Client)` 注入已经建好的 franz-go 客户端；
 - `NewProducer` / `NewConsumer` 在客户端之上创建生产者和消费者；
 - 需要按配置别名取用时，用可选的 `Configure` / `NewIO` 命名实例注册表；
-- 多实例也可以由应用装配层负责，例如 demo 的 `app/io/kafka`：`default` 发布为
+- 多实例也可以由应用装配层负责，例如 demo 的 `app/appio/kafka`：`default` 发布为
   `kafka.Default`，其它实例用 `kafka.Get("名字")` 取用。
 
 与 AMQP 的一个关键差异：franz-go 把消费者组配置放在客户端级别，因此

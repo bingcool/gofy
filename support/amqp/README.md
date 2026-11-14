@@ -8,7 +8,7 @@
 - `Wrap(conn)` 接管一个已经建好的 `*amqp091.Connection`，适合连接由外部创建
   或复用的场景；
 - 需要按配置别名取用时，用可选的 `Configure` / `NewIO` 命名实例注册表；
-- 多实例也可以由应用装配层负责，例如 demo 的 `app/io/amqp`：每个实例一个
+- 多实例也可以由应用装配层负责，例如 demo 的 `app/appio/amqp`：每个实例一个
   `Client`，`default` 发布为业务句柄，其它实例按名字取用。
 
 ## 连接配置

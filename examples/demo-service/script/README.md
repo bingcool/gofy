@@ -8,7 +8,7 @@
 
 - `fix_order.go`：示例脚本 `fix-order`，按订单 ID 取消待支付订单，走 service 层；
 - `gen_uuid.go`：示例脚本 `gen-uuid`，只验证 Redis 与 ID 生成器；
-- `register.go`：把所有脚本收集成列表，给需要数据库的脚本套上 `app/io` 装配代，
+- `register.go`：把所有脚本收集成列表，给需要数据库的脚本套上 `app/appio` 装配代，
   再交给 `main.go` 的 `WithScripts`；
 - `register_test.go`：`withIO` 包装的单元测试，不连真实数据库。
 
@@ -114,7 +114,7 @@ func Register(cfg *config.Config) []gofyscript.Script {
 | `Short` | `script --list` 显示的一行说明 |
 | `Flags` | 用 `pflag` 定义参数，可为 nil |
 | `Run` | 脚本主体，必填；返回 error 表示失败 |
-| `WithoutDatabase` | 为 true 时不为该脚本创建数据库连接，`withIO` 也不启动 app/io 装配代 |
+| `WithoutDatabase` | 为 true 时不为该脚本创建数据库连接，`withIO` 也不启动 app/appio 装配代 |
 
 `gofy.New` 和 `WithScripts` 都会调用 `script.Validate`，命名不合法、重名、
 `Run` 为 nil 都会在启动时报错。
@@ -135,7 +135,7 @@ func Register(cfg *config.Config) []gofyscript.Script {
 脚本的数据库连接是临时的：没有用 `WithDB` 注入连接时，框架按
 `db.default` 建连，`Run` 返回后关闭，不会影响其他进程或长时间占用连接池。
 
-## app/io 装配代
+## app/appio 装配代
 
 脚本和请求共用 `service` / `repository` 代码，这些代码按 `appio.WithContext(ctx)`
 取本代快照。为此 `register.go` 用 `withIO` 包一层：`Run` 之前
@@ -163,7 +163,7 @@ func Register(cfg *config.Config) []gofyscript.Script {
 | 情况 | 退出码 |
 | --- | --- |
 | 成功 | `0` |
-| `Run` 返回错误、数据库或 app/io 实例连接失败 | `1` |
+| `Run` 返回错误、数据库或 app/appio 实例连接失败 | `1` |
 | 脚本不存在、未知 flag、多余参数等用法错误 | `2` |
 
 脚本可以直接返回 `error`，也可以返回 `apperr` 构造的业务错误；错误最终由

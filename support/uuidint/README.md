@@ -146,9 +146,9 @@ TTL、同段连续性、降级、全部失败、命名实例别名和参数校�
 
 `examples/demo-service` 已经接入：
 
-- `app/io/uuidint` 在启动时用配置的 `uuidint.redis_instance_name`（默认
+- `app/appio/uuidint` 在启动时用配置的 `uuidint.redis_instance_name`（默认
   `ratelimit`）构建生成器并发布 `uuidint.Default`，`Stop` 时清空；
-- `gen-uuid` 声明 `WithoutDatabase`，不走 `app/io` 装配代，自己按同一份配置注册
+- `gen-uuid` 声明 `WithoutDatabase`，不走 `app/appio` 装配代，自己按同一份配置注册
   Redis 实例后取号：
 
 ```bash

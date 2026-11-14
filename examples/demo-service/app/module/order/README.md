@@ -35,11 +35,11 @@ order/
 
 | 层 | 职责 | 依赖限制 |
 | --- | --- | --- |
-| controller | 实现契约接口，视图↔DTO 映射、状态映射、错误码映射 | 只 import 本模块 `service` 与 HTTP 契约；不碰 `model`/`repository`/`innerapi`/其他模块/`app/io` |
+| controller | 实现契约接口，视图↔DTO 映射、状态映射、错误码映射 | 只 import 本模块 `service` 与 HTTP 契约；不碰 `model`/`repository`/`innerapi`/其他模块/`app/appio` |
 | service | 业务用例、事务、日志；实现本模块 `innerapi`，跨模块调对方 `innerapi` | 出入参用领域视图与普通值；不 import HTTP 契约；跨模块只 import 对方 `innerapi` |
-| innerapi | 模块对外发布的纯契约：接口 + 只读视图 + 入参 + 哨兵错误 | 只允许标准库（必要时 `support` 纯类型）；不 import 任何 `app/module`、契约、`app/io` |
-| repository | 导出 `OrderRepository` 具体类型与 `ErrNotFound`，返回 `model` | 只 import 本模块 `model` + `app/io` + `support`；状态由参数传入，不 import 契约枚举 |
-| model | GORM 实体，映射 `orders` 表 | 不依赖任何 `app/module`、契约、`app/io` |
+| innerapi | 模块对外发布的纯契约：接口 + 只读视图 + 入参 + 哨兵错误 | 只允许标准库（必要时 `support` 纯类型）；不 import 任何 `app/module`、契约、`app/appio` |
+| repository | 导出 `OrderRepository` 具体类型与 `ErrNotFound`，返回 `model` | 只 import 本模块 `model` + `app/appio` + `support`；状态由参数传入，不 import 契约枚举 |
+| model | GORM 实体，映射 `orders` 表 | 不依赖任何 `app/module`、契约、`app/appio` |
 
 `module.go` 只保留 `NewModule` / `Register`；仓库与 service 的装配集中在
 `app/container`，模块根不再声明仓库或 service 构造入口。
@@ -135,7 +135,7 @@ func (c *Container) BindOptions() gofyadapter.BindOptions {
   仍然先执行，所以用户级限流能读到已认证身份。
 - 计数存储是契约里 `RedisAlias` 指定的 Redis 命名实例（缺省 `ratelimit`），
   中间件在首次请求时用 `redisstore.New(redis.NewIO(ctx, alias))` 构建并缓存：
-  路由绑定早于 `app/io` 模块打开 Redis，`Reload` 后新代中间件也会绑定到新代
+  路由绑定早于 `app/appio` 模块打开 Redis，`Reload` 后新代中间件也会绑定到新代
   连接。解析失败不缓存，下一次请求重试；实例未启用或 Redis 故障时请求返回
   503，不会静默放行。
 - 契约里的 `Limit` / `WindowSeconds` 非法时中间件返回 503，不会静默放行。
@@ -212,10 +212,10 @@ type RepositoryDeclare struct {
 仓库无状态、按查询解析连接，零值构造后在本次服务内复用；构造槽只生效一次
 （每个服务一个 `sync.Once`，重复取用返回同一实例）。构造期间再次取用同一个槽
 会被判定为依赖成环，直接 panic 并带上服务名，不会让 `sync.Once` 静默死锁；装配
-只在启动期串行执行，不支持并发的首次取用。工厂执行时 `app/io` 还没 `Start`，
+只在启动期串行执行，不支持并发的首次取用。工厂执行时 `app/appio` 还没 `Start`，
 快照还没发布，仓库在每次查询时解析 `appio.WithContext(ctx).DB()`；`Start` 发布
 新快照后自动使用新资源。请求进入时中间件把当时的快照固定进 ctx，一次请求不会
-横跨 `Reload` 换连接。脚本也跑同一套 `app/io` 装配：`script/register.go` 的
+横跨 `Reload` 换连接。脚本也跑同一套 `app/appio` 装配：`script/register.go` 的
 `withIO` 在 `Run` 前后 `Start`/`Stop` 模块，脚本里的仓库因此取到本代完整快照
 （`db`、`redis`、`amqp`、`kafka`、`rocketmq`、`uuidint`），与请求一致。
 
@@ -325,11 +325,11 @@ type OrderService struct {
   import 对方的 service/repository/model；持久化模型仍留在属主模块内；
 - `innerapi` 是纯契约包：只含接口、只读视图、入参和哨兵错误，只允许标准库
   （必要时 `support` 纯类型），不 import 任何 `app/module`、HTTP 契约或
-  `app/io`。它是模块间唯一合法的耦合点；
+  `app/appio`。它是模块间唯一合法的耦合点；
 - 依赖只在构造期由 `app/container` 注入：service 不持有包级状态，也不在运行期
   查找其他 service；代际切换由新建容器完成；
 - 必填依赖（`Orders`、`Products`）由容器保证非 nil；`Logger` 允许为 nil；
-- 测试用纯 Go 内存 SQLite 跑真实仓库（零值构造，内存库发布成 `app/io` 快照），
+- 测试用纯 Go 内存 SQLite 跑真实仓库（零值构造，内存库发布成 `app/appio` 快照），
   通过 `container.NewContainer()` + `Init` 按需装配 service，不连外部 MySQL
   （见 `module_test.go` 与 `app/container/*_test.go`）。
 
@@ -592,7 +592,7 @@ go test ./app/module/order/...
 
 测试不需要外部数据库：repository 不声明接口，`module_test.go` 用纯 Go 的内存
 SQLite（`support/sqlite`，`DSN: ":memory:"`）建订单表和产品表并塞入固定数据
-（订单 1、产品 90001 上架 / 90002 下架），把内存库发布成 `app/io` 快照（测试
+（订单 1、产品 90001 上架 / 90002 下架），把内存库发布成 `app/appio` 快照（测试
 结束恢复）。`newTestServices` 通过 `container.NewContainer()` + `Init` 按需构造
 产品、订单与配置 service，再用 `gofytest.New` 启动一个只挂载 order 模块的测试应用。
 panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id = 9999`
@@ -637,11 +637,11 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
 
 | 层 | 允许的跨包 import | 禁止 |
 | --- | --- | --- |
-| controller | 本模块 `service`、HTTP 契约 | 任何 `model`/`repository`/`innerapi`、其他模块、`app/io` |
-| service | 本模块各层、`app/io`、其他模块 `innerapi` | HTTP 契约、其他模块 service/repository/model |
-| innerapi | 标准库、`support` 纯类型 | 任何 `app/module`、契约、`app/io`、框架、第三方 |
-| repository | 本模块 `model`、`app/io`、`support` | service/innerapi、契约、其他模块 |
-| model | 标准库、`support`、第三方（如 gorm） | 任何 `app/module`、契约、`app/io` |
+| controller | 本模块 `service`、HTTP 契约 | 任何 `model`/`repository`/`innerapi`、其他模块、`app/appio` |
+| service | 本模块各层、`app/appio`、其他模块 `innerapi` | HTTP 契约、其他模块 service/repository/model |
+| innerapi | 标准库、`support` 纯类型 | 任何 `app/module`、契约、`app/appio`、框架、第三方 |
+| repository | 本模块 `model`、`app/appio`、`support` | service/innerapi、契约、其他模块 |
+| model | 标准库、`support`、第三方（如 gorm） | 任何 `app/module`、契约、`app/appio` |
 
 模块根包（`module.go`）只做路由绑定，不受上表约束；装配根 `app/container`
 位于 `app/module` 之外，同样不在 guard 检查范围内，是唯一同时 import 多个模块

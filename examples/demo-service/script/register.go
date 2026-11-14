@@ -6,13 +6,13 @@ import (
 	"github.com/bingcool/gofy/apperr"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/spf13/pflag"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/config"
-	appio "github.com/yourorg/demo-service/app/io"
 )
 
-// Register returns the demo scripts with the app/io generation wrapped around
+// Register returns the demo scripts with the app/appio generation wrapped around
 // the ones that share the service layer.
-// Register 返回演示脚本；共用 service 层的那部分会套上 app/io 装配代。
+// Register 返回演示脚本；共用 service 层的那部分会套上 app/appio 装配代。
 func Register(cfg *config.Config) []gofyscript.Script {
 	return []gofyscript.Script{
 		withIO(cfg, FixOrder()),

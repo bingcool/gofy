@@ -7,11 +7,11 @@ import (
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 
+	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
+	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
+	appredis "github.com/yourorg/demo-service/app/appio/redis"
+	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
 	"github.com/yourorg/demo-service/app/config"
-	appamqp "github.com/yourorg/demo-service/app/io/amqp"
-	appkafka "github.com/yourorg/demo-service/app/io/kafka"
-	appredis "github.com/yourorg/demo-service/app/io/redis"
-	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 )
 
 // ConnectionsFrom builds the broker table that every subscription in group1

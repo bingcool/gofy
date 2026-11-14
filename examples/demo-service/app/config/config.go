@@ -9,11 +9,11 @@ import (
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logger"
-	appamqp "github.com/yourorg/demo-service/app/io/amqp"
-	appkafka "github.com/yourorg/demo-service/app/io/kafka"
-	"github.com/yourorg/demo-service/app/io/redis"
-	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
-	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
+	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
+	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
+	"github.com/yourorg/demo-service/app/appio/redis"
+	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
+	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 	"github.com/yourorg/demo-service/app/middleware"
 )
 

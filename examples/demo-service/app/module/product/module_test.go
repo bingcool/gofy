@@ -10,8 +10,8 @@ import (
 	"github.com/bingcool/gofy-interface-api/contracts/common/paging"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/support/sqlite"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/container"
-	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/product"
 	"github.com/yourorg/demo-service/app/module/product/model"
@@ -20,7 +20,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// newTestApp 用纯 Go SQLite 建产品表并发布为 app/io 快照，再按 demo-service 的
+// newTestApp 用纯 Go SQLite 建产品表并发布为 app/appio 快照，再按 demo-service 的
 // 装配方式启动测试 App：产品模块绑定契约分组，应用层中间件通过
 // WithMiddlewareRegistrar 注册进框架创建的共享注册表（分组声明了
 // "audit"、"auth" 两个别名）。

@@ -1,4 +1,4 @@
-package io
+package appio
 
 import (
 	"context"
@@ -17,12 +17,12 @@ import (
 	gofykafka "github.com/bingcool/gofy/support/kafka"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
-	appamqp "github.com/yourorg/demo-service/app/io/amqp"
-	appdb "github.com/yourorg/demo-service/app/io/db"
-	appkafka "github.com/yourorg/demo-service/app/io/kafka"
-	appredis "github.com/yourorg/demo-service/app/io/redis"
-	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
-	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
+	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
+	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
+	appredis "github.com/yourorg/demo-service/app/appio/redis"
+	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
+	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 	"gorm.io/gorm"
 )
 
@@ -66,12 +66,12 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	if viaIO != appredis.RateLimit() {
 		t.Fatal("redis.NewIO does not return the installed instance")
 	}
-	pinned, err := Current().RedisNewIO(ctx, appredis.InstanceRateLimit)
+	pinned, err := Current().RedisIO(ctx, appredis.InstanceRateLimit)
 	if err != nil {
-		t.Fatalf("snapshot RedisNewIO: %v", err)
+		t.Fatalf("snapshot RedisIO: %v", err)
 	}
 	if pinned != appredis.RateLimit() {
-		t.Fatal("snapshot RedisNewIO does not resolve this generation's instance")
+		t.Fatal("snapshot RedisIO does not resolve this generation's instance")
 	}
 	if appuuidint.Default() == nil {
 		t.Fatal("uuidint.Default was not installed")
@@ -115,7 +115,7 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 //
 //	GOFY_TEST_AMQP_ADDR=127.0.0.1:5672 GOFY_TEST_AMQP_USERNAME=rabbitmq \
 //	GOFY_TEST_AMQP_PASSWORD=... GOFY_TEST_AMQP_VHOST=my_vhost \
-//	  go test ./app/io -run AMQP -v
+//	  go test ./app/appio -run AMQP -v
 func TestStartInstallsAMQPInstance(t *testing.T) {
 	addr := os.Getenv("GOFY_TEST_AMQP_ADDR")
 	if addr == "" {
@@ -174,7 +174,7 @@ func TestStartInstallsAMQPInstance(t *testing.T) {
 
 // TestStartInstallsKafkaInstance 需要真实 Kafka：
 //
-//	GOFY_TEST_KAFKA_BROKERS=127.0.0.1:9092 go test ./app/io -run Kafka -v
+//	GOFY_TEST_KAFKA_BROKERS=127.0.0.1:9092 go test ./app/appio -run Kafka -v
 func TestStartInstallsKafkaInstance(t *testing.T) {
 	value := os.Getenv("GOFY_TEST_KAFKA_BROKERS")
 	if strings.TrimSpace(value) == "" {
@@ -227,7 +227,7 @@ func TestStartInstallsKafkaInstance(t *testing.T) {
 
 // TestStartInstallsRocketMQInstance 需要真实 RocketMQ gRPC proxy：
 //
-//	GOFY_TEST_ROCKETMQ_ENDPOINT=127.0.0.1:8081 go test ./app/io -run RocketMQ -v
+//	GOFY_TEST_ROCKETMQ_ENDPOINT=127.0.0.1:8081 go test ./app/appio -run RocketMQ -v
 func TestStartInstallsRocketMQInstance(t *testing.T) {
 	endpoint := strings.TrimSpace(os.Getenv("GOFY_TEST_ROCKETMQ_ENDPOINT"))
 	if endpoint == "" {

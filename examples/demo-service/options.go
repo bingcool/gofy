@@ -7,8 +7,8 @@ import (
 	"github.com/bingcool/gofy/core/systemenv"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/worker"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/config"
-	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	appscript "github.com/yourorg/demo-service/script"
 )

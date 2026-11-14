@@ -37,7 +37,7 @@ func FixOrder() gofyscript.Script {
 				return nil
 			}
 
-			// Register 已在脚本启动时发布了本代 app/io 快照，仓库按
+			// Register 已在脚本启动时发布了本代 app/appio 快照，仓库按
 			// WithContext 取到的就是脚本这一代的连接。
 			rows, err := (&repository.OrderRepository{}).CancelPending(ctx, id, orderservice.StatusPending, orderservice.StatusCancelled)
 			if err != nil {

@@ -9,16 +9,16 @@ import (
 	gofyscript "github.com/bingcool/gofy/script"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	"github.com/spf13/pflag"
+	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 	"github.com/yourorg/demo-service/app/config"
-	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
 	"go.uber.org/zap"
 )
 
 // GenUUID generates distributed IDs with support/uuidint.
 //
 // 脚本只校验 Redis 与生成器，不碰 service 层，因此声明 WithoutDatabase 跳过
-// app/io 装配代（否则会被迫连接 MySQL、Kafka 等无关实例），自己按配置打开选中
-// 的 redis 实例，把客户端直接交给生成器（与 app/io 相同的 WithClient 路径）。
+// app/appio 装配代（否则会被迫连接 MySQL、Kafka 等无关实例），自己按配置打开选中
+// 的 redis 实例，把客户端直接交给生成器（与 app/appio 相同的 WithClient 路径）。
 func GenUUID(cfg *config.Config) gofyscript.Script {
 	return gofyscript.Script{
 		Name:            "gen-uuid",

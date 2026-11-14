@@ -1571,7 +1571,7 @@ PostgreSQL 连接包，API 与 `support/db` 完全对齐（`Config` 字段、默
 - 错误前缀为 `pg:`；哨兵错误与 db 同名（`ErrDSNRequired`、`ErrNotConfigured`、
   `ErrUnknownInstance`）；
 - 不接入根包 `WithDatabase`（它仍只托管 MySQL 协议主库）；业务单独使用，
-  或按 `app/io` 模式自行托管生命周期。
+  或按 `app/appio` 模式自行托管生命周期。
 
 ### 3.7.4 `support/sqlite`
 
@@ -1619,7 +1619,7 @@ SQLite 连接包，API 与 `support/db`、`support/pg` 对齐（`Config` 字段�
   `ErrUnavailable` 的错误，`ctx` 取消时返回 `context.Canceled`。
 - 不依赖 `logger`，也不引入根包；与 PHP 版的差异是没有 Channel 池和定时
   预热（一次 `GetBatch` 一次 Redis 往返），由业务自行决定是否缓存批号。
-- demo 通过 `app/io/uuidint` 在启动时发布 `uuidint.Default`（实例别名来自
+- demo 通过 `app/appio/uuidint` 在启动时发布 `uuidint.Default`（实例别名来自
   `uuidint.redis_instance_name`），脚本模式用 `script gen-uuid` 按同一配置验证。
 
 ### 3.7.6 `support/phpoffice`
@@ -1710,11 +1710,11 @@ names := reg.Names()                          // 排序副本，供启动日志
 ### 3.7.9 `support/generation`
 
 跨入口的「当前一代」发布与固定机制。热更新时旧一代正在关闭、新请求仍在进入；
-请求一旦进入，就必须从头到尾使用同一代句柄。这套机制原先是 demo `app/io` 的
+请求一旦进入，就必须从头到尾使用同一代句柄。这套机制原先是 demo `app/appio` 的
 内部实现，现在下沉为框架能力，任何持有代际资源的服务都可以复用。
 
 ```go
-current := generation.NewSet[Snapshot]("app/io") // 装配根创建一次，进程内复用
+current := generation.NewSet[Snapshot]("app/appio") // 装配根创建一次，进程内复用
 current.Publish(snapshot)                        // 模块 Start：一代就绪后一次发布
 current.CompareAndSwap(snapshot, nil)            // 模块 Stop：只撤回自己那一代
 engine.Use(current.Middleware())                 // HTTP 入口：固定进入时的当前代
@@ -1733,8 +1733,8 @@ snapshot := current.WithContext(ctx)             // 共享代码：只读固定�
   指针，首次使用后不可复制；
 - 只依赖 `gin`，不读配置、不建连、不打印日志；与 `support/registry`（按名字取
   装配期实例）职责不同，互不替代；
-- demo 的 `app/io` 是完整示例（见 §9.3.1）：`Snapshot` 汇总一代句柄，
-  `currentSnapshot = generation.NewSet[Snapshot]("app/io")`，导出的
+- demo 的 `app/appio` 是完整示例（见 §9.3.1）：`Snapshot` 汇总一代句柄，
+  `currentSnapshot = generation.NewSet[Snapshot]("app/appio")`，导出的
   `Current` / `Publish` / `WithSnapshot` / `WithContext` / `Middleware` 只是
   薄封装。
 
@@ -2200,7 +2200,7 @@ import (
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logger"
-    "github.com/yourorg/demo-service/app/io/redis"
+    "github.com/yourorg/demo-service/app/appio/redis"
     "github.com/yourorg/demo-service/app/middleware"
 )
 
@@ -2335,12 +2335,12 @@ jwt:
 
 `${ORDER_DB_DSN}` 在加载时展开；缺失时启动失败（除非显式允许）。
 
-`db` 和 `redis` 都按实例名分组，业务通过 `app/io` 下的包级句柄直接取用：
+`db` 和 `redis` 都按实例名分组，业务通过 `app/appio` 下的包级句柄直接取用：
 
 | 句柄 | 来源 |
 | --- | --- |
 | `db.Db` | 框架托管的 `db.default`（`Runtime.DB`） |
-| `db.OrderDb` / `db.ProductDb` | `db.order` / `db.product`，由 `app/io` 创建 |
+| `db.OrderDb` / `db.ProductDb` | `db.order` / `db.product`，由 `app/appio` 创建 |
 | `db.NewIO(ctx, name)` | 其它命名 `db` 实例（如 `selectDb`），首次取用时建连 |
 | `redis.Cache` / `redis.Session` | `redis.cache` / `redis.session`，`enabled: false` 时为 nil |
 | `redis.RateLimit` | `redis.ratelimit`，供分布式限流使用 |
@@ -2349,7 +2349,7 @@ jwt:
 | `kafka.Default` | `kafka.default` 的 Kafka 客户端，未启用时为 nil |
 | `kafka.Get(name)` | 其它命名 `kafka` 实例，未启用时为 nil |
 
-`WithDatabase(cfg.DB["default"])` 负责主库的创建、热更新与关闭；`app/io`
+`WithDatabase(cfg.DB["default"])` 负责主库的创建、热更新与关闭；`app/appio`
 在 `Start` 中打开额外实例并 `Install` 到包级句柄，在 `Stop` 中关闭。热更新时新模块
 先 `Start`、旧模块再 `Stop`，关闭逻辑会比对句柄指针，不会误关新连接。没有 Redis
 或 RabbitMQ 的环境把对应实例设为 `enabled: false` 即可跳过。
@@ -2693,7 +2693,7 @@ import (
     "github.com/bingcool/gofy"
     "github.com/yourorg/demo-service/app/config"
     "github.com/yourorg/demo-service/app/container"
-    appio "github.com/yourorg/demo-service/app/io"
+    appio "github.com/yourorg/demo-service/app/appio"
     appscript "github.com/yourorg/demo-service/script"
 )
 
@@ -2770,7 +2770,7 @@ import (
     "github.com/bingcool/gofy"
     gofyconfig "github.com/bingcool/gofy/config"
     "github.com/bingcool/gofy/logger"
-    "github.com/yourorg/demo-service/app/io/redis"
+    "github.com/yourorg/demo-service/app/appio/redis"
     "github.com/yourorg/demo-service/app/middleware"
 )
 
@@ -2789,14 +2789,14 @@ func Load(ctx context.Context, path string) (*Config, error) {
 }
 ```
 
-### 9.3.1 `app/io` 实例句柄与请求级快照
+### 9.3.1 `app/appio` 实例句柄与请求级快照
 
-每个子包持有“当前一代”的不可变 `Set`，用 `atomic.Pointer` 发布；`app/io`
+每个子包持有“当前一代”的不可变 `Set`，用 `atomic.Pointer` 发布；`app/appio`
 再把这一代所有句柄组装成只读 `Snapshot` 一次发布。业务只经 context 取本代
 句柄，不直接读包级句柄：
 
 ```go
-// app/io/snapshot.go —— 本代句柄的只读视图
+// app/appio/snapshot.go —— 本代句柄的只读视图
 func (s *Snapshot) DB() *gorm.DB                      // db.default（框架托管）
 func (s *Snapshot) DBInstance(name string) *gorm.DB   // order、product
 func (s *Snapshot) Redis(name string) *goredis.Client // cache、session、ratelimit
@@ -2804,9 +2804,9 @@ func (s *Snapshot) AMQP(name string) *amqp.Client     // 本代已打开的实�
 func (s *Snapshot) Kafka(name string) *kafka.Client
 func (s *Snapshot) RocketMQ(name string) *rocketmq.Client
 func (s *Snapshot) UUID() *uuidint.Generator
-func (s *Snapshot) DBNewIO(context.Context, string) (*gorm.DB, error)              // 按别名懒解析本代 Registry
-func (s *Snapshot) RedisNewIO(context.Context, string) (*goredis.Client, error)
-func (s *Snapshot) AMQPNewIO/KafkaNewIO/RocketMQNewIO(context.Context, string) (...)
+func (s *Snapshot) DBIO(context.Context, string) (*gorm.DB, error)              // 按别名懒解析本代 Registry
+func (s *Snapshot) RedisIO(context.Context, string) (*goredis.Client, error)
+func (s *Snapshot) AMQPIO/KafkaIO/RocketMQIO(context.Context, string) (...)
 
 func WithSnapshot(context.Context, *Snapshot) context.Context
 func WithContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()；两者都没有直接 panic
@@ -2816,23 +2816,23 @@ func Middleware() support.Middleware         // 请求入口固定当前一代
 ```go
 o, err := appio.WithContext(ctx).DBInstance("order").WithContext(ctx).First(&order)
 s, err := appio.WithContext(ctx).Redis("cache").Get(ctx, "order:1").Result()
-client, err := appio.WithContext(ctx).RedisNewIO(ctx, "ratelimit") // 首次访问才建连
+client, err := appio.WithContext(ctx).RedisIO(ctx, "ratelimit") // 首次访问才建连
 ```
 
-发布与固定机制由 `support/generation`（§3.7.9）提供：`app/io` 只是把
-`generation.NewSet[Snapshot]("app/io")` 包一层，`Current` / `Publish` /
+发布与固定机制由 `support/generation`（§3.7.9）提供：`app/appio` 只是把
+`generation.NewSet[Snapshot]("app/appio")` 包一层，`Current` / `Publish` /
 `WithSnapshot` / `WithContext` / `Middleware` 都是薄封装，`Module.Stop` 用
 `CompareAndSwap` 撤回本代。其它服务按同样方式复用，不必再实现一套。
 
-生命周期由 `app/io` 统一管理：`Start` 依次打开 db、redis、amqp、kafka、
+生命周期由 `app/appio` 统一管理：`Start` 依次打开 db、redis、amqp、kafka、
 rocketmq、uuidint 的 `Set`（各自用本代 `NewRegistry` 建连），全部就绪后按序
 `Install` 并一次性 `Publish(snapshot)`；`Stop` 只撤回仍指向自己的快照，再关闭
 本代 `Set`。`Set.Close` 关闭本代注册表，旧代不会误清或误关新句柄。
 
 `db` 的其它实例名（如 `selectDb`，可指向任何兼容 MySQL 协议的服务器）只注册不
-预建连，业务首次 `DBNewIO` / `db.NewIO` 时才打开，也不会自动安装 GORM tracing
+预建连，业务首次 `DBIO` / `db.NewIO` 时才打开，也不会自动安装 GORM tracing
 插件。`uuidint` 生成器绑定本代 Redis 客户端（`support/uuidint.WithClient`），
-取号不再依赖包级 Registry。RocketMQ 的 `app/io` 只发布 producer 句柄；需要消费时
+取号不再依赖包级 Registry。RocketMQ 的 `app/appio` 只发布 producer 句柄；需要消费时
 业务用配置里的 `Config` 调用 `rocketmq.NewConsumer`。
 
 脚本与请求走同一套装配：`script/register.go` 的 `withIO` 在 `Run` 前后
@@ -3018,10 +3018,10 @@ func (m *Module) Register(r *support.Router) error {
 }
 ```
 
-仓库不持有连接和日志：每次查询从 `app/io` 安装的 `db.Db` 解析连接（ctx 事务优先），
-容器构建时 `app/io` 尚未 `Start`、句柄还是 nil 也没关系，等 `Start` 安装连接后
+仓库不持有连接和日志：每次查询从 `app/appio` 安装的 `db.Db` 解析连接（ctx 事务优先），
+容器构建时 `app/appio` 尚未 `Start`、句柄还是 nil 也没关系，等 `Start` 安装连接后
 仓库自动使用新句柄，热更新也会切到新连接。脚本也有装配代：`script/register.go`
-的 `withIO` 在 `Run` 前后 `Start` / `Stop` `app/io` 模块，`fix-order` 直接复用
+的 `withIO` 在 `Run` 前后 `Start` / `Stop` `app/appio` 模块，`fix-order` 直接复用
 已发布的快照，不再手工发布 `rt.DB`。
 
 装配关系收敛为三层：`app/container`（仓库 + service + 模块工厂）→ 模块根
@@ -3225,7 +3225,7 @@ import (
     "fmt"
 
     gofydb "github.com/bingcool/gofy/support/db"
-    appdb "github.com/yourorg/demo-service/app/io/db"
+    appdb "github.com/yourorg/demo-service/app/appio/db"
     orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
     "github.com/yourorg/demo-service/app/module/order/model"
     "github.com/yourorg/demo-service/app/module/order/repository"
@@ -3401,7 +3401,7 @@ import (
     "fmt"
 
     gofydb "github.com/bingcool/gofy/support/db"
-    appdb "github.com/yourorg/demo-service/app/io/db"
+    appdb "github.com/yourorg/demo-service/app/appio/db"
     "github.com/yourorg/demo-service/app/module/order/model"
     "gorm.io/gorm"
 )
@@ -3409,10 +3409,10 @@ import (
 var ErrNotFound = errors.New("order not found")
 
 // OrderRepository 是唯一实现，直接导出具体类型；service、脚本都依赖它，
-// 不再声明接口。仓库不持有连接和日志：每次查询按需解析 app/io 安装的 db.Db。
+// 不再声明接口。仓库不持有连接和日志：每次查询按需解析 app/appio 安装的 db.Db。
 type OrderRepository struct{}
 
-// conn 优先使用 ctx 中的事务；没有事务时用 app/io 安装的 db.Db。跨模块调用
+// conn 优先使用 ctx 中的事务；没有事务时用 app/appio 安装的 db.Db。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
     return gofydb.WithContext(ctx, appdb.Db)
@@ -3496,7 +3496,7 @@ func Register(cfg *config.Config) []gofyscript.Script {
 }
 ```
 
-`withIO` 在 `Run` 前后启动、关闭 `app/io` 模块，脚本因此借到完整的一代快照：
+`withIO` 在 `Run` 前后启动、关闭 `app/appio` 模块，脚本因此借到完整的一代快照：
 
 ```go
 func withIO(cfg *config.Config, s gofyscript.Script) gofyscript.Script {
@@ -4206,7 +4206,7 @@ gofy/
 | 2026-11-03 | 不提供依赖注入容器 | 业务依赖用闭包/构造函数注入；`Runtime` 只放框架依赖 |
 | 2026-11-11 | 模块按 controller/service/innerapi/repository/model 五包分层，跨模块只走对方 `innerapi` 契约 | 模块间稳定接缝，避免 service→service 与跨模块 repository 耦合；详见 [module-layering-design.md](./module-layering-design.md) |
 | 2026-11-11 | 跨模块依赖由 `app/container` 在构造期显式注入：每代新建容器，各 service 惰性构造，产品实现以 `innerapi` 接口传给订单 service | 去掉包级单例、module getter 与工厂顺序约束；按需构建、reload 代际隔离、测试互不影响；框架本身仍不提供 DI 容器，该容器是 demo 业务代码 |
-| 2026-11-11 | demo repository 无状态、不声明接口，连接每次查询从 `app/io` 句柄解析 | 只有一种 GORM 实现，接口无替换价值；装配早于 `app/io.Start`、Reload 换连接自动生效 |
+| 2026-11-11 | demo repository 无状态、不声明接口，连接每次查询从 `app/appio` 句柄解析 | 只有一种 GORM 实现，接口无替换价值；装配早于 `app/appio.Start`、Reload 换连接自动生效 |
 
 ---
 

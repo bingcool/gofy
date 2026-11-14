@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	gofydb "github.com/bingcool/gofy/support/db"
-	appio "github.com/yourorg/demo-service/app/io"
+	"github.com/yourorg/demo-service/app/appio"
 	orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/demo-service/app/module/order/repository"

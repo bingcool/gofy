@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	appamqp "github.com/yourorg/demo-service/app/io/amqp"
+	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 )
 
 func TestLoadDatabasesByInstanceName(t *testing.T) {
