@@ -1,0 +1,189 @@
+# worker
+
+本目录演示 gofy 的常驻任务（worker）：一个进程跑一组 worker，分组就是部署单位。
+与另外两种形态的区别只有边界：
+
+| 形态 | 入口 | 生命周期 | 典型用途 |
+| --- | --- | --- | --- |
+| HTTP | `demo-service start` | 常驻，监听端口，写 pid | 对外接口 |
+| script | `demo-service script <name>` | 跑完即退，不写 pid | 数据修复、一次性迁移 |
+| worker | `demo-service worker --group=<g>` | 常驻，不监听业务端口 | 扫表、MQ 消费、定时汇总 |
+
+worker 进程没有 HTTP 栈，也不注册路由；它拿到的是与 HTTP 处理器相同的 service 与
+repository，因此查询逻辑只有一份。
+
+## 目录
+
+```
+worker/
+├── config.go              # 公共设置 + 分组配置（config.yaml 的 worker 段）
+├── worker.go              # Register：构造全部分组，交给 main
+├── group1/
+│   ├── abc_register.go    # group1 的 Config 与 NewGroup
+│   ├── scan.go            # order-scan：扫表
+│   └── heartbeat.go       # order-heartbeat：存活心跳
+└── group2/
+    ├── abc_register.go    # group2 的 Config 与 NewGroup
+    └── summary.go         # report-summary：小时级汇总
+```
+
+`abc_` 前缀只是为了让入口文件排在成员文件之前，没有语义；下划线开头不行，Go 会忽略
+`_register.go`，`Config` 与 `NewGroup` 会跟着从编译里消失。
+
+每个分组自成一个包，配置结构、构造、成员都在包内。给 group1 加一个 worker，不需要
+碰 group2 的任何文件。
+
+## 两个分组各做什么
+
+| 分组 | worker | 实例数 | 节奏 | 说明 |
+| --- | --- | --- | --- | --- |
+| group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
+| group1 | `order-heartbeat` | 1 | 10s | 不依赖数据库，留一行可 grep 的存活日志 |
+| group2 | `report-summary` | 1 | 1h | 按状态聚合订单，多实例会重复写同一份报表 |
+
+拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
+两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
+
+## 运行
+
+`--group` 必填，缺省直接报用法错误并退出：
+
+```bash
+$ go run . worker
+[FAIL] gofy: usage error: worker: --group is required (see worker --list)
+```
+
+先看清有哪些分组、各自会起几个实例（不连数据库、不启动任何 worker）：
+
+```bash
+$ go run . worker --list
+┌────────┬─────────────────┬─────────────┐
+│ GROUP  │ WORKER          │ CONCURRENCY │
+├────────┼─────────────────┼─────────────┤
+│ group1 │ order-scan      │ 2           │
+├────────┼─────────────────┼─────────────┤
+│ group1 │ order-heartbeat │ 1           │
+├────────┼─────────────────┼─────────────┤
+│ group2 │ report-summary  │ 1           │
+└────────┴─────────────────┴─────────────┘
+```
+
+启动整组。前台运行，日志同时写 stdout 与文件：
+
+```bash
+$ go run . worker --group=group1
+{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":2,"drain_timeout":20}
+{"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#0","interval":5}
+{"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#1","interval":5}
+```
+
+`workers:2` 是这个分组的成员数（`order-scan` 与 `order-heartbeat`），不是实例数；
+`order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
+
+只跑组内某个 worker，或临时改实例数（不改配置、不改代码）：
+
+```bash
+go run . worker --group=group1 --name=order-scan
+go run . worker --group=group1 --name=order-scan --name=order-heartbeat
+go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 1 个实例
+```
+
+`--name` 可重复，也接受逗号分隔；`--concurrency=0`（默认）表示按配置。命令行覆盖的
+优先级高于 `worker.Func(name, n, run)` 里声明的数字，但只在本次启动生效：`worker --list`
+显示的是配置里的值，不会跟着 `--concurrency` 变。
+
+> 本地调试建议先 `go build -o /tmp/demo .` 再跑二进制：`go run` 会把信号交给 go 工具链，
+> Ctrl+C 下 worker 的 drain 过程和退出码看不准确。
+
+## 进程留下的东西
+
+| 产物 | 位置 | 说明 |
+| --- | --- | --- |
+| pid 文件 | `app/demo-service-worker-group1.pid` | 默认 pid 文件的 `-worker-<分组>` 后缀；未配置 `pid_file` 则不写 |
+| 日志 | `storage/log/worker/<date>/info/worker-h15.log` | 整组启动写 `worker-<host>.log` |
+| 日志 | `storage/log/worker/<date>/info/order-scan-h15.log` | `--name` 只跑一个 worker 时用它的名字 |
+| 就绪探针 | `http://127.0.0.1:9091/healthz` | 配置 `worker.health_addr` 才有；分组起来返回 200 `ok`，drain 期间 503 |
+
+日志文件不带分组名：分组已经在每行日志的 `worker` 字段里（`group1/order-scan#0`）。
+要一个 worker 一组文件，就用 `--name` 单独起；整组启动共用一份，靠字段区分。
+
+## 停止
+
+```bash
+$ go run . stop --worker=group1 --force
+[INFO] 正在停止 worker 分组【group1】 (pid 80656)
+[ OK ] worker 分组【group1】 已停止 (pid 80656)
+```
+
+不带 `--force` 会先问一次 `你确定 [停止] 应用【demo-service】? (yes or no):`。
+停止走 SIGTERM：worker 的拉取先停（`runCtx` 取消），在途任务继续跑到
+`drain_timeout`（默认 20s，`gofy.WithWorkerDrainTimeout` 可改），然后进程退出，pid
+文件清理。超时未退才在 `--force` 下补 SIGKILL。
+
+`stop` 的粒度是分组，`stop --worker=group1` 不会碰到 group2，也不会碰 HTTP 进程。
+`restart` 只用于 HTTP 实例，worker 用 `stop` + 重新启动。
+
+## 配置
+
+`config.yaml` 的 `worker` 段：公共项在顶层，每个分组一个同名块。
+
+```yaml
+worker:
+  health_addr: 127.0.0.1:9091   # 进程级：一个进程一个端口，同机跑两组要给第二个换端口
+  group1:
+    scan:
+      concurrency: 2            # 进程内扫描实例数（goroutine）
+      interval: 5s              # 两次扫描的间隔
+  group2:
+    summary:
+      concurrency: 1            # 多实例会重复写同一份报表
+      interval: 1h
+```
+
+三个约束：
+
+- **分组块是结构体字段而不是 map**：块内键拼错会直接报错，`default` 标签也才生效。
+- **实例数在 `worker.Func` 里是 `uint8`**：分组构造时校验 `1..255`，越界报错而不是被截断
+  成另一个数字；配置里仍是 `int`，由分组的 `NewGroup` 负责校验后再转换。
+- **worker 名全应用唯一**：日志文件名取自 worker 名，两个分组用同一个名字会写到同一个
+  文件（demo 里是 `order-scan`、`order-heartbeat`、`report-summary`）。
+
+并发实例共享同一个 `Worker` 值，`Run` 里不能有可变的接收者状态；需要每实例独立的数据
+就放在 `Run` 内部，从 `worker.IdentityFrom(ctx)` 取 `group/name#index`。
+
+## 新增任务
+
+组内加一个 worker，只动那个分组包：
+
+1. 新建成员文件，例如 `group1/settle.go`，用 `worker.Func("order-settle", 1, run)` 定义；
+2. 在 `group1/abc_register.go` 的 `NewGroup` 里追加；
+3. 它的配置写在成员文件里（照 `ScanWorkerConfig`），在分组的 `Config` 里加一个字段；
+4. `config.yaml` 加对应块，`go run . worker --list` 核对。
+
+## 新增分组
+
+1. 新建子包 `worker/group3/`，加 `abc_register.go`（`Config` + `NewGroup`）与成员文件；
+2. `worker/config.go` 的 `Config` 加一行 `Group3 group3.Config`，标签为 `yaml:"group3"`；
+3. `worker/worker.go` 的 `Register` 里构造并加进返回列表；
+4. `config.yaml` 加 `worker.group3` 块。
+
+`main.go` 与部署清单不用改结构：复制一份 Deployment，改 `--group=group3` 和副本数即可。
+同一个镜像服务所有分组，因此不必为每个分组单独出一个二进制。
+
+## 排障
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `[FAIL] worker: --group is required` | 漏了 `--group` | `worker --list` 看分组名 |
+| 退出码 1、终端没有任何输出 | 已知问题：`--group`/`--name` 写错时在启动前就失败，错误没落到终端 | `worker --list` 核对名字；已知分组仍静默的话属于待修 |
+| 进程起来就退出、退出码 0 | `Run` 在 ctx 取消前返回了 nil | 循环必须阻塞到 `ctx.Done()` |
+| 日志找不到 | 目录看错 | `storage/log/worker/<date>/info/`，整组是 `worker-<host>.log` |
+| `stop --worker=x` 报 not running | 未配置 `pid_file`，或分组名与启动时不同 | 查 `app/*-worker-<group>.pid` |
+| `--list` 的数字和实际不同 | 配置改了没重启，或用了 `--concurrency` | 覆盖只在本次启动生效 |
+
+## 相关文档
+
+- `docs/worker-guide.md`：四种循环（claim / MQ / Redis 队列 / lease）的写法与部署建议
+- `docs/worker-daemon-design.md`：设计与验收记录
+- `support/worker/README.md`：包 API、`Policy` 重启策略、drain 语义
+- `examples/demo-service/storage/log/README.md`：日志目录与文件命名规则

@@ -9,7 +9,8 @@ worker 在同一进程里同生共死，进程由 `app worker --group=<g>` 启�
 分别属于业务代码与 `support/claim`、`support/lease`、消费者适配器。
 
 > 部署方式、k8s 清单、排障表见 [`docs/worker-guide.md`](../../docs/worker-guide.md)；
-> 设计取舍见 [`docs/worker-daemon-design.md`](../../docs/worker-daemon-design.md)。
+> 设计取舍见 [`docs/worker-daemon-design.md`](../../docs/worker-daemon-design.md)；
+> 可直接跑的分组示例见 [`examples/demo-service/worker/README.md`](../../examples/demo-service/worker/README.md)。
 
 ## 与其它生命周期的边界
 
