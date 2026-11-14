@@ -29,6 +29,14 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	if path == "" {
 		return ErrPIDFileDisabled
 	}
+	// A worker group writes its own pid file, so stopping one must resolve the
+	// same suffixed path. Without this, `stop --worker=order` would target the
+	// API server that shares the configured pid_file.
+	// worker 分组写自己的 pid 文件，停止它必须解析同一个带后缀的路径。否则
+	// `stop --worker=order` 会打到共用 pid_file 的 API 服务上。
+	if opts.Worker != "" {
+		path = workerPIDPath(path, opts.Worker)
+	}
 	workDir, err := a.resolveWorkDir()
 	if err != nil {
 		return err
@@ -45,9 +53,13 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	}
 
 	logger := a.Logger()
-	logger.Info("stopping application", zap.Int("pid", pid), zap.String("pid_file", fullPath))
+	logger.Info("stopping application", zap.Int("pid", pid), zap.String("pid_file", fullPath), zap.String("worker", opts.Worker))
 	c := a.con()
-	c.Info("正在停止应用【%s】 (pid %d)", a.opts.name, pid)
+	target := fmt.Sprintf("应用【%s】", a.opts.name)
+	if opts.Worker != "" {
+		target = fmt.Sprintf("worker 分组【%s】", opts.Worker)
+	}
+	c.Info("正在停止 %s (pid %d)", target, pid)
 	if err := process.Terminate(pid); err != nil {
 		return err
 	}
@@ -61,7 +73,7 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	err = process.WaitExit(waitCtx, pid, 100*time.Millisecond)
 	if err == nil {
 		logger.Info("application stopped", zap.Int("pid", pid))
-		c.Success("应用【%s】已停止 (pid %d)", a.opts.name, pid)
+		c.Success("%s 已停止 (pid %d)", target, pid)
 		return nil
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -72,7 +84,7 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	}
 
 	logger.Warn("sending SIGKILL", zap.Int("pid", pid))
-	c.Warn("应用【%s】停止超时，发送 SIGKILL (pid %d)", a.opts.name, pid)
+	c.Warn("%s 停止超时，发送 SIGKILL (pid %d)", target, pid)
 	if err := process.Kill(pid); err != nil {
 		return err
 	}
@@ -82,6 +94,6 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 		return fmt.Errorf("%w: pid %d", ErrStopTimeout, pid)
 	}
 	logger.Info("application killed", zap.Int("pid", pid))
-	c.Success("应用【%s】已强制停止 (pid %d)", a.opts.name, pid)
+	c.Success("%s 已强制停止 (pid %d)", target, pid)
 	return nil
 }

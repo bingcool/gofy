@@ -54,6 +54,7 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, ord
 		gofy.WithWorkerConcurrency(map[string]int{
 			"order/order-scan": cfg.Worker.Scan.Concurrency,
 		}),
+		gofy.WithWorkerHealth(cfg.Worker.HealthAddr),
 		gofy.WithVersionInfo(gofy.VersionInfo{
 			Version:   version,
 			Commit:    commit,

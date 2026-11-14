@@ -54,6 +54,13 @@ var (
 // 命名约定。
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
+// ValidName reports whether name follows the group and worker naming rule. It
+// is exported for CLI validation: `stop --worker` turns the value into a pid
+// file name, so a stray slash must be rejected before that.
+// ValidName 判断名字是否符合分组与 worker 的命名规则。它导出给 CLI 校验使用：
+// `stop --worker` 会把这个值拼进 pid 文件名，拼之前必须先挡掉斜杠之类的字符。
+func ValidName(name string) bool { return namePattern.MatchString(name) }
+
 // Worker is one long-running task. Run must block until ctx is cancelled and
 // then return nil; returning nil earlier is treated as a contract violation,
 // and a non-nil error is handled according to the runner's Policy.

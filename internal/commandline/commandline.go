@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/internal/console"
+	"github.com/bingcool/gofy/support/worker"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -27,6 +28,12 @@ type StopOptions struct {
 	PIDFile string
 	Timeout time.Duration
 	Force   bool
+	// Worker selects a worker group instead of the HTTP instance. Only stop
+	// exposes it: restarting a worker means running the group in the
+	// foreground, which is `worker`, not `restart`.
+	// Worker 选择 worker 分组而不是 HTTP 实例。只有 stop 暴露该旗标：重启 worker
+	// 等于在前台运行分组，那是 `worker` 而不是 `restart`。
+	Worker string
 }
 
 // Script describes a registered script for listing.
@@ -148,7 +155,7 @@ func newStopCmd(d Deps) *cobra.Command {
 	opts := newStopOptions(d)
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Stop a running instance using its pid file",
+		Short: "Stop a running instance or worker group using its pid file",
 		Args:  noArgs(d, "stop"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !opts.Force {
@@ -161,6 +168,17 @@ func newStopCmd(d Deps) *cobra.Command {
 		},
 	}
 	addStopFlags(cmd, &opts)
+	cmd.Flags().StringVar(&opts.Worker, "worker", "", "stop the worker group with this name instead of the HTTP instance")
+	cmd.PreRunE = func(_ *cobra.Command, _ []string) error {
+		// The group name becomes part of a pid file name, so reject anything
+		// that could escape the directory before it reaches the filesystem.
+		// 分组名会成为 pid 文件名的一部分，因此要在它到达文件系统之前挡掉任何可能
+		// 越出目录的字符。
+		if opts.Worker != "" && !worker.ValidName(opts.Worker) {
+			return d.Usage(fmt.Errorf("stop: invalid worker group %q", opts.Worker))
+		}
+		return nil
+	}
 	return cmd
 }
 

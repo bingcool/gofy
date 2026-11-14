@@ -207,6 +207,8 @@ worker:
   scan:
     concurrency: 2      # 进程内扫描实例数（goroutine），按数据库与下游能力调整
     interval: 5s        # 两次扫描之间的间隔
+  # 就绪探针：分组启动后 200，drain 期间 503。留空则不监听端口。
+  health_addr: 127.0.0.1:9091
 
 pid_file: app/demo-service.pid
 

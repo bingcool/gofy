@@ -113,13 +113,37 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		zap.Duration("drain_timeout", a.opts.workerDrain),
 		zap.Bool("telemetry", telemetry.Enabled()),
 	)
+
+	// The probe comes up before the group does so a scheduler that restarts on
+	// a failed readiness check sees 503 instead of a connection refused, which
+	// is the difference between "starting" and "wrong port".
+	// 探针先于分组启动，调度器因就绪检查失败而重启时看到的是 503 而不是连接被拒，
+	// 这正是"还在启动"与"端口配错了"的区别。
+	var health *workerHealth
+	if a.opts.workerHealth != "" {
+		health = newWorkerHealth(a.opts.workerHealth)
+		if err := health.start(); err != nil {
+			return a.abort(fmt.Errorf("gofy: worker health endpoint: %w", err))
+		}
+		defer health.stop()
+	}
+
 	a.markReady()
+	if health != nil {
+		health.setReady()
+	}
 
 	// Workers reach the logger, database and tracer through the runtime, the
 	// same way a script receives it as an argument.
 	// worker 通过 Runtime 访问 logger、数据库与 tracer，方式与脚本接收 Runtime
 	// 参数一致。
 	runErr := runner.Run(worker.WithRuntime(ctx, rt))
+	if health != nil {
+		// Keep reporting 503 while the group drains: the process is still alive
+		// but it no longer accepts new work.
+		// drain 期间继续返回 503：进程还活着，但已经不再接新任务。
+		health.setStopping()
+	}
 	if cerr := a.cleanup(); cerr != nil {
 		runErr = errors.Join(runErr, cerr)
 	}

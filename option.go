@@ -114,6 +114,7 @@ type options struct {
 	workerPolicy      worker.Policy   // 单个实例失败后的重启策略
 	workerConcurrency map[string]int  // "group/worker" → 实例数
 	workerDrain       time.Duration   // 停机时在途任务的完成预算
+	workerHealth      string          // worker 进程可选的 /healthz 监听地址
 
 	shutdownTimeout time.Duration // 关闭预算：HTTP 优雅关闭与模块 Stop 共享的总时长
 
@@ -566,6 +567,29 @@ func WithWorkerDrainTimeout(timeout time.Duration) Option {
 			return fmt.Errorf("gofy: worker drain timeout must be positive")
 		}
 		o.workerDrain = timeout
+		return nil
+	}
+}
+
+// WithWorkerHealth exposes /healthz on addr inside a worker process: 200 once
+// the group has started, 503 from the moment shutdown begins. It is off by
+// default, because only a Deployment that defines a readiness probe needs it,
+// and picking a port per group is an operational decision rather than a
+// framework one.
+// WithWorkerHealth 让 worker 进程在 addr 上暴露 /healthz：分组启动后返回 200，
+// 进入停机后返回 503。它默认关闭：只有配置了就绪探针的 Deployment 才需要它，而给
+// 每个分组挑一个端口属于运维决策，不该由框架替用户决定。
+func WithWorkerHealth(addr string) Option {
+	return func(o *options) error {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			o.workerHealth = ""
+			return nil
+		}
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("gofy: worker health address %q must be host:port: %w", addr, err)
+		}
+		o.workerHealth = addr
 		return nil
 	}
 }

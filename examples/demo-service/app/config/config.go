@@ -45,6 +45,9 @@ type Config struct {
 // WorkerConfig 配置由 `demo-service worker --group=<分组>` 启动的常驻任务。
 type WorkerConfig struct {
 	Scan ScanWorkerConfig `yaml:"scan"`
+	// HealthAddr exposes /healthz on the worker process; empty disables it.
+	// HealthAddr 在 worker 进程上暴露 /healthz；为空表示关闭。
+	HealthAddr string `yaml:"health_addr"`
 }
 
 // ScanWorkerConfig controls the order scan worker's rhythm and replica count.
