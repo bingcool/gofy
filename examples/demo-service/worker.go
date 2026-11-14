@@ -26,11 +26,13 @@ func newOrderWorkerGroup(scan config.ScanWorkerConfig) (*worker.Group, error) {
 	return worker.NewGroup("order", newOrderScanWorker(scan), newOrderHeartbeatWorker())
 }
 
-// newOrderScanWorker scans pending orders on an interval. The count is a
-// placeholder: support/claim (T3-7) will replace it with a row-level claim, so
-// the scan can run on every replica without processing a row twice.
-// newOrderScanWorker 按间隔扫描待处理订单。当前只统计数量，占位到 support/claim
-// （T3-7）落地后改成按行认领，届时每个副本都能安全地扫同一张表。
+// newOrderScanWorker scans pending orders on an interval. Demo's orders table
+// has no claim columns (status is a business value, not a task state), so this
+// only counts; a real queue declares a job table with claim.DDL and calls
+// claim.Queue.Claim, which is what makes several replicas safe.
+// newOrderScanWorker 按间隔扫描待处理订单。demo 的 orders 表没有认领所需的状态列
+// （status 是业务值，不是任务状态），因此这里只统计；真实的队列用 claim.DDL 建
+// 任务表，再调 claim.Queue.Claim，多副本才安全。
 func newOrderScanWorker(cfg config.ScanWorkerConfig) worker.Worker {
 	interval := cfg.Interval
 	if interval <= 0 {

@@ -407,28 +407,28 @@ app, err := gofy.New(
 
 ### 5.2 适配矩阵
 
-| 类型 | 现有入口 | 适配后的 `Run` | 关键点 |
+| 类型 | 现有入口 | 适配器（**已实现**） | 关键点 |
 | --- | --- | --- | --- |
-| Kafka | `Consumer.Consume` | `kafkaworker.New(client, cfg, handler)` | 取消后 `Close` 触发最终 commit；`DiscardOnError=false` 时失败会重投 |
-| AMQP | `Queue.Consume` | `amqpworker.New(queue, handler)` | `PrefetchCount` 决定在途上限；未 ack 的消息在断开后重投 |
-| RocketMQ | `Consumer.Consume` | `rocketmqworker.New(cfg, handler)` | `Consumer` 一次性：`Consume` 一次后 `Close` |
-| Redis 队列 | `Queue.Pop` | `queues.Consume(ctx, handler, opts)`（**新增**） | 空轮询要退避，否则打满 Redis |
+| Kafka | `Consumer.Consume` | `kafkaconsumer.New(name, consumer, cfg)` | 停机时 `Close`；出错时不关，留给重启策略复用同一消费者 |
+| AMQP | `Queue.Consume` | `amqpconsumer.New(name, queue, cfg)` | `PrefetchCount` 决定在途上限；未 ack 的消息在断开后重投 |
+| RocketMQ | `Consumer.Consume` | `rocketmqconsumer.New(name, consumer, cfg)` | `Consumer` 一次性：`Consume` 一次后 `Close` |
+| Redis 队列 | `queues.Consume` | `queuesconsumer.New(name, queue, cfg)` | 客户端归应用所有，适配器不负责关闭 |
 
-放在哪个包：`support/worker/consumer/{kafka,amqp,rocketmq}`（子包，避免 `support/worker` 反向依赖三种 MQ 客户端，保持核心包零 MQ 依赖）。
+包路径：`support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`（子包，避免 `support/worker` 反向依赖三种 MQ 客户端，保持核心包零 MQ 依赖）。
 
-### 5.3 统一 Options
+每个适配器只做三件事：把投递 context 换成 drain context、退出时按需 `Close`、把错误原样返回给重启策略。`Concurrency` 由宿主解析后决定实例数，适配器不自己起协程——否则并发语义会散落在四个包里。
+
+### 5.3 Options 不强行统一
+
+适配器**不定义**统一 Options，而是原样转发各客户端自己的 `ConsumeOptions`：
 
 ```go
-// ConsumeOptions are shared by every consumer adapter.
-// ConsumeOptions 是所有消费者适配器共用的选项。
-type ConsumeOptions struct {
-	Concurrency  int           // 实例数，0 用配置
-	DrainTimeout time.Duration // 在途任务完成预算，默认取 worker.shutdown_timeout
-	OnError      func(error)   // 非致命错误上报，不得阻塞
-}
+// 各自转发，不抽象：
+kafkaconsumer.Config{Handler: h, Options: kafka.ConsumeOptions{MaxRecords: 100}}
+amqpconsumer.Config{Handler: h, Options: amqp.ConsumeOptions{PrefetchCount: 32}}
 ```
 
-各适配器只透传自己支持的选项（kafka 的 `MaxRecords`、amqp 的 `PrefetchCount`、rocketmq 的过滤表达式），**不强行统一语义**：例如 amqp 的 `AutoAck` 与 kafka 的 `commit_mode` 概念不同，硬统一会误导。
+理由：amqp 的 `AutoAck` 与 kafka 的 `commit_mode` 概念不同，硬统一会误导使用者。真正共用的只有 drain 与 close 的顺序，而那部分在适配器里，不在配置里。
 
 ### 5.4 Redis 队列补 `Consume`
 
@@ -650,6 +650,20 @@ COMMIT;
 // 包 claim 在 MySQL 8 上实现按行认领任务。
 package claim
 
+// Config is the queue definition: table, job, batch, lease, retry policy and
+// optional hooks.
+// Config 是队列定义：表、job、批大小、租约、重试策略与可选钩子。
+type Config struct {
+	Table       string        // 可带库名前缀："app.job_task"
+	Job         string
+	Batch       int           // 默认 100
+	Lease       time.Duration // 默认 60s，至少为处理耗时 p99 的 3 倍
+	MaxAttempts int           // 默认 5
+	Backoff     time.Duration // 默认 10s
+	MaxBackoff  time.Duration // 默认 10m
+	Hooks       Hooks
+}
+
 // Queue binds a job name to a table and its claim parameters.
 // Queue 把一个 job 名绑定到表与认领参数。
 type Queue struct{ /* db, job, table, lease, batch, maxAttempts */ }
@@ -678,9 +692,21 @@ func (q *Queue) Succeed(ctx context.Context, t Task) error
 // Fail 记录一次失败并按指数退避安排重试；达到 MaxAttempts 后转为死亡态。
 func (q *Queue) Fail(ctx context.Context, t Task, cause error) error
 
-// Reap returns expired leases to the pending state.
-// Reap 把租约已过期的任务放回待处理态。
+// Reap returns expired leases to the pending state and moves exhausted rows to
+// the dead state.
+// Reap 把租约过期的任务放回待处理态，并把重试耗尽的转为死亡态。
 func (q *Queue) Reap(ctx context.Context) (reaped int64, dead int64, err error)
+
+// DDL returns the CREATE TABLE statement the queries expect, index included.
+// DDL 返回查询所依赖的建表语句，含索引。
+func DDL(table string) (string, error)
+```
+
+实现位置：`support/claim/claim.go`；真实 MySQL 8 的集成测试在 `claim_integration_test.go`，未设置环境变量时跳过：
+
+```bash
+GOFY_MYSQL_DSN='user:pass@tcp(host:3306)/db?charset=utf8mb4&parseTime=True&loc=Local' \
+  go test -count=1 -run TestIntegration ./support/claim/
 ```
 
 ### 7.5 幂等与丢失
@@ -703,7 +729,17 @@ claim 自带行级租约（`owner + lease_until`），**不需要**再套全局 
 
 ### 7.7 指标
 
-`claim` 包只暴露钩子，指标实现放在 `support/worker/metrics`，避免核心包绑定具体监控库（与 `otel` 可选埋点的既有取向一致）。
+`claim` 包只暴露 `Hooks`（**已实现**），不绑定具体监控库：
+
+```go
+type Hooks struct {
+	OnClaim     func(job string, claimed int)          // 含 claimed=0 的空轮询
+	OnReap      func(job string, reaped, dead int64)
+	OnLeaseLost func(job string)                        // CAS 失败，即重复执行风险
+}
+```
+
+应用把这三个回调接到自己的指标实现上。核心包因此不依赖 prometheus/otel，与 `support/otel`「可选埋点」的既有取向一致。
 
 ---
 
@@ -929,9 +965,15 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | T3-4 | 已完成（2026-11-14） | `Runner.Run` 两级 context：`runCtx` 停止拉取、`drainCtx = WithoutCancel + deadline`；用例断言 drain 期间 `DrainContext` 仍有效且 Runner 等在途任务结束 |
 | T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/order/info-*.log`，pid 文件用 `-worker-order` 后缀并在退出时清理 |
 | T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker.go`、`config.yaml` 的 `worker.scan` 段；实测 `worker --group=order` 起 `order-scan#0/#1` 与 `order-heartbeat`，SIGTERM 后两组日志均为 `stopped`、退出码 0 |
+| T3-7 | 已完成（2026-11-14） | `support/claim/{claim.go,claim_test.go,claim_integration_test.go}`；真实 MySQL 8.4 上 1000 行 × 2 个并发 owner 零重复、`job` 隔离、`Succeed/Fail` 的 CAS 拒绝过期 owner、回收过期租约后 `attempts` 递增 |
+| T3-8 | 已完成（2026-11-14） | `claim.Hooks{OnClaim,OnReap,OnLeaseLost}`；用例断言租约丢失回调触发；不引入监控库依赖 |
+| T3-9 | 已完成（2026-11-14） | `support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`；用例断言 handler 收到的是 drain context（投递 ctx 已取消也仍有效）、停机才 `Close`、可重试错误不 `Close` |
 | T3-10 | 已完成（2026-11-14） | `support/queues/consume.go`、`consume_test.go`；`go test -race -count=1 ./support/queues/` 通过；覆盖空轮询、失败重投、重试耗尽、丢弃、panic、空闲停机六条路径 |
+| T3-11 | 已完成（2026-11-14） | `WithWorkerConcurrency` 校验 `group/worker` 形状与 `>=1`、`WithWorkerDrainTimeout` 校验正数、`worker` 缺 `--group` 报 `ErrUsage`；对应用例各一条 |
 
-其余条目（T3-7/T3-8/T3-9/T3-11、T3-12…T3-16）未开始。P0 已全关，`make check` EXIT=0。
+P1 全关（M4 达成）。剩余 P2：T3-12（Redis lease）、T3-13（k8s lease 放 adapter）、T3-14（`stop --worker`）、T3-15（可选 healthz）、T3-16（文档与脚手架）。
+
+集成测试需要真实 MySQL 8，未设置环境变量时自动跳过，`make check` 因此不依赖外部服务。
 
 ---
 
