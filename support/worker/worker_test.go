@@ -3,6 +3,7 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -284,6 +285,62 @@ func TestFuncWithoutRun(t *testing.T) {
 	err := worker.Func("noop", 1, nil).Run(context.Background())
 	if !errors.Is(err, worker.ErrNilRun) {
 		t.Fatalf("Run error = %v, want ErrNilRun", err)
+	}
+}
+
+// TestDrainContextDoesNotExpireBeforeShutdown pins a regression: the drain
+// budget used to start when the runner started, so any worker running longer
+// than DrainTimeout found its drain context already expired and failed every
+// in-flight handler with context.DeadlineExceeded.
+// TestDrainContextDoesNotExpireBeforeShutdown 固定一个回归：drain 预算过去从
+// runner 启动时起算，导致运行时间超过 DrainTimeout 的 worker 发现 drain context
+// 早已过期，每个在途 handler 都返回 context.DeadlineExceeded。
+func TestDrainContextDoesNotExpireBeforeShutdown(t *testing.T) {
+	checked := make(chan error, 1)
+	w := worker.Func("long-lived", 1, func(ctx context.Context) error {
+		// Outlive the drain budget while the process is perfectly healthy.
+		// 在进程完全健康的情况下活得比 drain 预算更久。
+		select {
+		case <-time.After(150 * time.Millisecond):
+		case <-ctx.Done():
+			return nil
+		}
+		drain := worker.DrainContext(ctx)
+		select {
+		case <-drain.Done():
+			checked <- fmt.Errorf("drain context expired before shutdown: %w", drain.Err())
+		default:
+			checked <- nil
+		}
+		<-ctx.Done()
+		return nil
+	})
+	runner, err := worker.NewRunner(mustGroup(t, "g", w), worker.RunConfig{
+		DrainTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Run did not return after cancellation")
+		}
+	}()
+
+	select {
+	case err := <-checked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker never reported the drain state")
 	}
 }
 

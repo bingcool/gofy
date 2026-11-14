@@ -121,9 +121,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	runCtx, stopRuns := context.WithCancel(ctx)
 	defer stopRuns()
 	// The drain context survives cancellation on purpose: handlers that already
-	// started may finish, but only until the budget expires.
+	// started may finish, but only until the budget expires. The budget starts
+	// when the run context is cancelled — starting it here would expire the
+	// context of a worker that has been running for a while, failing every
+	// in-flight handler with context.DeadlineExceeded.
 	// drain context 故意不随取消失效：已经开始的处理可以跑完，但不超过预算。
-	drainCtx, stopDrain := context.WithTimeout(context.WithoutCancel(ctx), cfg.DrainTimeout)
+	// 预算从 run context 取消时才起算——在这里起算会让跑了很久的 worker 拿到一个
+	// 早已过期的 context，每个在途 handler 都会返回 context.DeadlineExceeded。
+	drainCtx, stopDrain := newDrainContext(runCtx, cfg.DrainTimeout)
 	defer stopDrain()
 
 	var (
@@ -284,4 +289,39 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// newDrainContext returns a context that stays valid while parent is alive and
+// expires only timeout after parent is cancelled.
+//
+// A plain WithTimeout(WithoutCancel(parent), timeout) starts the budget at
+// creation, so a worker that runs longer than the budget would hand every
+// handler an already-expired context. Tying the deadline to cancellation is
+// what "in-flight work gets timeout to finish" actually means.
+// newDrainContext 返回一个在 parent 存活期间始终有效、只在 parent 取消后 timeout
+// 才失效的 context。
+//
+// 直接写 WithTimeout(WithoutCancel(parent), timeout) 会让预算从创建时刻起算，
+// 运行时间超过预算的 worker 会把一个早已过期的 context 交给每个 handler。把截止
+// 时间绑到取消上，才是"在途任务可以再跑 timeout"的真实含义。
+func newDrainContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	go func() {
+		select {
+		case <-parent.Done():
+		case <-ctx.Done():
+			// Cancelled from the outside (normal shutdown after the wait, or a
+			// failing run): no budget to wait for.
+			// 被外部取消（等待结束后的正常停机，或运行失败）：不需要再等预算。
+			return
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }

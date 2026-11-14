@@ -202,8 +202,11 @@ SIGTERM / app stop --worker=order
 └─ drainCtx 取消       → 预算耗尽，进程退出（只告警，不算失败）
 ```
 
-`drainCtx` 用 `context.WithoutCancel(parent)` 加超时构造，所以它不随停机取消；只有预算
-用完才失效。顺序固定为"先停拉取、再等 drain、最后关连接"，反过来会中断仍有预算的在途任务。
+`drainCtx` 在停机之前始终有效：它由 `context.WithoutCancel(parent)` 派生，去掉取消传播、保留
+value，预算只在 `runCtx` 被取消之后才开始计时。**这一点很关键**——如果预算从 `Run` 开始就计时，
+一个跑得比预算久的 worker 会拿到已经过期的 context，每个在途 handler 都会返回
+`context.DeadlineExceeded`。顺序固定为"先停拉取、再等 drain、最后关连接"，反过来会中断仍有
+预算的在途任务。
 
 **drain 预算耗尽不返回错误**：进程仍以 0 退出，只写一条 warn 日志。否则 k8s 会把一次
 正常的 SIGTERM 记成失败，触发无意义的重启与告警。

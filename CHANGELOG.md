@@ -760,6 +760,13 @@ All notable changes to this project are documented here. The format follows
   in main was still a Nop. Usage errors keep reporting the corrected form
   (`--order-id=1222`), and script `Run` errors reach `App.Logger()` because the
   runtime logger is now exposed on the app.
+- `support/worker`: the drain context no longer expires before shutdown. It was
+  built as `WithTimeout(WithoutCancel(ctx), DrainTimeout)` when `Runner.Run`
+  started, so any worker running longer than the budget — 20s by default — handed
+  every in-flight handler a context that had already expired, and consumers
+  failed each message with `context.DeadlineExceeded`. The budget now starts when
+  the run context is cancelled; `TestDrainContextDoesNotExpireBeforeShutdown`
+  pins it.
 
 ### Changed
 
