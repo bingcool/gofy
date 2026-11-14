@@ -15,7 +15,12 @@ import (
 // RocketMQ 消费者是一次性对象，因此 worker 只跑一个实例，并行度由 SDK 自己的拉取
 // worker 提供。
 var orderRocketMQ = gofyconsumer.RocketMQConfig{
-	Name:        "order-rocketmq-consumer",
+	Name: "order-rocketmq-consumer",
+	// Instance picks the rocketmq.default block: endpoint and ACL live there,
+	// while topic, group and tags belong to this subscription.
+	// Instance 指向 config.yaml 的 rocketmq.default：endpoint 与 ACL 在那边，
+	// topic、group 与 tags 属于这个订阅。
+	Instance:    "default",
 	Topic:       "demo-order-events",
 	Group:       "demo-service-order-consumer",
 	Concurrency: 1,

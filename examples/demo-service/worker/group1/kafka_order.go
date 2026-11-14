@@ -12,7 +12,12 @@ import (
 // orderKafka 是一个订阅，像 scanDefaults 描述扫描循环那样用一个文件描述它。第二个
 // topic 就是第二个文件，而不是共享配置块里再加一个字段。
 var orderKafka = gofyconsumer.KafkaConfig{
-	Name:        "order-kafka-consumer",
+	Name: "order-kafka-consumer",
+	// Instance picks the kafka.default block from config.yaml: the brokers live
+	// there once, shared by producers and consumers.
+	// Instance 指向 config.yaml 的 kafka.default：broker 地址在那里配一次，
+	// 生产者与消费者共用。
+	Instance:    "default",
 	Topic:       "demo.order.events",
 	Group:       "demo-service-order-consumer",
 	Concurrency: 1,

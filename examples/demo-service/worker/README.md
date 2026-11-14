@@ -313,9 +313,10 @@ var scanDefaults = ScanWorkerConfig{
 ```go
 // group1/kafka_order.go
 var orderKafka = gofyconsumer.KafkaConfig{
-	Name:        "order-kafka-consumer",
-	Topic:       "demo.order.events",
-	Group:       "demo-service-order-consumer",
+	Name:     "order-kafka-consumer",
+	Instance: "default",   // config.yaml 里 kafka 段的键名，地址在那边
+	Topic:    "demo.order.events",
+	Group:    "demo-service-order-consumer",
 	Concurrency: 1,
 	Idempotency: true,
 	Handler:     handleOrderKafka,
@@ -327,8 +328,9 @@ var orderKafka = gofyconsumer.KafkaConfig{
 再开一个文件，不要在共享块里加字段。
 
 `Instance` / `RedisInstance` 只写实例名，broker 地址在 `config.yaml` 的 `kafka` / `amqp` /
-`rocketmq` / `redis` 段配一次。写错了会在 `Register` 阶段报错，不会静默跑一个什么都不消费的
-worker。
+`rocketmq` / `redis` 段配一次。四个订阅都把它显式写出来：接一个新环境时，这是唯一必须改
+的一行，而 `default` / `ratelimit` 这两个默认值只在漏写时兜底。写错了会在 `Register` 阶段
+报错，不会静默跑一个什么都不消费的 worker。
 
 四条约束：
 
