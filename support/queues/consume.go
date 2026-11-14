@@ -56,6 +56,11 @@ type ConsumeOptions struct {
 	// DiscardOnError drops a failed message instead of retrying it.
 	// DiscardOnError 丢弃失败消息，不安排重试。
 	DiscardOnError bool
+	// PopLimit is how many due messages DelayQueue.Consume takes in one poll;
+	// zero means 10. Queue.Consume pops one message at a time and ignores it.
+	// PopLimit 是 DelayQueue.Consume 一次轮询取出的到期消息上限，0 表示 10。
+	// Queue.Consume 每次只弹一条，忽略这个字段。
+	PopLimit int
 	// OnError receives handler failures, retry scheduling failures and dropped
 	// messages. It is called from the Consume goroutine and must not block.
 	// OnError 接收 handler 失败、重试安排失败与被丢弃的消息，在 Consume 的

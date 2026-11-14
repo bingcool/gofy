@@ -69,15 +69,20 @@ conns := gofyconsumer.Connections{
 
 ## 配置与默认值
 
-| 字段 | Kafka | AMQP | RocketMQ | Queues |
-| --- | --- | --- | --- | --- |
-| `Name`（必填） | ✓ | ✓ | ✓ | ✓ |
-| `Concurrency` | 1 | 1 | 1 | 1 |
-| `Idempotency` | false | false | false | false |
-| `MaxAttempts` | 5 | 5 | 5 | 5 |
-| 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit |
-| 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） |
-| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s |
+| 字段 | Kafka | AMQP | RocketMQ | Queues | DelayQueues |
+| --- | --- | --- | --- | --- | --- |
+| `Name`（必填） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Concurrency` | 1 | 1 | 1 | 1 | 1 |
+| `Idempotency` | false | false | false | false | false |
+| `MaxAttempts` | 5 | 5 | 5 | 5 | 5 |
+| 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit | `RedisInstance`=ratelimit |
+| 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） | `Key`（必填，延迟 ZSET） |
+| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s |
+
+`DelayQueues` 由 `NewDelayQueues` 构造，订阅的是 Redis ZSET 里**已到期**的消息：生产端用
+`queues.DelayQueue.Add(ctx, payload, delay)`，消费端轮询 `Pop`，失败由 `Retry` 以新到期
+时间写回。`source` 是 `delay_queues`，日志与 trace 因此能与立即队列区分。它与 `Queues`
+共用同一个 worker 适配器（两者 `Consume` 签名相同），在途消息同样是"至多一次"。
 
 `Idempotency` 需要数据库，因此默认关闭：打开它就从"handler 必须幂等"变成"重投是空操作"。
 `MaxAttempts` 只在开启幂等时生效——没有台账就没有地方记尝试次数。
@@ -95,7 +100,7 @@ RocketMQ 的 `Tags` 是"或"列表：SDK 用 `||` 把元素拼成一个订阅表
 
 ## handler 拿到的消息
 
-四种消息都内嵌 `Envelope`（`ID`、`Type`、`OccurredAt`、`Payload`），另有 `Attempt`
+每种消息都内嵌 `Envelope`（`ID`、`Type`、`OccurredAt`、`Payload`），另有 `Attempt`
 投递次数与协议原生实体：
 
 | 类型 | 原生字段 | 手动操作用得上它 |

@@ -12,6 +12,12 @@ import (
 // TestSDKLogRootIsWritable 固定这个文件存在的原因：SDK 不能再退回 macOS 上不可写的
 // /logs/rocketmqlogs。
 func TestSDKLogRootIsWritable(t *testing.T) {
+	// The public constructors trigger the repair lazily; no init() is allowed
+	// in a public package, so a test that only imports the package has not
+	// configured anything yet.
+	// 修复由公开构造函数懒触发；公开包不允许 init()，因此仅 import 的测试此时
+	// 还没有完成配置。
+	ensureSDKLogRoot()
 	root := os.Getenv(sdkLogRootEnv)
 	if root == "" {
 		t.Fatalf("%s is unset; the SDK would use its /logs default", sdkLogRootEnv)

@@ -1,13 +1,15 @@
 // Package group1 holds the first worker group: the fast work that scales with
 // order volume.
 //
-// The group hosts three shapes of work. The scan loop polls on a timer and needs
-// nothing but the runtime database. The four consumers subscribe to Kafka,
-// RabbitMQ, RocketMQ and a Redis queue; each one is a file of its own holding
-// its settings and its handler, and nothing else — the chain behind them
-// (envelope, idempotency ledger, trace, error classification) is
+// The group hosts the whole produce → consume path. The scan loop polls on a
+// timer and needs nothing but the runtime database. Four consumers subscribe to
+// Kafka, RabbitMQ, RocketMQ and a Redis queue; each one is a file of its own
+// holding its settings and its handler, and nothing else — the chain behind
+// them (envelope, idempotency ledger, trace, error classification) is
 // support/consumer. The producer fans the same order event out to those four
-// transports on a timer, closing the produce → consume loop inside one process.
+// transports on a timer, closing the immediate loop inside one process. The
+// delayed half mirrors it: a scheduler writes due-dated events to a Redis ZSET
+// and a RocketMQ DELAY topic, and two more subscriptions consume them.
 //
 // The package boundary is the deployment boundary: group1 is started by
 // `demo-service worker --group=group1` and owns its own settings, so a change
@@ -21,11 +23,12 @@
 //
 // 包 group1 是第一个 worker 分组：随订单量扩缩的秒级任务。
 //
-// 分组里有三种形态的任务。扫描循环按定时器轮询，只依赖 Runtime 的数据库。四个消费者分别
-// 订阅 Kafka、RabbitMQ、RocketMQ 与 Redis 队列；每个消费者一个文件，里面只有它自己的
-// 设置与 handler，没有别的——它们背后的信封、幂等台账、trace 与错误分类都在
-// support/consumer。生产者按定时器把同一个订单事件群发到这四个传输层，让 生产 → 消费
-// 的闭环跑在一个进程里。
+// 分组里跑着完整的 生产 → 消费 链路。扫描循环按定时器轮询，只依赖 Runtime 的数据库。
+// 四个消费者分别订阅 Kafka、RabbitMQ、RocketMQ 与 Redis 队列；每个消费者一个文件，
+// 里面只有它自己的设置与 handler，没有别的——它们背后的信封、幂等台账、trace 与错误
+// 分类都在 support/consumer。生产者按定时器把同一个订单事件群发到这四个传输层，让立即
+// 链路的闭环跑在一个进程里。延迟链路是它的镜像：调度器把带到期时间的事件写进 Redis ZSET
+// 与 RocketMQ DELAY topic，另外两个订阅负责消费。
 //
 // 包边界就是部署边界：group1 由 `demo-service worker --group=group1` 启动，参数也归
 // 它自己，因此改动这里不会波及 group2。
@@ -67,6 +70,7 @@ func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
 	workers := []gofyworker.Worker{
 		newScanWorker(scanDefaults),
 		newOrderEventProducer(conns, orderEventProducerDefaults),
+		newDelayEventProducer(conns, delayEventProducerDefaults),
 	}
 
 	kafka, err := gofyconsumer.NewKafka(conns, orderKafka)
@@ -85,7 +89,19 @@ func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
 	if err != nil {
 		return nil, fmt.Errorf("group1: %w", err)
 	}
+	delayQueues, err := gofyconsumer.NewDelayQueues(conns, orderDelayQueues)
+	if err != nil {
+		return nil, fmt.Errorf("group1: %w", err)
+	}
+	rocketmqDelay, err := gofyconsumer.NewRocketMQ(conns, orderRocketMQDelay)
+	if err != nil {
+		return nil, fmt.Errorf("group1: %w", err)
+	}
 
-	workers = append(workers, kafka, amqp, rocketmq, queues, newHeartbeatWorker())
+	workers = append(workers,
+		kafka, amqp, rocketmq, queues,
+		delayQueues, rocketmqDelay,
+		newHeartbeatWorker(),
+	)
 	return gofyworker.NewGroup("group1", workers...)
 }

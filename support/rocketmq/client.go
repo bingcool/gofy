@@ -53,6 +53,7 @@ type Client struct {
 // New validates cfg, builds the producer and starts it.
 // New 校验 cfg，构建并启动 Producer。
 func New(ctx context.Context, cfg Config) (*Client, error) {
+	ensureSDKLogRoot()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}

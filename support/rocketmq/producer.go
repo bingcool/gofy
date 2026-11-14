@@ -75,6 +75,12 @@ type PublishOptions struct {
 	// DeliverAt 把投递推迟到指定时刻。v5 使用绝对时间戳，不再是 v2 的延迟等级。
 	// 零值表示立即发送。
 	DeliverAt time.Time
+	// Delay is the relative form of DeliverAt: the message becomes visible
+	// after this duration. It is a convenience for producers that schedule
+	// "in 10s" rather than "at 01:30"; setting both is an error.
+	// Delay 是 DeliverAt 的相对形式：消息在这段时长之后才可见。适合"10 秒后"
+	// 这类调度，而不必自己算"01:30 投递"；两者同时设置会报错。
+	Delay time.Duration
 	// MessageGroup selects the queue for FIFO messages; messages with the
 	// same group are sent in order. The topic must accept FIFO messages.
 	// MessageGroup 为 FIFO 消息选择队列，相同 group 的消息按顺序发送。该 topic
@@ -139,7 +145,17 @@ func buildMessage(body []byte, opts PublishOptions) (*rmq.Message, error) {
 	if topic == "" {
 		return nil, ErrTopicRequired
 	}
-	if !opts.DeliverAt.IsZero() && !opts.DeliverAt.After(time.Now()) {
+	deliverAt := opts.DeliverAt
+	if opts.Delay != 0 {
+		if opts.Delay < 0 {
+			return nil, fmt.Errorf("%w: delay must not be negative", ErrInvalidDelay)
+		}
+		if !deliverAt.IsZero() {
+			return nil, fmt.Errorf("%w: set either Delay or DeliverAt, not both", ErrInvalidDelay)
+		}
+		deliverAt = time.Now().Add(opts.Delay)
+	}
+	if !deliverAt.IsZero() && !deliverAt.After(time.Now()) {
 		return nil, ErrInvalidDelay
 	}
 	keys, err := normalizeKeys(opts.Keys)
@@ -160,8 +176,8 @@ func buildMessage(body []byte, opts PublishOptions) (*rmq.Message, error) {
 	if group := strings.TrimSpace(opts.MessageGroup); group != "" {
 		message.SetMessageGroup(group)
 	}
-	if !opts.DeliverAt.IsZero() {
-		message.SetDelayTimestamp(opts.DeliverAt)
+	if !deliverAt.IsZero() {
+		message.SetDelayTimestamp(deliverAt)
 	}
 	for key, value := range opts.Properties {
 		message.AddProperty(key, value)

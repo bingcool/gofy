@@ -180,6 +180,7 @@ logger.Info("published",
 | `Keys` | 业务 Key，最多 32 个，每个不超过 128 字节且不含空白；重复的自动去掉 |
 | `Properties` | 自定义属性，最多 32 个；Key 只能是字母、数字、`_`、`.`、`-`，不能以 `__` 开头；Value 不超过 1024 字节；合计不超过 16 KiB |
 | `DeliverAt` | 延时投递的绝对时间，必须晚于当前时间，否则返回 `ErrInvalidDelay`；零值立即发送 |
+| `Delay` | `DeliverAt` 的相对写法（如 `10*time.Second`），内部换算成绝对投递时间；与 `DeliverAt` 同时设置返回 `ErrInvalidDelay` |
 | `MessageGroup` | FIFO 消息的分组 key；同一 group 的消息进入同一队列并保持发送顺序 |
 
 - `Publish` 是同步语义：`Send` 等待 broker 确认后返回，等待时间由
@@ -187,9 +188,18 @@ logger.Info("published",
   是第一条回执的队列位点。
 - `PublishJSON` 会补一个 `content-type: application/json` 属性（调用方已设置
   时不覆盖）。
-- 设置 `MessageGroup` 的消息按 FIFO 类型发送，设置 `DeliverAt` 的消息按延时
+- 设置 `MessageGroup` 的消息按 FIFO 类型发送，设置 `DeliverAt` / `Delay` 的消息按延时
   类型发送；两者同时设置时 SDK 以 FIFO 为准。topic 的 `message.type` 必须
-  匹配（FIFO 或 DELAY），否则 broker 返回错误。
+  匹配（FIFO 或 DELAY），否则 broker 返回
+  `current message type not match with topic accept message types`。本地 broker 建一次
+  DELAY topic：
+
+  ```bash
+  mqadmin updateTopic -n <namesrv> -t <topic> -c DefaultCluster -a +message.type=DELAY
+  ```
+
+- 消费端 `Message.DeliveryTimestamp` 是计划投递时刻，`BornTimestamp` 是生产时刻，
+  两者相减可核对实际延迟。
 - `Client` 可被多个 goroutine 并发使用；单条消息的发送次数由
   `Config.MaxAttempts` 控制。
 

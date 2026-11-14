@@ -54,6 +54,28 @@ func TestBuildMessage(t *testing.T) {
 	}
 }
 
+// TestBuildMessageRelativeDelay pins the "in N seconds" form: it resolves to
+// an absolute delivery timestamp, which is what v5's gRPC protocol carries.
+// TestBuildMessageRelativeDelay 固定「N 秒后」这种写法：它解析成绝对投递时间，
+// 也就是 v5 gRPC 协议实际携带的字段。
+func TestBuildMessageRelativeDelay(t *testing.T) {
+	before := time.Now()
+	message, err := buildMessage([]byte(`{"id":1}`), PublishOptions{
+		Topic: "orders",
+		Delay: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("buildMessage: %v", err)
+	}
+	got := message.GetDeliveryTimestamp()
+	if got == nil {
+		t.Fatal("delivery timestamp is nil")
+	}
+	if got.Before(before.Add(29*time.Second)) || got.After(time.Now().Add(31*time.Second)) {
+		t.Fatalf("delivery timestamp = %v, want about now+30s", got)
+	}
+}
+
 func TestBuildMessageRejectsInvalidOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -64,6 +86,16 @@ func TestBuildMessageRejectsInvalidOptions(t *testing.T) {
 		{
 			name: "delay in the past",
 			opts: PublishOptions{Topic: "t", DeliverAt: time.Now().Add(-time.Second)},
+			want: ErrInvalidDelay,
+		},
+		{
+			name: "negative relative delay",
+			opts: PublishOptions{Topic: "t", Delay: -time.Second},
+			want: ErrInvalidDelay,
+		},
+		{
+			name: "relative and absolute delay together",
+			opts: PublishOptions{Topic: "t", Delay: time.Minute, DeliverAt: time.Now().Add(time.Minute)},
 			want: ErrInvalidDelay,
 		},
 		{name: "empty key", opts: PublishOptions{Topic: "t", Keys: []string{" "}}, want: ErrInvalidKey},

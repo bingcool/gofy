@@ -101,18 +101,16 @@ if err := dq.Add(ctx, order{ID: 1}, 30*time.Second); err != nil {
     return err
 }
 
-// 一到期的消息会被原子取出并删除，limit <= 0 时默认取 10 条
-messages, err := dq.Pop(ctx, 10)
-for _, msg := range messages {
+// 常驻消费：Consume 与 Queue.Consume 同签名，可直接交给
+// support/worker/consumer/queuesconsumer 适配器。
+// 到期消息按 PopLimit 成批取出，空轮询等 IdleDelay，失败按 RetryDelay 写回。
+err = dq.Consume(ctx, func(ctx context.Context, msg *queues.Message) error {
     var job order
     if err := msg.Decode(&job); err != nil {
         return err
     }
-    if err := handle(job); err != nil {
-        // 失败后按新的延迟时间重新写回同一个 ZSET
-        _, _ = dq.Retry(ctx, msg, time.Minute)
-    }
-}
+    return handle(job)
+}, queues.ConsumeOptions{PopLimit: 10, IdleDelay: 200 * time.Millisecond})
 ```
 
 ## 消息结构
@@ -157,6 +155,7 @@ for _, msg := range messages {
 | `Add(ctx, payload, delay)` | 写入延迟消息，`delay` 之后才可取出 |
 | `Pop(ctx, limit)` | 原子取出并删除至多 `limit` 条到期消息 |
 | `Retry(ctx, msg, delay)` | 以新的到期时间重新写回 ZSET |
+| `Consume(ctx, handler, opts)` | 常驻消费到期消息；与 `Queue.Consume` 同签名，可共用 worker 适配器；`opts.PopLimit` 控制单批条数 |
 | `Len(ctx)` | 队列中的消息总数（包含未到期消息） |
 | `Key()` / `MaxRetries()` | 键与配置 |
 

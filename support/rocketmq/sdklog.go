@@ -3,6 +3,7 @@ package rocketmq
 import (
 	"os"
 	"path/filepath"
+	"sync"
 
 	rmq "github.com/apache/rocketmq-clients/golang/v5"
 )
@@ -64,6 +65,17 @@ func configureSDKLogRoot() string {
 	return root
 }
 
-func init() {
-	configureSDKLogRoot()
+// Public packages in this repository must not use init(), so the repair runs
+// lazily on the first public constructor instead. Every SDK log line is
+// produced after a client or consumer is built, which makes New / NewConsumer
+// early enough; sync.Once keeps a concurrent first use from racing
+// ResetLogger.
+//
+// 本仓库的公开包不允许 init()，因此修复改为在第一个公开构造函数里懒执行。SDK 的每条
+// 日志都发生在建好 client 或 consumer 之后，New / NewConsumer 足够早；sync.Once
+// 避免并发首次调用时竞态地重置 logger。
+var sdkLogOnce sync.Once
+
+func ensureSDKLogRoot() {
+	sdkLogOnce.Do(func() { _ = configureSDKLogRoot() })
 }

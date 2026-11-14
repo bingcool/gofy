@@ -296,6 +296,7 @@ func (c *simpleConsumer) Ack(ctx context.Context, delivery deliveredMessage) err
 // NewConsumer 校验连接与订阅并构建 pull 消费者。连接要等到 Consume 被调用时才
 // 建立。
 func NewConsumer(cfg Config, consumerCfg ConsumerConfig) (*Consumer, error) {
+	ensureSDKLogRoot()
 	if err := cfg.validateConnection(); err != nil {
 		return nil, err
 	}

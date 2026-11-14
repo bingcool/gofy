@@ -20,15 +20,18 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、生产者、四个消费者与心跳
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、两个生产者、六个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
-│   ├── producer.go        # order-event-producer：每 5s 把同一订单事件群发到四个队列
+│   ├── producer.go        # order-event-producer：每 5s 群发同一订单事件到四个队列
+│   ├── delay_producer.go  # order-delay-producer：每 10s 调度一条 5s 后到期的事件
 │   ├── kafka_order.go     # order-kafka-consumer：一个订阅 + 它的配置
 │   ├── amqp_order.go      # order-amqp-consumer
 │   ├── rocketmq_order.go  # order-rocketmq-consumer
-│   └── queues_order.go    # order-queues-consumer（Redis 队列）
+│   ├── queues_order.go    # order-queues-consumer（Redis 队列）
+│   ├── delay_queues_order.go    # order-delay-queues-consumer（Redis ZSET）
+│   └── rocketmq_delay_order.go  # order-rocketmq-delay-consumer（DELAY topic）
 └── group2/
     ├── abc_register.go    # group2 的 NewGroup
     └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
@@ -55,10 +58,13 @@ worker/
 | --- | --- | --- | --- | --- |
 | group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
 | group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到四个队列，闭环演示生产 → 消费 |
+| group1 | `order-delay-producer` | 1 | 10s | 每 10s 调度一条 5s 后到期的事件到 Redis ZSET 与 RocketMQ DELAY topic |
 | group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅，手动提交位点 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
-| group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `tag=order`，SDK 侧拉取 |
+| group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `test-demo` / `tag=demo`，SDK 侧拉取 |
 | group1 | `order-queues-consumer` | 2 | 常驻 | Redis 队列，弹出即删除 |
+| group1 | `order-delay-queues-consumer` | 1 | 常驻 | Redis ZSET 到期消息，Lua 原子取出 |
+| group1 | `order-rocketmq-delay-consumer` | 1 | 常驻 | `test-demo-delay` / `tag=delay`，broker 定时投递 |
 | group1 | `order-heartbeat` | 1 | 10s | 不依赖数据库，留一行可 grep 的存活日志 |
 | group2 | `report-summary` | 1 | 1h | 按状态聚合订单，多实例会重复写同一份报表 |
 
@@ -83,6 +89,41 @@ group1 四个消费者订阅的那四条流。payload 里的 `reason` 写明这�
 头带事件 UUID 供去重；AMQP 用事件类型做 routing key 过 `order.*` 绑定；RocketMQ
 带订阅的首个 tag；Redis 队列直接压栈。四个 sink 一次循环打开、逆序关闭，任一打不开
 就拒绝启动——少一条腿的群发示例比没有示例更糟。
+
+## 延迟队列
+
+`delay_producer.go` 是立即链路的镜像：每 10 秒生成一条 `order.paid`，但两条流都要
+等 5 秒才可见。payload 的 `reason` 写明来源，两个 handler 各打一行
+`delayed order event arrived`，带上实测等待时间，因此一行日志就能验证延迟是否生效。
+
+| 传输 | 生产端 | 到期机制 | 消费端 |
+| --- | --- | --- | --- |
+| Redis ZSET | `queues.DelayQueue.Add(ctx, event, delay)` | score 是到期时间，`Pop` 用 Lua 一次「取到期 + 删除」，多实例不重复 | `gofyconsumer.NewDelayQueues`，键 `demo:order:delay` |
+| RocketMQ | `PublishJSON(..., PublishOptions{Delay: delay})` | SDK 转成绝对投递时间，broker 保管到点才投放 | `gofyconsumer.NewRocketMQ`，`test-demo-delay` / `tag=delay` |
+
+Redis 侧的失败消息由 `DelayQueue.Retry` 以新的到期时间写回（受 `MaxRetries` 限制）；
+`Pop` 已经把条目删掉，所以与立即队列一样是**在途至多一次**——不能丢消息的场景请用 MQ。
+
+**RocketMQ 的 topic 必须是 DELAY 类型**：v5 在普通 topic 上会直接拒绝定时消息，报
+`current message type not match with topic accept message types`。本地 broker 建一次即可：
+
+```bash
+docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq-5.3.2/bin && \
+  mqadmin updateTopic -n rocketmq-namesrv:9876 -t test-demo-delay \
+  -c DefaultCluster -a +message.type=DELAY'
+```
+
+生产端写 `Delay` 还是 `DeliverAt` 都行：前者是「5 秒后」，后者是绝对时刻，两者同时
+设置会报 `ErrInvalidDelay`。消费端 `msg.Message.DeliveryTimestamp` 与 `BornTimestamp`
+可以算出计划延迟，日志里的 `scheduled` / `waited` 就是这么来的。
+
+实跑一轮：
+
+```
+01:28:15  delayed order event scheduled  delay=5s  due_at=...01:28:20
+01:28:21  delayed order event arrived   source=delay_queues     waited≈6s
+01:28:21  delayed order event arrived   source=rocketmq_delay   scheduled=5s waited≈5.1s
+```
 
 ## 消费者怎么接入
 

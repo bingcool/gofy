@@ -573,6 +573,26 @@ All notable changes to this project are documented here. The format follows
   the subscription's first tag, and the Redis queue pushes the envelope as-is.
   Sinks open once in a loop and close in reverse; any transport that fails to
   open aborts the worker rather than fanning out three quarters of the demo.
+- Delayed queues end to end. `support/queues.DelayQueue` already had `Add` /
+  `Pop` / `Retry` / `Len` but no resident loop: it now has `Consume`, with the
+  same signature as `Queue.Consume`, so the existing `queuesconsumer` worker
+  adapter drives both unchanged. `ConsumeOptions.PopLimit` bounds one batch of
+  due messages; a failed message is written back with a fresh due time up to
+  `MaxRetries`. `support/consumer.NewDelayQueues` adds the matching
+  subscription (`DelayQueuesConfig` / `DelayQueuesMessage`, `source`
+  `delay_queues`) on top of that adapter.
+  `support/rocketmq.PublishOptions` gains `Delay`, the relative form of the
+  existing `DeliverAt`; setting both, or a negative delay, reports
+  `ErrInvalidDelay`.
+  `examples/demo-service/worker/group1` mirrors the immediate loop:
+  `delay_producer.go` schedules one `order.paid` every 10s due 5s later into a
+  Redis ZSET and a RocketMQ DELAY topic, and `delay_queues_order.go` /
+  `rocketmq_delay_order.go` consume them, logging the observed wait. RocketMQ
+  v5 rejects a delayed message on a NORMAL topic, so the sample documents the
+  `-a +message.type=DELAY` topic creation. Verified against the local brokers:
+  Redis waited ~6s (second-granularity enqueue stamp plus the 200ms poll) and
+  RocketMQ scheduled 5s / waited ~5.1s, with one idempotency row per consumer
+  per event.
 
 ### Changed
 
@@ -822,8 +842,10 @@ All notable changes to this project are documented here. The format follows
   line instead emitted `write error: can't make directories for new logfile:
   mkdir /logs: read-only file system` on stderr and the diagnostics were lost.
   `support/rocketmq/sdklog.go` now sets `rocketmq.client.logRoot` to a writable
-  temp directory and calls `ResetLogger()` before anything is written; an
-  explicit value of that variable always wins. Verified with
+  temp directory and rebuilds the SDK logger on the first `New` / `NewConsumer`
+  (lazily via `sync.Once`, since public packages may not use `init()`), before
+  anything is written; an explicit value of that variable always wins.
+  Verified with
   `worker --group='*'`: zero `/logs` errors and
   `rocketmq_client_go.log` created under the temp root. Upstream v5.1.4 fixes
   the default with `os.UserHomeDir()`, but that release also renames the
