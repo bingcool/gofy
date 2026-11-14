@@ -1,29 +1,41 @@
-// Package worker builds the long-running group started by
-// `demo-service worker --group=order`.
+// Package worker builds the long-running groups started by
+// `demo-service worker --group=<group>`.
 //
-// One file per task keeps each loop readable: scan.go and heartbeat.go own their
-// own retry, ticker and logging, worker.go only decides what belongs to the
-// group. The workers call the same repository-level data as the HTTP handlers
-// instead of reimplementing queries, and they never touch support.Router: a
-// worker process has no HTTP stack.
-// 包 worker 构造 `demo-service worker --group=order` 启动的常驻分组。
+// Two files per group keep it obvious where a change belongs: the group file
+// (order.go, report.go) holds its membership and its config, and every worker
+// gets a file of its own (scan.go, heartbeat.go, summary.go) with its ticker,
+// logging and error handling. Register builds all groups once; the worker
+// subcommand then runs exactly one of them, so a group stays the deployment
+// unit and the same binary serves every deployment.
+// 包 worker 构造 `demo-service worker --group=<分组>` 启动的常驻分组。
 //
-// 一个任务一个文件，各自的 ticker、日志与错误处理都留在自己的文件里；worker.go
-// 只决定谁属于这个分组。worker 复用与 HTTP 处理器相同的数据访问，而不是另写一套
-// 查询；它们也不碰 support.Router：worker 进程里没有 HTTP 栈。
+// 每个分组两个文件，改动该落在哪里一目了然：分组文件（order.go、report.go）放成员
+// 与配置，每个 worker 各占一个文件（scan.go、heartbeat.go、summary.go），ticker、
+// 日志与错误处理都留在里面。Register 一次构造全部分组，worker 子命令只运行其中一个，
+// 因此分组始终是部署单位，同一个二进制可以服务所有部署。
+//
+// Workers reuse the same repository-level data access as the HTTP handlers instead
+// of reimplementing queries, and they never touch support.Router: a worker
+// process has no HTTP stack.
+// worker 复用与 HTTP 处理器相同的数据访问，而不是另写一套查询；它们也不碰
+// support.Router：worker 进程里没有 HTTP 栈。
 package worker
 
 import gofyworker "github.com/bingcool/gofy/support/worker"
 
-// NewGroup builds the order group. Concurrency and rhythm come from the worker
-// section of config.yaml, so the same image runs with different replica counts
-// per environment.
-// NewGroup 构造 order 分组。并发与节奏来自 config.yaml 的 worker 段，同一个镜像
-// 因此可以在不同环境用不同的实例数运行。
-func NewGroup(cfg Config) (*gofyworker.Group, error) {
-	return gofyworker.NewGroup(
-		"order",
-		newOrderScanWorker(cfg.Scan),
-		newOrderHeartbeatWorker(),
-	)
+// Register builds every group the binary knows about, in the order `worker
+// --list` prints them. Adding a group means adding a file and one line here;
+// nothing else in the binary changes.
+// Register 构造二进制认识的所有分组，顺序与 `worker --list` 的输出一致。新增一个分组
+// 只需加一个文件加这里一行，二进制其它部分不用改。
+func Register(cfg Config) ([]*gofyworker.Group, error) {
+	order, err := newOrderGroup(cfg.Order)
+	if err != nil {
+		return nil, err
+	}
+	report, err := newReportGroup(cfg.Report)
+	if err != nil {
+		return nil, err
+	}
+	return []*gofyworker.Group{order, report}, nil
 }

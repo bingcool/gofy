@@ -65,12 +65,16 @@ func main() {
 		envFromProcess: envFromProcess,
 	}
 
-	orderGroup, err := appworker.NewGroup(cfg.Worker)
+	// Every group is registered in one binary; `worker --group=<group>` picks
+	// one at startup, so one image serves all worker deployments.
+	// 所有分组都注册进同一个二进制，`worker --group=<分组>` 在启动时选择其中一个，
+	// 因此一个镜像可以服务所有 worker 部署。
+	groups, err := appworker.Register(cfg.Worker)
 	if err != nil {
-		fatalf("build worker group: %v", err)
+		fatalf("build worker groups: %v", err)
 	}
 
-	app, err := gofy.New(appOptions(cfg, reload, nacosCfg, orderGroup)...)
+	app, err := gofy.New(appOptions(cfg, reload, nacosCfg, groups)...)
 	if err != nil {
 		fatalf("init application: %v", err)
 	}

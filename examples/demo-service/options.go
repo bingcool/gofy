@@ -11,6 +11,7 @@ import (
 	appio "github.com/yourorg/demo-service/app/io"
 	"github.com/yourorg/demo-service/app/middleware"
 	appscript "github.com/yourorg/demo-service/script"
+	appworker "github.com/yourorg/demo-service/worker"
 )
 
 // middlewareRegistrar 把 app/middleware 里的应用层别名注册进 gofy 启动时创建
@@ -28,7 +29,7 @@ func middlewareRegistrar(cfg *config.Config) gofy.MiddlewareRegistrar {
 
 // appOptions 汇总 demo-service 的启动选项：框架配置、io/order 模块、脚本、
 // 常驻任务分组和版本信息。热更新会用同一份 reloader 重建模块集合。
-func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, orderGroup *worker.Group) []gofy.Option {
+func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, groups []*worker.Group) []gofy.Option {
 	return []gofy.Option{
 		gofy.WithName("demo-service"),
 		gofy.WithEnv(systemenv.GetEnv()),
@@ -49,11 +50,11 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, ord
 		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
 		gofy.WithModuleFactories(reload.factories(cfg)...),
 		gofy.WithScripts(appscript.Register(cfg)...),
-		// 常驻任务只通过 worker 子命令运行，HTTP 进程不会启动它们。
-		gofy.WithWorkerGroups(orderGroup),
-		gofy.WithWorkerConcurrency(map[string]int{
-			"order/order-scan": cfg.Worker.Scan.Concurrency,
-		}),
+		// 常驻任务只通过 worker 子命令运行，HTTP 进程不会启动它们。这里注册
+		// 全部分组，`worker --group=<分组>` 只运行其中一个。
+		gofy.WithWorkerGroups(groups...),
+		// 并发数由 worker 包按分组名给出，main 不必再抄一遍 "order/order-scan"。
+		gofy.WithWorkerConcurrency(appworker.Concurrency(cfg.Worker)),
 		gofy.WithWorkerHealth(cfg.Worker.HealthAddr),
 		gofy.WithVersionInfo(gofy.VersionInfo{
 			Version:   version,

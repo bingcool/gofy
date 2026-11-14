@@ -203,12 +203,23 @@ rocketmq:
 
 # 常驻任务：`demo-service worker --group=order` 启动。HTTP 服务不会拉起它们，
 # 两者共用同一份 config.yaml、日志与数据库配置。
+# 常驻任务：一个进程只运行一个分组，`demo-service worker --group=<分组>` 选择要跑
+# 哪个。全部组合都注册在同一个二进制里，因此各分组共用这一份 config.yaml。
 worker:
-  scan:
-    concurrency: 2      # 进程内扫描实例数（goroutine），按数据库与下游能力调整
-    interval: 5s        # 两次扫描之间的间隔
   # 就绪探针：分组启动后 200，drain 期间 503。留空则不监听端口。
+  # 一个进程一个端口，同机跑两个分组时给第二个换端口（或用 ORDER_CONFIG 指向另一份
+  # 配置）；k8s 里每个分组各自一个 Pod，端口相同不冲突。
   health_addr: 127.0.0.1:9091
+  # order：秒级扫表 + 实例存活，随业务量扩缩容。
+  order:
+    scan:
+      concurrency: 2      # 进程内扫描实例数（goroutine），按数据库与下游能力调整
+      interval: 5s        # 两次扫描之间的间隔
+  # report：小时级汇总，与 order 节奏不同，单独一个 Deployment。
+  report:
+    summary:
+      concurrency: 1      # 汇总实例数，多实例会重复写同一份报表
+      interval: 1h        # 两次汇总之间的间隔
 
 pid_file: app/demo-service.pid
 
