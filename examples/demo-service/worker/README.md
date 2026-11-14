@@ -80,6 +80,17 @@ $ go run . worker --group=group1
 `workers:2` 是这个分组的成员数（`order-scan` 与 `order-heartbeat`），不是实例数；
 `order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
 
+本地调试时可以用通配符把全部注册分组放进同一个进程：
+
+```bash
+$ go run . worker --group='*'
+{"level":"info","caller":"gofy/worker_host.go:145","msg":"worker groups started","workers":3,"groups":["group1","group2"]}
+```
+
+它只解决“一条命令起全部循环”，不改变部署语义：pid 变成 `-worker-all.pid`，
+`stop --worker='*'` 一次停掉全部，任一分组失败会取消其余分组。引号不能省，否则 shell 先
+展开 `*`；也不能和 `--name` 同用——worker 名只属于一个分组，跨组过滤会静默跳过不含它的组。
+
 只跑组内某个 worker，或临时改实例数（不改配置、不改代码）：
 
 ```bash
@@ -100,6 +111,7 @@ go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 
 | 产物 | 位置 | 说明 |
 | --- | --- | --- |
 | pid 文件 | `app/demo-service-worker-group1.pid` | 默认 pid 文件的 `-worker-<分组>` 后缀；未配置 `pid_file` 则不写 |
+| pid 文件 | `app/demo-service-worker-all.pid` | `--group='*'` 时用这个后缀，`stop --worker='*'` 解析同一个文件 |
 | 日志 | `storage/log/worker/<date>/info/worker-h15.log` | 整组启动写 `worker-<host>.log` |
 | 日志 | `storage/log/worker/<date>/info/order-scan-h15.log` | `--name` 只跑一个 worker 时用它的名字 |
 | 就绪探针 | `http://127.0.0.1:9091/healthz` | 配置 `worker.health_addr` 才有；分组起来返回 200 `ok`，drain 期间 503 |
@@ -113,6 +125,11 @@ go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 
 $ go run . stop --worker=group1 --force
 [INFO] 正在停止 worker 分组【group1】 (pid 80656)
 [ OK ] worker 分组【group1】 已停止 (pid 80656)
+
+# 停掉 --group='*' 起的那个进程
+$ go run . stop --worker='*' --force
+[INFO] 正在停止 worker 分组【all】 (pid 80656)
+[ OK ] worker 分组【all】 已停止 (pid 80656)
 ```
 
 不带 `--force` 会先问一次 `你确定 [停止] 应用【demo-service】? (yes or no):`。
@@ -180,6 +197,7 @@ worker:
 | 进程起来就退出、退出码 0 | `Run` 在 ctx 取消前返回了 nil | 循环必须阻塞到 `ctx.Done()` |
 | 日志找不到 | 目录看错 | `storage/log/worker/<date>/info/`，整组是 `worker-<host>.log` |
 | `stop --worker=x` 报 not running | 未配置 `pid_file`，或分组名与启动时不同 | 查 `app/*-worker-<group>.pid` |
+| `--group='*'` 配 `--name` 报 usage error | 通配符按组运行，`--name` 只能指定一个组内的 worker | 改成 `--group=<拥有该 worker 的组>` |
 | `--list` 的数字和实际不同 | 配置改了没重启，或用了 `--concurrency` | 覆盖只在本次启动生效 |
 
 ## 相关文档

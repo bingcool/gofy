@@ -152,6 +152,95 @@ func TestStopWorkerTargetsTheGroupPidFile(t *testing.T) {
 	}
 }
 
+// TestStopWorkerWildcardUsesTheAllPidFile pins the name the wildcard run writes:
+// `stop --worker=*` has to resolve `-worker-all.pid`, otherwise a process started
+// with `--group=*` could never be stopped by the flag that started it.
+// TestStopWorkerWildcardUsesTheAllPidFile 固定通配符启动写的文件名：
+// `stop --worker=*` 必须解析到 `-worker-all.pid`，否则用 `--group=*` 起
+// 来的进程没法用配套的旗标停掉。
+func TestStopWorkerWildcardUsesTheAllPidFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pid based stop is not supported on windows")
+	}
+	pidPath := filepath.Join(t.TempDir(), "demo.pid")
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	app, err := New(
+		WithName("stop-worker-test"),
+		WithPIDFile(pidPath),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = app.stop(context.Background(), commandline.StopOptions{Worker: commandline.WorkerGroupAll})
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("stop worker wildcard: got %v, want ErrNotRunning", err)
+	}
+	if !strings.Contains(err.Error(), "demo-worker-all.pid") {
+		t.Fatalf("error does not name the wildcard pid file: %v", err)
+	}
+	if _, statErr := os.Stat(pidPath); statErr != nil {
+		t.Fatalf("HTTP pid file was touched: %v", statErr)
+	}
+}
+
+// TestSelectWorkerGroups covers the two shapes --group accepts: one name, or the
+// wildcard that returns every registered group without mutating the registry.
+// TestSelectWorkerGroups 覆盖 --group 的两种形态：单个名字，或返回全部已注册分组且
+// 不改动注册表的通配符。
+func TestSelectWorkerGroups(t *testing.T) {
+	build := func(name string) *worker.Group {
+		t.Helper()
+		g, err := worker.NewGroup(name, worker.Func(name+"-tick", 1, func(context.Context) error { return nil }))
+		if err != nil {
+			t.Fatalf("NewGroup(%s): %v", name, err)
+		}
+		return g
+	}
+	app, err := New(
+		WithName("worker-test"),
+		WithWorkerGroups(build("order"), build("report")),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	all, err := app.selectWorkerGroups(commandline.WorkerGroupAll)
+	if err != nil {
+		t.Fatalf("selectWorkerGroups(*): %v", err)
+	}
+	if len(all) != 2 || all[0].Name() != "order" || all[1].Name() != "report" {
+		t.Fatalf("selectWorkerGroups(*) = %v, want order and report in order", groupNames(all))
+	}
+	if got := len(app.opts.workerGroups); got != 2 {
+		t.Fatalf("registered groups = %d after selection, want 2", got)
+	}
+
+	one, err := app.selectWorkerGroups("report")
+	if err != nil {
+		t.Fatalf("selectWorkerGroups(report): %v", err)
+	}
+	if len(one) != 1 || one[0].Name() != "report" {
+		t.Fatalf("selectWorkerGroups(report) = %v, want just report", groupNames(one))
+	}
+
+	if _, err := app.selectWorkerGroups("missing"); !errors.Is(err, ErrWorkerGroupNotFound) {
+		t.Fatalf("selectWorkerGroups(missing) = %v, want ErrWorkerGroupNotFound", err)
+	}
+}
+
+func groupNames(groups []*worker.Group) []string {
+	out := make([]string, len(groups))
+	for i, g := range groups {
+		out[i] = g.Name()
+	}
+	return out
+}
+
 // TestWorkerHealthReportsState covers the probe contract: 503 before the group
 // starts, 200 while it runs, 503 again while it drains.
 // TestWorkerHealthReportsState 覆盖探针契约：分组启动前 503，运行中 200，drain 时

@@ -736,6 +736,13 @@ All notable changes to this project are documented here. The format follows
   `global` opt-in for OTel, `make check` as the only gate (the repository has
   no GitHub Actions), and the `storage/log/{http,access,script}` demo layout.
 
+- `worker --group='*'` runs every registered group in one process, for local
+  runs and smoke tests: the pid file becomes `-worker-all.pid`,
+  `stop --worker='*'` resolves that same file, and the first group to fail
+  cancels the rest. `--name` is rejected in this mode because a worker name
+  belongs to exactly one group, and the process-wide pid/probe/stop granularity
+  is unchanged, so a deployment still runs one group per process.
+
 ### Fixed
 
 - `Execute` prints an error to stderr whenever no logger exists yet, not just

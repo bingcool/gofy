@@ -35,6 +35,14 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	// worker 分组写自己的 pid 文件，停止它必须解析同一个带后缀的路径。否则
 	// `stop --worker=order` 会打到共用 pid_file 的 API 服务上。
 	if opts.Worker != "" {
+		// A wildcard run writes its pid file under the "all" token, so stopping it
+		// has to resolve that same name. The flag layer does this too; repeating it
+		// here keeps programmatic callers honest.
+		// 通配符启动的进程把 pid 文件写在 "all" 名下，停止时也要解析同一个名字。旗标层
+		// 已经做过一次，这里再做一次是为了让程序化调用同样成立。
+		if opts.Worker == commandline.WorkerGroupAll {
+			opts.Worker = commandline.WorkerAllPIDToken
+		}
 		path = workerPIDPath(path, opts.Worker)
 	}
 	workDir, err := a.resolveWorkDir()

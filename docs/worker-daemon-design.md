@@ -125,11 +125,14 @@ demo-service worker --group=order --concurrency=4
 
 # 列出配置里声明的分组与 worker
 demo-service worker --list
+
+# 全部已注册分组塞进一个进程（本地调试/冒烟，不是部署形态）
+demo-service worker --group='*'
 ```
 
 | flag | 默认 | 说明 |
 | --- | --- | --- |
-| `--group` | 空 | 必填（除 `--list`）；对应配置里的同名分组块（如 `worker.order`） |
+| `--group` | 空 | 必填（除 `--list`）；对应配置里的同名分组块（如 `worker.order`）；`*` 表示全部已注册分组 |
 | `--name` | 空 | 可重复；只启动列出的 worker，用于排障 |
 | `--concurrency` | 0 | 覆盖全部 worker 的实例数，0 表示按配置 |
 | `--list` | false | 打印分组/worker/并发后退出，不连 MQ、不连 DB |
@@ -142,6 +145,7 @@ demo-service worker --list
 - 分组依据：故障域一致 + 资源画像接近 + 发布节奏一致。典型切法：`order`、`settle`、`notify`、`maintenance`。
 - 组内某个 worker 触发 fatal，整个进程退出（由 k8s 重启容器），避免"进程活着但只剩一半 worker"的静默降级。
 - 不同组之间无共享状态，可独立扩缩容。
+- 例外是 `--group='*'`：它把全部分组放进一个进程，用于本地调试与冒烟测试。pid 后缀变成 `all`，`stop --worker='*'` 对应同一个文件；组间隔离随之消失，任一组失败会取消其余组。部署仍然是一组一个进程——通配符不是把"多组同进程"合法化，只是省掉本地连起三个进程的动作。
 
 ### 3.3 与现有命令的对比
 
@@ -999,6 +1003,7 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | T3-14 | 已完成（2026-11-14） | `stop --worker=<group>` + `stop.StopOptions.Worker`；组名先过 `worker.ValidName` 再拼 pid 路径；用例断言只存在 HTTP pid 文件时返回 `ErrNotRunning` 且原文件未被触碰 |
 | T3-15 | 已完成（2026-11-14） | `gofy.WithWorkerHealth(addr)` + `worker_health.go`；实测 `worker --group=order` 时 `/healthz` 200、未知路径 404、停机后端口关闭；未配置时不监听任何端口 |
 | T3-16 | 已完成（2026-11-14） | `gofy new --with-worker`（默认开）生成 `worker/{register,example}.go` 并接入 `WithWorkerGroups`；`docs/worker-guide.md`；脚手架实测 `go mod tidy` clean、`go build ./...` 通过、`worker --list` 输出 default/example |
+| T3-17 | 已完成（2026-11-14） | `worker --group='*'`：`selectWorkerGroups` 返回全部注册分组，pid 后缀取 `all`、`stop --worker='*'` 由旗标层归一为 `all`；多个 runner 并发运行，首个错误取消其余；`--name` 与 `*` 同用返回 `ErrUsage`。实测 demo 两组同进程 3 个 worker、`/healthz` 200、`stop --worker='*'` 后退出码 0 |
 
 P1/P2 全关（M4、M5 达成）。`make check` 与 adapter `make check` 均 EXIT=0。
 

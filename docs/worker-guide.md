@@ -68,8 +68,14 @@ app, err := gofy.New(
 | `app worker --group=order` | 跑 order 组全部 worker |
 | `app worker --group=order --name=order-scan` | 只跑组内指定 worker（可重复） |
 | `app worker --group=order --concurrency=4` | 覆盖组内所有 worker 的实例数 |
+| `app worker --group='*'` | 在一个进程里跑全部已注册分组，仅本地调试与冒烟测试 |
 | `app stop --worker=order` | 按 pid 文件停掉该组 |
 | `app stop --worker=order --force` | 跳过确认，超时发 SIGKILL |
+| `app stop --worker='*'` | 停掉 `--group='*'` 起的那个进程（pid 后缀为 `all`） |
+
+`--group='*'` 要加引号，否则 shell 会先把它展开成当前目录的文件名。通配符运行不允许
+再配 `--name`：worker 名只属于某一个分组，跨组过滤会静默跳过不含它的分组，直接写
+`--group=<拥有该 worker 的组>` 更清楚。
 
 ### 3.3 进程留下的东西
 
@@ -146,9 +152,14 @@ worker:
 一项、`config.yaml` 加同名配置块。`main.go` 与部署清单不用改结构——复制一份清单，改
 `--group` 和副本数即可。
 
-**不要在一个进程里跑多个分组**：pid、探针、`stop` 的粒度都是分组，混跑会出现"停一半"，
+**部署时不要在一个进程里跑多个分组**：pid、探针、`stop` 的粒度都是分组，混跑会出现"停一半"，
 而且一个分组里某个 worker 反复失败会把另一个分组一起带走。分组就是部署单位，副本数与发布
 节奏不同才是拆组的理由。
+
+唯一的例外是 `worker --group='*'`：它把全部分组放进一个进程，pid 文件变成
+`-worker-all.pid`，`stop --worker='*'` 一次停掉全部，任一分组失败会取消其余分组。这套语义
+是给本地开发和冒烟测试用的——一条命令起来验证所有循环，省掉三次进程管理；它不解决部署问题，
+生产仍然一组一个 Deployment。
 
 ## 4. 四种循环的写法
 

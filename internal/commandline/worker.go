@@ -8,6 +8,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// WorkerGroupAll is the --group value that selects every registered group.
+// WorkerGroupAll 是选中全部已注册分组的 --group 取值。
+const WorkerGroupAll = "*"
+
+// WorkerAllPIDToken is the pid-file suffix that stands for "every group": the
+// wildcard run writes it, and `stop --worker=*` resolves it.
+// WorkerAllPIDToken 是代表"全部分组"的 pid 文件后缀：通配符启动时写它，
+// `stop --worker=*` 也解析它。
+const WorkerAllPIDToken = "all"
+
 // WorkerOptions are the flags of the worker command.
 // WorkerOptions 是 worker 命令的旗标。
 type WorkerOptions struct {
@@ -58,7 +68,7 @@ func newWorkerCmd(d Deps) *cobra.Command {
 			return d.RunWorker(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Group, "group", "", "worker group to run")
+	cmd.Flags().StringVar(&opts.Group, "group", "", "worker group to run, or "+WorkerGroupAll+" for every registered group")
 	cmd.Flags().StringSliceVar(&opts.Names, "name", nil, "run only the named workers (repeatable)")
 	cmd.Flags().IntVar(&opts.Concurrency, "concurrency", 0, "override the instance count of every worker (0 = config)")
 	cmd.Flags().BoolVar(&opts.List, "list", false, "list groups and workers, then exit")

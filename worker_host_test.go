@@ -181,6 +181,88 @@ func TestExecuteWorkerRunsOnlyTheRequestedGroup(t *testing.T) {
 	}
 }
 
+// TestExecuteWorkerWildcardRunsEveryGroup is the counterpart of the previous
+// test: the wildcard is the only way to start more than one group in a process,
+// and it must start every registered group rather than the first one.
+// TestExecuteWorkerWildcardRunsEveryGroup 是上一条的对照：通配符是同一进程里启动多个
+// 分组的唯一方式，它必须启动全部已注册分组，而不是只启动第一个。
+func TestExecuteWorkerWildcardRunsEveryGroup(t *testing.T) {
+	var orderStarted, reportStarted int32
+	app, err := gofy.New(
+		gofy.WithName("worker-test"),
+		gofy.WithWorkerGroups(
+			countingGroup(t, "order", &orderStarted),
+			countingGroup(t, "report", &reportStarted),
+		),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- app.ExecuteArgs(ctx, []string{"worker", "--group=*"})
+	}()
+
+	waitFor(t, func() bool {
+		return atomic.LoadInt32(&orderStarted) == 1 && atomic.LoadInt32(&reportStarted) == 1
+	}, "both groups to start")
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ExecuteArgs error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("wildcard run did not stop after cancellation")
+	}
+}
+
+// TestExecuteWorkerWildcardRejectsNameFilter keeps --name unambiguous: a worker
+// name belongs to exactly one group, so filtering a wildcard run would silently
+// skip the groups that do not contain it.
+// TestExecuteWorkerWildcardRejectsNameFilter 让 --name 保持无歧义：worker 名只属于一个
+// 分组，对通配符运行做过滤会静默跳过不含它的分组。
+func TestExecuteWorkerWildcardRejectsNameFilter(t *testing.T) {
+	var started int32
+	app, err := gofy.New(
+		gofy.WithName("worker-test"),
+		gofy.WithWorkerGroups(
+			countingGroup(t, "order", &started),
+			countingGroup(t, "report", &started),
+		),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = app.ExecuteArgs(context.Background(), []string{"worker", "--group=*", "--name=order-tick"})
+	if !errors.Is(err, gofy.ErrUsage) {
+		t.Fatalf("ExecuteArgs error = %v, want ErrUsage", err)
+	}
+	if atomic.LoadInt32(&started) != 0 {
+		t.Fatalf("a worker started before the flag conflict was reported")
+	}
+}
+
+// countingGroup builds a one-worker group that blocks until the context is
+// cancelled and records each launch in started.
+// countingGroup 构造一个单 worker 分组：阻塞到 ctx 取消，每次启动都记到 started。
+func countingGroup(t *testing.T, name string, started *int32) *worker.Group {
+	t.Helper()
+	group, err := worker.NewGroup(name, worker.Func(name+"-tick", 1, func(ctx context.Context) error {
+		atomic.AddInt32(started, 1)
+		<-ctx.Done()
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGroup(%s): %v", name, err)
+	}
+	return group
+}
+
 // TestExecuteWorkerUsesFuncConcurrency proves the count travels from Func to the
 // process without any host option, which is what `worker --list` reports too.
 // TestExecuteWorkerUsesFuncConcurrency 证明计数可以从 Func 一路传到进程，无需任何宿主

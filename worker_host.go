@@ -16,22 +16,32 @@ import (
 	"go.uber.org/zap"
 )
 
-// runWorker hosts one worker group. It builds the same logger, database,
-// telemetry and Runtime the HTTP path uses, but binds no routes, opens no
-// listener and registers nothing with Nacos, so the process is a pure consumer.
-// runWorker 托管一个 worker 分组。它与 HTTP 路径共用 logger、数据库、遥测与
-// Runtime，但不注册路由、不监听端口、不向 Nacos 注册，因此进程是纯消费者。
+// runWorker hosts the worker groups named by --group. It builds the same logger,
+// database, telemetry and Runtime the HTTP path uses, but binds no routes, opens
+// no listener and registers nothing with Nacos, so the process is a pure consumer.
+// runWorker 托管 `--group` 指定的 worker 分组。它与 HTTP 路径共用 logger、数据库、
+// 遥测与 Runtime，但不注册路由、不监听端口、不向 Nacos 注册，因此进程是纯消费者。
 func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) error {
-	// Resolve the group before anything is built: a typo in --group should not
+	// Resolve the groups before anything is built: a typo in --group should not
 	// open a database pool, start telemetry or write a log line first.
 	// 先解析分组再构建任何资源：--group 拼错时不应该先去连数据库、启动遥测、写日志。
-	group, err := a.workerGroup(opts.Group)
+	groups, err := a.selectWorkerGroups(opts.Group)
 	if err != nil {
 		return err
 	}
-	group, err = group.Subset(opts.Names)
-	if err != nil {
-		return err
+	if len(groups) > 1 && len(opts.Names) > 0 {
+		// Each name belongs to one group, so filtering across groups would either
+		// silently skip groups or need a per-group name list. Run the group that
+		// owns the worker instead.
+		// 每个名字只属于一个分组，跨组过滤要么静默跳过某些分组，要么得给每组单独
+		// 列名字。直接运行拥有该 worker 的那个分组即可。
+		return fmt.Errorf("%w: --name cannot be combined with --group=%s; name the group that owns the worker",
+			ErrUsage, commandline.WorkerGroupAll)
+	}
+	if len(groups) == 1 {
+		if groups[0], err = groups[0].Subset(opts.Names); err != nil {
+			return err
+		}
 	}
 
 	if err := a.beginStart(false); err != nil {
@@ -78,14 +88,17 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	})
 	a.rt = rt
 
-	runner, err := worker.NewRunner(group, worker.RunConfig{
-		Policy:       a.opts.workerPolicy,
-		Concurrency:  a.workerConcurrency(group, opts.Concurrency),
-		DrainTimeout: a.opts.workerDrain,
-		Logger:       lg,
-	})
-	if err != nil {
-		return a.abort(err)
+	runners := make([]*worker.Runner, len(groups))
+	for i, group := range groups {
+		runners[i], err = worker.NewRunner(group, worker.RunConfig{
+			Policy:       a.opts.workerPolicy,
+			Concurrency:  a.workerConcurrency(group, opts.Concurrency),
+			DrainTimeout: a.opts.workerDrain,
+			Logger:       lg,
+		})
+		if err != nil {
+			return a.abort(err)
+		}
 	}
 
 	pidPath, err := a.resolvePIDPath()
@@ -94,10 +107,12 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	}
 	// The worker process keeps its own pid file: sharing the HTTP one would let
 	// `stop` kill the API server and make a second group look like a duplicate
-	// instance.
+	// instance. Running every group at once still owns a single pid file, named
+	// after the wildcard rather than after a group that is not the whole process.
 	// worker 进程使用独立 pid 文件：共用 HTTP 的那个会让 `stop` 误杀 API 服务，
-	// 也会让第二个分组被误判为重复实例。
-	pidPath = workerPIDPath(pidPath, group.Name())
+	// 也会让第二个分组被误判为重复实例。全部分组同跑时仍然只有一个 pid 文件，
+	// 名字取通配符而不是某个并不代表整个进程的分组名。
+	pidPath = workerPIDPath(pidPath, workerPIDGroup(groups))
 	if pidPath != "" {
 		if existing, readErr := pidfile.Read(pidPath); readErr == nil && process.Alive(existing) {
 			return a.abort(fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath))
@@ -109,14 +124,26 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		a.startPIDRefresh(lg)
 	}
 
-	lg.Info("worker group started",
+	names := make([]string, len(groups))
+	workers := 0
+	for i, group := range groups {
+		names[i] = group.Name()
+		workers += len(group.Workers())
+	}
+	startedFields := []zap.Field{
 		zap.String("name", a.opts.name),
 		zap.String("env", a.opts.env),
-		zap.String("group", group.Name()),
-		zap.Int("workers", len(group.Workers())),
+		zap.Int("workers", workers),
 		zap.Duration("drain_timeout", a.opts.workerDrain),
 		zap.Bool("telemetry", telemetry.Enabled()),
-	)
+	}
+	if len(groups) == 1 {
+		startedFields = append(startedFields, zap.String("group", groups[0].Name()))
+		lg.Info("worker group started", startedFields...)
+	} else {
+		startedFields = append(startedFields, zap.Strings("groups", names))
+		lg.Info("worker groups started", startedFields...)
+	}
 
 	// The probe comes up before the group does so a scheduler that restarts on
 	// a failed readiness check sees 503 instead of a connection refused, which
@@ -141,7 +168,26 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	// same way a script receives it as an argument.
 	// worker 通过 Runtime 访问 logger、数据库与 tracer，方式与脚本接收 Runtime
 	// 参数一致。
-	runErr := runner.Run(worker.WithRuntime(ctx, rt))
+	runCtx, cancelRunners := context.WithCancelCause(ctx)
+	defer cancelRunners(nil)
+	errCh := make(chan error, len(runners))
+	for _, runner := range runners {
+		go func(r *worker.Runner) {
+			errCh <- r.Run(worker.WithRuntime(runCtx, rt))
+		}(runner)
+	}
+	// One group failing takes the process down: a process that keeps half of its
+	// groups alive would report ready while silently skipping work, and the
+	// wildcard exists for local runs where "all or nothing" is the useful answer.
+	// 一个分组失败就带走整个进程：只留一半分组活着的进程会一边报就绪一边漏活；
+	// 通配符本来就是给本地运行用的，"全有或全无"才是想要的答案。
+	var runErr error
+	for range runners {
+		if err := <-errCh; err != nil {
+			runErr = errors.Join(runErr, err)
+			cancelRunners(err)
+		}
+	}
 	if health != nil {
 		// Keep reporting 503 while the group drains: the process is still alive
 		// but it no longer accepts new work.
@@ -152,12 +198,51 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		runErr = errors.Join(runErr, cerr)
 	}
 	if runErr == nil {
-		lg.Info("worker group stopped", zap.String("group", group.Name()))
-	} else {
+		if len(groups) == 1 {
+			lg.Info("worker group stopped", zap.String("group", groups[0].Name()))
+		} else {
+			lg.Info("worker groups stopped", zap.Strings("groups", names))
+		}
+	} else if len(groups) == 1 {
 		lg.Error("worker group stopped with error",
-			zap.String("group", group.Name()), zap.Error(runErr))
+			zap.String("group", groups[0].Name()), zap.Error(runErr))
+	} else {
+		lg.Error("worker groups stopped with error",
+			zap.Strings("groups", names), zap.Error(runErr))
 	}
 	return runErr
+}
+
+// selectWorkerGroups resolves --group to the groups this process should run.
+// A single name returns that group; the wildcard returns every registered group,
+// which is a local-development and smoke-test mode rather than a deployment
+// shape: pid file, probe and `stop` stay process-wide.
+// selectWorkerGroups 把 --group 解析成进程要运行的分组：单个名字返回该分组，通配符返回
+// 全部已注册分组。后者是本地开发与冒烟测试的用法，不是部署形态——pid 文件、探针与
+// `stop` 的粒度仍然是进程。
+func (a *App) selectWorkerGroups(name string) ([]*worker.Group, error) {
+	if strings.TrimSpace(name) == commandline.WorkerGroupAll {
+		if len(a.opts.workerGroups) == 0 {
+			return nil, fmt.Errorf("%w: no worker groups registered", ErrWorkerGroupNotFound)
+		}
+		return append([]*worker.Group(nil), a.opts.workerGroups...), nil
+	}
+	group, err := a.workerGroup(name)
+	if err != nil {
+		return nil, err
+	}
+	return []*worker.Group{group}, nil
+}
+
+// workerPIDGroup names the pid file for the resolved groups: the group name when
+// one runs, and the wildcard token when the process hosts every group.
+// workerPIDGroup 为解析出的分组决定 pid 文件名：只跑一个分组时用组名，进程托管全部分组
+// 时用通配符对应的名字。
+func workerPIDGroup(groups []*worker.Group) string {
+	if len(groups) == 1 {
+		return groups[0].Name()
+	}
+	return commandline.WorkerAllPIDToken
 }
 
 // workerGroup looks up a registered group by name.

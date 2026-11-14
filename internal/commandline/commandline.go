@@ -168,8 +168,16 @@ func newStopCmd(d Deps) *cobra.Command {
 		},
 	}
 	addStopFlags(cmd, &opts)
-	cmd.Flags().StringVar(&opts.Worker, "worker", "", "stop the worker group with this name instead of the HTTP instance")
+	cmd.Flags().StringVar(&opts.Worker, "worker", "", "stop the worker group with this name instead of the HTTP instance ("+WorkerGroupAll+" = all groups)")
 	cmd.PreRunE = func(_ *cobra.Command, _ []string) error {
+		// The wildcard is a run-time selector, not a file name: it stands for the
+		// pid file a `worker --group=*` process wrote, so resolve it to the token
+		// that process used before validating.
+		// 通配符是启动时的选择符，不是文件名：它指向 `worker --group=*` 进程写的那个
+		// pid 文件，因此先解析成该进程用的后缀，再做校验。
+		if opts.Worker == WorkerGroupAll {
+			opts.Worker = WorkerAllPIDToken
+		}
 		// The group name becomes part of a pid file name, so reject anything
 		// that could escape the directory before it reaches the filesystem.
 		// 分组名会成为 pid 文件名的一部分，因此要在它到达文件系统之前挡掉任何可能
