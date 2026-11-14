@@ -11,6 +11,7 @@ import (
 	"time"
 
 	rmq "github.com/apache/rocketmq-clients/golang/v5"
+	rmqv2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
 )
 
 const (
@@ -429,7 +430,7 @@ func (c *Consumer) poll(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 			if ctx.Err() != nil {
 				return
 			}
-			if isReceiveTimeout(err) {
+			if isIdleReceive(err) {
 				continue
 			}
 			report(opts, fmt.Errorf("rocketmq: receive %q: %w", c.cfg.Topic, err))
@@ -474,19 +475,39 @@ func (c *Consumer) ack(ctx context.Context, delivery deliveredMessage, action st
 	}
 }
 
-// isReceiveTimeout reports the SDK's long-poll timeout. v5.1.2 returns a plain
-// fmt.Errorf("[error] CODE=DEADLINE_EXCEEDED") instead of a typed timeout, so
-// the string match is the only portable signal; context cancellation is
-// checked by the caller.
-// isReceiveTimeout 判断 SDK 的长轮询超时。v5.1.2 返回的是普通
-// fmt.Errorf("[error] CODE=DEADLINE_EXCEEDED")，并非类型化超时，只能靠字符串
-// 匹配识别；上下文取消由调用方自行判断。
-func isReceiveTimeout(err error) bool {
+// isIdleReceive reports a long poll that came back empty. Two shapes mean it,
+// and neither is a failure:
+//
+//   - the client side hits its own deadline; v5.1.2 returns a plain
+//     fmt.Errorf("[error] CODE=DEADLINE_EXCEEDED") rather than a typed timeout,
+//     so the string match is the only portable signal;
+//   - the proxy answers instead, gRPC 40401 MESSAGE_NOT_FOUND with
+//     "no new message". That is the server's long-poll window closing first,
+//     and the SDK hands it back as *ErrRpcStatus, which AsErrRpcStatus unwraps.
+//
+// The second shape is why this is not just a timeout check: on an idle topic
+// the proxy usually wins the race, so a caller that reported it would log an
+// error every AwaitDuration, per worker, forever. Context cancellation stays
+// the caller's business.
+// isIdleReceive 判断一次长轮询是否空手而归。两种形态是同一件事，都不是失败：
+//
+//   - 客户端自己到期；v5.1.2 返回的是普通 fmt.Errorf("[error]
+//     CODE=DEADLINE_EXCEEDED")，并非类型化超时，只能靠字符串匹配；
+//   - 服务端先到期，proxy 直接回答 gRPC 40401 MESSAGE_NOT_FOUND 与
+//     "no new message"。SDK 以 *ErrRpcStatus 返回，AsErrRpcStatus 会拆开包装。
+//
+// 后者正是这个判断不能只当成"超时"的原因：空 topic 上通常是 proxy 先答复，若当成
+// 失败，每个 worker 每个 AwaitDuration 都会打一行错误，永不停止。上下文取消仍由
+// 调用方判断。
+func isIdleReceive(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
+	}
+	if status, ok := rmq.AsErrRpcStatus(err); ok {
+		return status.Code == int32(rmqv2.Code_MESSAGE_NOT_FOUND)
 	}
 	return strings.Contains(err.Error(), "CODE=DEADLINE_EXCEEDED")
 }

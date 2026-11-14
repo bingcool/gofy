@@ -449,6 +449,72 @@ func TestConsumerTreatsPollTimeoutAsEmpty(t *testing.T) {
 	}
 }
 
+// TestConsumerTreatsEmptyLongPollAsEmpty pins the other half of an idle poll:
+// the proxy answering 40401 MESSAGE_NOT_FOUND, which is what a v5 broker sends
+// when its long-poll window closes before the client's deadline. It is the
+// common case on an idle topic, so reporting it would log an error every
+// AwaitDuration for every worker.
+// TestConsumerTreatsEmptyLongPollAsEmpty 固定空轮询的另一半：proxy 回答 40401
+// MESSAGE_NOT_FOUND。v5 服务端在长轮询窗口先到期时就这么答复，空 topic 上它才是
+// 常见形态；若把它当错误，每个 worker 每个 AwaitDuration 都会打一行错误。
+func TestConsumerTreatsEmptyLongPollAsEmpty(t *testing.T) {
+	fake := &fakeConsumer{receiveErr: &rmq.ErrRpcStatus{Code: 40401, Message: "no new message"}}
+	reported := make(chan error, 4)
+	c := newPullConsumer(ConsumerConfig{Topic: "orders", Group: "g"}, fake)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Consume(ctx, func(context.Context, *Message) error { return nil },
+			ConsumeOptions{OnError: func(err error) { reported <- err }})
+	}()
+
+	waitCalls(t, fake, 2)
+	select {
+	case err := <-reported:
+		t.Fatalf("empty long poll was reported as an error: %v", err)
+	default:
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+}
+
+// TestIsIdleReceive covers the classifier both poll paths lean on, including the
+// shapes that must still be reported: a proxy that is down, and an RPC status
+// that is a real failure rather than an empty poll.
+// TestIsIdleReceive 覆盖两条轮询路径共用的判定，也包括必须照旧上报的形态：proxy
+// 不可用，以及并非空轮询的真实 RPC 失败。
+func TestIsIdleReceive(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "typed deadline", err: context.DeadlineExceeded, want: true},
+		{name: "client deadline string", err: fmt.Errorf("[error] CODE=DEADLINE_EXCEEDED"), want: true},
+		{name: "wrapped client deadline", err: fmt.Errorf("receive: %w", context.DeadlineExceeded), want: true},
+		{name: "proxy says no message", err: &rmq.ErrRpcStatus{Code: 40401, Message: "no new message"}, want: true},
+		{
+			name: "wrapped proxy answer",
+			err:  fmt.Errorf("rocketmq: %w", &rmq.ErrRpcStatus{Code: 40401, Message: "no new message"}),
+			want: true,
+		},
+		{name: "proxy internal error", err: &rmq.ErrRpcStatus{Code: 50002, Message: "internal"}, want: false},
+		{name: "proxy down", err: errors.New("connection refused"), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isIdleReceive(test.err); got != test.want {
+				t.Fatalf("isIdleReceive(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
 func TestConsumerReportsReceiveError(t *testing.T) {
 	fake := &fakeConsumer{receiveErr: errors.New("proxy down")}
 	reported := make(chan error, 4)

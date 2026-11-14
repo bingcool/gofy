@@ -808,6 +808,15 @@ All notable changes to this project are documented here. The format follows
   failed each message with `context.DeadlineExceeded`. The budget now starts when
   the run context is cancelled; `TestDrainContextDoesNotExpireBeforeShutdown`
   pins it.
+- `support/rocketmq`: an empty long poll is no longer reported as a receive
+  error. Only the client-side deadline (`CODE=DEADLINE_EXCEEDED`) was treated as
+  idle; when the v5 proxy's long-poll window closes first it answers gRPC 40401
+  `MESSAGE_NOT_FOUND` / "no new message", which fell through to the error path —
+  so an idle topic logged `rocketmq consume error` once per `AwaitDuration`, per
+  worker, and every one of those polls also paid the 1s receive backoff.
+  `isIdleReceive` now recognizes both shapes, through the SDK's `ErrRpcStatus`
+  (which survives `%w` wrapping) as well as the deadline string, and real
+  failures — proxy down, an RPC status that is not 40401 — still report.
 
 ### Changed
 
