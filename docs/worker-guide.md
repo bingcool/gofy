@@ -179,7 +179,7 @@ queue, err := claim.New(db, claim.Config{
 
 func scanLoop(ctx context.Context, q *claim.Queue) error {
 	id, _ := worker.IdentityFrom(ctx)
-	return worker.Ticker(ctx, 2*time.Second, func(ctx context.Context) error {
+	return worker.Ticker(ctx, 2000, func(ctx context.Context) error {
 		drain := worker.DrainContext(ctx) // 停机后仍允许在途处理跑完
 		tasks, err := q.Claim(drain, id.String(), 0)
 		if err != nil {

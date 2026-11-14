@@ -20,9 +20,9 @@ type SummaryWorkerConfig struct {
 	// Concurrency is how many summary instances run inside the worker process.
 	// Concurrency 是 worker 进程内同时运行的汇总实例数。
 	Concurrency int
-	// Interval is the pause between two aggregations.
-	// Interval 是两次汇总之间的间隔。
-	Interval time.Duration
+	// IntervalMS is the pause between two aggregations, in milliseconds.
+	// IntervalMS 是两次汇总之间的间隔，单位毫秒。
+	IntervalMS uint32
 }
 
 // summaryDefaults is what group2's summary worker runs with: one instance per
@@ -32,7 +32,7 @@ type SummaryWorkerConfig struct {
 // 写两遍，因此计数刻意就是 1，和它控制的聚合逻辑放在一起。
 var summaryDefaults = SummaryWorkerConfig{
 	Concurrency: 1,
-	Interval:    time.Hour,
+	IntervalMS:  3_600_000,
 }
 
 // statusCount is one row of the status breakdown.
@@ -48,9 +48,9 @@ type statusCount struct {
 // newSummaryWorker 按间隔统计各状态订单数。它与 group1 读同一个库却不同进程，这正是
 // 拆成两个分组的意义：节奏不同、部署独立。
 func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
-	interval := cfg.Interval
-	if interval <= 0 {
-		interval = time.Hour
+	intervalMS := cfg.IntervalMS
+	if intervalMS == 0 {
+		intervalMS = 3_600_000
 	}
 	return gofyworker.Func("report-summary", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
@@ -60,10 +60,10 @@ func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := rt.Logger.With(zap.String("worker", id.String()))
 
-		lg.Info("report summary started", zap.Duration("interval", interval))
+		lg.Info("report summary started", zap.Uint32("interval_ms", intervalMS))
 		defer lg.Info("report summary stopped")
 
-		return gofyworker.Ticker(ctx, interval, func(ctx context.Context) error {
+		return gofyworker.Ticker(ctx, intervalMS, func(ctx context.Context) error {
 			// The aggregation uses the drain context: a shutdown must not cut
 			// a query that is already on the wire.
 			// 汇总使用 drain context：停机不应该中断已经在执行的查询。

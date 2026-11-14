@@ -150,13 +150,13 @@ $ go run . stop --worker='*' --force
 ```go
 // group1/scan.go
 type ScanWorkerConfig struct {
-	Concurrency int           // 进程内扫描实例数
-	Interval    time.Duration // 两次扫描的间隔
+	Concurrency int    // 进程内扫描实例数
+	IntervalMS  uint32 // 两次扫描的间隔，单位毫秒
 }
 
 var scanDefaults = ScanWorkerConfig{
 	Concurrency: 2,
-	Interval:    5 * time.Second,
+	IntervalMS:  5000, // 5 秒
 }
 ```
 
@@ -184,7 +184,7 @@ var scanDefaults = ScanWorkerConfig{
 3. 在 `abc_register.go` 的 `NewGroup` 里把新 worker 加进参数列表；
 4. `go run . worker --list` 核对，列表里出现新名字即可。
 
-轮询型任务在 `run` 里用 `worker.Ticker(ctx, interval, fn)`：按固定节拍触发，单次失败只记日志、
+轮询型任务在 `run` 里用 `worker.Ticker(ctx, intervalMS, fn)`：按固定节拍触发，单次失败只记日志、
 panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 会合并成一次）。三个成员文件都是
 这个写法，不必自己写 ticker + select。
 

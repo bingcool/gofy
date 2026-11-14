@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/bingcool/gofy/logger"
@@ -16,18 +15,25 @@ import (
 // process alive with the work silently stopped. A panic is recovered the same
 // way, so one bad tick cannot take the worker down with it.
 //
+// The interval is a millisecond count, not a time.Duration: callers configure
+// polling rhythms as "every 5000 ms", and a bare number cannot be misread as
+// seconds. Zero is rejected before the first tick.
+//
 // The callback receives the worker context, which is also where a caller finds
 // DrainContext: work that is already on the wire should use it, so a shutdown
 // does not cut a query in half.
-// Ticker 每经过 interval 调用一次 fn，直到 ctx 取消后返回 nil。它是轮询型 worker 的
-// 常驻形态：单次失败只记日志，下一个 tick 照常执行——出错就退出的循环会让进程还活着、
+// Ticker 每经过 intervalMS 毫秒调用一次 fn，直到 ctx 取消后返回 nil。它是轮询型 worker
+// 的常驻形态：单次失败只记日志，下一个 tick 照常执行——出错就退出的循环会让进程还活着、
 // 工作却悄悄停了。panic 同样被恢复，一次坏 tick 带不走整个 worker。
+//
+// 间隔是毫秒数而不是 time.Duration：轮询节奏通常按"每 5000 毫秒"配，裸数字不会被人读成
+// 秒。0 在第一个 tick 之前就被拒绝。
 //
 // 回调拿到的是 worker context，DrainContext 也从这里取：已经在链路上的活应该用它，
 // 停机才不会把查询切成两半。
-func Ticker(ctx context.Context, interval time.Duration, fn func(context.Context) error) error {
-	if interval <= 0 {
-		return fmt.Errorf("worker: ticker interval must be positive, got %s", interval)
+func Ticker(ctx context.Context, intervalMS uint32, fn func(context.Context) error) error {
+	if intervalMS == 0 {
+		return errors.New("worker: ticker interval must be positive (milliseconds)")
 	}
 	if fn == nil {
 		return errors.New("worker: ticker callback is nil")
@@ -36,7 +42,7 @@ func Ticker(ctx context.Context, interval time.Duration, fn func(context.Context
 		ctx = context.Background()
 	}
 
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(time.Duration(intervalMS) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {

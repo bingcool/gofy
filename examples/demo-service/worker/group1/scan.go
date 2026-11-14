@@ -22,9 +22,9 @@ type ScanWorkerConfig struct {
 	// Concurrency is how many scan instances run inside the worker process.
 	// Concurrency 是 worker 进程内同时运行的扫描实例数。
 	Concurrency int
-	// Interval is the pause between two scans.
-	// Interval 是两次扫描之间的间隔。
-	Interval time.Duration
+	// IntervalMS is the pause between two scans, in milliseconds.
+	// IntervalMS 是两次扫描之间的间隔，单位毫秒。
+	IntervalMS uint32
 }
 
 // scanDefaults is what group1's scan worker runs with. The numbers sit in the
@@ -36,7 +36,7 @@ type ScanWorkerConfig struct {
 // 不必动代码。
 var scanDefaults = ScanWorkerConfig{
 	Concurrency: 2,
-	Interval:    5 * time.Second,
+	IntervalMS:  5000,
 }
 
 // newScanWorker scans pending orders on an interval. Demo's orders table has no
@@ -47,9 +47,9 @@ var scanDefaults = ScanWorkerConfig{
 // 是业务值，不是任务状态），因此这里只统计；真实的队列用 claim.DDL 建任务表，再调
 // claim.Queue.Claim，多副本才安全。
 func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
-	interval := cfg.Interval
-	if interval <= 0 {
-		interval = 5 * time.Second
+	intervalMS := cfg.IntervalMS
+	if intervalMS == 0 {
+		intervalMS = 5000
 	}
 	return gofyworker.Func("order-scan", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
@@ -59,10 +59,10 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := rt.Logger.With(zap.String("worker", id.String()))
 
-		lg.Info("order scan started", zap.Duration("interval", interval))
+		lg.Info("order scan started", zap.Uint32("interval_ms", intervalMS))
 		defer lg.Info("order scan stopped")
 
-		return gofyworker.Ticker(ctx, interval, func(ctx context.Context) error {
+		return gofyworker.Ticker(ctx, intervalMS, func(ctx context.Context) error {
 			// The count uses the drain context: a shutdown must not abort a
 			// query that is already talking to the database.
 			// 计数使用 drain context：停机不应该中断已经在与数据库交互的查询。

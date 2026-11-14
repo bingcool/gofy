@@ -291,7 +291,7 @@ func (w *scanWorker) Run(ctx context.Context) error {
 扫表、汇总、巡检这类"每隔一段时间做一次"的循环，不必每次手写 ticker + select 和错误分支：
 
 ```go
-return worker.Ticker(ctx, 5*time.Second, func(ctx context.Context) error {
+return worker.Ticker(ctx, 5000, func(ctx context.Context) error { // 5000 毫秒 = 5s
 	queryCtx, cancel := context.WithTimeout(worker.DrainContext(ctx), 3*time.Second)
 	defer cancel()
 	return scanOnce(queryCtx)
@@ -304,9 +304,10 @@ return worker.Ticker(ctx, 5*time.Second, func(ctx context.Context) error {
 - **panic 不外溢**：单次 panic 恢复后按 error 记录（含 stack），循环继续。
 - **取消即退出**：ctx 取消返回 `nil`，Runner 记为一次正常停机，不会触发重启策略。
 
-`interval` 必须为正、回调不能为空，否则第一次启动就返回错误——把配置错误挡在第一个 tick 之前，
-而不是让循环空转。回调内部要自己决定用不用 `DrainContext`：已经在链路上的查询应该用它，
-停机才不会被切断。
+`intervalMS` 是毫秒数（`uint32`），不是 `time.Duration`：轮询节奏通常按"每 5000 毫秒"配，
+裸数字不会被人读成秒，也不用在调用处写一长串乘法。0 与空回调都会在第一个 tick 之前返回错误——
+把配置错误挡在启动阶段，而不是让循环空转。回调内部要自己决定用不用 `DrainContext`：已经在链路上
+的查询应该用它，停机才不会被切断。
 
 ## 消费者适配器
 
@@ -418,7 +419,7 @@ CLI：
 | `ValidName(name)` | 名字是否符合分组/worker 规则 |
 | `Identity` / `IdentityFrom(ctx)` | 实例身份 |
 | `DrainContext(ctx)` | 取 drain context |
-| `Ticker(ctx, interval, fn)` | 常驻定时循环：失败/panic 记日志后继续，ctx 取消返回 nil |
+| `Ticker(ctx, intervalMS, fn)` | 常驻定时循环（毫秒）：失败/panic 记日志后继续，ctx 取消返回 nil |
 | `WithRuntime(ctx, rt)` / `RuntimeFrom(ctx)` | 注入/读取宿主 Runtime |
 | `Policy` / `DefaultPolicy()` / `FailureMode` | 重启策略 |
 | `NewRunner(group, RunConfig)` / `(*Runner).Run(ctx)` | 自行托管分组时使用 |

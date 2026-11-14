@@ -2,7 +2,6 @@ package group1
 
 import (
 	"context"
-	"time"
 
 	"go.uber.org/zap"
 
@@ -21,7 +20,7 @@ func newHeartbeatWorker() gofyworker.Worker {
 		if ok && rt.Logger != nil {
 			lg = rt.Logger
 		}
-		return gofyworker.Ticker(ctx, 10*time.Second, func(context.Context) error {
+		return gofyworker.Ticker(ctx, 10_000, func(context.Context) error {
 			lg.Info("worker heartbeat",
 				zap.String("worker", id.String()),
 				zap.String("host", id.Host),

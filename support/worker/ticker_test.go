@@ -20,7 +20,7 @@ func TestTickerRunsUntilCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- worker.Ticker(ctx, 5*time.Millisecond, func(context.Context) error {
+		done <- worker.Ticker(ctx, 5, func(context.Context) error {
 			atomic.AddInt32(&calls, 1)
 			return nil
 		})
@@ -49,7 +49,7 @@ func TestTickerKeepsGoingAfterFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- worker.Ticker(ctx, 5*time.Millisecond, func(context.Context) error {
+		done <- worker.Ticker(ctx, 5, func(context.Context) error {
 			atomic.AddInt32(&calls, 1)
 			return errors.New("boom")
 		})
@@ -77,7 +77,7 @@ func TestTickerRecoversPanics(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- worker.Ticker(ctx, 5*time.Millisecond, func(context.Context) error {
+		done <- worker.Ticker(ctx, 5, func(context.Context) error {
 			if atomic.AddInt32(&calls, 1) <= 2 {
 				panic("boom")
 			}
@@ -103,7 +103,7 @@ func TestTickerRejectsBadInput(t *testing.T) {
 	if err := worker.Ticker(context.Background(), 0, fn); err == nil {
 		t.Fatal("Ticker accepted a zero interval")
 	}
-	if err := worker.Ticker(context.Background(), time.Second, nil); err == nil {
+	if err := worker.Ticker(context.Background(), 5000, nil); err == nil {
 		t.Fatal("Ticker accepted a nil callback")
 	}
 }
