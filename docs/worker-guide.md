@@ -226,8 +226,8 @@ consumer := kafkaconsumer.New("order-consumer", client, kafkaconsumer.Config{
 var orderKafka = consumer.KafkaConfig{
 	Name: "order-consumer", Topic: "demo.order.events", Group: "order-group",
 	Idempotency: true,
-	Handler: func(ctx context.Context, msg consumer.KafkaMessage) error {
-		return svc.Handle(ctx, msg.Envelope) // msg.Record 是原生 kgo.Record
+	Handler: func(ctx context.Context, cfg consumer.KafkaConfig, msg consumer.KafkaMessage) error {
+		return svc.Handle(ctx, msg.Envelope) // cfg 是本订阅；msg.Record 是原生 kgo.Record
 	},
 }
 

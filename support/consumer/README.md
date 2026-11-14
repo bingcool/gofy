@@ -26,8 +26,8 @@ var orderKafka = gofyconsumer.KafkaConfig{
 	Handler: handleOrderKafka,
 }
 
-func handleOrderKafka(ctx context.Context, msg gofyconsumer.KafkaMessage) error {
-	return applyOrderEvent(ctx, msg.Envelope) // msg.Record 是原生 kgo.Record
+func handleOrderKafka(ctx context.Context, cfg gofyconsumer.KafkaConfig, msg gofyconsumer.KafkaMessage) error {
+	return applyOrderEvent(ctx, msg.Envelope) // cfg 是本订阅；msg.Record 是原生 kgo.Record
 }
 ```
 
@@ -77,13 +77,17 @@ conns := gofyconsumer.Connections{
 | `MaxAttempts` | 5 | 5 | 5 | 5 |
 | 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit |
 | 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） |
-| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`SessionTimeout`=45s | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s |
+| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s |
 
 `Idempotency` 需要数据库，因此默认关闭：打开它就从"handler 必须幂等"变成"重投是空操作"。
 `MaxAttempts` 只在开启幂等时生效——没有台账就没有地方记尝试次数。
 
 AMQP 的持久化用反向字段 `NonDurable`：普通 bool 的零值会让"重启即丢队列"变成默认，
 那不是业务队列该有的默认。
+
+Kafka 没有 `max.poll.interval.ms` 可调：franz-go 的心跳在独立 goroutine 上，慢 handler 不会
+把成员踢出组。想避免重平衡落在 handler 与提交之间，用 `BlockRebalanceOnPoll: true`——当前
+批次跑完、位点提交后才放行。`AutoCommitInterval` 只在 `CommitMode: auto` 下生效。
 
 RocketMQ 的 `Tags` 是"或"列表：SDK 用 `||` 把元素拼成一个订阅表达式，因此元素在构造时
 去掉首尾空格（原样拼接的话，多一个空格就是永远匹配不上的 tag），空元素或自身含 `||`
@@ -103,6 +107,10 @@ RocketMQ 的 `Tags` 是"或"列表：SDK 用 `||` 把元素拼成一个订阅表
 
 原生实体就是"有时候要自己动 MQ"的那个入口：手动确认、读 offset 记日志、按
 `DeliveryTag` 做批量 ack，都不需要再绕一层。
+
+四种 handler 的签名一致：`func(ctx context.Context, cfg XxxConfig, msg XxxMessage) error`。
+`cfg` 是收到这条消息的订阅本身——topic、group、queue、幂等开关——按值传入，因此同一个
+handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕获消费者。
 
 ## 信封
 

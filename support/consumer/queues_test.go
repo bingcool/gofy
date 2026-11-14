@@ -18,7 +18,7 @@ func queuesConns() Connections {
 	}
 }
 
-func noopQueuesHandler(context.Context, QueuesMessage) error { return nil }
+func noopQueuesHandler(context.Context, QueuesConfig, QueuesMessage) error { return nil }
 
 // TestNewQueuesAppliesDefaults pins the queue defaults: one pop at a time, a
 // short idle wait and a retry that does not spin.

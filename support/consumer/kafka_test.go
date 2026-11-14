@@ -23,7 +23,7 @@ func kafkaConns() Connections {
 	}
 }
 
-func noopKafkaHandler(context.Context, KafkaMessage) error { return nil }
+func noopKafkaHandler(context.Context, KafkaConfig, KafkaMessage) error { return nil }
 
 // TestNewKafkaAppliesDefaults pins the zero-value contract: a consumer file that
 // only names its topic and group still gets at-least-once delivery, a manual
@@ -52,6 +52,9 @@ func TestNewKafkaAppliesDefaults(t *testing.T) {
 	}
 	if cfg.SessionTimeout != 45*time.Second {
 		t.Fatalf("session timeout = %v", cfg.SessionTimeout)
+	}
+	if cfg.AutoCommitInterval != 200*time.Millisecond {
+		t.Fatalf("auto commit interval = %v, want 200ms", cfg.AutoCommitInterval)
 	}
 	if cfg.MaxAttempts != 5 {
 		t.Fatalf("max attempts = %d, want 5", cfg.MaxAttempts)
@@ -90,6 +93,11 @@ func TestNewKafkaRejects(t *testing.T) {
 		},
 		{name: "bad commit mode", mutate: func(c *KafkaConfig) { c.CommitMode = "batch" }, want: "commit_mode"},
 		{name: "bad offset reset", mutate: func(c *KafkaConfig) { c.AutoOffsetReset = "middle" }, want: "auto_offset_reset"},
+		{
+			name:   "negative commit interval",
+			mutate: func(c *KafkaConfig) { c.AutoCommitInterval = -time.Second },
+			want:   "auto commit interval must not be negative",
+		},
 		{name: "unknown instance", mutate: func(c *KafkaConfig) { c.Instance = "order" }, want: `kafka instance "order"`},
 	}
 	for _, tt := range tests {
@@ -147,5 +155,35 @@ func TestKafkaMessageKeepsHeadersAndNative(t *testing.T) {
 	}
 	if msg.Native != record {
 		t.Fatal("the native record was not carried through")
+	}
+}
+
+// TestKafkaHandlerReceivesItsConfig pins the contract that the subscription
+// travels with the message: a handler shared by two topics reads them from the
+// cfg parameter instead of closing over the consumer. The other three protocols
+// pass their config the same way from their own handle method.
+// TestKafkaHandlerReceivesItsConfig 固定"订阅随消息一起传"的契约：被两个 topic 共用的
+// handler 从 cfg 参数读到它们，而不是闭包捕获消费者。另外三种协议在各自的 handle 方法
+// 里用同样的方式传配置。
+func TestKafkaHandlerReceivesItsConfig(t *testing.T) {
+	var got KafkaConfig
+	consumer, err := NewKafka(kafkaConns(), KafkaConfig{
+		Name:     "order-consumer",
+		Instance: "default",
+		Topic:    "demo.order.events",
+		Group:    "order-group",
+		Handler: func(_ context.Context, cfg KafkaConfig, _ KafkaMessage) error {
+			got = cfg
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewKafka: %v", err)
+	}
+	if err := consumer.handle(context.Background(), Message{}, Envelope{}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if got.Topic != "demo.order.events" || got.Group != "order-group" || got.Instance != "default" {
+		t.Fatalf("handler config = %+v, want the subscription it was built with", got)
 	}
 }

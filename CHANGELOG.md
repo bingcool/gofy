@@ -24,10 +24,19 @@ All notable changes to this project are documented here. The format follows
   nothing. A missing instance fails at registration instead of starting a
   consumer that reads nothing.
 
-  Handlers receive the decoded `Envelope` plus the native broker entity —
-  `KafkaMessage.Record`, `AMQPMessage.Delivery`, `RocketMQMessage.Message`,
-  `QueuesMessage.Message` — which is what a manual commit, an explicit `Ack`
-  or an offset log line needs. Behind them, `NewProcessor` continues the
+  Kafka adds `AutoCommitInterval` and `BlockRebalanceOnPoll`. The second stands
+  in for `max.poll.interval.ms`: franz-go heartbeats on its own goroutine, so a
+  slow handler never drops the member out of the group, and the window left to
+  close is a rebalance landing between the handler and its commit. With the
+  flag set, the batch finishes and commits before the rebalance proceeds; it is
+  off by default because a handler that never returns would hold the group.
+
+  Handlers receive the subscription's own config, the decoded `Envelope` and
+  the native broker entity — `KafkaMessage.Record`, `AMQPMessage.Delivery`,
+  `RocketMQMessage.Message`, `QueuesMessage.Message` — which is what a manual
+  commit, an explicit `Ack` or an offset log line needs, and what lets one
+  handler serve several subscriptions without closing over the consumer.
+  Behind them, `NewProcessor` continues the
   producer's trace from `traceparent`, claims `(consumer, message_id)` in the
   `worker_consumed_messages` ledger with a single insert (no lock), decodes the
   `id`/`type`/`occurred_at`/`payload` contract, and splits permanent failures

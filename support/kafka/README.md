@@ -197,7 +197,13 @@ err = consumer.Consume(ctx, func(ctx context.Context, record *kgo.Record) error 
 | `AutoCommitInterval` | `200ms` | 自动提交间隔，仅 `commit_mode: auto` 生效 |
 | `AutoOffsetReset` | `earliest` | 无位点时从最早或最新开始，可选 `latest` |
 | `SessionTimeout` | `45s` | 消费者组会话超时 |
+| `BlockRebalanceOnPoll` | `false` | 当前批次处理并提交完再放行重平衡；franz-go 没有 `max.poll.interval.ms`，用它替代 |
 | `OnPartitionsAssigned` / `OnPartitionsRevoked` | 无 | rebalance 钩子，仅对受管客户端生效 |
+
+Java 客户端的 `max.poll.interval.ms` 在这里没有对应项：它存在是因为应用线程处理期间心跳会
+停，而 franz-go 的心跳在独立 goroutine 上，慢 handler 不会把成员踢出组。真正还会发生的是
+重平衡落在 handler 与提交之间，导致提交失败、整批重放；`BlockRebalanceOnPoll: true` 把这段
+窗口关掉——当前批次跑完、位点提交后才放行重平衡。
 
 处理与位点语义：
 

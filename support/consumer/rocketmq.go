@@ -94,8 +94,14 @@ type RocketMQMessage struct {
 }
 
 // RocketMQHandlerFunc processes one RocketMQ message.
+//
+// cfg carries topic, group and tags, which is what a handler needs to tell two
+// subscriptions of the same topic apart without closing over the consumer.
 // RocketMQHandlerFunc 处理一条 RocketMQ 消息。
-type RocketMQHandlerFunc func(ctx context.Context, msg RocketMQMessage) error
+//
+// cfg 带 topic、group 与 tags：handler 想区分同一 topic 的两个订阅时就靠它，不必闭包
+// 捕获消费者。
+type RocketMQHandlerFunc func(ctx context.Context, cfg RocketMQConfig, msg RocketMQMessage) error
 
 // RocketMQConsumer is one subscription, ready to be put in a worker group.
 // RocketMQConsumer 是一个订阅，可以直接放进 worker 分组。
@@ -183,7 +189,7 @@ func (c *RocketMQConsumer) Run(ctx context.Context) error {
 // handle 把共用链路的回调适配成有类型的 handler。
 func (c *RocketMQConsumer) handle(ctx context.Context, message Message, envelope Envelope) error {
 	native, _ := message.Native.(*gofyrocketmq.Message)
-	return c.cfg.Handler(ctx, RocketMQMessage{
+	return c.cfg.Handler(ctx, c.cfg, RocketMQMessage{
 		Envelope: envelope,
 		Attempt:  message.Attempt,
 		Message:  native,

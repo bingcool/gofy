@@ -19,7 +19,7 @@ func amqpConns() Connections {
 	}
 }
 
-func noopAMQPHandler(context.Context, AMQPMessage) error { return nil }
+func noopAMQPHandler(context.Context, AMQPConfig, AMQPMessage) error { return nil }
 
 // TestNewAMQPAppliesDefaults pins the topology defaults: a direct exchange, a
 // durable queue and a prefetch window wide enough to keep one consumer busy.

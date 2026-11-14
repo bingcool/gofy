@@ -30,10 +30,15 @@ var orderQueues = gofyconsumer.QueuesConfig{
 	Handler:       handleOrderQueues,
 }
 
-// handleOrderQueues is the business branch for one entry. msg.Message is the
+// handleOrderQueues is the business branch for one entry.
+//
+// cfg is the subscription — queue key, concurrency, retry budget — so a handler
+// shared by several queues can log or branch by parameter. msg.Message is the
 // native queues.Message with its id, retry number and timestamp.
-// handleOrderQueues 是一条队列项的业务分支。msg.Message 是原生 queues.Message，
-// 带 ID、重试次数与时间戳。
-func handleOrderQueues(ctx context.Context, msg gofyconsumer.QueuesMessage) error {
+// handleOrderQueues 是一条队列项的业务分支。
+//
+// cfg 是这个订阅——队列 key、并发、重试预算——多个队列共用一个 handler 时可以按参数
+// 记日志或分支。msg.Message 是原生 queues.Message，带 ID、重试次数与时间戳。
+func handleOrderQueues(ctx context.Context, cfg gofyconsumer.QueuesConfig, msg gofyconsumer.QueuesMessage) error {
 	return applyOrderEvent(ctx, msg.Envelope)
 }

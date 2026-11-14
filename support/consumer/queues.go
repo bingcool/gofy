@@ -85,8 +85,14 @@ type QueuesMessage struct {
 }
 
 // QueuesHandlerFunc processes one queue entry.
+//
+// cfg is the subscription — key, concurrency, retry budget — passed by value so
+// the handler can log which queue an entry came from without a closure.
 // QueuesHandlerFunc 处理一条队列项。
-type QueuesHandlerFunc func(ctx context.Context, msg QueuesMessage) error
+//
+// cfg 是这个订阅——key、并发、重试预算——按值传入，handler 因此不用闭包，也能记下
+// 这条来自哪个队列。
+type QueuesHandlerFunc func(ctx context.Context, cfg QueuesConfig, msg QueuesMessage) error
 
 // QueuesConsumer is one queue subscription, ready to be put in a worker group.
 // QueuesConsumer 是一个队列订阅，可以直接放进 worker 分组。
@@ -173,7 +179,7 @@ func (c *QueuesConsumer) Run(ctx context.Context) error {
 // handle 把共用链路的回调适配成有类型的 handler。
 func (c *QueuesConsumer) handle(ctx context.Context, message Message, envelope Envelope) error {
 	native, _ := message.Native.(*queues.Message)
-	return c.cfg.Handler(ctx, QueuesMessage{
+	return c.cfg.Handler(ctx, c.cfg, QueuesMessage{
 		Envelope: envelope,
 		Attempt:  message.Attempt,
 		Message:  native,

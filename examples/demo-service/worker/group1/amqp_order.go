@@ -31,11 +31,17 @@ var orderAMQP = gofyconsumer.AMQPConfig{
 	Handler:      handleOrderAMQP,
 }
 
-// handleOrderAMQP is the business branch for one delivery. msg.Delivery is the
-// native amqp091.Delivery, which is what a manual Ack takes when AutoAck is
-// off.
-// handleOrderAMQP 是一次投递的业务分支。msg.Delivery 是原生 amqp091.Delivery，
-// 关闭 AutoAck 后手动 Ack 用的就是它。
-func handleOrderAMQP(ctx context.Context, msg gofyconsumer.AMQPMessage) error {
+// handleOrderAMQP is the business branch for one delivery.
+//
+// cfg names the exchange, queue and binding key this delivery came through, so
+// a handler that serves several queues can tell them apart by parameter instead
+// of by closure. msg.Delivery is the native amqp091.Delivery, which is what a
+// manual Ack takes when AutoAck is off.
+// handleOrderAMQP 是一次投递的业务分支。
+//
+// cfg 给出这次投递经过的 exchange、queue 与 binding key，因此服务多个队列的 handler
+// 可以按参数区分，而不是靠闭包。msg.Delivery 是原生 amqp091.Delivery，关闭 AutoAck
+// 后手动 Ack 用的就是它。
+func handleOrderAMQP(ctx context.Context, cfg gofyconsumer.AMQPConfig, msg gofyconsumer.AMQPMessage) error {
 	return applyOrderEvent(ctx, msg.Envelope)
 }

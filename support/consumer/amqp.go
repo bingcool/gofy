@@ -106,8 +106,15 @@ type AMQPMessage struct {
 }
 
 // AMQPHandlerFunc processes one AMQP delivery.
+//
+// cfg is this subscription's config — exchange, queue, binding key — passed by
+// value so the handler can log or branch on it without a closure over the
+// consumer.
 // AMQPHandlerFunc 处理一次 AMQP 投递。
-type AMQPHandlerFunc func(ctx context.Context, msg AMQPMessage) error
+//
+// cfg 是这个订阅的配置——exchange、queue、binding key——按值传入，handler 因此不用
+// 闭包捕获消费者，也能就它记日志或分支。
+type AMQPHandlerFunc func(ctx context.Context, cfg AMQPConfig, msg AMQPMessage) error
 
 // AMQPConsumer is one queue subscription, ready to be put in a worker group.
 // AMQPConsumer 是一个队列订阅，可以直接放进 worker 分组。
@@ -206,7 +213,7 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 // handle 把共用链路的回调适配成有类型的 handler。
 func (c *AMQPConsumer) handle(ctx context.Context, message Message, envelope Envelope) error {
 	delivery, _ := message.Native.(amqp091.Delivery)
-	return c.cfg.Handler(ctx, AMQPMessage{
+	return c.cfg.Handler(ctx, c.cfg, AMQPMessage{
 		Envelope: envelope,
 		Attempt:  message.Attempt,
 		Delivery: delivery,

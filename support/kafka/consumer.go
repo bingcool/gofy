@@ -86,6 +86,25 @@ type ConsumerConfig struct {
 	// SessionTimeout is the group session timeout. Zero uses 45s.
 	// SessionTimeout 是消费者组会话超时，0 表示 45s。
 	SessionTimeout time.Duration `yaml:"session_timeout" default:"45s"`
+	// BlockRebalanceOnPoll holds a rebalance until the polled batch has been
+	// handled and committed, which is what franz-go offers in place of Java's
+	// max.poll.interval.ms. That setting exists because a Java consumer stops
+	// heartbeating while the application thread runs; franz-go heartbeats on
+	// its own goroutine, so a slow handler never drops the member out of the
+	// group. What can still happen without this flag is a rebalance landing
+	// between the handler and the commit, which fails the commit and replays
+	// the batch. With it, the batch finishes first.
+	//
+	// Off by default: a handler that never returns would then hold the group
+	// hostage, and a stuck consumer is worse than a replay.
+	// BlockRebalanceOnPoll 让重平衡等到这一批处理并提交完成，这是 franz-go 对
+	// Java max.poll.interval.ms 的替代。后者存在的原因是 Java 消费者在应用线程
+	// 执行期间停止心跳；franz-go 由独立 goroutine 心跳，因此慢 handler 不会把成员
+	// 踢出消费组。不开这个开关仍可能发生的是：重平衡恰好落在 handler 与提交之间，
+	// 导致提交失败、整批重放。打开它，这一批会先跑完。
+	//
+	// 默认关闭：永远不返回的 handler 会拖住整个组，卡死的消费者比重放更糟。
+	BlockRebalanceOnPoll bool `yaml:"block_rebalance_on_poll"`
 	// OnPartitionsAssigned and OnPartitionsRevoked are rebalance hooks. They
 	// only apply to consumers built from a managed Client; franz-go stores
 	// them on the client, so injected clients must configure their own.
@@ -159,6 +178,9 @@ func (c ConsumerConfig) clientOptions() []kgo.Opt {
 	}
 	if c.CommitMode != CommitModeAuto {
 		opts = append(opts, kgo.DisableAutoCommit())
+	}
+	if c.BlockRebalanceOnPoll {
+		opts = append(opts, kgo.BlockRebalanceOnPoll())
 	}
 	if c.OnPartitionsAssigned != nil {
 		opts = append(opts, kgo.OnPartitionsAssigned(
@@ -300,6 +322,7 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 		}
 		fetches := c.raw.PollRecords(ctx, opts.MaxRecords)
 		if ctx.Err() != nil {
+			c.allowRebalance()
 			return nil
 		}
 		if fetches.IsClientClosed() {
@@ -311,17 +334,36 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 			report(opts, fmt.Errorf("kafka: fetch %s/%d: %w", fetchErr.Topic, fetchErr.Partition, fetchErr.Err))
 		}
 		if len(errs) > 0 && fetches.NumRecords() == 0 {
+			c.allowRebalance()
 			if !wait(ctx, opts.RetryDelay) {
 				return nil
 			}
 			continue
 		}
-		if err := c.process(ctx, fetches, handler, opts); err != nil {
+		// Release the gate after the batch is handled and its offsets are
+		// committed, never before: that ordering is the whole point of
+		// BlockRebalanceOnPoll.
+		// 在这一批处理完、位点提交之后再放行，绝不提前——这个顺序正是
+		// BlockRebalanceOnPoll 的意义。
+		err := c.process(ctx, fetches, handler, opts)
+		c.allowRebalance()
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
+	}
+}
+
+// allowRebalance releases the gate that BlockRebalanceOnPoll closes around a
+// polled batch. It is a no-op when the option is off, so the loop can call it
+// unconditionally instead of duplicating every exit path.
+// allowRebalance 放行 BlockRebalanceOnPoll 在一批记录上关掉的闸门。选项关闭时它是
+// 空操作，因此循环可以无条件调用，不必给每条退出路径都复制一次。
+func (c *Consumer) allowRebalance() {
+	if c.cfg.BlockRebalanceOnPoll && c.raw != nil {
+		c.raw.AllowRebalance()
 	}
 }
 

@@ -69,7 +69,33 @@ type KafkaConfig struct {
 	// committed offset yet.
 	// AutoOffsetReset 取 earliest 或 latest，仅在消费组还没有已提交位点时生效。
 	AutoOffsetReset string
-	SessionTimeout  time.Duration
+	// AutoCommitInterval is how often offsets are auto committed; it matters
+	// only when CommitMode is auto. Zero means 200ms, the same default
+	// franz-go uses.
+	// AutoCommitInterval 是自动提交位点的间隔，仅在 CommitMode 为 auto 时生效。
+	// 0 表示 200ms，与 franz-go 的默认值一致。
+	AutoCommitInterval time.Duration
+	// SessionTimeout is how long the broker waits for a heartbeat before
+	// removing this member and starting a rebalance. Zero uses 45s.
+	// SessionTimeout 是 broker 等心跳的时长，超时会把本成员移出组并触发重平衡。
+	// 0 表示 45s。
+	SessionTimeout time.Duration
+	// BlockRebalanceOnPoll finishes the current batch — handler, then commit —
+	// before a rebalance may proceed.
+	//
+	// franz-go has no max.poll.interval.ms to raise: the Java client stops
+	// heartbeating while the application thread runs, while franz-go heartbeats
+	// on its own goroutine, so a slow handler never drops the member out of the
+	// group. What can still happen is a rebalance landing between the handler
+	// and its commit, which fails the commit and replays the batch. This turns
+	// that into "let the batch finish".
+	// BlockRebalanceOnPoll 让当前批次——先 handler 后提交——跑完再放行重平衡。
+	//
+	// franz-go 没有可调大的 max.poll.interval.ms：Java 客户端在应用线程执行期间
+	// 停止心跳，而 franz-go 由独立 goroutine 心跳，慢 handler 不会把成员踢出组。
+	// 仍可能发生的是重平衡落在 handler 与它的提交之间，导致提交失败、整批重放。
+	// 这个开关把它变成"等这一批跑完"。
+	BlockRebalanceOnPoll bool
 	// MaxRecords caps one poll; zero polls everything already buffered.
 	// MaxRecords 限制单次拉取条数，0 表示拉取全部已缓冲记录。
 	MaxRecords int
@@ -110,8 +136,17 @@ type KafkaMessage struct {
 }
 
 // KafkaHandlerFunc processes one Kafka record.
+//
+// The subscription's own config travels with the message, so a handler can read
+// its topic, group or idempotency switch without capturing the variable it was
+// declared next to. That keeps handleOrderKafka a plain function — testable on
+// its own — instead of a closure over the consumer.
 // KafkaHandlerFunc 处理一条 Kafka 记录。
-type KafkaHandlerFunc func(ctx context.Context, msg KafkaMessage) error
+//
+// 订阅自己的配置随消息一起传入，handler 因此不用闭包捕获声明处的变量，就能读到自己的
+// topic、group 或幂等开关。这样 handleOrderKafka 仍是普通函数、可以单独测试，而不是
+// 一个包住消费者的闭包。
+type KafkaHandlerFunc func(ctx context.Context, cfg KafkaConfig, msg KafkaMessage) error
 
 // KafkaConsumer is one subscription, ready to be put in a worker group.
 //
@@ -168,11 +203,13 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 	defer func() { _ = client.Close() }()
 
 	consumer, err := gofykafka.NewConsumer(client, gofykafka.ConsumerConfig{
-		Topic:           c.cfg.Topic,
-		Group:           c.cfg.Group,
-		CommitMode:      gofykafka.CommitMode(c.cfg.CommitMode),
-		AutoOffsetReset: c.cfg.AutoOffsetReset,
-		SessionTimeout:  c.cfg.SessionTimeout,
+		Topic:                c.cfg.Topic,
+		Group:                c.cfg.Group,
+		CommitMode:           gofykafka.CommitMode(c.cfg.CommitMode),
+		AutoOffsetReset:      c.cfg.AutoOffsetReset,
+		AutoCommitInterval:   c.cfg.AutoCommitInterval,
+		SessionTimeout:       c.cfg.SessionTimeout,
+		BlockRebalanceOnPoll: c.cfg.BlockRebalanceOnPoll,
 	})
 	if err != nil {
 		return fmt.Errorf("%s: subscribe %s: %w", name, c.cfg.Topic, err)
@@ -212,11 +249,13 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 }
 
 // handle adapts the shared chain's callback to the typed handler: the native
-// record travels through Message.Native.
-// handle 把共用链路的回调适配成有类型的 handler：原生记录经 Message.Native 传过来。
+// record travels through Message.Native, and the config is the one the consumer
+// was built with.
+// handle 把共用链路的回调适配成有类型的 handler：原生记录经 Message.Native 传过来，
+// 配置就是构造消费者时用的那一份。
 func (c *KafkaConsumer) handle(ctx context.Context, message Message, envelope Envelope) error {
 	record, _ := message.Native.(*kgo.Record)
-	return c.cfg.Handler(ctx, KafkaMessage{
+	return c.cfg.Handler(ctx, c.cfg, KafkaMessage{
 		Envelope: envelope,
 		Attempt:  message.Attempt,
 		Record:   record,
@@ -240,6 +279,13 @@ func (c KafkaConfig) withDefaults() KafkaConfig {
 	}
 	if c.SessionTimeout <= 0 {
 		c.SessionTimeout = 45 * time.Second
+	}
+	// Exactly zero, not <= 0: a negative value stays negative so validate can
+	// reject it, instead of being quietly replaced by the default.
+	// 只处理等于零的情况，不用 <= 0：负值保持原样，交给 validate 报错，而不是被悄悄
+	// 换成默认值。
+	if c.AutoCommitInterval == 0 {
+		c.AutoCommitInterval = 200 * time.Millisecond
 	}
 	if c.RetryDelay <= 0 {
 		c.RetryDelay = time.Second
@@ -278,6 +324,14 @@ func (c KafkaConfig) validate() error {
 	case "earliest", "latest":
 	default:
 		return fmt.Errorf("auto_offset_reset must be earliest or latest, got %q", c.AutoOffsetReset)
+	}
+	// A negative commit interval would reach franz-go as a timer that fires
+	// immediately. SessionTimeout and RetryDelay are clamped by withDefaults
+	// instead, because their zero value already means "use the default".
+	// 负的提交间隔到 franz-go 那里会变成立刻触发的定时器。SessionTimeout 与
+	// RetryDelay 由 withDefaults 夹紧——它们的零值本身就表示"用默认值"。
+	if c.AutoCommitInterval < 0 {
+		return errors.New("auto commit interval must not be negative")
 	}
 	return nil
 }

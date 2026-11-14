@@ -17,7 +17,7 @@ func rocketMQConns() Connections {
 	}
 }
 
-func noopRocketMQHandler(context.Context, RocketMQMessage) error { return nil }
+func noopRocketMQHandler(context.Context, RocketMQConfig, RocketMQMessage) error { return nil }
 
 // TestNewRocketMQAppliesDefaults pins the pull defaults: one worker instance,
 // one SDK pull worker, a batch the broker can fill in one round trip. It also

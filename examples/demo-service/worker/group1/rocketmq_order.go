@@ -33,10 +33,16 @@ var orderRocketMQ = gofyconsumer.RocketMQConfig{
 	Handler:     handleOrderRocketMQ,
 }
 
-// handleOrderRocketMQ is the business branch for one message. msg.Message is
-// the native RocketMQ message with the broker id, keys and delivery attempt.
-// handleOrderRocketMQ 是一条消息的业务分支。msg.Message 是原生 RocketMQ 消息，带
-// broker 消息 ID、keys 与投递次数。
-func handleOrderRocketMQ(ctx context.Context, msg gofyconsumer.RocketMQMessage) error {
+// handleOrderRocketMQ is the business branch for one message.
+//
+// cfg carries the topic, group and tags of the subscription that received it —
+// the tags matter here, since they are what narrowed the subscription in the
+// first place. msg.Message is the native RocketMQ message with the broker id,
+// keys and delivery attempt.
+// handleOrderRocketMQ 是一条消息的业务分支。
+//
+// cfg 带收到它的订阅的 topic、group 与 tags——这里的 tags 尤其有用，它正是订阅被
+// 收窄的原因。msg.Message 是原生 RocketMQ 消息，带 broker 消息 ID、keys 与投递次数。
+func handleOrderRocketMQ(ctx context.Context, cfg gofyconsumer.RocketMQConfig, msg gofyconsumer.RocketMQMessage) error {
 	return applyOrderEvent(ctx, msg.Envelope)
 }
