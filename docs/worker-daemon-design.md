@@ -1,6 +1,6 @@
 # gofy worker 常驻服务设计（v1）
 
-> 状态：草案，待评审后拆任务实施。
+> 状态：P0/P1 已实施，P2 见 §11.6。使用方式见 [`worker-guide.md`](./worker-guide.md)。
 > 关联：`docs/interface-api-split-design.md`（分级与验收写法）、`AGENTS.md`（注释约定）。
 > 范围：框架层新增能力 + 一个示例改造；不涉及业务代码迁移。
 
@@ -343,7 +343,7 @@ type Policy struct {
 | 维度 | 做法 |
 | --- | --- |
 | 存活 | 进程存活即存活，不引入探针（崩溃由 k8s 重启） |
-| 就绪 | 所有 worker 首次 `Run` 返回前的准备阶段完成即就绪；可选 `:port/healthz`（P2） |
+| 就绪 | 分组启动后返回 200，进入 drain 返回 503；由 `gofy.WithWorkerHealth("host:port")` 开启，关闭时不监听任何端口 |
 | 业务健康 | "10 分钟没消费到消息"属于业务告警，不进探针，避免 broker 抖动引发批量重启 |
 
 ### 4.6 与 Starter / Script 的边界
@@ -559,6 +559,13 @@ UPDATE job SET status = 2, fence = :token
 
 参数建议：`ttl = 3 × 续约间隔`，续约间隔取 `ttl/3`；`ttl` 至少 10s，否则一次 GC 停顿就丢锁。
 
+**实现**（`support/lease/redislease`）与上表的差别，都是为了少一次往返、少烧一个号：
+
+- 取号与抢锁合并成一条 Lua：先 `EXISTS`，无人持有才 `INCR` + `SET ... PX`。拆成两步时，每次抢锁失败都会白烧一个 fence 号。
+- 键名是 `lease:{key}` 与 `fence:{key}`，花括号是 Redis Cluster 的 hash tag，两个键落在同一 slot，单条脚本才能原子操作。
+- 续约失败（非 `ErrLeaseLost`）不立刻判定丢锁：继续按 `ttl/3` 重试，直到手上这段租期真正到期才报 `ErrLeaseLost`。否则一次网络抖动就会让健康的持有者主动下台。
+- `lease.Run` 封装了"抢锁 → 续约 → 丢锁即取消业务 ctx → 停机释放"这一整套，worker 里只写业务函数。
+
 ### 6.4 为什么 k8s Lease 实现不进主模块
 
 `k8s.io/client-go` 会把一整套 API machinery 拉进 `go.mod`（数百个包），与 gofy 目前"核心模块依赖克制"的取向冲突。因此：
@@ -568,6 +575,14 @@ UPDATE job SET status = 2, fence = :token
 - k8s Lease 实现放 `gofy-adapter`（`adapter/lease/k8slease`），用 `client-go/tools/leaderelection` 或直接操作 `coordination.k8s.io/v1 Lease`，RBAC 只需 leases 的 get/update/create。
 
 好处：不用 k8s 的项目不为它付编译与依赖成本；用 k8s 的项目多引一个 adapter 包。
+
+**实现**（`gofy-adapter/adapter/lease/k8slease`）的取舍：
+
+- 只 import `client-go/kubernetes/typed/coordination/v1`，不 import 完整 clientset：只编译 coordination 这一个 API 组，adapter 的 `go.sum` 从 80 行涨到 255 行，核心模块的 `go list -deps` 里 `k8s.io/` 仍为 0。
+- token 用 `spec.leaseTransitions`：它随对象存在 apiserver 上，每次接管加一。代价是**删除 Lease 对象会让它归零**，只要被保护的资源还认旧 token，运维就不能删这个对象。
+- key 必须是 DNS-1123 subdomain（`settle-reconcile` 而不是 `settle:reconcile`）。不做字符替换，否则 `a:b` 与 `a-b` 会悄悄指向同一个对象。
+- 同一 `Identity` 读到自己的未过期租约时只续期、不加 token，避免同名 Pod 重启让自己在途写入用的 token 失效；`Identity` 因此必须每进程唯一（用 Pod 名）。
+- Release 按 k8s 选举的惯例清空 `holderIdentity` 并把租期缩到 1 秒，下一个实例立刻能接管。
 
 ### 6.5 失败模式
 
@@ -971,9 +986,15 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | T3-10 | 已完成（2026-11-14） | `support/queues/consume.go`、`consume_test.go`；`go test -race -count=1 ./support/queues/` 通过；覆盖空轮询、失败重投、重试耗尽、丢弃、panic、空闲停机六条路径 |
 | T3-11 | 已完成（2026-11-14） | `WithWorkerConcurrency` 校验 `group/worker` 形状与 `>=1`、`WithWorkerDrainTimeout` 校验正数、`worker` 缺 `--group` 报 `ErrUsage`；对应用例各一条 |
 
-P1 全关（M4 达成）。剩余 P2：T3-12（Redis lease）、T3-13（k8s lease 放 adapter）、T3-14（`stop --worker`）、T3-15（可选 healthz）、T3-16（文档与脚手架）。
+| T3-12 | 已完成（2026-11-14） | `support/lease/{lease,lease_test}.go` + `support/lease/redislease`；miniredis 用例覆盖双实例互斥、释放后 token 递增、续约延长、过期后旧持有者 `Renew/Release` 均失败、fence 拒绝旧持有者写入、`Run` 的待命/周期/丢锁/释放四条路径 |
+| T3-13 | 已完成（2026-11-14） | `gofy-adapter/adapter/lease/k8slease`（不在本仓库）；核心模块 `go list -deps ./...` 中 `k8s.io/` 计数为 0；adapter `make check` EXIT=0，假 API 覆盖创建、互斥、接管递增、同名重入、冲突转 ErrHeld、Release 交还 |
+| T3-14 | 已完成（2026-11-14） | `stop --worker=<group>` + `stop.StopOptions.Worker`；组名先过 `worker.ValidName` 再拼 pid 路径；用例断言只存在 HTTP pid 文件时返回 `ErrNotRunning` 且原文件未被触碰 |
+| T3-15 | 已完成（2026-11-14） | `gofy.WithWorkerHealth(addr)` + `worker_health.go`；实测 `worker --group=order` 时 `/healthz` 200、未知路径 404、停机后端口关闭；未配置时不监听任何端口 |
+| T3-16 | 已完成（2026-11-14） | `gofy new --with-worker`（默认开）生成 `worker/{register,example}.go` 并接入 `WithWorkerGroups`；`docs/worker-guide.md`；脚手架实测 `go mod tidy` clean、`go build ./...` 通过、`worker --list` 输出 default/example |
 
-集成测试需要真实 MySQL 8，未设置环境变量时自动跳过，`make check` 因此不依赖外部服务。
+P1/P2 全关（M4、M5 达成）。`make check` 与 adapter `make check` 均 EXIT=0。
+
+集成测试需要真实 MySQL 8（`GOFY_MYSQL_DSN`），未设置时自动跳过，`make check` 因此不依赖外部服务。
 
 ---
 
