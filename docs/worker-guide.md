@@ -116,7 +116,8 @@ opts = append(opts, gofy.WithWorkerGroups(groups...))
 `group/worker → n` 的表；要用命令行临时扩缩，再加 `worker --concurrency=<n>`。
 
 配置按分组名分层，公共项留在 `worker` 顶层；每个分组块的类型定义在它自己的子包里，加一个
-worker 不会碰到别的分组：
+worker 不会碰到别的分组。分组块可以整段省略：`default` 标签在解码前生效，默认值就写在分组
+自己的结构体上，块只在需要按环境覆盖时才出现：
 
 ```yaml
 worker:

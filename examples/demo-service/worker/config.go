@@ -21,23 +21,28 @@ type WorkerConfig struct {
 	HealthAddr string `yaml:"health_addr"`
 }
 
-// Config is the `worker` section of config.yaml: the shared settings inlined at
-// the top, then one block per group, named after the group, so the file reads as
-// `worker.health_addr`, `worker.group1.scan.*` and `worker.group2.summary.*`.
+// Config is the `worker` section of config.yaml: the settings every worker in the
+// process shares, inlined at the top, then one optional block per group. The demo
+// ships only `worker.health_addr`; a group block (`worker.group1.scan.*`,
+// `worker.group2.summary.*`) exists to override a default per environment, and
+// the defaults live in the group packages next to the worker they configure.
 //
 // Group blocks come from the group packages, so the yaml shape and the struct
 // that consumes it live together. They are struct fields rather than a map:
 // strict decoding then rejects a misspelled key inside a block, and `default`
 // tags still apply. A map would silently accept both.
 // Config 是 config.yaml 的 `worker` 段：公共设置内联在顶层，其下按分组名给每个分组
-// 一个配置块，因此配置文件里读作 `worker.health_addr`、`worker.group1.scan.*` 与
-// `worker.group2.summary.*`。
+// 一个可选配置块。demo 只写 `worker.health_addr`；分组块（`worker.group1.scan.*`、
+// `worker.group2.summary.*`）用于按环境覆盖默认值，默认值就写在分组包里、紧挨它
+// 配置的那个 worker。
 //
 // 分组块的类型来自各分组自己的包，配置结构与读它的代码因此放在一起。分组用结构体
 // 字段而不是 map：严格解码才能拒绝块内拼错的键，`default` 标签也才会生效；用 map
 // 两者都会静默放过。
 type Config struct {
 	WorkerConfig `yaml:",inline"`
-	Group1       group1.Config `yaml:"group1"`
-	Group2       group2.Config `yaml:"group2"`
+	// Group1 and Group2 are optional overrides; each group's defaults live in
+	// its own package. Group1、Group2 是可选覆盖，默认值在各自的分组包里。
+	Group1 group1.Config `yaml:"group1"`
+	Group2 group2.Config `yaml:"group2"`
 }

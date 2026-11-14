@@ -99,7 +99,8 @@ go run . worker --group=group1 --name=order-scan --name=order-heartbeat
 go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 1 个实例
 ```
 
-`--name` 可重复，也接受逗号分隔；`--concurrency=0`（默认）表示按配置。命令行覆盖的
+`--name` 可重复，也接受逗号分隔；`--concurrency=0`（默认）表示沿用 worker 自己声明的数字
+（或 config.yaml 里同名块的覆盖）。命令行覆盖的
 优先级高于 `worker.Func(name, n, run)` 里声明的数字，但只在本次启动生效：`worker --list`
 显示的是配置里的值，不会跟着 `--concurrency` 变。
 
@@ -142,26 +143,41 @@ $ go run . stop --worker='*' --force
 
 ## 配置
 
-`config.yaml` 的 `worker` 段：公共项在顶层，每个分组一个同名块。
+每个 worker 的参数就定义在它自己的文件里，`default` 标签给出默认值，读代码即可知道会起
+几个实例、多久跑一次：
+
+```go
+// group1/scan.go
+type ScanWorkerConfig struct {
+	Concurrency int           `yaml:"concurrency" default:"2"` // 进程内扫描实例数
+	Interval    time.Duration `yaml:"interval" default:"5s"`   // 两次扫描的间隔
+}
+```
+
+因此 `config.yaml` 的 `worker` 段只需要进程级设置，不必写分组块：
 
 ```yaml
 worker:
   health_addr: 127.0.0.1:9091   # 进程级：一个进程一个端口，同机跑两组要给第二个换端口
-  group1:
-    scan:
-      concurrency: 2            # 进程内扫描实例数（goroutine）
-      interval: 5s              # 两次扫描的间隔
-  group2:
-    summary:
-      concurrency: 1            # 多实例会重复写同一份报表
-      interval: 1h
 ```
 
-三个约束：
+默认值在解码前应用，分组块整段省略也能正常启动（`worker/config_test.go` 的
+`TestConfigAppliesGroupDefaults` 固定了这一点）。要按环境调整时再加同名块覆盖，键名必须
+与 `yaml` 标签一致——严格解码会拒绝拼错的键，而不是静默忽略：
 
-- **分组块是结构体字段而不是 map**：块内键拼错会直接报错，`default` 标签也才生效。
+```yaml
+worker:
+  group1:
+    scan:
+      concurrency: 4      # 只覆盖这一项，interval 仍取默认的 5s
+```
+
+四条约束：
+
+- **分组块是可选覆盖，不是必填**：类型来自各分组包，结构体字段而非 map，拼错的键会直接报错。
 - **实例数在 `worker.Func` 里是 `uint8`**：分组构造时校验 `1..255`，越界报错而不是被截断
   成另一个数字；配置里仍是 `int`，由分组的 `NewGroup` 负责校验后再转换。
+- **`--concurrency` 优先级最高**：命令行 > 配置块 > worker 自己声明的数字，临时压测不必改文件。
 - **worker 名全应用唯一**：日志文件名取自 worker 名，两个分组用同一个名字会写到同一个
   文件（demo 里是 `order-scan`、`order-heartbeat`、`report-summary`）。
 
