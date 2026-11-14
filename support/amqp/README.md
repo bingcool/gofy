@@ -223,13 +223,27 @@ queue, err := amqp.NewQueue(client, amqp.QueueConfig{
 })
 ```
 
+发布时用相对延迟，不必自己算绝对时刻：
+
+```go
+err := queue.PublishJSON(ctx, event, amqp.PublishOptions{Delay: 5 * time.Second})
+```
+
 - 发布时先声明 `Target`，再声明带 `x-message-ttl`、`x-dead-letter-exchange`、
   `x-dead-letter-routing-key` 的暂存队列，目标拓扑缺失也不会丢消息。
 - 消费读取的是 `Target.Queue`，暂存队列只负责等待。
-- TTL 是队列级参数，单位毫秒，最小 `1ms`；`PublishOptions.Expiration` 可再加
-  每消息 TTL，broker 取两者较小值。
+- TTL 是队列级参数，单位毫秒，最小 `1ms`。它既是**未指定延迟时的默认等待**，也是
+  `PublishOptions.Delay` 的**上限**——broker 取队列 TTL 与单条消息 TTL 中较小值。
+- `PublishOptions.Delay` 是相对延迟入口（"5 秒后投递"），内部转成单条消息 TTL；
+  与底层字段 `Expiration` 互斥。小于 `1ms`、超过 `Delay.TTL`、或用在没有 `Delay`
+  的普通队列上都会返回错误：前者会被 broker 静默截断，后者会让消息到期后没有死信
+  目的地而直接消失。不带 `Delay` 时 `Expiration` 的行为不变。
+- **队头阻塞**：RabbitMQ 只在队头判定消息是否过期。同一个暂存队列混用不同延迟时，
+  前面的长等待会挡住后面的短等待。按延迟分档建多个暂存队列（每档一个固定 TTL），
+  或让一档队列只承载一种延迟。
 - 暂存队列的 `Topology.Arguments` 会被保留，但上述三个死信参数由 `Delay`
-  覆盖；不要在同一队列上手工设置同名参数。
+  覆盖；不要在同一队列上手工设置同名参数。已存在队列的 `x-message-ttl` 不能修改，
+  调整 TTL 需要换队列名或先删除队列。
 
 ## API 摘要
 

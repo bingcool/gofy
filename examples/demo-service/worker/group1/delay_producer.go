@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	gofyamqp "github.com/bingcool/gofy/support/amqp"
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyqueues "github.com/bingcool/gofy/support/queues"
 	gofyredis "github.com/bingcool/gofy/support/redis"
@@ -59,21 +60,23 @@ var delayEventProducerDefaults = DelayEventProducerConfig{
 	EventType:   "order.paid",
 }
 
-// newDelayEventProducer schedules the same order event through both delayed
-// transports: a Redis ZSET (support/queues.DelayQueue) and a RocketMQ DELAY
-// topic. Its two siblings in delay_queues_order.go and rocketmq_delay_order.go
+// newDelayEventProducer schedules the same order event through all three
+// delayed transports: a Redis ZSET (support/queues.DelayQueue), a RocketMQ
+// DELAY topic, and a RabbitMQ TTL + dead-letter workflow. Its three siblings in
+// delay_queues_order.go, rocketmq_delay_order.go and delay_amqp_order.go
 // consume them, so group1 demonstrates delayed produce → consume without a
 // second terminal.
 //
-// The subscriptions own the addresses again: keys, topic, tag and instance are
-// read from the consumer configs, so this producer cannot drift away from the
-// consumers it feeds.
-// newDelayEventProducer 把同一个订单事件调度到两种延迟传输：Redis ZSET 与 RocketMQ
-// DELAY topic。delay_queues_order.go 与 rocketmq_delay_order.go 里的两个消费者负责
-// 消费，因此 group1 单进程即可演示延迟的 生产 → 消费 闭环。
+// The subscriptions own the addresses again: keys, topic, tag, staging/target
+// topology and instance are read from the consumer configs, so this producer
+// cannot drift away from the consumers it feeds.
+// newDelayEventProducer 把同一个订单事件调度到三种延迟传输：Redis ZSET、RocketMQ
+// DELAY topic 与 RabbitMQ 的 TTL + 死信流程。delay_queues_order.go、
+// rocketmq_delay_order.go 与 delay_amqp_order.go 里的三个消费者负责消费，因此
+// group1 单进程即可演示延迟的 生产 → 消费 闭环。
 //
-// 地址同样归订阅所有：键、topic、tag 与实例名都从消费者配置读取，生产端不会与它所
-// 喂的消费者走偏。
+// 地址同样归订阅所有：键、topic、tag、暂存/目标拓扑与实例名都从消费者配置读取，
+// 生产端不会与它所喂的消费者走偏。
 func newDelayEventProducer(conns gofyconsumer.Connections, cfg DelayEventProducerConfig) gofyworker.Worker {
 	intervalMS := cfg.IntervalMS
 	if intervalMS == 0 {
@@ -162,9 +165,9 @@ func publishDelayEvent(ctx context.Context, sinks []eventSink, cfg DelayEventPro
 	return errors.Join(errs...)
 }
 
-// openDelayEventSinks connects the two delayed transports, closing them in
+// openDelayEventSinks connects the three delayed transports, closing them in
 // reverse order if any opener fails.
-// openDelayEventSinks 连接两个延迟传输层；任一打开失败时按逆序关闭已打开的部分。
+// openDelayEventSinks 连接三个延迟传输层；任一打开失败时按逆序关闭已打开的部分。
 func openDelayEventSinks(ctx context.Context, conns gofyconsumer.Connections, cfg DelayEventProducerConfig, delay time.Duration) ([]eventSink, func(), error) {
 	var closers []func()
 	closeAll := func() {
@@ -175,6 +178,7 @@ func openDelayEventSinks(ctx context.Context, conns gofyconsumer.Connections, cf
 	open := []func(context.Context, gofyconsumer.Connections, DelayEventProducerConfig, time.Duration) (eventSink, func(), error){
 		openDelayQueuesSink,
 		openRocketMQDelaySink,
+		openAMQPDelaySink,
 	}
 	sinks := make([]eventSink, 0, len(open))
 	for _, openSink := range open {
@@ -254,5 +258,52 @@ func openRocketMQDelaySink(ctx context.Context, conns gofyconsumer.Connections, 
 			},
 		},
 		func() { _ = client.Close() },
+		nil
+}
+
+func openAMQPDelaySink(ctx context.Context, conns gofyconsumer.Connections, cfg DelayEventProducerConfig, delay time.Duration) (eventSink, func(), error) {
+	name := orderAMQPDelay.Instance
+	conn, ok := conns.AMQP[name]
+	if !ok {
+		return eventSink{}, nil, fmt.Errorf("amqp instance %q is not configured", name)
+	}
+	client, err := gofyamqp.New(ctx, conn)
+	if err != nil {
+		return eventSink{}, nil, fmt.Errorf("amqp instance %q: %w", name, err)
+	}
+	// The subscription is the single source of truth for both topologies. The
+	// producer only turns on confirms; a queue declared with different
+	// x-message-ttl / dead-letter arguments would fail with PRECONDITION_FAILED.
+	// 两套拓扑都来自订阅配置。生产端只额外打开发布确认：若声明队列时参数不同，
+	// broker 会返回 PRECONDITION_FAILED。
+	queueCfg := orderAMQPDelay.QueueConfig()
+	queueCfg.Confirm = true
+	queue, err := gofyamqp.NewQueue(client, queueCfg)
+	if err != nil {
+		_ = client.Close()
+		return eventSink{}, nil, fmt.Errorf("amqp delay queue %q: %w", orderAMQPDelay.DelayQueue, err)
+	}
+	return eventSink{
+			transport: "amqp_delay",
+			reason:    "延迟投递，来自 rabbitmq 延迟队列",
+			send: func(ctx context.Context, event gofyconsumer.Envelope) error {
+				// Delay becomes the per-message TTL; the staging queue
+				// dead-letters the message to the target once it expires.
+				// It must stay within the subscription's TTL, which the
+				// transport verifies before publishing.
+				// Delay 会转成单条消息的 TTL；暂存队列在到期时把消息死信到目标队列。
+				// 它必须在订阅的 TTL 之内，传输层会在发布前校验。
+				return queue.PublishJSON(ctx, event, gofyamqp.PublishOptions{
+					Delay:      delay,
+					Persistent: true,
+					MessageID:  event.ID,
+					Timestamp:  event.OccurredAt,
+				})
+			},
+		},
+		func() {
+			_ = queue.Close()
+			_ = client.Close()
+		},
 		nil
 }

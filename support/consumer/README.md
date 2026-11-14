@@ -2,6 +2,7 @@
 
 常驻消费者的完整实现：**一个订阅一个文件**，文件里是配置、业务 handler，没有别的。
 每种 broker 一个构造器（`NewKafka` / `NewAMQP` / `NewRocketMQ` / `NewQueues`），
+延迟订阅另有 `NewDelayQueues`（Redis ZSET）与 `NewDelayAMQP`（TTL + 死信）。
 返回的值直接满足 `worker.Worker`，和扫描循环一样注册进分组。
 
 背后统一处理四件事：消息信封、数据库幂等台账、trace 续接、永久/可重试错误分类。
@@ -69,20 +70,28 @@ conns := gofyconsumer.Connections{
 
 ## 配置与默认值
 
-| 字段 | Kafka | AMQP | RocketMQ | Queues | DelayQueues |
-| --- | --- | --- | --- | --- | --- |
-| `Name`（必填） | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `Concurrency` | 1 | 1 | 1 | 1 | 1 |
-| `Idempotency` | false | false | false | false | false |
-| `MaxAttempts` | 5 | 5 | 5 | 5 | 5 |
-| 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit | `RedisInstance`=ratelimit |
-| 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） | `Key`（必填，延迟 ZSET） |
-| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s |
+| 字段 | Kafka | AMQP | RocketMQ | Queues | DelayQueues | DelayAMQP |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Name`（必填） | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Concurrency` | 1 | 1 | 1 | 1 | 1 | 1 |
+| `Idempotency` | false | false | false | false | false | false |
+| `MaxAttempts` | 5 | 5 | 5 | 5 | 5 | 5 |
+| 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit | `RedisInstance`=ratelimit | `Instance`=default |
+| 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） | `Key`（必填，延迟 ZSET） | 暂存 `DelayExchange`+`DelayQueue`、目标 `Exchange`+`Queue`（必填） |
+| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（必填）、`ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false |
 
 `DelayQueues` 由 `NewDelayQueues` 构造，订阅的是 Redis ZSET 里**已到期**的消息：生产端用
 `queues.DelayQueue.Add(ctx, payload, delay)`，消费端轮询 `Pop`，失败由 `Retry` 以新到期
 时间写回。`source` 是 `delay_queues`，日志与 trace 因此能与立即队列区分。它与 `Queues`
 共用同一个 worker 适配器（两者 `Consume` 签名相同），在途消息同样是"至多一次"。
+
+`DelayAMQP` 由 `NewDelayAMQP` 构造，消费的是 **TTL + 死信**流程里的目标队列：`Delay*`
+字段声明暂存 exchange/queue，普通字段声明消息过期后被转发到的目标。`TTL` 既是默认延迟
+也是生产端 `amqp.PublishOptions.Delay` 的上限（broker 取队列 TTL 与单条消息 TTL 的较小
+值），必须显式填写。`QueueConfig()` 把两半拓扑一次性导出，生产端用它发布就不会与消费端
+各自声明出不同的暂存队列。`source` 是 `amqp_delay`。它与 `AMQP` 共用 `amqpconsumer`
+适配器——传输层的 `consumeQueue()` 在存在 `Delay` 时自动改读目标队列。注意 RabbitMQ 只在
+队头判定过期，一个暂存队列请只承载一种延迟。
 
 `Idempotency` 需要数据库，因此默认关闭：打开它就从"handler 必须幂等"变成"重投是空操作"。
 `MaxAttempts` 只在开启幂等时生效——没有台账就没有地方记尝试次数。

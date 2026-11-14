@@ -21,6 +21,14 @@ var (
 	// ErrDeliveryClosed 表示 broker 取消了消费者或 channel 已失效；除非上下文
 	// 被取消，Consume 会重连。
 	ErrDeliveryClosed = errors.New("amqp: delivery channel closed")
+	// ErrInvalidDelay is a per-message delay the staging queue cannot honour.
+	// ErrInvalidDelay 表示暂存队列无法满足的单条消息延迟。
+	ErrInvalidDelay = errors.New("amqp: invalid message delay")
+	// ErrDelayRequiresWorkflow guards against a message expiring on a plain
+	// queue with nowhere to be dead-lettered: it would simply disappear.
+	// ErrDelayRequiresWorkflow 防止消息在普通队列上到期：没有死信目的地时它会
+	// 直接消失。
+	ErrDelayRequiresWorkflow = errors.New("amqp: per-message delay requires QueueConfig.Delay")
 )
 
 // Queue declares one topology and publishes or consumes through it.
@@ -75,7 +83,20 @@ type PublishOptions struct {
 	// Expiration is the per-message TTL. The broker applies the smaller of this
 	// and the queue-level TTL.
 	// Expiration 是单条消息的 TTL。broker 取它与队列级 TTL 中较小的那个。
-	Expiration    time.Duration
+	Expiration time.Duration
+	// Delay is the relative form of Expiration for a delayed Queue: publish
+	// now, deliver after this long. It becomes the message TTL, and the staging
+	// queue dead-letters the message into DelayConfig.Target when it expires.
+	// It must be at least 1ms and must not exceed DelayConfig.TTL, which is the
+	// upper bound the broker would silently clamp to. Setting both Delay and
+	// Expiration is an error; on a Queue without Delay it is an error too,
+	// because an expiring message there has nowhere to go.
+	// Delay 是 Expiration 在延迟队列上的相对写法：现在发布，经过这段时间后投递。
+	// 它会被转成消息 TTL，暂存队列在消息到期时把它死信到 DelayConfig.Target。
+	// 最小 1ms，且不能超过 DelayConfig.TTL（超过会被 broker 静默截断为 TTL）。
+	// Delay 与 Expiration 同时设置会报错；普通队列上设置同样报错——那条消息到期后
+	// 没有死信目的地，会直接消失。
+	Delay         time.Duration
 	MessageID     string
 	CorrelationID string
 	ReplyTo       string
@@ -96,6 +117,10 @@ type PublishOptions struct {
 func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	expiration, err := messageExpiration(q.cfg, opts)
+	if err != nil {
+		return err
 	}
 
 	routingKey := opts.RoutingKey
@@ -118,8 +143,8 @@ func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) e
 	if opts.Persistent {
 		publishing.DeliveryMode = 2
 	}
-	if opts.Expiration > 0 {
-		publishing.Expiration = fmt.Sprintf("%d", opts.Expiration.Milliseconds())
+	if expiration > 0 {
+		publishing.Expiration = fmt.Sprintf("%d", expiration.Milliseconds())
 	}
 
 	q.mu.Lock()

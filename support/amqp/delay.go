@@ -18,8 +18,12 @@ import (
 // 发布侧会先声明 Target，再声明带 x-message-ttl / x-dead-letter-* 参数的延迟
 // 队列，避免过期消息因为目标交换机不存在而丢失。
 type DelayConfig struct {
-	// TTL is the queue-level message TTL, at least 1ms.
-	// TTL 是队列级消息 TTL，至少 1ms。
+	// TTL is the queue-level message TTL, at least 1ms. It is both the delay
+	// for messages published without PublishOptions.Delay and the upper bound
+	// for those published with one, since the broker applies the smaller of
+	// the two values.
+	// TTL 是队列级消息 TTL，至少 1ms。它既是未设置 PublishOptions.Delay 的消息
+	// 的延迟，也是设置了该字段的消息的延迟上限——broker 取两者中较小值。
 	TTL time.Duration
 	// Target is where expired messages are routed.
 	// Target 是过期消息被路由到的目的地。
@@ -31,6 +35,40 @@ func (d DelayConfig) validate() error {
 		return errors.New("amqp: delay ttl must be at least 1ms")
 	}
 	return d.Target.validate(true)
+}
+
+// messageExpiration resolves the effective per-message TTL.
+//
+// RabbitMQ only checks the message at the head of a queue for expiry, so a
+// staging queue that mixes different delays lets a long wait hold up shorter
+// ones behind it. Keeping one delay per staging queue (or one queue per delay
+// band) avoids that head-of-line blocking. Delays past the queue TTL are
+// rejected instead of being silently clamped, and a delay on a queue with no
+// dead-letter target is rejected instead of dropping the message at expiry.
+// messageExpiration 计算实际生效的单条消息 TTL。
+//
+// RabbitMQ 只在队头判定消息是否过期，因此同一暂存队列里混用不同延迟时，前面的长
+// 延迟会挡住后面的短延迟。一个暂存队列只放一种延迟（或按延迟分档建多个队列）可避免
+// 这种队头阻塞。超过队列 TTL 的延迟会被拒绝而不是静默截断；没有死信目标的队列上设置
+// 延迟也会被拒绝，而不是让消息到期后凭空消失。
+func messageExpiration(cfg QueueConfig, opts PublishOptions) (time.Duration, error) {
+	if opts.Delay == 0 {
+		return opts.Expiration, nil
+	}
+	if opts.Expiration > 0 {
+		return 0, errors.New("amqp: delay and expiration are mutually exclusive")
+	}
+	if opts.Delay < time.Millisecond {
+		return 0, fmt.Errorf("%w: %s must be at least 1ms", ErrInvalidDelay, opts.Delay)
+	}
+	if cfg.Delay == nil {
+		return 0, ErrDelayRequiresWorkflow
+	}
+	if opts.Delay > cfg.Delay.TTL {
+		return 0, fmt.Errorf("%w: %s exceeds the staging queue ttl %s",
+			ErrInvalidDelay, opts.Delay, cfg.Delay.TTL)
+	}
+	return opts.Delay, nil
 }
 
 func (d DelayConfig) declareTarget(ch *amqp091.Channel) error {

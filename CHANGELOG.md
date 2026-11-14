@@ -593,6 +593,25 @@ All notable changes to this project are documented here. The format follows
   Redis waited ~6s (second-granularity enqueue stamp plus the 200ms poll) and
   RocketMQ scheduled 5s / waited ~5.1s, with one idempotency row per consumer
   per event.
+- AMQP delayed queues complete the trio. `support/amqp` already had the TTL +
+  dead-letter workflow (`DelayConfig`), but only a queue-level fixed TTL and no
+  resident subscription. `PublishOptions.Delay` is now the relative form of
+  `Expiration`: it becomes the per-message TTL whose expiry dead-letters the
+  message into `DelayConfig.Target`, and `DelayConfig.TTL` doubles as its upper
+  bound because the broker applies the smaller of the two. The transport
+  rejects a delay below 1ms, one past the queue TTL (otherwise silently
+  clamped), one combined with `Expiration`, and one on a Queue with no
+  dead-letter target (where the message would simply vanish at expiry).
+  `support/consumer.NewDelayAMQP` adds `DelayAMQPConfig` / `DelayAMQPMessage`
+  with `source` `amqp_delay`. It declares both halves of the topology and reads
+  the target through the existing `amqpconsumer` adapter, whose `consumeQueue`
+  already switches to `Delay.Target.Queue`. `QueueConfig()` is the one topology
+  both sides publish through, so their queue arguments cannot disagree and trip
+  PRECONDITION_FAILED. The demo's `delay_producer.go` gains a third sink and
+  `delay_amqp_order.go` the matching consumer. RabbitMQ only checks the head of
+  a queue for expiry, so the docs call for one delay per staging queue.
+  Verified against the local broker: four events, each arriving on all three
+  delayed transports at ~5.3-5.8s, one idempotency row per consumer per event.
 
 ### Changed
 
