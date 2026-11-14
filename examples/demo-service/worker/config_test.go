@@ -39,11 +39,11 @@ func loadSection(t *testing.T, body string) appworker.Config {
 func TestConfigKeepsSharedAndGroupSettingsApart(t *testing.T) {
 	cfg := loadSection(t, `worker:
   health_addr: 127.0.0.1:9091
-  order:
+  group1:
     scan:
       concurrency: 4
       interval: 2s
-  report:
+  group2:
     summary:
       concurrency: 3
       interval: 30m
@@ -52,17 +52,17 @@ func TestConfigKeepsSharedAndGroupSettingsApart(t *testing.T) {
 	if cfg.HealthAddr != "127.0.0.1:9091" {
 		t.Fatalf("health_addr = %q", cfg.HealthAddr)
 	}
-	if cfg.Order.Scan.Concurrency != 4 {
-		t.Fatalf("order.scan.concurrency = %d, want 4", cfg.Order.Scan.Concurrency)
+	if cfg.Group1.Scan.Concurrency != 4 {
+		t.Fatalf("group1.scan.concurrency = %d, want 4", cfg.Group1.Scan.Concurrency)
 	}
-	if cfg.Order.Scan.Interval != 2*time.Second {
-		t.Fatalf("order.scan.interval = %s, want 2s", cfg.Order.Scan.Interval)
+	if cfg.Group1.Scan.Interval != 2*time.Second {
+		t.Fatalf("group1.scan.interval = %s, want 2s", cfg.Group1.Scan.Interval)
 	}
-	if cfg.Report.Summary.Concurrency != 3 {
-		t.Fatalf("report.summary.concurrency = %d, want 3", cfg.Report.Summary.Concurrency)
+	if cfg.Group2.Summary.Concurrency != 3 {
+		t.Fatalf("group2.summary.concurrency = %d, want 3", cfg.Group2.Summary.Concurrency)
 	}
-	if cfg.Report.Summary.Interval != 30*time.Minute {
-		t.Fatalf("report.summary.interval = %s, want 30m", cfg.Report.Summary.Interval)
+	if cfg.Group2.Summary.Interval != 30*time.Minute {
+		t.Fatalf("group2.summary.interval = %s, want 30m", cfg.Group2.Summary.Interval)
 	}
 }
 
@@ -75,24 +75,24 @@ func TestConfigAppliesGroupDefaults(t *testing.T) {
 	// shared struct: a config that omits a group entirely must still start.
 	// 默认值必须穿过分组块，而不只作用在内联的公共结构上：完全省略某个分组的配置
 	// 仍然要能启动。
-	if cfg.Order.Scan.Concurrency != 2 {
-		t.Fatalf("order.scan.concurrency = %d, want the default 2", cfg.Order.Scan.Concurrency)
+	if cfg.Group1.Scan.Concurrency != 2 {
+		t.Fatalf("group1.scan.concurrency = %d, want the default 2", cfg.Group1.Scan.Concurrency)
 	}
-	if cfg.Order.Scan.Interval != 5*time.Second {
-		t.Fatalf("order.scan.interval = %s, want the default 5s", cfg.Order.Scan.Interval)
+	if cfg.Group1.Scan.Interval != 5*time.Second {
+		t.Fatalf("group1.scan.interval = %s, want the default 5s", cfg.Group1.Scan.Interval)
 	}
-	if cfg.Report.Summary.Concurrency != 1 {
-		t.Fatalf("report.summary.concurrency = %d, want the default 1", cfg.Report.Summary.Concurrency)
+	if cfg.Group2.Summary.Concurrency != 1 {
+		t.Fatalf("group2.summary.concurrency = %d, want the default 1", cfg.Group2.Summary.Concurrency)
 	}
-	if cfg.Report.Summary.Interval != time.Hour {
-		t.Fatalf("report.summary.interval = %s, want the default 1h", cfg.Report.Summary.Interval)
+	if cfg.Group2.Summary.Interval != time.Hour {
+		t.Fatalf("group2.summary.interval = %s, want the default 1h", cfg.Group2.Summary.Interval)
 	}
 }
 
 func TestConfigRejectsUnknownWorkerKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`worker:
-  order:
+  group1:
     scan:
       concurrency: 1
       unknown: true
@@ -100,7 +100,7 @@ func TestConfigRejectsUnknownWorkerKeys(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	if _, err := gofyconfig.Load[section](context.Background(), path, gofyconfig.WithStrict(true)); err == nil {
-		t.Fatal("strict load accepted an unknown key under worker.order.scan")
+		t.Fatal("strict load accepted an unknown key under worker.group1.scan")
 	}
 }
 
@@ -126,8 +126,8 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"order":  {"order-scan", "order-heartbeat"},
-		"report": {"report-summary"},
+		"group1": {"order-scan", "order-heartbeat"},
+		"group2": {"report-summary"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("groups = %v, want %v", got, want)

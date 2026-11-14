@@ -17,21 +17,21 @@ type WorkerConfig struct {
 
 // Config is the `worker` section of config.yaml: the shared settings inlined at
 // the top, then one block per group, named after the group, so the file reads as
-// `worker.health_addr`, `worker.order.scan.*` and `worker.report.summary.*`.
+// `worker.health_addr`, `worker.group1.scan.*` and `worker.group2.summary.*`.
 //
 // Group blocks are struct fields rather than a map: strict decoding then rejects
 // a misspelled key inside a block, and `default` tags still apply. A map would
 // silently accept both.
 // Config 是 config.yaml 的 `worker` 段：公共设置内联在顶层，其下按分组名给每个分组
-// 一个配置块，因此配置文件里读作 `worker.health_addr`、`worker.order.scan.*` 与
-// `worker.report.summary.*`。
+// 一个配置块，因此配置文件里读作 `worker.health_addr`、`worker.group1.scan.*` 与
+// `worker.group2.summary.*`。
 //
 // 分组用结构体字段而不是 map：严格解码才能拒绝块内拼错的键，`default` 标签也才会
 // 生效；用 map 两者都会静默放过。
 type Config struct {
 	WorkerConfig `yaml:",inline"`
-	Order        OrderGroupConfig  `yaml:"order"`
-	Report       ReportGroupConfig `yaml:"report"`
+	Group1       Group1Config `yaml:"group1"`
+	Group2       Group2Config `yaml:"group2"`
 }
 
 // Concurrency maps every configured worker to its instance count, keyed the way
@@ -42,11 +42,11 @@ type Config struct {
 // 再抄一遍。
 func Concurrency(cfg Config) map[string]int {
 	out := make(map[string]int, 2)
-	if n := cfg.Order.Scan.Concurrency; n > 0 {
-		out["order/order-scan"] = n
+	if n := cfg.Group1.Scan.Concurrency; n > 0 {
+		out["group1/order-scan"] = n
 	}
-	if n := cfg.Report.Summary.Concurrency; n > 0 {
-		out["report/report-summary"] = n
+	if n := cfg.Group2.Summary.Concurrency; n > 0 {
+		out["group2/report-summary"] = n
 	}
 	return out
 }
