@@ -1,24 +1,23 @@
 package worker
 
-import "time"
-
-// WorkerConfig configures the long-running workers started by
-// `demo-service worker --group=<group>`.
-// WorkerConfig 配置由 `demo-service worker --group=<分组>` 启动的常驻任务。
+// WorkerConfig holds the settings every worker in the process shares, so they
+// are set once for `demo-service worker` rather than per task. Settings only one
+// worker understands live next to that worker: ScanWorkerConfig is in scan.go.
+// WorkerConfig 保存进程内所有 worker 共用的设置，对 `demo-service worker` 配置一次
+// 即可，不必按任务重复；只有某一个 worker 才懂的设置放在它自己的文件里，例如
+// ScanWorkerConfig 在 scan.go。
 type WorkerConfig struct {
-	Scan ScanWorkerConfig `yaml:"scan"`
 	// HealthAddr exposes /healthz on the worker process; empty disables it.
 	// HealthAddr 在 worker 进程上暴露 /healthz；为空表示关闭。
 	HealthAddr string `yaml:"health_addr"`
 }
 
-// ScanWorkerConfig controls the order scan worker's rhythm and replica count.
-// ScanWorkerConfig 控制订单扫描任务的节奏与实例数。
-type ScanWorkerConfig struct {
-	// Concurrency is how many scan instances run inside the worker process.
-	// Concurrency 是 worker 进程内同时运行的扫描实例数。
-	Concurrency int `yaml:"concurrency" default:"2"`
-	// Interval is the pause between two scans.
-	// Interval 是两次扫描之间的间隔。
-	Interval time.Duration `yaml:"interval" default:"5s"`
+// Config is the `worker` section of config.yaml: the shared settings inlined at
+// the top, then one block per worker, so the file reads as
+// `worker.health_addr` and `worker.scan.*`.
+// Config 是 config.yaml 的 `worker` 段：公共设置内联在顶层，其下是每个 worker 各自
+// 的配置块，因此配置文件里读作 `worker.health_addr` 与 `worker.scan.*`。
+type Config struct {
+	WorkerConfig `yaml:",inline"`
+	Scan         ScanWorkerConfig `yaml:"scan"`
 }

@@ -11,6 +11,22 @@ import (
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
+// ScanWorkerConfig controls the order scan worker's rhythm and replica count.
+// It lives here rather than in config.go because only this worker understands
+// it: the shared settings stay in WorkerConfig, the task's own knobs stay with
+// the task.
+// ScanWorkerConfig 控制订单扫描任务的节奏与实例数。它放在这里而不是 config.go，
+// 因为只有这个 worker 懂这些设置：公共设置留在 WorkerConfig，任务自己的旋钮跟着
+// 任务走。
+type ScanWorkerConfig struct {
+	// Concurrency is how many scan instances run inside the worker process.
+	// Concurrency 是 worker 进程内同时运行的扫描实例数。
+	Concurrency int `yaml:"concurrency" default:"2"`
+	// Interval is the pause between two scans.
+	// Interval 是两次扫描之间的间隔。
+	Interval time.Duration `yaml:"interval" default:"5s"`
+}
+
 // newOrderScanWorker scans pending orders on an interval. Demo's orders table
 // has no claim columns (status is a business value, not a task state), so this
 // only counts; a real queue declares a job table with claim.DDL and calls

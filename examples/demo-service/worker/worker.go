@@ -20,7 +20,7 @@ import gofyworker "github.com/bingcool/gofy/support/worker"
 // per environment.
 // NewGroup 构造 order 分组。并发与节奏来自 config.yaml 的 worker 段，同一个镜像
 // 因此可以在不同环境用不同的实例数运行。
-func NewGroup(cfg WorkerConfig) (*gofyworker.Group, error) {
+func NewGroup(cfg Config) (*gofyworker.Group, error) {
 	return gofyworker.NewGroup(
 		"order",
 		newOrderScanWorker(cfg.Scan),
