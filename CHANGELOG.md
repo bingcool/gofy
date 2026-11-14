@@ -812,6 +812,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `logger`: a colored error block now ends with a newline. It used to append
+  `\x1b[0m` after the last content newline without terminating its own line, so
+  the next entry — or zap's own `write error` on stderr — was glued onto the
+  reset code. Redirected stdout then held lines like
+  `\x1b[0m{"level":"info",...}`, which a JSON collector cannot parse and a
+  `grep` reports as a missing line. The reset code now sits at the end of the
+  last content line and the block ends in `\n`.
+  `TestColorAlwaysDoesNotGlueEntriesTogether` pins the boundary, and
+  `TestConcurrentSinksKeepEveryEntry` verifies 4x200 concurrent entries reach
+  both a console and a file sink in all three color modes: the tee itself never
+  drops lines. (An earlier note blamed `color: always` for a "stdout drops
+  lines" observation; that was a misdiagnosis — a second worker process was
+  appending to the same rotated log, so the file was the union of two processes
+  while the redirected stdout belonged to one. The block termination above was
+  the only real defect.)
 - `Execute` prints an error to stderr whenever no logger exists yet, not just
   for usage errors: a mistyped `worker --group` used to exit 1 with no message
   because the group is looked up before the logger is built and `App.Logger()`

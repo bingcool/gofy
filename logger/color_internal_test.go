@@ -32,8 +32,8 @@ func TestTerminalErrorEncoderRendersRedBlock(t *testing.T) {
 	defer buf.Free()
 	out := buf.String()
 
-	if !strings.HasPrefix(out, ansiRed) || !strings.HasSuffix(out, ansiReset) {
-		t.Fatalf("block is not wrapped in red: %q", out)
+	if !strings.HasPrefix(out, ansiRed) || !strings.HasSuffix(out, ansiReset+"\n") {
+		t.Fatalf("block is not wrapped in red and terminated by a newline: %q", out)
 	}
 	if strings.Contains(out, `\n`) || strings.Contains(out, `\t`) {
 		t.Fatalf("stacktrace is still escaped on one line: %q", out)
@@ -42,7 +42,7 @@ func TestTerminalErrorEncoderRendersRedBlock(t *testing.T) {
 		"ERROR demo-service/main.go:75 demo-service exit",
 		`{"service": "demo-service"}`,
 		"\nerror: module \"order\" register: middleware \"audit1\" is not registered\n",
-		"\nstacktrace:\nmain.main\n\t/src/demo-service/main.go:75\nruntime.main\n\t/src/runtime/proc.go:290\n",
+		"\nstacktrace:\nmain.main\n\t/src/demo-service/main.go:75\nruntime.main\n\t/src/runtime/proc.go:290",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("block missing %q: %q", want, out)
@@ -61,8 +61,9 @@ func TestTerminalErrorEncoderNamedErrorField(t *testing.T) {
 		t.Fatalf("EncodeEntry: %v", err)
 	}
 	defer buf.Free()
-	if !strings.Contains(buf.String(), "\ncause: nacos unreachable\n") {
-		t.Fatalf("named error is not on its own line: %q", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "\ncause: nacos unreachable") || !strings.HasSuffix(out, ansiReset+"\n") {
+		t.Fatalf("named error is not on its own line, or the block is not terminated: %q", out)
 	}
 }
 
@@ -77,8 +78,8 @@ func TestTerminalErrorEncoderWithoutErrorOrStack(t *testing.T) {
 	if strings.Contains(out, "error:") || strings.Contains(out, "stacktrace:") {
 		t.Fatalf("empty sections were rendered: %q", out)
 	}
-	if !strings.HasPrefix(out, ansiRed) || !strings.HasSuffix(out, ansiReset) {
-		t.Fatalf("block is not wrapped in red: %q", out)
+	if !strings.HasPrefix(out, ansiRed) || !strings.HasSuffix(out, ansiReset+"\n") {
+		t.Fatalf("block is not wrapped in red and terminated by a newline: %q", out)
 	}
 }
 
@@ -141,7 +142,8 @@ func TestTerminalErrorEncoderClone(t *testing.T) {
 	}
 	defer buf.Free()
 	out := buf.String()
-	if !strings.HasPrefix(out, ansiRed) || !strings.Contains(out, "\nerror: boom\n") {
+	if !strings.HasPrefix(out, ansiRed) || !strings.Contains(out, "\nerror: boom") ||
+		!strings.HasSuffix(out, ansiReset+"\n") {
 		t.Fatalf("cloned encoder lost the block rendering: %q", out)
 	}
 }

@@ -273,18 +273,31 @@ func (e terminalErrorEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fi
 	}
 	block := e.pool.Get()
 	block.AppendString(ansiRed)
-	block.AppendBytes(buf.Bytes())
+	// The console encoder ends its header with a newline. Keep that newline as
+	// a separator between sections instead of a trailer, so the reset code can
+	// sit at the end of the last content line and the whole block still ends
+	// with a newline. A block without a trailing newline glues the next entry
+	// onto \x1b[0m, which turns two log lines into one unparseable line as soon
+	// as stdout is redirected to a file or piped into a collector.
+	// console 编码器的首行自带换行。把它当作段间分隔符而不是段尾，重置码就能落在
+	// 最后一行末尾，整块仍以换行结束。缺了这个换行，下一条日志会粘在 \x1b[0m 后面：
+	// stdout 一旦重定向到文件或接上采集管道，两行日志就变成一行无法解析的东西。
+	headerBytes := buf.Bytes()
+	if n := len(headerBytes); n > 0 && headerBytes[n-1] == '\n' {
+		headerBytes = headerBytes[:n-1]
+	}
+	block.AppendBytes(headerBytes)
 	buf.Free()
 	for _, line := range errLines {
-		block.AppendString(line)
 		block.AppendString("\n")
+		block.AppendString(line)
 	}
 	if stack := strings.TrimRight(ent.Stack, "\n"); stack != "" {
-		block.AppendString("stacktrace:\n")
+		block.AppendString("\nstacktrace:\n")
 		block.AppendString(stack)
-		block.AppendString("\n")
 	}
 	block.AppendString(ansiReset)
+	block.AppendString("\n")
 	return block, nil
 }
 
