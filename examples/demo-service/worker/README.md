@@ -20,10 +20,11 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、四个消费者与心跳
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、生产者、四个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
+│   ├── producer.go        # order-event-producer：每 5s 把同一订单事件群发到四个队列
 │   ├── kafka_order.go     # order-kafka-consumer：一个订阅 + 它的配置
 │   ├── amqp_order.go      # order-amqp-consumer
 │   ├── rocketmq_order.go  # order-rocketmq-consumer
@@ -53,6 +54,7 @@ worker/
 | 分组 | worker | 实例数 | 节奏 | 说明 |
 | --- | --- | --- | --- | --- |
 | group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
+| group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到四个队列，闭环演示生产 → 消费 |
 | group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅，手动提交位点 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
 | group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `tag=order`，SDK 侧拉取 |
@@ -66,6 +68,21 @@ worker/
 四个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
 实际跑哪些用 `--name` 选；注册不建连，所以 `--list` 和被过滤掉的消费者都不产生成本。
 实例数写在各自的配置文件里，`--concurrency` 仍可覆盖。
+
+## 生产-消费闭环
+
+`producer.go` 是示例的生产端：一个 worker，每 5 秒生成一条指向订单 1 的
+`order.paid` 事件，同一时刻发到 Kafka、RabbitMQ、RocketMQ 与 Redis 队列——正是
+group1 四个消费者订阅的那四条流。payload 里的 `reason` 写明这条事件来自哪个队列
+（`记录来自 kafka 队列`……），`docker logs` 里对同一个 `event_id` 能看到四条
+`message consumed`，各带一个 `source`。
+
+契约在消费者那边：topic、exchange、绑定键、tag 都从订阅配置读，生产者不重复声明，
+因此移动订阅等于移动生产端。传输地址来自 `ConnectionsFrom` 的同一张连接表，一个
+地址只有一个家。发送各带各的关键字：Kafka 用订单号做 key 保分区有序、`message_id`
+头带事件 UUID 供去重；AMQP 用事件类型做 routing key 过 `order.*` 绑定；RocketMQ
+带订阅的首个 tag；Redis 队列直接压栈。四个 sink 一次循环打开、逆序关闭，任一打不开
+就拒绝启动——少一条腿的群发示例比没有示例更糟。
 
 ## 消费者怎么接入
 
@@ -89,9 +106,9 @@ handler_order.go
 ```json
 {
   "id": "evt-1",
-  "type": "order.cancelled",
+  "type": "order.paid",
   "occurred_at": "2026-01-01T00:00:00Z",
-  "payload": {"order_id": 1, "user_id": 7, "reason": "user"}
+  "payload": {"order_id": 1, "user_id": 7, "reason": "记录来自 kafka 队列"}
 }
 ```
 

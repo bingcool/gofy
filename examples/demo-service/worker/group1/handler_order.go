@@ -32,8 +32,11 @@ type orderEventPayload struct {
 	// UserID is kept for audit logs; it is not required for the update.
 	// UserID 用于审计日志，更新本身并不需要它。
 	UserID uint64 `json:"user_id"`
-	// Reason explains a cancellation; optional.
-	// Reason 说明取消原因，可选。
+	// Reason is free text the payload may carry. In this demo the producer
+	// fills it with the queue the event came in on, so one log line answers
+	// "which transport delivered this".
+	// Reason 是 payload 可携带的自由文本。本示例中生产者用它记录事件来自哪个
+	// 队列，因此一行日志就能回答"这条是哪个传输投递的"。
 	Reason string `json:"reason"`
 }
 

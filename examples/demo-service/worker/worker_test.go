@@ -50,6 +50,7 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 	want := map[string][]string{
 		"group1": {
 			"order-scan",
+			"order-event-producer",
 			"order-kafka-consumer",
 			"order-amqp-consumer",
 			"order-rocketmq-consumer",
@@ -77,6 +78,7 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 	}
 	wantDeclared := map[string]int{
 		"group1/order-scan":              2,
+		"group1/order-event-producer":    1,
 		"group1/order-kafka-consumer":    1,
 		"group1/order-amqp-consumer":     1,
 		"group1/order-rocketmq-consumer": 1,

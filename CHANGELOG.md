@@ -556,6 +556,23 @@ All notable changes to this project are documented here. The format follows
   access-log 500, retained `req_id`) and the boundary that panics raised before
   `Recovery` are not caught. `make check` also runs `go vet` for the demo
   module now.
+- `examples/demo-service`: group1 closes the produce → consume loop.
+  `worker/group1/producer.go` is `order-event-producer`, a worker that every
+  five seconds publishes the same `order.paid` event for order 1 to the four
+  transports its sibling consumers subscribe to, so one `worker --group=group1`
+  process demonstrates the full path without a second terminal. The contract
+  lives with the consumers: topic, exchange, binding and tag are read from the
+  subscription configs, and broker addresses from the same `ConnectionsFrom`
+  table, so moving a subscription moves its producer leg. Each payload carries
+  `reason` naming the queue it arrived through (`记录来自 kafka 队列`), and the
+  four deliveries share one event id — safe because the idempotency ledger is
+  keyed by `(consumer, message_id)`. Kafka publishes with the order id as key
+  and the event id in the `message_id` header, so the consumer's dedup takes
+  the first-choice path instead of falling back to `topic/partition@offset`;
+  AMQP routes on the event type through the `order.*` binding, RocketMQ takes
+  the subscription's first tag, and the Redis queue pushes the envelope as-is.
+  Sinks open once in a loop and close in reverse; any transport that fails to
+  open aborts the worker rather than fanning out three quarters of the demo.
 
 ### Changed
 
