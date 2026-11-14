@@ -2,8 +2,8 @@
 // order volume.
 //
 // The package boundary is the deployment boundary: group1 is started by
-// `demo-service worker --group=group1` and owns its own config, so a change here
-// never reaches group2.
+// `demo-service worker --group=group1` and owns its own settings, so a change
+// here never reaches group2.
 //
 // The file is named abc_register.go so the group's entry point sorts above its
 // member files: "a" beats heartbeat.go and scan.go, whereas a plain register.go
@@ -22,30 +22,18 @@
 package group1
 
 import (
-	"time"
-
 	gofyworker "github.com/bingcool/gofy/support/worker"
 )
 
-// defaults is what group1 runs with. It sits here rather than in config.yaml so
-// the numbers live next to the worker they belong to: one file answers "how many
-// instances, how often". Use --concurrency to override the count for a run
-// without editing code.
-// defaults 是 group1 运行时的参数。放在这里而不是 config.yaml：数字紧挨它配置的
-// worker，一个文件就能回答"几个实例、多久一次"。临时改实例数用 `--concurrency`，
-// 不必改代码。
-var defaults = ScanWorkerConfig{
-	Concurrency: 2,
-	Interval:    5 * time.Second,
-}
-
 // NewGroup builds group1: the scan loop and the liveness heartbeat, which share
-// one rhythm and therefore one process.
-// NewGroup 构造 group1：扫描循环与存活心跳，两者节奏一致，因此同进程运行。
+// one rhythm and therefore one process. Each worker passes its own defaults,
+// declared next to the loop they control.
+// NewGroup 构造 group1：扫描循环与存活心跳，两者节奏一致，因此同进程运行。每个 worker
+// 传入自己的 defaults，声明就写在它控制的那个循环旁边。
 func NewGroup() (*gofyworker.Group, error) {
 	return gofyworker.NewGroup(
 		"group1",
-		newScanWorker(defaults),
+		newScanWorker(scanDefaults),
 		newHeartbeatWorker(),
 	)
 }

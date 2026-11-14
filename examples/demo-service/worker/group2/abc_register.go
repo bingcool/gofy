@@ -19,25 +19,15 @@
 package group2
 
 import (
-	"time"
-
 	gofyworker "github.com/bingcool/gofy/support/worker"
 )
 
-// defaults is what group2 runs with: one instance per hour. More than one would
-// write the same report twice, so the number is deliberately one.
-// defaults 是 group2 运行时的参数：每小时一个实例。多实例会把同一份报表写两遍，因此
-// 这里刻意就是 1。
-var defaults = SummaryWorkerConfig{
-	Concurrency: 1,
-	Interval:    time.Hour,
-}
-
-// NewGroup builds group2.
-// NewGroup 构造 group2。
+// NewGroup builds group2. The summary worker passes its own defaults, declared
+// next to the loop they control.
+// NewGroup 构造 group2。汇总任务传入自己的 defaults，声明就写在它控制的循环旁边。
 func NewGroup() (*gofyworker.Group, error) {
 	return gofyworker.NewGroup(
 		"group2",
-		newSummaryWorker(defaults),
+		newSummaryWorker(summaryDefaults),
 	)
 }

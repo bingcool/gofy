@@ -18,12 +18,12 @@ repository，因此查询逻辑只有一份。
 worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── group1/
-│   ├── abc_register.go    # group1 的 defaults 与 NewGroup
-│   ├── scan.go            # order-scan：扫表
+│   ├── abc_register.go    # group1 的 NewGroup
+│   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   └── heartbeat.go       # order-heartbeat：存活心跳
 └── group2/
-    ├── abc_register.go    # group2 的 defaults 与 NewGroup
-    └── summary.go         # report-summary：小时级汇总
+    ├── abc_register.go    # group2 的 NewGroup
+    └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
 ```
 
 `abc_` 前缀只是为了让入口文件排在成员文件之前，没有语义；下划线开头不行，Go 会忽略
@@ -144,8 +144,8 @@ $ go run . stop --worker='*' --force
 
 ## 参数
 
-每个 worker 的参数就写在它自己的文件里，由分组在 `abc_register.go` 里给值。`config.yaml`
-没有 `worker:` 段，读代码即可知道会起几个实例、多久跑一次：
+每个 worker 的参数就写在它自己的文件里，结构体和取值放在一起，一个文件读完就知道会起几个
+实例、多久跑一次。`config.yaml` 没有 `worker:` 段：
 
 ```go
 // group1/scan.go
@@ -154,14 +154,14 @@ type ScanWorkerConfig struct {
 	Interval    time.Duration // 两次扫描的间隔
 }
 
-// group1/abc_register.go
-var defaults = ScanWorkerConfig{
+var scanDefaults = ScanWorkerConfig{
 	Concurrency: 2,
 	Interval:    5 * time.Second,
 }
 ```
 
-改参数就改这个 `defaults`；临时改实例数用 `--group=group1 --concurrency=4`，不必动代码。
+`abc_register.go` 只负责把 worker 装进分组，不碰数字：`newScanWorker(scanDefaults)`。
+改参数就改这个 `scanDefaults`；临时改实例数用 `--group=group1 --concurrency=4`，不必动代码。
 结构体上没有 `yaml` 标签，配置里写 `worker:` 会被严格解码拒绝——它不再是配置来源。
 
 三条约束：
@@ -180,14 +180,14 @@ var defaults = ScanWorkerConfig{
 组内加一个 worker，只动那个分组包：
 
 1. 新建成员文件，例如 `group1/settle.go`，用 `worker.Func("order-settle", 1, run)` 定义；
-2. 参数写在成员文件的结构体里（照 `ScanWorkerConfig`），在 `group1/abc_register.go` 的
-   `defaults` 里给值；
+2. 参数结构体与它的 `xxxDefaults` 都写在成员文件里（照 `ScanWorkerConfig` + `scanDefaults`），
+   `abc_register.go` 只把 worker 追加进 `NewGroup`；
 3. 在同一个文件的 `NewGroup` 里把它追加进去；
 4. `go run . worker --list` 核对，列表里出现新名字即可。
 
 ## 新增分组
 
-1. 新建子包 `worker/group3/`，加 `abc_register.go`（`defaults` + `NewGroup`）与成员文件；
+1. 新建子包 `worker/group3/`，加 `abc_register.go`（只含 `NewGroup`）与成员文件（含各自的参数结构体与 defaults）；
 2. `worker/worker.go` 的 `Register` 里构造该分组并加进返回列表；
 3. `go run . worker --list` 核对，`worker --group=group3` 即可启动。
 

@@ -27,6 +27,18 @@ type ScanWorkerConfig struct {
 	Interval time.Duration
 }
 
+// scanDefaults is what group1's scan worker runs with. The numbers sit in the
+// same file as the loop they control, so "how many instances, how often" is
+// answered without leaving the worker; `--concurrency` overrides the count for
+// one run without touching code.
+// scanDefaults 是 group1 扫描任务的运行参数。数字和它控制的循环在同一个文件里，
+// "几个实例、多久一次"不必离开这个 worker 就能回答；临时改实例数用 `--concurrency`，
+// 不必动代码。
+var scanDefaults = ScanWorkerConfig{
+	Concurrency: 2,
+	Interval:    5 * time.Second,
+}
+
 // newScanWorker scans pending orders on an interval. Demo's orders table has no
 // claim columns (status is a business value, not a task state), so this only
 // counts; a real queue declares a job table with claim.DDL and calls

@@ -25,6 +25,16 @@ type SummaryWorkerConfig struct {
 	Interval time.Duration
 }
 
+// summaryDefaults is what group2's summary worker runs with: one instance per
+// hour. More than one would write the same report twice, so the count is
+// deliberately one and lives here, beside the aggregation it paces.
+// summaryDefaults 是 group2 汇总任务的运行参数：每小时一个实例。多实例会把同一份报表
+// 写两遍，因此计数刻意就是 1，和它控制的聚合逻辑放在一起。
+var summaryDefaults = SummaryWorkerConfig{
+	Concurrency: 1,
+	Interval:    time.Hour,
+}
+
 // statusCount is one row of the status breakdown.
 // statusCount 是状态分布中的一行。
 type statusCount struct {
