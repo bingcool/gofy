@@ -59,11 +59,11 @@ func main() {
 {{- if .WithWorker }}
 	// Long-running tasks live in their own process: `{{.Name}} worker --group=default`.
 	// HTTP never starts them, so the same image can run as a Deployment or a worker.
-	workerGroup, err := appworker.Register()
+	workerGroups, err := appworker.Register()
 	if err != nil {
 		log.Fatalf("register workers: %v", err)
 	}
-	opts = append(opts, gofy.WithWorkerGroups(workerGroup))
+	opts = append(opts, gofy.WithWorkerGroups(workerGroups...))
 {{- end }}
 
 	app, err := gofy.New(opts...)

@@ -72,8 +72,8 @@ func TestGenerateDefaults(t *testing.T) {
 	if strings.Contains(main, "WithDatabase") {
 		t.Errorf("main.go must not wire a database by default")
 	}
-	if !strings.Contains(main, "gofy.WithWorkerGroups(workerGroup)") {
-		t.Errorf("main.go must register the worker group:\n%s", main)
+	if !strings.Contains(main, "gofy.WithWorkerGroups(workerGroups...)") {
+		t.Errorf("main.go must register the worker groups:\n%s", main)
 	}
 }
 
