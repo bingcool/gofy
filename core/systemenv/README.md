@@ -52,20 +52,21 @@ GOFY_ENV=prod ./demo-service start
 
 ## 服务类型判定
 
-入口子命令决定当前进程的服务类型。两个方法读取 `os.Args[1:]` 的第一个非 flag
+入口子命令决定当前进程的服务类型。这些方法读取 `os.Args[1:]` 的第一个非 flag
 参数，不缓存结果：
 
-| 启动方式 | `IsHTTPService()` | `IsScriptService()` |
-| --- | --- | --- |
-| `demo-service`（无子命令） | `true` | `false` |
-| `demo-service start` | `true` | `false` |
-| `demo-service stop` | `true` | `false` |
-| `demo-service restart` | `true` | `false` |
-| `demo-service script fix-order` | `false` | `true` |
-| `version` / `--help` | `false` | `false` |
+| 启动方式 | `IsHTTPService()` | `IsScriptService()` | `IsWorkerService()` |
+| --- | --- | --- | --- |
+| `demo-service`（无子命令） | `true` | `false` | `false` |
+| `demo-service start` | `true` | `false` | `false` |
+| `demo-service stop` | `true` | `false` | `false` |
+| `demo-service restart` | `true` | `false` | `false` |
+| `demo-service script fix-order` | `false` | `true` | `false` |
+| `demo-service worker --group=order` | `false` | `false` | `true` |
+| `version` / `--help` | `false` | `false` | `false` |
 
 `start`、`stop`、`restart` 和默认启动都作用于 HTTP 服务：`restart` 会先停旧实例
-再就地启动，`stop` 通过 pid 文件停止 HTTP 实例。`version`、`help` 等命令两者
+再就地启动，`stop` 通过 pid 文件停止 HTTP 实例。`version`、`help` 等命令三者
 都不成立。判定基于进程真实的启动参数：用 `App.ExecuteArgs` 在测试里传入自定义
 参数，不会改变这里的结果。
 
@@ -83,6 +84,26 @@ GOFY_ENV=prod ./demo-service start
 
 返回值会去掉空白，只保留字母、数字、`-` 和 `_`。日志文件名会直接使用它，
 因此过滤路径分隔符和 `..`，避免命令行参数把日志写到其他目录。
+
+### WorkerGroup / WorkerNames
+
+`worker` 子命令的两个参数读取器，供按分组/按 worker 拆分日志与 pid 文件使用：
+
+| 启动参数 | `WorkerGroup()` | `WorkerNames()` |
+| --- | --- | --- |
+| `demo-service worker --group=order` | `order` | `nil` |
+| `demo-service worker --group=order --name=order-consumer` | `order` | `[order-consumer]` |
+| `demo-service worker --name order-scan --name order-consumer` | `""` | `[order-scan order-consumer]` |
+| `demo-service worker --name=order-scan,order-consumer` | `""` | `[order-scan order-consumer]` |
+| `demo-service worker --list` / `worker --help` | `""` | `nil` |
+| `demo-service start` | `""` | `nil` |
+
+`--name` 支持 `--name=a`、`--name a` 以及 pflag `StringSlice` 的逗号分隔形式，重复项
+会被去掉。两个函数都会清洗返回值（去空白，只保留字母、数字、`-` 和 `_`），因为结果
+会直接拼进文件名或 pid 路径。
+
+`WorkerNames()` 返回全部名字而不是一个：进程可能同时跑多个 worker。日志实现据此决定
+文件名——只有一个名字时用它，否则退回分组名，见 `examples/demo-service/app/config/log.go`。
 
 ## GetGoroutineID
 

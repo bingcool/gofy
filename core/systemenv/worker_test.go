@@ -39,6 +39,41 @@ func TestWorkerMode(t *testing.T) {
 	}
 }
 
+func TestWorkerNames(t *testing.T) {
+	original := os.Args
+	defer func() { os.Args = original }()
+
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"group only", []string{"worker", "--group=order"}, nil},
+		{"equals form", []string{"worker", "--group=order", "--name=order-consumer"}, []string{"order-consumer"}},
+		{"space form", []string{"worker", "--name", "order-consumer", "--group=order"}, []string{"order-consumer"}},
+		{"repeated", []string{"worker", "--name=order-scan", "--name=order-consumer"}, []string{"order-scan", "order-consumer"}},
+		{"comma separated", []string{"worker", "--name=order-scan,order-consumer"}, []string{"order-scan", "order-consumer"}},
+		{"duplicates dropped", []string{"worker", "--name=a", "--name=a"}, []string{"a"}},
+		{"path characters removed", []string{"worker", "--name=../../etc/passwd"}, []string{"etcpasswd"}},
+		{"other subcommand", []string{"script", "--name=order-consumer"}, nil},
+		{"help", []string{"worker", "--help"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = append([]string{"demo-service"}, tc.args...)
+			got := systemenv.WorkerNames()
+			if len(got) != len(tc.want) {
+				t.Fatalf("WorkerNames() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("WorkerNames() = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestWorkerModeIsNotHTTPService(t *testing.T) {
 	original := os.Args
 	defer func() { os.Args = original }()

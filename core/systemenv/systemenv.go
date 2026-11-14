@@ -148,7 +148,7 @@ func ScriptName() string {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
-		return sanitizeScriptName(arg)
+		return sanitizeName(arg)
 	}
 	return ""
 }
@@ -194,16 +194,76 @@ func WorkerGroup() string {
 	for i := index + 1; i < len(args); i++ {
 		arg := args[i]
 		if value, ok := strings.CutPrefix(arg, "--group="); ok {
-			return sanitizeScriptName(value)
+			return sanitizeName(value)
 		}
 		if arg == "--group" && i+1 < len(args) {
-			return sanitizeScriptName(args[i+1])
+			return sanitizeName(args[i+1])
 		}
 	}
 	return ""
 }
 
-func sanitizeScriptName(name string) string {
+// WorkerNames returns every --name value of the worker subcommand, in command
+// line order, so logs can be named after the worker that is running. It accepts
+// "--name=order-consumer", "--name order-consumer" and the comma-separated form
+// pflag's StringSlice accepts ("--name=a,b"); duplicates are dropped and each
+// name is sanitized for use in a file name. A whole group (no --name) returns
+// nil, since one process may then run several workers.
+// WorkerNames 按命令行顺序返回 worker 子命令的全部 --name 值，用于按运行中的
+// worker 命名日志。它同时支持 "--name=order-consumer"、"--name order-consumer"
+// 以及 pflag StringSlice 接受的逗号分隔形式（"--name=a,b"）；重复项会被去掉，
+// 每个名字都会清洗成可安全用于文件名的形式。整组启动（没有 --name）返回 nil，
+// 因为此时一个进程可能同时运行多个 worker。
+func WorkerNames() []string {
+	args := os.Args[1:]
+	index := -1
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			if arg == "-h" || arg == "--help" {
+				return nil
+			}
+			continue
+		}
+		if arg != "worker" {
+			return nil
+		}
+		index = i
+		break
+	}
+	if index < 0 {
+		return nil
+	}
+
+	var names []string
+	seen := make(map[string]struct{}, 2)
+	add := func(value string) {
+		for _, part := range strings.Split(value, ",") {
+			name := sanitizeName(part)
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	for i := index + 1; i < len(args); i++ {
+		arg := args[i]
+		if value, ok := strings.CutPrefix(arg, "--name="); ok {
+			add(value)
+			continue
+		}
+		if arg == "--name" && i+1 < len(args) {
+			add(args[i+1])
+			i++
+		}
+	}
+	return names
+}
+
+func sanitizeName(name string) string {
 	var b strings.Builder
 	for _, r := range name {
 		switch {
