@@ -2,7 +2,7 @@
 *.log
 *.pid
 .idea
-*/storage/*
+examples/demo-service/storage/
 bin/
 dist/
 coverage.out

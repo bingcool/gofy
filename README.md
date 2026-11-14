@@ -442,8 +442,9 @@ log:
 
 demo-service 的分流结果：HTTP 模式写 `storage/log/http/<date>/`（`info` /
 `error` / `system_error`）和 `storage/log/access/<date>/access.log`；脚本模式写
-`storage/log/script/<date>/{info,error}/`，没有访问日志。完整目录说明见
-[examples/demo-service/storage/log/README.md](examples/demo-service/storage/log/README.md)。
+`storage/log/script/<date>/{info,error}/`，没有访问日志。这些目录由进程在运行时
+自行创建，整个 `examples/demo-service/storage/` 都是运行产物，不纳入版本库
+（见根 `.gitignore`）。
 
 数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
 MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase` 交给 App 托管连接池，
