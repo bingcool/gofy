@@ -1,7 +1,7 @@
 # storage/log
 
 demo-service 的日志目录，按执行模式分目录，参考 swoolefy 的
-`cli` / `script` / `daemon` 日志划分：
+`cli` / `script` / `worker` 日志划分：
 
 ```
 storage/log/
@@ -23,7 +23,7 @@ storage/log/
 │       └── error/
 │           ├── fix-order.log
 │           └── fix-order-system_error.log
-└── daemon/                   # worker --group
+└── worker/                   # worker --group
     └── 20261106/
         ├── info/
         │   └── order-consumer-h1.log
@@ -54,13 +54,13 @@ script/20261106/error/fix-order-system_error.log
 `fix-order.log` 是脚本的 error 级日志，`fix-order-system_error.log` 是框架
 自动捕获的 panic。两个文件分开，避免业务错误和系统异常混在一起。
 
-daemon 模式（`worker` 子命令）使用与脚本模式相同的 `info/` + `error/` 布局，文件名
+worker 模式（`worker` 子命令）使用与脚本模式相同的 `info/` + `error/` 布局，文件名
 是**运行中的 worker 名**，做到一个 worker 一组文件：
 
 ```
-daemon/20261106/info/order-consumer-h1.log
-daemon/20261106/error/order-consumer.log
-daemon/20261106/error/order-consumer-system_error.log
+worker/20261106/info/order-consumer-h1.log
+worker/20261106/error/order-consumer.log
+worker/20261106/error/order-consumer-system_error.log
 ```
 
 名字来自 `systemenv.WorkerNames()`（`--name`，支持 `--name=a`、`--name a` 与
