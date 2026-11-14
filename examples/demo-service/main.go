@@ -66,12 +66,13 @@ func main() {
 	}
 
 	// Every group is registered in one binary; `worker --group=<group>` picks
-	// one at startup, so one image serves all worker deployments. Register takes
-	// no config: a group's settings live in its own package.
+	// one at startup, so one image serves all worker deployments. Consumer
+	// settings come from config.yaml, so a topic or a consumer group changes
+	// without a rebuild.
 	// 所有分组都注册进同一个二进制，`worker --group=<分组>` 在启动时选择其中一个，
-	// 因此一个镜像可以服务所有 worker 部署。Register 不接收配置：分组的参数在自己
-	// 的包里。
-	groups, err := appworker.Register()
+	// 因此一个镜像可以服务所有 worker 部署。消费者设置来自 config.yaml，改 topic
+	// 或消费组不必重新编译。
+	groups, err := appworker.Register(workerDeps(cfg))
 	if err != nil {
 		fatalf("build worker groups: %v", err)
 	}

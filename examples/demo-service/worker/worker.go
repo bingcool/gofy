@@ -29,16 +29,35 @@ import (
 	"github.com/yourorg/demo-service/worker/group2"
 )
 
+// Deps is what the groups need from the application: the consumer settings
+// from config.yaml and the broker connection blocks they refer to.
+//
+// The connection maps are the already-decoded kafka/amqp/rocketmq/redis
+// blocks, filtered to enabled instances. Passing them in — instead of letting a
+// group read the file itself — keeps one decoder for the whole binary and makes
+// a missing instance an error at registration, before any goroutine starts.
+// Deps 是分组需要应用提供的东西：config.yaml 里的消费者设置，以及它们引用的
+// broker 连接段。
+//
+// 连接表就是已解码并过滤过启用项的 kafka/amqp/rocketmq/redis 配置。传进来而不是
+// 让分组自己去读文件，是为了整个二进制只有一个解码器，并让"实例不存在"在注册阶段
+// 就报错，而不是等到 goroutine 跑起来。
+type Deps struct {
+	// Group1 carries the scan defaults plus the four consumer blocks.
+	// Group1 携带扫描默认值与四个消费者配置。
+	Group1 group1.Config
+	// Connections resolves the instance names used by the consumers.
+	// Connections 解析消费者引用的实例名。
+	Connections group1.Connections
+}
+
 // Register builds every group the binary knows about, in the order `worker
 // --list` prints them. Adding a group means adding a package and one line here;
-// nothing else in the binary changes. It takes no config: each group's settings
-// live in its own package, so there is no file to decode and no second source of
-// truth for numbers like instance counts.
+// nothing else in the binary changes.
 // Register 构造二进制认识的所有分组，顺序与 `worker --list` 的输出一致。新增一个分组
-// 只需加一个子包加这里一行，二进制其它部分不用改。它不接收配置：每个分组的参数就在
-// 自己包里，因此没有文件要解码，实例数这类数字也不会出现第二个来源。
-func Register() ([]*gofyworker.Group, error) {
-	first, err := group1.NewGroup()
+// 只需加一个子包加这里一行，二进制其它部分不用改。
+func Register(deps Deps) ([]*gofyworker.Group, error) {
+	first, err := group1.NewGroup(deps.Group1, deps.Connections)
 	if err != nil {
 		return nil, err
 	}

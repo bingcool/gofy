@@ -1,0 +1,77 @@
+# 常驻消费者的配置。与 config.yaml 分开有两个理由：
+#   1. 只有 `worker --group=<g>` 会读它，HTTP 进程与脚本完全不需要；
+#   2. 它随 worker 的 Deployment 走，改 topic 或并发只要重启 worker，不碰 API 配置。
+#
+# 分组清单与扫描节奏仍在 group1/ 的代码里（那是代码事实）；topic、消费组、并发与
+# 开关属于部署事实，放这里改完重启即可生效，不用重新编译。
+#
+# 路径：默认读取工作目录下的 worker/worker.yaml，可用 WORKER_CONFIG_PATH 指向别的
+# 文件（容器里挂 ConfigMap 时用得上）。文件不存在等同于四个消费者全部关闭，进程照常
+# 启动；文件存在但解析或校验失败会在启动时报错，不会静默跳过。
+#
+# 四个消费者各自独立：把 enabled 打开一个不会顺带启用其它三个，未启用的消费者
+# 既不出现在 `worker --list` 里，也不会建立任何连接。
+#
+# instance / redis_instance 写的是 config.yaml 里 kafka / amqp / rocketmq / redis 段的
+# 实例名，broker 地址只在那里配一次。引用了未启用的实例会在启动时报错。
+#
+# 消息契约（envelope）：
+#   {"id":"evt-1","type":"order.cancelled","occurred_at":"2026-01-01T00:00:00Z",
+#    "payload":{"order_id":1,"user_id":7,"reason":"user"}}
+# 已知 type：order.paid、order.cancelled；未知 type 与解不出的消息体会记为 dead
+# 并确认，不会无限重投。
+#
+# idempotency 默认开启，需要 worker_consumed_messages 表：消费者首次启动时自动
+# 建表，也可以先执行 migrations/0003_worker_consumed_messages.sql。
+#
+# 启动命令：`demo-service worker --group=group1`（本地调试可加 --name 只跑一个）。
+consumers:
+  kafka:
+    enabled: false
+    instance: default
+    concurrency: 1
+    topic: demo.order.events
+    group: demo-service-order-consumer
+    commit_mode: manual
+    auto_offset_reset: earliest
+    session_timeout: 45s
+    retry_delay: 1s
+    idempotency: true
+    max_attempts: 5
+  amqp:
+    enabled: false
+    instance: default
+    concurrency: 1
+    exchange: demo.orders
+    exchange_type: topic
+    queue: demo.order.events
+    binding_key: "order.*"
+    routing_key: "order.*"
+    durable: true
+    prefetch_count: 32
+    reconnect_delay: 3s
+    idempotency: true
+    max_attempts: 5
+  rocketmq:
+    enabled: false
+    instance: default
+    concurrency: 1
+    topic: demo-order-events
+    group: demo-service-order-consumer
+    tags: []
+    pull_workers: 1
+    batch_size: 16
+    await_duration: 5s
+    invisible_duration: 30s
+    idempotency: true
+    max_attempts: 5
+  queues:
+    enabled: false
+    redis_instance: ratelimit
+    concurrency: 2
+    key: demo:order:events
+    max_retries: 3
+    idle_delay: 200ms
+    retry_delay: 3s
+    idempotency: true
+    max_attempts: 5

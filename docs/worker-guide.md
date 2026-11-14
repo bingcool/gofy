@@ -132,8 +132,9 @@ worker:
       interval: 1h
 ```
 
-demo 的 `config.yaml` 没有 `worker:` 段：分组参数（并发数、节奏）写在各分组包里，探针也没
-启用，所以它只有 `pid_file` 这类公共项。
+demo 的 `config.yaml` 没有 `worker:` 段：消费者设置独立成 `worker/worker.yaml`，只有
+`worker --group=<g>` 会读它，HTTP 进程与脚本不加载；扫描参数（并发数、节奏）仍写在
+各分组包里。探针也没启用，所以 `config.yaml` 只剩 `pid_file` 这类公共项。
 
 各维度的隔离程度不一样，部署时按这张表对照：
 
@@ -219,6 +220,15 @@ consumer := kafkaconsumer.New("order-consumer", client, kafkaconsumer.Config{
 适配器替你做了三件事：把投递 context 换成 drain context（否则 SIGTERM 一到，在途消息立刻取消、未 ack、重投）、只在停机时 `Close`（出错关掉会让重启策略复用不了同一个消费者）、错误原样交给重启策略。
 
 `amqpconsumer` / `rocketmqconsumer` 的用法相同，只换构造参数。
+
+适配器之上还有四件事值得在业务侧补上，`examples/demo-service/worker/group1` 是一份可直接对照的完整实现：
+
+| 关注点 | 做法 |
+| --- | --- |
+| 幂等 | `(consumer, message_id)` 唯一索引的台账表，INSERT 抢行即认领 |
+| 错误分类 | 永久错误（解不出、未知 type）确认并记 dead；其它错误留给 broker 重投 |
+| 幂等键 | Kafka 用 `message_id` 头或 `topic/partition@offset`；AMQP 用 `MessageId` |
+| 链路 | 从消息属性提取 `traceparent`，把消费挂到生产者那条 trace 上 |
 
 ### 4.3 Redis 队列
 

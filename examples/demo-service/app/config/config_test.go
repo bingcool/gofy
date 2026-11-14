@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -356,5 +357,107 @@ func TestApplyLogPathsKeepsConfiguredOutputs(t *testing.T) {
 	}
 	if len(cfg.Log.AccessOutputs) != 1 {
 		t.Fatalf("access outputs = %v", cfg.Log.AccessOutputs)
+	}
+}
+
+// TestLoadWorkerConfigFromSeparateFile pins the split: consumer settings come
+// from worker/worker.yaml, not from config.yaml, and the defaults declared on
+// group1.Config still apply to the fields the file omits.
+// TestLoadWorkerConfigFromSeparateFile 固定这次拆分：消费者设置来自
+// worker/worker.yaml 而非 config.yaml，同时 group1.Config 上声明的默认值对文件里
+// 省略的字段仍然生效。
+func TestLoadWorkerConfigFromSeparateFile(t *testing.T) {
+	mainPath := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+`)
+	workerPath := filepath.Join(t.TempDir(), "worker.yaml")
+	body := `
+consumers:
+  kafka:
+    enabled: true
+    instance: default
+    concurrency: 2
+    topic: demo.order.events
+    group: demo-service-order-consumer
+    max_attempts: 4
+`
+	if err := os.WriteFile(workerPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write worker config: %v", err)
+	}
+	t.Setenv(WorkerConfigEnv, workerPath)
+
+	cfg, err := Load(context.Background(), mainPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	kafka := cfg.Worker.Consumers.Kafka
+	if !kafka.Enabled {
+		t.Fatal("kafka consumer is not enabled")
+	}
+	if kafka.Topic != "demo.order.events" || kafka.Group != "demo-service-order-consumer" {
+		t.Fatalf("kafka = %+v", kafka)
+	}
+	if kafka.Concurrency != 2 {
+		t.Fatalf("concurrency = %d, want 2", kafka.Concurrency)
+	}
+	// Defaults come from the struct tags, not from the file.
+	// 默认值来自结构体标签，而不是文件内容。
+	if kafka.CommitMode != "manual" {
+		t.Fatalf("commit_mode = %q, want the default manual", kafka.CommitMode)
+	}
+	if !kafka.Idempotency {
+		t.Fatal("idempotency defaulted to false, want true")
+	}
+	if cfg.Worker.Consumers.AMQP.Enabled {
+		t.Fatal("amqp consumer was enabled by a file that never mentioned it")
+	}
+}
+
+// TestLoadWithoutWorkerConfigDisablesConsumers keeps an API-only deployment
+// working: no worker file means every consumer is off, not a startup failure.
+// TestLoadWithoutWorkerConfigDisablesConsumers 让只跑 API 的部署照常启动：没有
+// worker 文件意味着消费者全关，而不是启动失败。
+func TestLoadWithoutWorkerConfigDisablesConsumers(t *testing.T) {
+	mainPath := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+`)
+	t.Setenv(WorkerConfigEnv, filepath.Join(t.TempDir(), "absent.yaml"))
+
+	cfg, err := Load(context.Background(), mainPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	consumers := cfg.Worker.Consumers
+	if consumers.Kafka.Enabled || consumers.AMQP.Enabled || consumers.RocketMQ.Enabled || consumers.Queues.Enabled {
+		t.Fatalf("a missing worker file enabled a consumer: %+v", consumers)
+	}
+}
+
+// TestLoadRejectsInlineWorkerBlock points a stale copy of the block at the new
+// file instead of failing with "field worker not found", which reads like a
+// typo.
+// TestLoadRejectsInlineWorkerBlock 把残留的配置段指向新文件，而不是用
+// "field worker not found" 让人以为拼错了字段。
+func TestLoadRejectsInlineWorkerBlock(t *testing.T) {
+	mainPath := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+worker:
+  consumers:
+    kafka:
+      enabled: true
+`)
+
+	_, err := Load(context.Background(), mainPath)
+	if err == nil {
+		t.Fatal("Load accepted an inline worker block")
+	}
+	if !strings.Contains(err.Error(), "moved to") {
+		t.Fatalf("error = %v, want it to point at the new file", err)
 	}
 }

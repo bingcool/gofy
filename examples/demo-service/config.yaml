@@ -201,10 +201,11 @@ rocketmq:
     enabled: false
     endpoint: 127.0.0.1:8081
 
-# 常驻任务没有配置段：分组清单、并发数与节奏都在 worker/ 目录里，由
-# `demo-service worker --group=<分组>` 启动（本地调试可用 --group='*' 跑全部）。
-# 就绪探针默认不开；需要时在 options.go 里加 gofy.WithWorkerHealth(addr)。
+# 常驻消费者的配置不在本文件：见 worker/worker.yaml。那份配置只有
+# `worker --group=<分组>` 会读，HTTP 进程与脚本不加载它；容器里挂 ConfigMap 时
+# 用 WORKER_CONFIG_PATH 指向挂载路径即可。本文件里再写 worker: 段会启动报错。
 
+# 就绪探针默认不开；需要时在 options.go 里加 gofy.WithWorkerHealth(addr)。
 pid_file: app/demo-service.pid
 
 # 契约在分组上显式声明了 "auth" 中间件，其内部用框架 JWT
