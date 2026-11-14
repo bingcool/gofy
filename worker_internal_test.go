@@ -201,3 +201,61 @@ func TestWithWorkerHealthValidatesAddr(t *testing.T) {
 		t.Fatalf("workerHealth = %q, want :9099", app.opts.workerHealth)
 	}
 }
+
+// TestWithWorkerConcurrencyRejectsUnknownWorker guards the failure mode that
+// multi-group setups make easy: a renamed worker leaves a stale key behind, and
+// without this check the only symptom is that worker running one instance.
+// TestWithWorkerConcurrencyRejectsUnknownWorker 守住多分组下容易出现的失败：worker
+// 改名后留下过期键，没有这道校验时唯一的表现就是那个 worker 只跑一个实例。
+func TestWithWorkerConcurrencyRejectsUnknownWorker(t *testing.T) {
+	group, err := worker.NewGroup("order",
+		worker.Func("scan", func(context.Context) error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+
+	for _, key := range []string{"order/missing", "settle/scan", "order/scanx"} {
+		_, err := New(
+			WithName("worker-test"),
+			WithWorkerGroups(group),
+			WithWorkerConcurrency(map[string]int{key: 2}),
+		)
+		if err == nil {
+			t.Fatalf("New accepted concurrency key %q that matches no worker", key)
+		}
+		if !strings.Contains(err.Error(), key) {
+			t.Fatalf("error %v does not name the offending key %q", err, key)
+		}
+	}
+}
+
+// TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown pins that the check runs
+// once every option has been applied: with several groups registered in
+// different places, the concurrency map may be declared before the group it
+// addresses.
+// TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown 固定"所有选项应用完才校验"：
+// 分组可能在多个地方注册，并发映射完全可能先于它要覆盖的分组声明。
+func TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown(t *testing.T) {
+	group, err := worker.NewGroup("order",
+		worker.Func("scan", func(context.Context) error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	app, err := New(
+		WithName("worker-test"),
+		WithWorkerConcurrency(map[string]int{"order/scan": 3}),
+		WithWorkerGroups(group),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, g := range app.workerDescriptors() {
+		for _, w := range g.Workers {
+			if g.Name+"/"+w.Name == "order/scan" && w.Concurrency != 3 {
+				t.Fatalf("order/scan concurrency = %d, want 3", w.Concurrency)
+			}
+		}
+	}
+}

@@ -133,3 +133,50 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// TestExecuteWorkerRunsOnlyTheRequestedGroup is the property that makes several
+// groups in one binary safe: `--group` must start that group and nothing else,
+// otherwise a deployment that owns one group would silently consume the work of
+// another.
+// TestExecuteWorkerRunsOnlyTheRequestedGroup 是同一个二进制里放多个分组仍安全的
+// 关键：`--group` 只能启动指定分组，否则只该拥有一个分组的 Deployment 会悄悄抢另
+// 一个分组的活。
+func TestExecuteWorkerRunsOnlyTheRequestedGroup(t *testing.T) {
+	var orderStarted, reportStarted int32
+	build := func(name string, started *int32) *worker.Group {
+		t.Helper()
+		group, err := worker.NewGroup(name, worker.Func(name+"-tick", func(ctx context.Context) error {
+			atomic.AddInt32(started, 1)
+			<-ctx.Done()
+			return nil
+		}))
+		if err != nil {
+			t.Fatalf("NewGroup(%s): %v", name, err)
+		}
+		return group
+	}
+
+	app, err := gofy.New(
+		gofy.WithName("worker-test"),
+		gofy.WithWorkerGroups(build("order", &orderStarted), build("report", &reportStarted)),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- app.ExecuteArgs(ctx, []string{"worker", "--group=report"})
+	}()
+
+	waitFor(t, func() bool { return atomic.LoadInt32(&reportStarted) == 1 }, "report group to start")
+	time.Sleep(50 * time.Millisecond)
+	if got := atomic.LoadInt32(&orderStarted); got != 0 {
+		t.Fatalf("order group started %d times while --group=report, want 0", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("ExecuteArgs error = %v", err)
+	}
+}

@@ -528,12 +528,14 @@ func WithWorkerPolicy(policy worker.Policy) Option {
 }
 
 // WithWorkerConcurrency overrides the instance count per worker. Keys are
-// "group/worker"; an unmatched key is ignored only until the group is started,
-// where a typo shows up as the configured worker still running one instance.
-// Values below one fail New.
-// WithWorkerConcurrency 按 worker 覆盖实例数，键为 "group/worker"。未匹配的键
-// 不会报错，因此写错名字只会表现为该 worker 仍按 1 个实例运行。小于 1 的值会让
-// New 失败。
+// "group/worker" and must address a worker some registered group actually owns:
+// the check runs at the end of New, so a stale key fails startup instead of
+// leaving that worker quietly running one instance. Values below one fail New
+// as well. Calls merge.
+// WithWorkerConcurrency 按 worker 覆盖实例数，键为 "group/worker"，必须对应某个已
+// 注册分组里真实存在的 worker：校验在 New 结束时进行，因此过期的键会让启动失败，
+// 而不是让那个 worker 静默只跑一个实例；与 WithWorkerGroups 的调用先后无关。小于 1
+// 的值同样让 New 失败。可多次调用合并。
 func WithWorkerConcurrency(concurrency map[string]int) Option {
 	return func(o *options) error {
 		for key, n := range concurrency {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -168,6 +169,9 @@ func (o *options) validate() error {
 	if err := command.Validate(o.commands); err != nil {
 		return err
 	}
+	if err := o.validateWorkerConcurrency(); err != nil {
+		return err
+	}
 	if o.shutdownTimeout <= 0 {
 		return fmt.Errorf("gofy: shutdown timeout must be positive")
 	}
@@ -179,6 +183,34 @@ func (o *options) validate() error {
 	}
 	if o.responder == nil {
 		return fmt.Errorf("gofy: responder must not be nil")
+	}
+	return nil
+}
+
+// validateWorkerConcurrency rejects a key that addresses no registered worker.
+// With several groups a stale key is easy to miss, and its only symptom would be
+// that worker quietly running a single instance.
+// validateWorkerConcurrency 拒绝没有对应 worker 的键。有多个分组时过期的键很容易
+// 被忽略，而它唯一的表现就是那个 worker 悄悄只跑一个实例。
+func (o *options) validateWorkerConcurrency() error {
+	if len(o.workerConcurrency) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(o.workerGroups))
+	for _, g := range o.workerGroups {
+		for _, w := range g.Workers() {
+			known[g.Name()+"/"+w.Name()] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(o.workerConcurrency))
+	for key := range o.workerConcurrency {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, ok := known[key]; !ok {
+			return fmt.Errorf("gofy: worker concurrency key %q matches no registered worker", key)
+		}
 	}
 	return nil
 }

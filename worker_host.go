@@ -22,6 +22,18 @@ import (
 // runWorker 托管一个 worker 分组。它与 HTTP 路径共用 logger、数据库、遥测与
 // Runtime，但不注册路由、不监听端口、不向 Nacos 注册，因此进程是纯消费者。
 func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) error {
+	// Resolve the group before anything is built: a typo in --group should not
+	// open a database pool, start telemetry or write a log line first.
+	// 先解析分组再构建任何资源：--group 拼错时不应该先去连数据库、启动遥测、写日志。
+	group, err := a.workerGroup(opts.Group)
+	if err != nil {
+		return err
+	}
+	group, err = group.Subset(opts.Names)
+	if err != nil {
+		return err
+	}
+
 	if err := a.beginStart(false); err != nil {
 		return err
 	}
@@ -66,14 +78,6 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	})
 	a.rt = rt
 
-	group, err := a.workerGroup(opts.Group)
-	if err != nil {
-		return a.abort(err)
-	}
-	group, err = group.Subset(opts.Names)
-	if err != nil {
-		return a.abort(err)
-	}
 	runner, err := worker.NewRunner(group, worker.RunConfig{
 		Policy:       a.opts.workerPolicy,
 		Concurrency:  a.workerConcurrency(group, opts.Concurrency),
