@@ -71,9 +71,9 @@ worker/20261106/error/order-consumer-system_error.log
 
 多个分组时，日志目录不再按分组分层（早期版本是 `worker/<date>/<group>/info.log`），
 文件名本身就带着分组信息：整组启动用分组名（`order-h1.log`、`report-h1.log`），
-`--name` 启动用 worker 名。因此**同一个应用里 worker 名应全局唯一**——示例用
-`order-scan`、`report-summary` 这样带分组前缀的名字，两个分组同机运行时也不会写到
-同一个文件。
+`--name` 启动用 worker 名。因此**同一个应用里 worker 名应全局唯一**——示例里两个分组的 worker 名不同
+（`order-scan`、`report-summary`），同机运行也不会写到同一个文件；新增 worker 时保持
+名字在整个应用里唯一即可。
 
 脚本名来自 `systemenv.ScriptName()`：取 `script` 后面的第一个非 flag 参数，
 去掉空白，只保留字母、数字、`-` 和 `_`，防止命令行参数影响目录结构。

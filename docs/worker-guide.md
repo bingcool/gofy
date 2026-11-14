@@ -136,7 +136,7 @@ worker:
 | 并发数 | 是 | 键为 `group/worker`，写错名字 `New` 直接失败（不再静默退回 1 个实例） |
 | 探针端口 | **否** | `WithWorkerHealth` 是进程级地址；k8s 里每组一个 Pod 不冲突，同机跑两组要换端口或用 `ORDER_CONFIG` 换配置 |
 
-新增一个分组只要三步：写 `report.go`（成员 + 它的配置结构）、在 `Register` 的返回列表里加
+新增一个分组只要三步：写一个分组文件（如 `group3_register.go`，含成员 + 它的配置结构）、在 `Register` 的返回列表里加
 一项、`config.yaml` 加同名配置块。`main.go` 与部署清单不用改结构——复制一份清单，改
 `--group` 和副本数即可。
 
