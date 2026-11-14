@@ -17,26 +17,30 @@ logger 与数据库，MQ 消费者则在 `Run` 里按配置自建连接——wor
 
 ```
 worker/
-├── worker.yaml            # 四个消费者的全部配置（独立于 config.yaml）
 ├── worker.go              # Register：构造全部分组，交给 main
+├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：按配置装配成员
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、四个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
-│   ├── kafka.go           # order-kafka-consumer
-│   ├── amqp.go            # order-amqp-consumer
-│   ├── rocketmq.go        # order-rocketmq-consumer
-│   └── queues.go          # order-queues-consumer（Redis 队列）
+│   ├── kafka_order.go     # order-kafka-consumer：一个订阅 + 它的配置
+│   ├── amqp_order.go      # order-amqp-consumer
+│   ├── rocketmq_order.go  # order-rocketmq-consumer
+│   └── queues_order.go    # order-queues-consumer（Redis 队列）
 └── group2/
     ├── abc_register.go    # group2 的 NewGroup
     └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
 ```
 
-四个消费者共用的那一半不在示例里：配置块、信封、幂等台账与错误分类都在框架的
-`support/consumer`（见它的 [README](../../../support/consumer/README.md)）。它不认识订单业务，
-只认 `Message`、`Envelope` 和一个 `HandlerFunc`，所以该留在框架里——放进示例，第二个项目
-就得复制一遍。示例只留协议适配器与业务 handler，这也是照着抄的时候该抄的部分。
+没有 `worker.yaml`：每个订阅的设置就在它自己的文件里，和 `scanDefaults` 一样是代码。
+这是刻意的——配置文件那种"一个 broker 一个块"的形状，一个进程只能描述一个 Kafka 订阅，
+而实际服务往往要读好几条事件流。多一条 stream 就是多一个文件。
+
+消费者背后的信封、幂等台账、错误分类与四种 broker 的构造器都在框架的
+[`support/consumer`](../../../support/consumer/README.md)。它不认识订单业务，只认
+`Message`、`Envelope` 与一个 handler，所以该留在框架里——放进示例，第二个项目就得复制
+一遍。示例只留"一个订阅一个文件"和业务分支，这也是照着抄的时候该抄的部分。
 
 `abc_` 前缀只是为了让入口文件排在成员文件之前，没有语义；下划线开头不行，Go 会忽略
 `_register.go`，`NewGroup` 会跟着从编译里消失。
@@ -51,7 +55,7 @@ worker/
 | group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
 | group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅，手动提交位点 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
-| group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅，SDK 侧拉取 |
+| group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `tag=order`，SDK 侧拉取 |
 | group1 | `order-queues-consumer` | 2 | 常驻 | Redis 队列，弹出即删除 |
 | group1 | `order-heartbeat` | 1 | 10s | 不依赖数据库，留一行可 grep 的存活日志 |
 | group2 | `report-summary` | 1 | 1h | 按状态聚合订单，多实例会重复写同一份报表 |
@@ -59,20 +63,23 @@ worker/
 拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
-四个消费者默认全部 `enabled: false`，因此默认的 `--list` 只显示扫描与心跳。启用哪个，
-`--list` 就多出哪个；实例数由 `consumers.<kind>.concurrency` 决定，`--concurrency`
-仍可覆盖。
+四个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
+实际跑哪些用 `--name` 选；注册不建连，所以 `--list` 和被过滤掉的消费者都不产生成本。
+实例数写在各自的配置文件里，`--concurrency` 仍可覆盖。
 
 ## 消费者怎么接入
 
-四个消费者共用同一条链路，协议差异只留在各自的协议文件里：
+每个订阅一个文件：配置、handler、没有别的：
 
 ```
-kafka.go / amqp.go / rocketmq.go / queues.go   把协议记录转成 consumer.Message
+kafka_order.go / amqp_order.go / rocketmq_order.go / queues_order.go
+        一个订阅一个文件：Config + Handler
         ↓
-support/consumer Processor.Handle          提取 trace → 查幂等台账 → 解信封
+support/consumer Processor.Handle
+        提取 trace → 查幂等台账 → 解信封 → 调 handler
         ↓
-handler_order.go                               按 event.type 落到 orders 表
+handler_order.go
+        按 event.type 落到 orders 表
 ```
 
 ### 消息契约
@@ -145,15 +152,15 @@ context，每个 handler 都失败。
 
 ### 新增一种消费者
 
-已支持的四种协议，加订阅只要写适配器；要接一种新协议（Pulsar、NATS），第一步落在框架里：
+已支持的四种协议，加订阅就是在分组里加一个文件；要接一种新协议（Pulsar、NATS），
+第一步落在框架里：
 
-1. 在 `support/consumer/config.go` 加一个配置结构（照 `KafkaConsumer`），带 `Enabled` 与
-   `Instance`，在 `Consumers` 与 `Validate` 里各加一行；
-2. 照 `kafka.go` 在分组里写一个文件：`Run` 里建连 → 构造适配器 → `return w.Run(ctx)`，
-   协议记录转成 `consumer.Message`；
-3. 在 `abc_register.go` 的 `NewGroup` 里 `if consumer.Enabled { ... }` 追加；
-4. 在 `worker/worker.yaml` 的 `consumers` 下加同名配置块，`instance` 指向 config.yaml 里已有的
-   `kafka`/`amqp`/`rocketmq`/`redis` 实例。
+1. 照 `support/consumer/kafka.go` 写一个文件：`XxxConfig`（配置 + 默认值 + `validate`）、
+   `XxxMessage`（信封 + 原生实体）、`NewXxx(conns, cfg)` 返回实现 `Name`/`Concurrency`/`Run`
+   的值，`Run` 里建连 → 装配 `Processor` → 调用 `support/worker/consumer` 的适配器；
+2. 在 `support/consumer/consume.go` 的编译期断言里补两行，保证它仍然满足 `worker.Worker`；
+3. 在 `group1` 里加一个文件：`var xxxConfig = gofyconsumer.XxxConfig{...}` 加业务 handler；
+4. 在 `abc_register.go` 的 `NewGroup` 里 `gofyconsumer.NewXxx(conns, xxxConfig)` 追加。
 
 `worker --list` 出现新名字即接好，不用改 main、不用改部署清单。
 
@@ -170,34 +177,49 @@ $ go run . worker
 
 ```bash
 $ go run . worker --list
-┌────────┬─────────────────┬─────────────┐
-│ GROUP  │ WORKER          │ CONCURRENCY │
-├────────┼─────────────────┼─────────────┤
-│ group1 │ order-scan      │ 2           │
-├────────┼─────────────────┼─────────────┤
-│ group1 │ order-heartbeat │ 1           │
-├────────┼─────────────────┼─────────────┤
-│ group2 │ report-summary  │ 1           │
-└────────┴─────────────────┴─────────────┘
+┌────────┬─────────────────────────┬─────────────┐
+│ GROUP  │ WORKER                  │ CONCURRENCY │
+├────────┼─────────────────────────┼─────────────┤
+│ group1 │ order-scan              │ 2           │
+├────────┼─────────────────────────┼─────────────┤
+│ group1 │ order-kafka-consumer    │ 1           │
+├────────┼─────────────────────────┼─────────────┤
+│ group1 │ order-amqp-consumer     │ 1           │
+├────────┼─────────────────────────┼─────────────┤
+│ group1 │ order-rocketmq-consumer │ 1           │
+├────────┼─────────────────────────┼─────────────┤
+│ group1 │ order-queues-consumer   │ 2           │
+├────────┼─────────────────────────┼─────────────┤
+│ group1 │ order-heartbeat         │ 1           │
+├────────┼─────────────────────────┼─────────────┤
+│ group2 │ report-summary          │ 1           │
+└────────┴─────────────────────────┴─────────────┘
 ```
 
 启动整组。前台运行，日志同时写 stdout 与文件：
 
 ```bash
 $ go run . worker --group=group1
-{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":2,"drain_timeout":20}
+{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":6,"drain_timeout":20}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#0","interval":5}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#1","interval":5}
 ```
 
-`workers:2` 是这个分组的成员数（`order-scan` 与 `order-heartbeat`），不是实例数；
-`order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
+`workers:6` 是这个分组的成员数（扫描、四个消费者、心跳），不是实例数；`order-scan` 起了
+2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
+
+整组启动意味着四个 broker 都要在。本地只有数据库与 Redis 时，用 `--name` 挑一个跑：
+
+```bash
+go run . worker --group=group1 --name=order-scan
+go run . worker --group=group1 --name=order-queues-consumer
+```
 
 本地调试时可以用通配符把全部注册分组放进同一个进程：
 
 ```bash
 $ go run . worker --group='*'
-{"level":"info","caller":"gofy/worker_host.go:145","msg":"worker groups started","workers":3,"groups":["group1","group2"]}
+{"level":"info","caller":"gofy/worker_host.go:145","msg":"worker groups started","workers":7,"groups":["group1","group2"]}
 ```
 
 它只解决“一条命令起全部循环”，不改变部署语义：pid 变成 `-worker-all.pid`，
@@ -259,12 +281,13 @@ $ go run . stop --worker='*' --force
 
 ## 参数
 
-参数分两类，来源不同不是偶然：
+参数只有一个来源：写在使用它的那个文件里。
 
 | 参数 | 放在哪 | 理由 |
 | --- | --- | --- |
-| 扫描节奏、默认实例数 | 代码里的 `xxxDefaults` | 属于实现细节，改它意味着改逻辑 |
-| topic、消费组、开关、并发、重试预算 | `worker/worker.yaml` | 属于部署事实，每个环境不同 |
+| 扫描节奏、扫描实例数 | `scan.go` 的 `scanDefaults` | 属于实现细节，改它意味着改逻辑 |
+| topic、消费组、并发、重试预算 | 各消费者文件的 `gofyconsumer.XxxConfig` | 一个订阅一个文件，才写得下多条事件流 |
+| broker 地址、账号、超时 | `config.yaml` | HTTP 进程也要用，只配一次 |
 
 扫描任务的参数写在它自己的文件里，结构体和取值放在一起，一个文件读完就知道会起几个
 实例、多久跑一次：
@@ -284,48 +307,36 @@ var scanDefaults = ScanWorkerConfig{
 
 `abc_register.go` 只负责把 worker 装进分组，不碰数字：`newScanWorker(scanDefaults)`。
 改参数就改这个 `scanDefaults`；临时改实例数用 `--group=group1 --concurrency=4`，不必动代码。
-结构体上没有 `yaml` 标签，配置里写 `scan:` 会被严格解码拒绝——扫描参数不再是配置来源。
 
-消费者相反：`gofyconsumer.Config` 带 `yaml` 标签，由 `app/config` 从 `worker/worker.yaml`
-解码后经 `worker.Register(Deps)` 传进分组。为什么单独一个文件：
+消费者是同一个形状，只是配置结构由框架提供：
 
-- 只有 `worker --group=<g>` 读它，HTTP 进程与脚本完全不加载；
-- 它随 worker 的 Deployment 走，改 topic 或并发只重启 worker，不碰 API 配置；
-- 容器里挂 ConfigMap 时用 `WORKER_CONFIG_PATH` 指向挂载路径，镜像布局不用改。
-
-文件顶层就是 `consumers:`，一个配置块长这样：
-
-```yaml
-# worker/worker.yaml
-consumers:
-  kafka:
-    enabled: true
-    instance: default          # 复用 config.yaml 里 kafka.default 的连接参数
-    concurrency: 1
-    topic: demo.order.events
-    group: demo-service-order-consumer
-    commit_mode: manual
-    idempotency: true
-    max_attempts: 5
+```go
+// group1/kafka_order.go
+var orderKafka = gofyconsumer.KafkaConfig{
+	Name:        "order-kafka-consumer",
+	Topic:       "demo.order.events",
+	Group:       "demo-service-order-consumer",
+	Concurrency: 1,
+	Idempotency: true,
+	Handler:     handleOrderKafka,
+}
 ```
 
-文件不存在等同于四个消费者全部关闭，进程照常启动（只跑 API 的部署不必携带它）；
-文件存在但解析或校验失败会在启动时报错。`config.yaml` 里再写 `worker:` 段会得到一条
-指向新路径的错误，而不是被静默忽略。
+零值就是默认值，只写让它与众不同的字段（默认值表见
+[`support/consumer/README.md`](../../../support/consumer/README.md)）。要读第二条事件流？
+再开一个文件，不要在共享块里加字段。
 
-`instance` / `redis_instance` 只写实例名，broker 地址在 `kafka` / `amqp` / `rocketmq` /
-`redis` 段配一次。引用了未启用的实例会在 `Register` 阶段报错，不会静默跑一个什么都不消费的
+`Instance` / `RedisInstance` 只写实例名，broker 地址在 `config.yaml` 的 `kafka` / `amqp` /
+`rocketmq` / `redis` 段配一次。写错了会在 `Register` 阶段报错，不会静默跑一个什么都不消费的
 worker。
 
 四条约束：
 
-- **实例数在 `worker.Func` 里是 `uint8`**：配置里的值先由 `Validate` 挡在 `1..255`，
-  转换函数再兜一层，越界回落到 1，不会静默截断成另一个数字。
-- **`--concurrency` 优先级最高**：命令行覆盖配置与 worker 自己声明的数字，临时压测不必改文件。
+- **实例数是 `uint8`**：`NewXxx` 校验时挡在 `1..255`，越界直接报错，不会静默改成 1。
+- **`--concurrency` 优先级最高**：命令行覆盖配置里写的数字，临时压测不必改代码。
 - **worker 名全应用唯一**：日志文件名取自 worker 名，两个分组用同一个名字会写到同一个
   文件（demo 里是 `order-scan`、`order-kafka-consumer`、`report-summary` 等）。
-- **配置错误在启动前失败**：`config.Load` 调 `Worker.Validate`，`Register` 解析实例名，
-  两者都发生在写 pid 文件与建连之前。
+- **错误在启动前失败**：`NewXxx` 校验配置并解析实例名，发生在写 pid 文件与建连之前。
 
 并发实例共享同一个 `Worker` 值，`Run` 里不能有可变的接收者状态；需要每实例独立的数据
 就放在 `Run` 内部，从 `worker.IdentityFrom(ctx)` 取 `group/name#index`。
@@ -364,8 +375,8 @@ panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 
 | `stop --worker=x` 报 not running | 未配置 `pid_file`，或分组名与启动时不同 | 查 `app/*-worker-<group>.pid` |
 | `--group='*'` 配 `--name` 报 usage error | 通配符按组运行，`--name` 只能指定一个组内的 worker | 改成 `--group=<拥有该 worker 的组>` |
 | `--list` 的数字和实际不同 | 用了 `--concurrency` | 覆盖只在本次启动生效，`--list` 读的是配置或代码里的数字 |
-| 启动即报 `kafka instance "x" is not configured or not enabled` | `instance` 写了未启用的实例名 | 改 `instance`，或把对应的 `kafka.x.enabled` 打开 |
-| 启动即报 `consumers.kafka: topic is required` | 打开了 `enabled` 但没填必填项 | 按报错里的路径补配置 |
+| 启动即报 `kafka instance "x" is not configured` | `Instance` 写了 config.yaml 里没有的实例名 | 改 `Instance`，或在 `config.yaml` 里补上该连接段 |
+| 启动即报 `kafka consumer "x": topic is required` | 订阅文件里没填必填项 | 报错里带消费者名与字段名，补在对应文件里 |
 | 日志出现 `consume claim failed` | 幂等台账不可用（库连不上、表被锁） | 先看数据库；台账不可用时不确认消息，broker 会重投 |
 | 同一条消息反复处理 | handler 返回可重试错误 | 看台账 `last_error`；`max_attempts` 用完后自动转 `dead` |
 | 日志出现 `message skipped` | 幂等命中或尝试次数用完 | 正常行为；查台账 `status` 区分是哪一种 |
@@ -376,4 +387,5 @@ panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 
 - `docs/worker-guide.md`：四种循环（claim / MQ / Redis 队列 / lease）的写法与部署建议
 - `docs/worker-daemon-design.md`：设计与验收记录
 - `support/worker/README.md`：包 API、`Policy` 重启策略、drain 语义
+- `support/consumer/README.md`：四种消费者的配置、原生实体、幂等与错误分类
 - `examples/demo-service/storage/log/README.md`：日志目录与文件命名规则

@@ -351,9 +351,10 @@ if err != nil {
 各客户端的选项按原样透传，不做统一抽象：AMQP 的 `AutoAck`（关闭手动确认）与 Kafka 的
 `DiscardOnError`（提交失败位点并继续）是不同契约，硬套一张结构体只会把差异藏起来。
 
-适配器只管协议。消费之后"怎么算处理完"由 [`support/consumer`](../consumer/README.md) 提供：
-配置块、消息信封、数据库幂等台账、永久/可重试分类。两者可以分开用——只要 worker 生命周期
-就只用本包的适配器；还要一套完整的消费语义，就在 handler 里接 `consumer.Processor.Handle`。
+适配器只管协议。往上一层是 [`support/consumer`](../consumer/README.md)：一个订阅一个文件，
+信封、数据库幂等台账、永久/可重试分类都在里面，`consumer.NewKafka(conns, cfg)` 返回的值直接
+满足 `Worker`，所以业务分组通常跳过本节的适配器、直接用那四个构造器。两者可以分开用——
+只要 worker 生命周期就只用本包的适配器；要完整的消费语义，就用 `support/consumer`。
 
 ## 选型：先看工作形态
 

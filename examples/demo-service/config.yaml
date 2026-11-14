@@ -201,9 +201,9 @@ rocketmq:
     enabled: false
     endpoint: 127.0.0.1:8081
 
-# 常驻消费者的配置不在本文件：见 worker/worker.yaml。那份配置只有
-# `worker --group=<分组>` 会读，HTTP 进程与脚本不加载它；容器里挂 ConfigMap 时
-# 用 WORKER_CONFIG_PATH 指向挂载路径即可。本文件里再写 worker: 段会启动报错。
+# 常驻消费者没有配置段：每个订阅是 worker/group1 里的一个文件，topic、消费组、
+# 并发与 handler 都写在那个文件里（像扫描节奏写在 scan.go 一样）。这里只保留
+# broker 连接参数，消费者的 instance 字段按名字引用它们。
 
 # 就绪探针默认不开；需要时在 options.go 里加 gofy.WithWorkerHealth(addr)。
 pid_file: app/demo-service.pid

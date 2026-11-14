@@ -123,7 +123,7 @@ func TestProcessorRequiresDatabase(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
 	_, err := NewProcessor(rt, ProcessorConfig{
 		Consumer:    testConsumerName,
-		Handler:     func(context.Context, Envelope) error { return nil },
+		Handler:     func(context.Context, Message, Envelope) error { return nil },
 		Idempotency: true,
 		MaxAttempts: 5,
 	})
@@ -143,7 +143,7 @@ func TestProcessorWithoutIdempotencyRuns(t *testing.T) {
 	handled := 0
 	proc, err := NewProcessor(rt, ProcessorConfig{
 		Consumer:    testConsumerName,
-		Handler:     func(context.Context, Envelope) error { handled++; return nil },
+		Handler:     func(context.Context, Message, Envelope) error { handled++; return nil },
 		Idempotency: false,
 		MaxAttempts: 5,
 	})
@@ -173,7 +173,7 @@ func TestProcessorAcknowledgesPermanentFailure(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
 	permanent, err := NewProcessor(rt, ProcessorConfig{
 		Consumer:    testConsumerName,
-		Handler:     func(context.Context, Envelope) error { return Permanent(errors.New("bad event")) },
+		Handler:     func(context.Context, Message, Envelope) error { return Permanent(errors.New("bad event")) },
 		Idempotency: false,
 		MaxAttempts: 5,
 	})
@@ -187,7 +187,7 @@ func TestProcessorAcknowledgesPermanentFailure(t *testing.T) {
 
 	retryable, err := NewProcessor(rt, ProcessorConfig{
 		Consumer:    testConsumerName,
-		Handler:     func(context.Context, Envelope) error { return errors.New("database is down") },
+		Handler:     func(context.Context, Message, Envelope) error { return errors.New("database is down") },
 		Idempotency: false,
 		MaxAttempts: 5,
 	})
@@ -207,7 +207,7 @@ func TestProcessorAcknowledgesUndecodableBody(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
 	proc, err := NewProcessor(rt, ProcessorConfig{
 		Consumer:    testConsumerName,
-		Handler:     func(context.Context, Envelope) error { return nil },
+		Handler:     func(context.Context, Message, Envelope) error { return nil },
 		Idempotency: false,
 		MaxAttempts: 5,
 	})

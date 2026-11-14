@@ -66,13 +66,13 @@ func main() {
 	}
 
 	// Every group is registered in one binary; `worker --group=<group>` picks
-	// one at startup, so one image serves all worker deployments. Consumer
-	// settings come from config.yaml, so a topic or a consumer group changes
-	// without a rebuild.
+	// one at startup, so one image serves all worker deployments. A consumer's
+	// topic and group are in its own file in the group, so a change there is a
+	// rebuild — that is the trade for "one subscription, one file".
 	// 所有分组都注册进同一个二进制，`worker --group=<分组>` 在启动时选择其中一个，
-	// 因此一个镜像可以服务所有 worker 部署。消费者设置来自 config.yaml，改 topic
-	// 或消费组不必重新编译。
-	groups, err := appworker.Register(workerDeps(cfg))
+	// 因此一个镜像可以服务所有 worker 部署。消费者的 topic 与消费组在分组里它自己的
+	// 文件中，改它们意味着重新编译——这是"一个订阅一个文件"换来的代价。
+	groups, err := appworker.Register(appworker.ConnectionsFrom(cfg))
 	if err != nil {
 		fatalf("build worker groups: %v", err)
 	}

@@ -8,22 +8,38 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `support/consumer`: the consumer semantics that the worker adapters leave to
-  the application are now a framework package. `consumer.Config` holds the four
-  blocks (`kafka`, `amqp`, `rocketmq`, `queues`) with `default` tags and a
-  `Validate` that runs at decode time, reporting a fixed `consumers.<kind>` path
-  in a stable check order so the same file fails the same way on every start.
-  `consumer.Connections` resolves an instance name (`KafkaConfig`,
-  `AMQPConfig`, `RocketMQConfig`, `RedisConfig`), so a disabled or misspelled
-  broker fails during registration instead of starting a consumer that reads
-  nothing. `consumer.NewProcessor` takes a `*core.Runtime` and wraps a
-  `HandlerFunc` with trace continuation from `traceparent`, a
-  `worker_consumed_messages` ledger keyed by `(consumer, message_id)` whose
-  insert-to-claim needs no lock, envelope decoding
-  (`id`/`type`/`occurred_at`/`payload`), and the permanent-versus-retryable
-  split: `Permanent(err)` is parked as `dead` and acknowledged, anything else
-  goes back to the broker until `max_attempts`. `examples/demo-service/worker`
-  keeps only the four protocol adapters and its business handler.
+- `support/consumer`: a resident consumer is now "one subscription, one file".
+  `NewKafka`, `NewAMQP`, `NewRocketMQ` and `NewQueues` take a config struct and
+  a `Connections` table and return a value that satisfies `worker.Worker` and
+  `worker.Concurrent`, so a group registers a consumer next to its polling loops
+  and writes no adapter of its own. Each config carries its own defaults —
+  `Concurrency` 1, `MaxAttempts` 5, Kafka `CommitMode` manual, AMQP
+  `PrefetchCount` 32, RocketMQ `AwaitDuration` 5s, Redis `MaxRetries` 3 — and a
+  `validate` that rejects a missing `Topic`/`Group`/`Queue`/`Key`, a bad
+  `CommitMode` or `ExchangeType`, a direct exchange whose routing and binding
+  keys differ, a RocketMQ tag that is empty or carries the `||` separator the
+  SDK builds its expression with, and a concurrency outside 1..255.
+  Construction resolves the instance name but never connects; `Run` connects,
+  consumes and releases, so `worker --list` and a `--name`-filtered worker cost
+  nothing. A missing instance fails at registration instead of starting a
+  consumer that reads nothing.
+
+  Handlers receive the decoded `Envelope` plus the native broker entity —
+  `KafkaMessage.Record`, `AMQPMessage.Delivery`, `RocketMQMessage.Message`,
+  `QueuesMessage.Message` — which is what a manual commit, an explicit `Ack`
+  or an offset log line needs. Behind them, `NewProcessor` continues the
+  producer's trace from `traceparent`, claims `(consumer, message_id)` in the
+  `worker_consumed_messages` ledger with a single insert (no lock), decodes the
+  `id`/`type`/`occurred_at`/`payload` contract, and splits permanent failures
+  (`Permanent(err)` is parked `dead` and acknowledged) from retryable ones (back
+  to the broker until `max_attempts`).
+
+  This replaces the `worker.yaml` mechanism: one block per broker could only
+  describe one subscription per process, which is the wrong shape for a service
+  that reads several event streams. Consumer settings now live next to the
+  handler that uses them, and `config.yaml` keeps only the broker connection
+  blocks. `examples/demo-service/worker` is the reference: four one-file
+  subscriptions plus the shared order handler.
 - Contract modules are now free of the gofy framework dependency: the
   `internal/integration/**` tests moved to `examples/demo-service`, so
   `examples/interface-service/go.mod` only requires `gofy-interface-api`

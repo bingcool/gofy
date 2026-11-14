@@ -1,3 +1,26 @@
+// Package consumer is the shared half of a resident consumer: the message
+// envelope, a database-backed idempotency ledger, the permanent-versus-
+// retryable split, and one constructor per broker.
+//
+// Each broker lives in its own file and is used the way a scan loop is: a config
+// struct in the consumer's own file, a handler for the business branch, and
+// nothing else. NewKafka, NewAMQP, NewRocketMQ and NewQueues each return a value
+// that already satisfies worker.Worker — Name, Concurrency and Run — so a group
+// registers it next to its polling loops without an adapter of its own.
+//
+// The chain takes a *core.Runtime rather than its pieces one by one, so a
+// consumed message logs, traces and writes through exactly what the worker host
+// built — not a second logger, tracer or pool.
+// 包 consumer 是常驻消费者的共用部分：消息信封、基于数据库的幂等台账、"永久失败 /
+// 可重试"的区分，以及每种 broker 一个构造器。
+//
+// 每种 broker 各占一个文件，用法与扫描循环一致：消费者自己的文件里一个配置结构、
+// 一个业务 handler，没有别的。NewKafka、NewAMQP、NewRocketMQ、NewQueues 返回的值
+// 本身就满足 worker.Worker（Name、Concurrency、Run），分组把它和轮询任务放在一起注册
+// 即可，不必再写适配器。
+//
+// 链路接收 *core.Runtime 而不是逐个传入组件，是为了让消费到的消息用宿主构造的同一个
+// logger、tracer 与连接池，而不是另起一套。
 package consumer
 
 import (
@@ -20,6 +43,92 @@ import (
 
 	"github.com/bingcool/gofy/core"
 	gofyotel "github.com/bingcool/gofy/support/otel"
+	gofyworker "github.com/bingcool/gofy/support/worker"
+)
+
+// start builds what every consumer needs inside Run: the runtime's logger
+// decorated with the worker identity, and the processing chain.
+//
+// Keeping it here rather than in each broker file is what makes the four
+// constructors small enough to read in one sitting; the differences between
+// them stay in connect-and-subscribe, which is the part worth reading.
+// start 构造每个消费者在 Run 里都需要的东西：带上 worker 身份的 logger，以及处理链路。
+//
+// 放在这里而不是各 broker 文件里，是为了让四个构造器短到能一眼读完；它们之间的差异
+// 留在"建连与订阅"那一段，那才是值得读的部分。
+func start(ctx context.Context, name string, idempotency bool, maxAttempts int, handler HandlerFunc) (*Processor, *zap.Logger, error) {
+	rt, ok := gofyworker.RuntimeFrom(ctx)
+	if !ok {
+		return nil, nil, fmt.Errorf("%s: worker runtime is missing from the context", name)
+	}
+	id, _ := gofyworker.IdentityFrom(ctx)
+	logger := rt.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	lg := logger.With(
+		zap.String("worker", id.String()),
+		zap.String("consumer", name),
+	)
+	proc, err := NewProcessor(rt, ProcessorConfig{
+		Consumer:    name,
+		Handler:     handler,
+		Idempotency: idempotency,
+		MaxAttempts: maxAttempts,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return proc, lg, nil
+}
+
+// concurrency converts a validated instance count to the worker API's type.
+// Validation has already rejected anything outside 1..255, so the conversion
+// cannot silently wrap.
+// concurrency 把校验过的实例数转成 worker API 的类型。校验已经拒绝 1..255 之外的值，
+// 因此转换不会悄悄回绕。
+func concurrency(n int) uint8 {
+	if n < 1 || n > 255 {
+		return 1
+	}
+	return uint8(n)
+}
+
+// validateConcurrency rejects an instance count the worker API cannot hold. The
+// upper bound is the worker API's: it takes a uint8, so 256 is a configuration
+// mistake rather than a plan — and silently running one instance instead would
+// hide it.
+// validateConcurrency 拒绝 worker API 装不下的实例数。上限来自 worker API：它接收
+// uint8，因此 256 是配置错误而不是计划——静默只跑一个实例会把这个错误藏起来。
+func validateConcurrency(n int) error {
+	if n < 1 || n > 255 {
+		return fmt.Errorf("concurrency must be between 1 and 255, got %d", n)
+	}
+	return nil
+}
+
+// validName reports whether name can be used as a worker name. Consumers check
+// it at registration so a mistake fails there instead of at group construction.
+// validName 判断名字能否作为 worker 名。消费者在注册阶段检查，拼错的名字因此在那时
+// 失败，而不是等到构造分组。
+func validName(name string) bool { return gofyworker.ValidName(name) }
+
+// The four consumers must stay registrable as workers without importing
+// support/worker into their own files. These assertions are the compiler's
+// copy of that promise: dropping Name or changing Run's signature breaks the
+// build here instead of at a caller's group constructor.
+// 四个消费者必须能在自己的文件不导入 support/worker 的前提下注册为 worker。下面这些
+// 断言是编译器手里的那份承诺：少写 Name 或改了 Run 的签名，会在这里编译失败，而不是
+// 在调用方的分组构造函数里。
+var (
+	_ gofyworker.Worker     = (*KafkaConsumer)(nil)
+	_ gofyworker.Concurrent = (*KafkaConsumer)(nil)
+	_ gofyworker.Worker     = (*AMQPConsumer)(nil)
+	_ gofyworker.Concurrent = (*AMQPConsumer)(nil)
+	_ gofyworker.Worker     = (*RocketMQConsumer)(nil)
+	_ gofyworker.Concurrent = (*RocketMQConsumer)(nil)
+	_ gofyworker.Worker     = (*QueuesConsumer)(nil)
+	_ gofyworker.Concurrent = (*QueuesConsumer)(nil)
 )
 
 // Message is the protocol-independent view of one delivery. Each consumer
@@ -54,6 +163,14 @@ type Message struct {
 	// Enqueued is the broker timestamp when available.
 	// Enqueued 是 broker 提供的时间戳，拿不到时为零值。
 	Enqueued time.Time
+	// Native is the protocol record this message came from: a *kgo.Record, an
+	// amqp091.Delivery, a *rocketmq.Message or a *queues.Message. The handler
+	// receives it typed by its consumer, so this field exists only to carry it
+	// through the shared chain.
+	// Native 是这条消息来自的协议记录：*kgo.Record、amqp091.Delivery、
+	// *rocketmq.Message 或 *queues.Message。handler 拿到的是自己那一种类型，这个字段
+	// 只是把它带过共用链路。
+	Native any
 }
 
 // Envelope is the message contract the chain decodes: an id, a type, the time
@@ -78,15 +195,18 @@ type Envelope struct {
 
 // HandlerFunc processes one decoded envelope.
 //
-// A nil return acknowledges the message. A permanent error is logged, parked as
-// dead and acknowledged, because redelivering it cannot change the outcome. Any
-// other error leaves the message unacknowledged so the broker redelivers it —
-// which is also why handlers should be idempotent.
+// message carries the transport facts — attempt, headers and the native record —
+// and envelope carries the decoded body. A nil return acknowledges the message.
+// A permanent error is logged, parked as dead and acknowledged, because
+// redelivering it cannot change the outcome. Any other error leaves the message
+// unacknowledged so the broker redelivers it — which is also why handlers should
+// be idempotent.
 // HandlerFunc 处理一条已解码的信封。
 //
-// 返回 nil 表示确认消息。永久错误会记日志、标记为 dead 并确认，因为重投也改变
-// 不了结果。其它错误则不确认，由 broker 重投——这也是 handler 必须幂等的原因。
-type HandlerFunc func(ctx context.Context, envelope Envelope) error
+// message 携带传输层事实——投递次数、消息头与原生记录，envelope 携带解码后的消息体。
+// 返回 nil 表示确认消息。永久错误会记日志、标记为 dead 并确认，因为重投也改变不了
+// 结果。其它错误则不确认，由 broker 重投——这也是 handler 必须幂等的原因。
+type HandlerFunc func(ctx context.Context, message Message, envelope Envelope) error
 
 // permanentError marks a failure that redelivery cannot fix: an unknown event
 // type, a payload that does not decode, a required field that is missing.
@@ -202,7 +322,7 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 		logger:      rt.Logger,
 		tracer:      consumerTracer(rt),
 		propagator:  rt.Propagator,
-		maxAttempts: effectiveMaxAttempts(cfg.MaxAttempts),
+		maxAttempts: max(cfg.MaxAttempts, 1),
 	}
 	if p.logger == nil {
 		p.logger = zap.NewNop()
@@ -294,7 +414,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		return nil
 	}
 
-	err = p.handler(ctx, env)
+	err = p.handler(ctx, msg, env)
 	switch {
 	case err == nil:
 		if p.deduper != nil {

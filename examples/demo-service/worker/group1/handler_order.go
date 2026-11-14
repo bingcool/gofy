@@ -6,10 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"gorm.io/gorm"
-
-	"github.com/bingcool/gofy/core"
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
+	gofyworker "github.com/bingcool/gofy/support/worker"
+
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
@@ -38,58 +37,52 @@ type orderEventPayload struct {
 	Reason string `json:"reason"`
 }
 
-// orderEventHandler applies order events to the orders table.
+// applyOrderEvent is the business branch every consumer in this group shares.
 //
-// It writes through the runtime's database handle instead of a module-scoped
-// repository: a worker process runs no HTTP module, so the connection it can
-// rely on is the one the host opened for it.
-// orderEventHandler 把订单事件落到 orders 表。
+// It takes the decoded envelope, so each consumer file adapts its own message
+// type to it — and still reaches the native record when it needs an offset, a
+// delivery tag or a manual acknowledgement.
 //
-// 它通过 Runtime 的数据库句柄写入，而不是模块内的 repository：worker 进程不运行
-// HTTP 模块，能依赖的连接只有宿主为它打开的那个。
-type orderEventHandler struct {
-	db *gorm.DB
-}
-
-// newOrderHandler builds the demo's business handler. The database is required:
-// an event sink that cannot persist anything would only acknowledge messages
-// it never applied.
-// newOrderHandler 构造示例的业务 handler。数据库是必需的：一个什么都存不下的
-// 事件汇点只会确认它从未应用过的消息。
-func newOrderHandler(rt *core.Runtime) (gofyconsumer.HandlerFunc, error) {
-	if rt == nil || rt.DB == nil {
-		return nil, errors.New("order handler requires a runtime database")
+// The database comes from the runtime in ctx instead of being captured when the
+// handler is built: a consumer config is a package value, and its handler must
+// not hold a pool that outlives a reload. A worker process runs no HTTP module,
+// so the runtime's handle is the only connection it can rely on.
+// applyOrderEvent 是本分组内所有消费者共用的业务分支。
+//
+// 它接收已解码的信封，因此每个消费者文件把自己的消息类型适配到它——需要位点、投递
+// 标签或手动确认时，仍然能拿到原生记录。
+//
+// 数据库来自 ctx 里的 Runtime，而不是在构造 handler 时捕获：消费者配置是包级值，它的
+// handler 不应该持有一个比 reload 活得更久的连接池。worker 进程不运行 HTTP 模块，
+// 能依赖的连接只有 Runtime 持有的那个。
+func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
+	rt, ok := gofyworker.RuntimeFrom(ctx)
+	if !ok || rt.DB == nil {
+		return errors.New("order handler requires a runtime database")
 	}
-	h := &orderEventHandler{db: rt.DB}
-	return h.handle, nil
-}
+	db := rt.DB
 
-// handle applies one order event.
-//
-// The update is written as "set the target status where it differs", so a
-// redelivery touches zero rows instead of writing the same value twice. Zero
-// rows then splits into the two cases that matter: already in the target state
-// (idempotent success) and not in the table yet (retry — the create may still
-// be in flight).
-// handle 应用一条订单事件。
-//
-// 更新写成"把与目标状态不同的行改成目标状态"，因此重复投递影响 0 行，而不是把
-// 同一个值写两次。0 行随后分成两种要紧的情况：已是目标状态（幂等成功）与尚未
-// 落库（重试——创建请求可能还在路上）。
-func (h *orderEventHandler) handle(ctx context.Context, env gofyconsumer.Envelope) error {
-	target, ok := orderEventStatus[env.Type]
+	target, ok := orderEventStatus[event.Type]
 	if !ok {
-		return gofyconsumer.Permanent(fmt.Errorf("unsupported event type %q", env.Type))
+		return gofyconsumer.Permanent(fmt.Errorf("unsupported event type %q", event.Type))
 	}
 	var payload orderEventPayload
-	if err := json.Unmarshal(env.Payload, &payload); err != nil {
-		return gofyconsumer.Permanent(fmt.Errorf("decode payload of %s: %w", env.Type, err))
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return gofyconsumer.Permanent(fmt.Errorf("decode payload of %s: %w", event.Type, err))
 	}
 	if payload.OrderID == 0 {
-		return gofyconsumer.Permanent(fmt.Errorf("%s payload: order_id is required", env.Type))
+		return gofyconsumer.Permanent(fmt.Errorf("%s payload: order_id is required", event.Type))
 	}
 
-	res := h.db.WithContext(ctx).Model(&model.Order{}).
+	// The update is written as "set the target status where it differs", so a
+	// redelivery touches zero rows instead of writing the same value twice.
+	// Zero rows then splits into the two cases that matter: already in the
+	// target state (idempotent success) and not in the table yet (retry — the
+	// create may still be in flight).
+	// 更新写成"把与目标状态不同的行改成目标状态"，因此重复投递影响 0 行，而不是把
+	// 同一个值写两次。0 行随后分成两种要紧的情况：已是目标状态（幂等成功）与尚未
+	// 落库（重试——创建请求可能还在路上）。
+	res := db.WithContext(ctx).Model(&model.Order{}).
 		Where("id = ? AND status <> ?", payload.OrderID, string(target)).
 		Update("status", string(target))
 	if res.Error != nil {
@@ -99,11 +92,8 @@ func (h *orderEventHandler) handle(ctx context.Context, env gofyconsumer.Envelop
 		return nil
 	}
 
-	// Nothing changed: either the order already had the target status, or it
-	// does not exist yet.
-	// 没有行被改动：要么订单已经是目标状态，要么订单还不存在。
 	var count int64
-	if err := h.db.WithContext(ctx).Model(&model.Order{}).
+	if err := db.WithContext(ctx).Model(&model.Order{}).
 		Where("id = ?", payload.OrderID).
 		Count(&count).Error; err != nil {
 		return fmt.Errorf("lookup order %d: %w", payload.OrderID, err)

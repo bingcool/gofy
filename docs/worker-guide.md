@@ -132,9 +132,8 @@ worker:
       interval: 1h
 ```
 
-demo 的 `config.yaml` 没有 `worker:` 段：消费者设置独立成 `worker/worker.yaml`，只有
-`worker --group=<g>` 会读它，HTTP 进程与脚本不加载；扫描参数（并发数、节奏）仍写在
-各分组包里。探针也没启用，所以 `config.yaml` 只剩 `pid_file` 这类公共项。
+demo 的 `config.yaml` 没有 `worker:` 段：扫描参数与消费者设置都写在各分组包里，一个订阅
+一个文件；`config.yaml` 只留 broker 连接参数与 `pid_file` 这类公共项。探针也没启用。
 
 各维度的隔离程度不一样，部署时按这张表对照：
 
@@ -221,7 +220,21 @@ consumer := kafkaconsumer.New("order-consumer", client, kafkaconsumer.Config{
 
 `amqpconsumer` / `rocketmqconsumer` 的用法相同，只换构造参数。
 
-适配器之上还有四件事值得在业务侧补上，框架已经做成 `support/consumer`：配置块、信封、数据库幂等台账与错误分类。`examples/demo-service/worker/group1` 是可对照的完整用法——四个协议适配器各自只负责把协议记录转成一条 `consumer.Message`，业务分支写在 `handler_order.go`。
+适配器之上还有一层：`support/consumer` 把它们和信封、数据库幂等台账、错误分类打包成"一个订阅一个文件"。业务只写配置与 handler：
+
+```go
+var orderKafka = consumer.KafkaConfig{
+	Name: "order-consumer", Topic: "demo.order.events", Group: "order-group",
+	Idempotency: true,
+	Handler: func(ctx context.Context, msg consumer.KafkaMessage) error {
+		return svc.Handle(ctx, msg.Envelope) // msg.Record 是原生 kgo.Record
+	},
+}
+
+w, err := consumer.NewKafka(conns, orderKafka) // 满足 worker.Worker，直接进分组
+```
+
+多一条事件流就是多一个文件，不必回到配置文件——这正是它取代 `worker.yaml` 的原因。`examples/demo-service/worker/group1` 是完整用法。
 
 | 关注点 | 做法 |
 | --- | --- |
