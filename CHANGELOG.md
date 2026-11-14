@@ -812,6 +812,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/rocketmq`: the v5 SDK no longer tries to create `/logs` on macOS.
+  `rocketmq-clients/golang/v5@v5.1.2` builds its lumberjack log root as
+  `os.Getenv("user.home") + "/logs/rocketmqlogs"`. `user.home` is a Java system
+  property, not a Go environment variable, so in a Go process it is empty and
+  the default becomes `/logs/rocketmqlogs/...`. The SDK's `init()` builds that
+  writer before `main`, and its first log line makes lumberjack call
+  `MkdirAll("/logs")` — the macOS root volume is read-only, so every SDK log
+  line instead emitted `write error: can't make directories for new logfile:
+  mkdir /logs: read-only file system` on stderr and the diagnostics were lost.
+  `support/rocketmq/sdklog.go` now sets `rocketmq.client.logRoot` to a writable
+  temp directory and calls `ResetLogger()` before anything is written; an
+  explicit value of that variable always wins. Verified with
+  `worker --group='*'`: zero `/logs` errors and
+  `rocketmq_client_go.log` created under the temp root. Upstream v5.1.4 fixes
+  the default with `os.UserHomeDir()`, but that release also renames the
+  `WithSimpleAwaitDuration` / `WithSimpleSubscriptionExpressions` options and
+  changes producer startup behavior (a registry test with a real client hung),
+  so this pins the equivalent fix on the version we use.
 - `logger`: a colored error block now ends with a newline. It used to append
   `\x1b[0m` after the last content newline without terminating its own line, so
   the next entry — or zap's own `write error` on stderr — was glued onto the
