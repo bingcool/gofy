@@ -1,0 +1,62 @@
+package worker
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"go.uber.org/zap"
+
+	gofyworker "github.com/bingcool/gofy/support/worker"
+	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
+)
+
+// newOrderScanWorker scans pending orders on an interval. Demo's orders table
+// has no claim columns (status is a business value, not a task state), so this
+// only counts; a real queue declares a job table with claim.DDL and calls
+// claim.Queue.Claim, which is what makes several replicas safe.
+// newOrderScanWorker 按间隔扫描待处理订单。demo 的 orders 表没有认领所需的状态列
+// （status 是业务值，不是任务状态），因此这里只统计；真实的队列用 claim.DDL 建
+// 任务表，再调 claim.Queue.Claim，多副本才安全。
+func newOrderScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	return gofyworker.Func("order-scan", func(ctx context.Context) error {
+		rt, ok := gofyworker.RuntimeFrom(ctx)
+		if !ok || rt.DB == nil {
+			return errors.New("order-scan: runtime database is required")
+		}
+		id, _ := gofyworker.IdentityFrom(ctx)
+		lg := rt.Logger.With(zap.String("worker", id.String()))
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		lg.Info("order scan started", zap.Duration("interval", interval))
+		for {
+			select {
+			case <-ctx.Done():
+				lg.Info("order scan stopped")
+				return nil
+			case <-ticker.C:
+				// The count uses the drain context: a shutdown must not abort a
+				// query that is already talking to the database.
+				// 计数使用 drain context：停机不应该中断已经在与数据库交互的查询。
+				queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 3*time.Second)
+				var pending int64
+				err := rt.DB.WithContext(queryCtx).
+					Table("orders").
+					Where("status = ?", string(orderenum.OrderStatusPending)).
+					Count(&pending).Error
+				cancel()
+				if err != nil {
+					lg.Warn("order scan failed", zap.Error(err))
+					continue
+				}
+				lg.Info("order scan tick", zap.Int64("pending", pending))
+			}
+		}
+	})
+}

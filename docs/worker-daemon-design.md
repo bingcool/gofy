@@ -983,7 +983,7 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | T3-3 | 已完成（2026-11-14） | `runner.supervise` + `Policy`：指数退避、±20% 抖动、`MaxRestarts`；用例覆盖「重启到成功」「触顶退出」「ExitOnError 立即退出」「提前返回 nil 视为违约」 |
 | T3-4 | 已完成（2026-11-14） | `Runner.Run` 两级 context：`runCtx` 停止拉取、`drainCtx = WithoutCancel + deadline`；用例断言 drain 期间 `DrainContext` 仍有效且 Runner 等在途任务结束 |
 | T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/info/order-scan-h11.log`（`--name=order-scan`）与 `order-h11.log`（整组），pid 文件用 `-worker-order` 后缀并在退出时清理 |
-| T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker.go`、`config.yaml` 的 `worker.scan` 段；实测 `worker --group=order` 起 `order-scan#0/#1` 与 `order-heartbeat`，SIGTERM 后两组日志均为 `stopped`、退出码 0 |
+| T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker/`（`worker.go` 组装配 + `scan.go`、`heartbeat.go` 各一个循环 + `config.go` 配置类型）、`config.yaml` 的 `worker.scan` 段；实测 `worker --group=order` 起 `order-scan#0/#1` 与 `order-heartbeat`，SIGTERM 后两组日志均为 `stopped`、退出码 0 |
 | T3-7 | 已完成（2026-11-14） | `support/claim/{claim.go,claim_test.go,claim_integration_test.go}`；真实 MySQL 8.4 上 1000 行 × 2 个并发 owner 零重复、`job` 隔离、`Succeed/Fail` 的 CAS 拒绝过期 owner、回收过期租约后 `attempts` 递增 |
 | T3-8 | 已完成（2026-11-14） | `claim.Hooks{OnClaim,OnReap,OnLeaseLost}`；用例断言租约丢失回调触发；不引入监控库依赖 |
 | T3-9 | 已完成（2026-11-14） | `support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`；用例断言 handler 收到的是 drain context（投递 ctx 已取消也仍有效）、停机才 `Close`、可重试错误不 `Close` |

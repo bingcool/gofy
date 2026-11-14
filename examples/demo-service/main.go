@@ -10,6 +10,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/yourorg/demo-service/app/config"
+	appworker "github.com/yourorg/demo-service/worker"
 )
 
 var (
@@ -64,7 +65,7 @@ func main() {
 		envFromProcess: envFromProcess,
 	}
 
-	orderGroup, err := newOrderWorkerGroup(cfg.Worker.Scan)
+	orderGroup, err := appworker.NewGroup(cfg.Worker)
 	if err != nil {
 		fatalf("build worker group: %v", err)
 	}
