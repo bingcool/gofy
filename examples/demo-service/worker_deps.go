@@ -6,13 +6,13 @@ import (
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	"github.com/yourorg/demo-service/app/config"
 	appamqp "github.com/yourorg/demo-service/app/io/amqp"
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	appredis "github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 	appworker "github.com/yourorg/demo-service/worker"
-	"github.com/yourorg/demo-service/worker/group1"
 )
 
 // workerDeps turns the application config into what worker.Register needs.
@@ -27,7 +27,7 @@ import (
 func workerDeps(cfg *config.Config) appworker.Deps {
 	return appworker.Deps{
 		Group1: cfg.Worker,
-		Connections: group1.Connections{
+		Connections: gofyconsumer.Connections{
 			Kafka:    kafkaConnections(cfg.Kafka),
 			AMQP:     amqpConnections(cfg.AMQP),
 			RocketMQ: rocketMQConnections(cfg.RocketMQ),

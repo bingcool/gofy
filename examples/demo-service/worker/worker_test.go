@@ -8,8 +8,8 @@ import (
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	appworker "github.com/yourorg/demo-service/worker"
-	"github.com/yourorg/demo-service/worker/group1"
 )
 
 // TestRegisterBuildsEveryGroup pins the registration list and the count each
@@ -74,8 +74,8 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 // 且声明的并发数跟随配置，而不是写死的数字。
 func TestRegisterAddsEnabledConsumers(t *testing.T) {
 	groups, err := appworker.Register(appworker.Deps{
-		Group1: group1.Config{Consumers: group1.Consumers{
-			Kafka: group1.KafkaConsumer{
+		Group1: gofyconsumer.Config{Consumers: gofyconsumer.Consumers{
+			Kafka: gofyconsumer.KafkaConsumer{
 				Enabled:     true,
 				Instance:    "default",
 				Concurrency: 3,
@@ -83,7 +83,7 @@ func TestRegisterAddsEnabledConsumers(t *testing.T) {
 				Group:       "demo-service-order-consumer",
 				MaxAttempts: 5,
 			},
-			Queues: group1.QueuesConsumer{
+			Queues: gofyconsumer.QueuesConsumer{
 				Enabled:       true,
 				RedisInstance: "ratelimit",
 				Concurrency:   4,
@@ -91,7 +91,7 @@ func TestRegisterAddsEnabledConsumers(t *testing.T) {
 				MaxAttempts:   5,
 			},
 		}},
-		Connections: group1.Connections{
+		Connections: gofyconsumer.Connections{
 			Kafka: map[string]gofykafka.Config{
 				"default": {Brokers: []string{"127.0.0.1:9092"}},
 			},
@@ -136,8 +136,8 @@ func TestRegisterAddsEnabledConsumers(t *testing.T) {
 // 实例时，不能走到"启动成功但什么都不消费"那一步。
 func TestRegisterRejectsUnknownInstance(t *testing.T) {
 	_, err := appworker.Register(appworker.Deps{
-		Group1: group1.Config{Consumers: group1.Consumers{
-			Kafka: group1.KafkaConsumer{
+		Group1: gofyconsumer.Config{Consumers: gofyconsumer.Consumers{
+			Kafka: gofyconsumer.KafkaConsumer{
 				Enabled:     true,
 				Instance:    "order",
 				Concurrency: 1,
@@ -146,7 +146,7 @@ func TestRegisterRejectsUnknownInstance(t *testing.T) {
 				MaxAttempts: 5,
 			},
 		}},
-		Connections: group1.Connections{
+		Connections: gofyconsumer.Connections{
 			Kafka: map[string]gofykafka.Config{
 				"default": {Brokers: []string{"127.0.0.1:9092"}},
 			},

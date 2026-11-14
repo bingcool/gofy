@@ -1,9 +1,11 @@
-package group1
+package consumer
 
 import (
 	"strings"
 	"testing"
 	"time"
+
+	gofykafka "github.com/bingcool/gofy/support/kafka"
 )
 
 // TestConfigValidateIgnoresDisabledBlocks pins the shipped config: every
@@ -65,7 +67,12 @@ func TestConfigValidateKafka(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Validate = %v, want an error containing %q", err, tt.want)
 			}
-			if !strings.Contains(err.Error(), "worker.consumers.kafka") {
+			// The path has to match the YAML root: worker.yaml starts at
+			// consumers, so "worker.consumers.kafka" would point at a key that
+			// does not exist in that file.
+			// 路径必须与 YAML 根一致：worker.yaml 从 consumers 开始，写成
+			// "worker.consumers.kafka" 会指向该文件里根本不存在的键。
+			if !strings.Contains(err.Error(), "consumers.kafka") {
 				t.Fatalf("Validate = %v, want the config path in the message", err)
 			}
 		})
@@ -169,8 +176,8 @@ func TestConfigValidateQueues(t *testing.T) {
 func TestConcurrencyConversion(t *testing.T) {
 	tests := map[int]uint8{-1: 1, 0: 1, 1: 1, 4: 4, 255: 255, 256: 1}
 	for in, want := range tests {
-		if got := concurrency(in); got != want {
-			t.Fatalf("concurrency(%d) = %d, want %d", in, got, want)
+		if got := Concurrency(in); got != want {
+			t.Fatalf("Concurrency(%d) = %d, want %d", in, got, want)
 		}
 	}
 }
@@ -207,5 +214,43 @@ func TestNegativeRetryDelayFallsBackToDefaults(t *testing.T) {
 	}}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate = %v, want nil (the consumer layer applies the default)", err)
+	}
+}
+
+// TestConnectionsResolve checks that an instance name is resolved at startup
+// and that a misspelled or disabled one produces an error naming the broker,
+// because that message is what an operator sees before any goroutine starts.
+// TestConnectionsResolve 校验实例名在启动阶段解析，拼错或未启用的实例会给出指名
+// broker 的错误——那正是运维在任何 goroutine 启动之前看到的提示。
+func TestConnectionsResolve(t *testing.T) {
+	conns := Connections{
+		Kafka: map[string]gofykafka.Config{"default": {Brokers: []string{"127.0.0.1:9092"}}},
+	}
+	if _, err := conns.KafkaConfig("default"); err != nil {
+		t.Fatalf("KafkaConfig(default) = %v", err)
+	}
+	_, err := conns.KafkaConfig("order")
+	if err == nil || !strings.Contains(err.Error(), `kafka instance "order"`) {
+		t.Fatalf("KafkaConfig(order) = %v, want it to name the missing instance", err)
+	}
+}
+
+// TestValidateReportsTheFirstBlockEveryTime pins the check order. With two
+// blocks wrong, the message must not depend on map iteration order — otherwise
+// the same config file produces a different error on each start, and a support
+// ticket quoting it becomes unreproducible.
+// TestValidateReportsTheFirstBlockEveryTime 固定检查顺序。两个配置块同时写错时，
+// 报错不能取决于 map 遍历顺序——否则同一个配置文件每次启动给出不同错误，工单里引用的
+// 那条报错就复现不出来。
+func TestValidateReportsTheFirstBlockEveryTime(t *testing.T) {
+	cfg := Config{Consumers: Consumers{
+		Kafka: KafkaConsumer{Enabled: true, Instance: "default", Concurrency: 1, MaxAttempts: 5},
+		AMQP:  AMQPConsumer{Enabled: true, Instance: "default", Concurrency: 1, MaxAttempts: 5},
+	}}
+	for i := 0; i < 20; i++ {
+		err := cfg.Validate()
+		if err == nil || !strings.HasPrefix(err.Error(), "consumers.kafka:") {
+			t.Fatalf("Validate = %v, want consumers.kafka reported first on every run", err)
+		}
 	}
 }

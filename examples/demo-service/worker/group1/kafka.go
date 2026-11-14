@@ -8,6 +8,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.uber.org/zap"
 
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofykafka "github.com/bingcool/gofy/support/kafka"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/kafkaconsumer"
@@ -28,8 +29,8 @@ const kafkaConsumerName = "order-kafka-consumer"
 //
 // 客户端在 Run 里建立，而不是注册时：`worker --list` 与 `--name` 不应该打开任何
 // broker 连接，被过滤掉的消费者也不该产生成本。
-func newKafkaConsumer(cfg KafkaConsumer, conn gofykafka.Config) gofyworker.Worker {
-	return gofyworker.Func(kafkaConsumerName, concurrency(cfg.Concurrency), func(ctx context.Context) error {
+func newKafkaConsumer(cfg gofyconsumer.KafkaConsumer, conn gofykafka.Config) gofyworker.Worker {
+	return gofyworker.Func(kafkaConsumerName, gofyconsumer.Concurrency(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok {
 			return errors.New("order-kafka-consumer: worker runtime is missing from the context")
@@ -44,7 +45,7 @@ func newKafkaConsumer(cfg KafkaConsumer, conn gofykafka.Config) gofyworker.Worke
 		if err != nil {
 			return err
 		}
-		proc, err := newProcessor(rt, processorConfig{
+		proc, err := gofyconsumer.NewProcessor(rt, gofyconsumer.ProcessorConfig{
 			Consumer:    kafkaConsumerName,
 			Handler:     handler,
 			Idempotency: cfg.Idempotency,
@@ -114,12 +115,12 @@ func newKafkaConsumer(cfg KafkaConsumer, conn gofykafka.Config) gofyworker.Worke
 //
 // Kafka 不报告投递次数，因此 Attempt 固定为 1；在这里限制重复处理的是幂等台账，
 // 而不是 broker。
-func kafkaMessage(record *kgo.Record) Message {
+func kafkaMessage(record *kgo.Record) gofyconsumer.Message {
 	headers := make(map[string]string, len(record.Headers))
 	for _, header := range record.Headers {
 		headers[header.Key] = string(header.Value)
 	}
-	return Message{
+	return gofyconsumer.Message{
 		ID:       kafkaMessageID(record, headers),
 		Source:   "kafka",
 		Topic:    record.Topic,

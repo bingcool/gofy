@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/consumer`: the consumer semantics that the worker adapters leave to
+  the application are now a framework package. `consumer.Config` holds the four
+  blocks (`kafka`, `amqp`, `rocketmq`, `queues`) with `default` tags and a
+  `Validate` that runs at decode time, reporting a fixed `consumers.<kind>` path
+  in a stable check order so the same file fails the same way on every start.
+  `consumer.Connections` resolves an instance name (`KafkaConfig`,
+  `AMQPConfig`, `RocketMQConfig`, `RedisConfig`), so a disabled or misspelled
+  broker fails during registration instead of starting a consumer that reads
+  nothing. `consumer.NewProcessor` takes a `*core.Runtime` and wraps a
+  `HandlerFunc` with trace continuation from `traceparent`, a
+  `worker_consumed_messages` ledger keyed by `(consumer, message_id)` whose
+  insert-to-claim needs no lock, envelope decoding
+  (`id`/`type`/`occurred_at`/`payload`), and the permanent-versus-retryable
+  split: `Permanent(err)` is parked as `dead` and acknowledged, anything else
+  goes back to the broker until `max_attempts`. `examples/demo-service/worker`
+  keeps only the four protocol adapters and its business handler.
 - Contract modules are now free of the gofy framework dependency: the
   `internal/integration/**` tests moved to `examples/demo-service`, so
   `examples/interface-service/go.mod` only requires `gofy-interface-api`

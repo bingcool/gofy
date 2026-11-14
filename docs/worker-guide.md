@@ -221,7 +221,7 @@ consumer := kafkaconsumer.New("order-consumer", client, kafkaconsumer.Config{
 
 `amqpconsumer` / `rocketmqconsumer` 的用法相同，只换构造参数。
 
-适配器之上还有四件事值得在业务侧补上，`examples/demo-service/worker/group1` 是一份可直接对照的完整实现：
+适配器之上还有四件事值得在业务侧补上，框架已经做成 `support/consumer`：配置块、信封、数据库幂等台账与错误分类。`examples/demo-service/worker/group1` 是可对照的完整用法——四个协议适配器各自只负责把协议记录转成一条 `consumer.Message`，业务分支写在 `handler_order.go`。
 
 | 关注点 | 做法 |
 | --- | --- |

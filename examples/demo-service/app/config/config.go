@@ -11,13 +11,13 @@ import (
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logger"
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	appamqp "github.com/yourorg/demo-service/app/io/amqp"
 	appkafka "github.com/yourorg/demo-service/app/io/kafka"
 	"github.com/yourorg/demo-service/app/io/redis"
 	approcketmq "github.com/yourorg/demo-service/app/io/rocketmq"
 	appuuidint "github.com/yourorg/demo-service/app/io/uuidint"
 	"github.com/yourorg/demo-service/app/middleware"
-	"github.com/yourorg/demo-service/worker/group1"
 )
 
 // DefaultDatabase is the instance the framework manages and scripts use.
@@ -55,7 +55,7 @@ type Config struct {
 	// deployment can ship its own file and the API process never reads it.
 	// Worker 携带常驻消费者的设置。它不从 config.yaml 解码：Load 从 worker/worker.yaml
 	// 读取后填入，因此只跑 worker 的部署可以单独发自己的文件，API 进程完全不读它。
-	Worker group1.Config `yaml:"-"`
+	Worker gofyconsumer.Config `yaml:"-"`
 }
 
 // Database returns the named instance; the caller must have checked it exists.
@@ -138,10 +138,10 @@ func Load(ctx context.Context, path string) (*Config, error) {
 		return nil, fmt.Errorf("config: uuidint: %w", err)
 	}
 	// Worker validation happens while worker/worker.yaml is decoded: that file
-	// maps straight onto group1.Config, which implements Validate, so
+	// maps straight onto gofyconsumer.Config, which implements Validate, so
 	// gofyconfig.Load runs it before returning.
 	// Worker 的校验在解码 worker/worker.yaml 时完成：该文件直接映射到实现了
-	// Validate 的 group1.Config，gofyconfig.Load 会在返回前调用它。
+	// Validate 的 gofyconsumer.Config，gofyconfig.Load 会在返回前调用它。
 	if err := cfg.OTel.Validate(); err != nil {
 		return nil, fmt.Errorf("config: otel: %w", err)
 	}
@@ -171,13 +171,13 @@ func WorkerConfigPath() string {
 // 文件缺失时返回零值 Config——所有消费者关闭——因为只跑 API 的部署没有理由携带
 // worker 配置。其它错误（严格解码失败、Validate 失败）原样返回：文件存在但写错，
 // 不能被当成"没有消费者"。
-func loadWorkerConfig(ctx context.Context, path string) (group1.Config, error) {
-	cfg, err := gofyconfig.Load[group1.Config](ctx, path, gofyconfig.WithStrict(true))
+func loadWorkerConfig(ctx context.Context, path string) (gofyconsumer.Config, error) {
+	cfg, err := gofyconfig.Load[gofyconsumer.Config](ctx, path, gofyconfig.WithStrict(true))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return group1.Config{}, nil
+			return gofyconsumer.Config{}, nil
 		}
-		return group1.Config{}, err
+		return gofyconsumer.Config{}, err
 	}
 	return *cfg, nil
 }

@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/bingcool/gofy/core"
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
@@ -55,7 +56,7 @@ type orderEventHandler struct {
 // it never applied.
 // newOrderHandler 构造示例的业务 handler。数据库是必需的：一个什么都存不下的
 // 事件汇点只会确认它从未应用过的消息。
-func newOrderHandler(rt *core.Runtime) (HandlerFunc, error) {
+func newOrderHandler(rt *core.Runtime) (gofyconsumer.HandlerFunc, error) {
 	if rt == nil || rt.DB == nil {
 		return nil, errors.New("order handler requires a runtime database")
 	}
@@ -75,17 +76,17 @@ func newOrderHandler(rt *core.Runtime) (HandlerFunc, error) {
 // 更新写成"把与目标状态不同的行改成目标状态"，因此重复投递影响 0 行，而不是把
 // 同一个值写两次。0 行随后分成两种要紧的情况：已是目标状态（幂等成功）与尚未
 // 落库（重试——创建请求可能还在路上）。
-func (h *orderEventHandler) handle(ctx context.Context, env Envelope) error {
+func (h *orderEventHandler) handle(ctx context.Context, env gofyconsumer.Envelope) error {
 	target, ok := orderEventStatus[env.Type]
 	if !ok {
-		return Permanent(fmt.Errorf("unsupported event type %q", env.Type))
+		return gofyconsumer.Permanent(fmt.Errorf("unsupported event type %q", env.Type))
 	}
 	var payload orderEventPayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
-		return Permanent(fmt.Errorf("decode payload of %s: %w", env.Type, err))
+		return gofyconsumer.Permanent(fmt.Errorf("decode payload of %s: %w", env.Type, err))
 	}
 	if payload.OrderID == 0 {
-		return Permanent(fmt.Errorf("%s payload: order_id is required", env.Type))
+		return gofyconsumer.Permanent(fmt.Errorf("%s payload: order_id is required", env.Type))
 	}
 
 	res := h.db.WithContext(ctx).Model(&model.Order{}).

@@ -1,4 +1,4 @@
-package group1
+package consumer
 
 import (
 	"context"
@@ -56,11 +56,11 @@ type Message struct {
 	Enqueued time.Time
 }
 
-// Envelope is the message contract shared by every producer and consumer in
-// the demo. Keeping one shape means a new consumer only supplies a handler, not
-// another decoder.
-// Envelope 是示例中所有生产者与消费者共用的消息契约。统一形状意味着新增消费者
-// 只需要提供 handler，不必再写一个解码器。
+// Envelope is the message contract the chain decodes: an id, a type, the time
+// the event occurred and a raw payload. Keeping one shape means adding a
+// consumer is supplying a handler, not another decoder.
+// Envelope 是链路解码的消息契约：ID、类型、事件发生时间与原始 payload。统一形状
+// 意味着新增消费者只需要提供 handler，不必再写一个解码器。
 type Envelope struct {
 	// ID is the event id; the consumer falls back to the transport message id.
 	// ID 是事件 ID；消费者会回退到传输层的消息 ID。
@@ -148,9 +148,9 @@ func DecodeEnvelope(msg Message) (Envelope, error) {
 	return env, nil
 }
 
-// processorConfig is what a consumer passes to newProcessor.
-// processorConfig 是消费者传给 newProcessor 的参数。
-type processorConfig struct {
+// ProcessorConfig is what an adapter passes to NewProcessor.
+// ProcessorConfig 是适配器传给 NewProcessor 的参数。
+type ProcessorConfig struct {
 	// Consumer is the worker name; it scopes the idempotency rows.
 	// Consumer 是 worker 名，用它划分幂等记录。
 	Consumer string
@@ -184,12 +184,12 @@ type Processor struct {
 	maxAttempts int
 }
 
-// newProcessor builds the shared chain. It fails when idempotency is requested
+// NewProcessor builds the shared chain. It fails when idempotency is requested
 // without a database: silently dropping deduplication would turn every
 // redelivery into a second side effect.
-// newProcessor 构造共用链路。开启幂等却没有数据库时直接失败：静默放弃去重会让
+// NewProcessor 构造共用链路。开启幂等却没有数据库时直接失败：静默放弃去重会让
 // 每次重投都变成第二次副作用。
-func newProcessor(rt *core.Runtime, cfg processorConfig) (*Processor, error) {
+func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 	if rt == nil {
 		return nil, errors.New("consumer runtime is required")
 	}
@@ -361,9 +361,9 @@ func (p *Processor) extract(ctx context.Context, headers map[string]string) cont
 // panic。
 func consumerTracer(rt *core.Runtime) trace.Tracer {
 	if rt.TracerProvider == nil {
-		return trace.NewNoopTracerProvider().Tracer("gofy/worker/consumer")
+		return trace.NewNoopTracerProvider().Tracer("gofy/support/consumer")
 	}
-	return rt.TracerProvider.Tracer("gofy/worker/consumer")
+	return rt.TracerProvider.Tracer("gofy/support/consumer")
 }
 
 // park marks a message as dead so a later redelivery is skipped instead of

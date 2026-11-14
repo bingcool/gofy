@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/rocketmqconsumer"
@@ -27,8 +28,8 @@ const rocketmqConsumerName = "order-rocketmq-consumer"
 //
 // RocketMQ 消费者是一次性对象：创建、消费一次、关闭，因此 worker 实例数按配置
 // 走，并行度由 SDK 自己的拉取 worker 提供。
-func newRocketMQConsumer(cfg RocketMQConsumer, conn gofyrocketmq.Config) gofyworker.Worker {
-	return gofyworker.Func(rocketmqConsumerName, concurrency(cfg.Concurrency), func(ctx context.Context) error {
+func newRocketMQConsumer(cfg gofyconsumer.RocketMQConsumer, conn gofyrocketmq.Config) gofyworker.Worker {
+	return gofyworker.Func(rocketmqConsumerName, gofyconsumer.Concurrency(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok {
 			return errors.New("order-rocketmq-consumer: worker runtime is missing from the context")
@@ -43,7 +44,7 @@ func newRocketMQConsumer(cfg RocketMQConsumer, conn gofyrocketmq.Config) gofywor
 		if err != nil {
 			return err
 		}
-		proc, err := newProcessor(rt, processorConfig{
+		proc, err := gofyconsumer.NewProcessor(rt, gofyconsumer.ProcessorConfig{
 			Consumer:    rocketmqConsumerName,
 			Handler:     handler,
 			Idempotency: cfg.Idempotency,
@@ -105,8 +106,8 @@ func newRocketMQConsumer(cfg RocketMQConsumer, conn gofyrocketmq.Config) gofywor
 //
 // DeliveryAttempt 是 broker 自己的计数器，是四种协议里最可信的尝试次数，因此
 // 适合用来发现一条持续失败的消息。
-func rocketmqMessage(message *gofyrocketmq.Message) Message {
-	return Message{
+func rocketmqMessage(message *gofyrocketmq.Message) gofyconsumer.Message {
+	return gofyconsumer.Message{
 		ID:       rocketmqMessageID(message),
 		Source:   "rocketmq",
 		Topic:    message.Topic,

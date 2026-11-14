@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	"github.com/bingcool/gofy/support/queues"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyworker "github.com/bingcool/gofy/support/worker"
@@ -29,8 +30,8 @@ const queuesConsumerName = "order-queues-consumer"
 // 这是四种里运行成本最低、保证也最弱的一种：消息弹出时已从 Redis 删除，handler
 // 崩溃就会丢这一条。示例保留它，是因为"发出去就不用管"的工作——缩略图、通知——
 // 正是 Redis 队列的用武之地。
-func newQueuesConsumer(cfg QueuesConsumer, conn gofyredis.Config) gofyworker.Worker {
-	return gofyworker.Func(queuesConsumerName, concurrency(cfg.Concurrency), func(ctx context.Context) error {
+func newQueuesConsumer(cfg gofyconsumer.QueuesConsumer, conn gofyredis.Config) gofyworker.Worker {
+	return gofyworker.Func(queuesConsumerName, gofyconsumer.Concurrency(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok {
 			return errors.New("order-queues-consumer: worker runtime is missing from the context")
@@ -45,7 +46,7 @@ func newQueuesConsumer(cfg QueuesConsumer, conn gofyredis.Config) gofyworker.Wor
 		if err != nil {
 			return err
 		}
-		proc, err := newProcessor(rt, processorConfig{
+		proc, err := gofyconsumer.NewProcessor(rt, gofyconsumer.ProcessorConfig{
 			Consumer:    queuesConsumerName,
 			Handler:     handler,
 			Idempotency: cfg.Idempotency,
@@ -104,13 +105,13 @@ func newQueuesConsumer(cfg QueuesConsumer, conn gofyredis.Config) gofyworker.Wor
 // queuesMessage 把一条 Redis 队列消息转成共用视图。
 //
 // 队列会给每条消息盖自己的 ID，因此去重不需要生产者配合。
-func queuesMessage(key string, msg *queues.Message) Message {
+func queuesMessage(key string, msg *queues.Message) gofyconsumer.Message {
 	attempt := int32(msg.RetryNum) + 1
 	var enqueued time.Time
 	if msg.Timestamp > 0 {
 		enqueued = time.Unix(msg.Timestamp, 0)
 	}
-	return Message{
+	return gofyconsumer.Message{
 		ID:       msg.ID,
 		Source:   "queues",
 		Topic:    key,

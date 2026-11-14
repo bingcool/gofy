@@ -21,10 +21,8 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── group1/
 │   ├── abc_register.go    # group1 的 NewGroup：按配置装配成员
-│   ├── config.go          # 四个消费者的全部可配置项与校验
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
-│   ├── consume.go         # 共用链路：信封、幂等台账、trace、错误分类
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
 │   ├── kafka.go           # order-kafka-consumer
 │   ├── amqp.go            # order-amqp-consumer
@@ -34,6 +32,11 @@ worker/
     ├── abc_register.go    # group2 的 NewGroup
     └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
 ```
+
+四个消费者共用的那一半不在示例里：配置块、信封、幂等台账与错误分类都在框架的
+`support/consumer`（见它的 [README](../../../support/consumer/README.md)）。它不认识订单业务，
+只认 `Message`、`Envelope` 和一个 `HandlerFunc`，所以该留在框架里——放进示例，第二个项目
+就得复制一遍。示例只留协议适配器与业务 handler，这也是照着抄的时候该抄的部分。
 
 `abc_` 前缀只是为了让入口文件排在成员文件之前，没有语义；下划线开头不行，Go 会忽略
 `_register.go`，`NewGroup` 会跟着从编译里消失。
@@ -57,7 +60,7 @@ worker/
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
 四个消费者默认全部 `enabled: false`，因此默认的 `--list` 只显示扫描与心跳。启用哪个，
-`--list` 就多出哪个；实例数由 `worker.consumers.<kind>.concurrency` 决定，`--concurrency`
+`--list` 就多出哪个；实例数由 `consumers.<kind>.concurrency` 决定，`--concurrency`
 仍可覆盖。
 
 ## 消费者怎么接入
@@ -65,9 +68,9 @@ worker/
 四个消费者共用同一条链路，协议差异只留在各自的协议文件里：
 
 ```
-kafka.go / amqp.go / rocketmq.go / queues.go   把协议记录转成 Message
+kafka.go / amqp.go / rocketmq.go / queues.go   把协议记录转成 consumer.Message
         ↓
-consume.go Processor.Handle                    提取 trace → 查幂等台账 → 解信封
+support/consumer Processor.Handle          提取 trace → 查幂等台账 → 解信封
         ↓
 handler_order.go                               按 event.type 落到 orders 表
 ```
@@ -118,7 +121,7 @@ AMQP 的空兜底是刻意的：拿 `DeliveryTag` 当 ID 会把每次重投当�
 | Handler 返回 | 处理 | 效果 |
 | --- | --- | --- |
 | `nil` | 台账置 `done`，确认 | 分区继续推进 |
-| `group1.Permanent(err)` | 台账置 `dead`，确认 | 毒消息不再重投 |
+| `gofyconsumer.Permanent(err)` | 台账置 `dead`，确认 | 毒消息不再重投 |
 | 其它 `error` | 台账置 `failed`，不确认 | broker 重投，直到 `max_attempts` |
 
 解不出信封、未知 `event.type`、`payload` 缺 `order_id` 都属于永久错误——重投多少次
@@ -140,12 +143,14 @@ AMQP 的空兜底是刻意的：拿 `DeliveryTag` 当 ID 会把每次重投当�
 `support/worker` 的 `newDrainContext` 保证，否则跑得比预算久的 worker 会拿到过期
 context，每个 handler 都失败。
 
-### 新增一个消费者
+### 新增一种消费者
 
-1. 在 `group1/config.go` 加一个配置结构（照 `KafkaConsumer`），带 `Enabled` 与
+已支持的四种协议，加订阅只要写适配器；要接一种新协议（Pulsar、NATS），第一步落在框架里：
+
+1. 在 `support/consumer/config.go` 加一个配置结构（照 `KafkaConsumer`），带 `Enabled` 与
    `Instance`，在 `Consumers` 与 `Validate` 里各加一行；
-2. 照 `kafka.go` 写一个文件：`Run` 里建连 → 构造适配器 → `return w.Run(ctx)`，
-   协议记录转成 `Message`；
+2. 照 `kafka.go` 在分组里写一个文件：`Run` 里建连 → 构造适配器 → `return w.Run(ctx)`，
+   协议记录转成 `consumer.Message`；
 3. 在 `abc_register.go` 的 `NewGroup` 里 `if consumer.Enabled { ... }` 追加；
 4. 在 `worker/worker.yaml` 的 `consumers` 下加同名配置块，`instance` 指向 config.yaml 里已有的
    `kafka`/`amqp`/`rocketmq`/`redis` 实例。
@@ -281,7 +286,7 @@ var scanDefaults = ScanWorkerConfig{
 改参数就改这个 `scanDefaults`；临时改实例数用 `--group=group1 --concurrency=4`，不必动代码。
 结构体上没有 `yaml` 标签，配置里写 `scan:` 会被严格解码拒绝——扫描参数不再是配置来源。
 
-消费者相反：`group1.Config` 带 `yaml` 标签，由 `app/config` 从 `worker/worker.yaml`
+消费者相反：`gofyconsumer.Config` 带 `yaml` 标签，由 `app/config` 从 `worker/worker.yaml`
 解码后经 `worker.Register(Deps)` 传进分组。为什么单独一个文件：
 
 - 只有 `worker --group=<g>` 读它，HTTP 进程与脚本完全不加载；
@@ -360,7 +365,7 @@ panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 
 | `--group='*'` 配 `--name` 报 usage error | 通配符按组运行，`--name` 只能指定一个组内的 worker | 改成 `--group=<拥有该 worker 的组>` |
 | `--list` 的数字和实际不同 | 用了 `--concurrency` | 覆盖只在本次启动生效，`--list` 读的是配置或代码里的数字 |
 | 启动即报 `kafka instance "x" is not configured or not enabled` | `instance` 写了未启用的实例名 | 改 `instance`，或把对应的 `kafka.x.enabled` 打开 |
-| 启动即报 `worker.consumers.kafka: topic is required` | 打开了 `enabled` 但没填必填项 | 按报错里的路径补配置 |
+| 启动即报 `consumers.kafka: topic is required` | 打开了 `enabled` 但没填必填项 | 按报错里的路径补配置 |
 | 日志出现 `consume claim failed` | 幂等台账不可用（库连不上、表被锁） | 先看数据库；台账不可用时不确认消息，broker 会重投 |
 | 同一条消息反复处理 | handler 返回可重试错误 | 看台账 `last_error`；`max_attempts` 用完后自动转 `dead` |
 | 日志出现 `message skipped` | 幂等命中或尝试次数用完 | 正常行为；查台账 `status` 区分是哪一种 |

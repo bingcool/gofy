@@ -1,4 +1,26 @@
-package group1
+// Package consumer is the shared half of a resident consumer: the configuration
+// block, the message envelope, a database-backed idempotency ledger and the
+// permanent-versus-retryable split.
+//
+// The protocol adapters in support/worker/consumer turn a Kafka record, an AMQP
+// delivery, a RocketMQ message or a Redis queue entry into a Message and hand it
+// to Processor.Handle; everything after that is written once, here. An
+// application supplies the configuration, a HandlerFunc for its business events,
+// and the connection it already holds for the broker.
+//
+// The chain takes a *core.Runtime rather than its pieces one by one, so a
+// consumed message logs, traces and writes through exactly what the worker host
+// built — not a second logger, tracer or pool.
+// 包 consumer 是常驻消费者的共用部分：配置块、消息信封、基于数据库的幂等台账，以及
+// "永久失败 / 可重试"的区分。
+//
+// support/worker/consumer 里的协议适配器把 Kafka 记录、AMQP 投递、RocketMQ 消息或
+// Redis 队列项变成 Message，交给 Processor.Handle；之后的一切只在这里写一次。应用只需
+// 提供配置、处理业务事件的 HandlerFunc，以及它本来就持有的 broker 连接。
+//
+// 链路接收 *core.Runtime 而不是逐个传入组件，是为了让消费到的消息用宿主构造的同一个
+// logger、tracer 与连接池，而不是另起一套。
+package consumer
 
 import (
 	"errors"
@@ -12,18 +34,23 @@ import (
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 )
 
-// Config is everything group1 reads from config.yaml.
+// Config is the consumer block of an application's worker configuration: which
+// of the four kinds are on, and how each one subscribes.
 //
-// The group used to take no configuration at all: a scan interval is a number
-// only its own loop cares about. A consumer is different — its topic, its
-// consumer group and its broker are deployment facts that differ between
-// environments, so they belong in the config file while the JSON shape of the
-// payload stays in code.
-// Config 是 group1 从 config.yaml 读取的全部配置。
+// A scan loop takes no configuration — its interval is a number only its own
+// loop cares about. A consumer is different: its topic, its consumer group and
+// its broker are deployment facts that differ between environments, so they
+// belong in a config file while the JSON shape of the payload stays in code.
 //
-// 分组原本不接收配置：扫描间隔只有它自己的循环关心。消费者不同——topic、
-// 消费组、broker 都是随环境变化的部署事实，应该写在配置文件里；消息体长什么样
-// 属于代码。
+// Decode it with config.Load and the default tags apply; Validate runs as part
+// of decoding, so a missing topic fails before a pool or a log file exists.
+// Config 是应用 worker 配置里的消费者段：四种消费者哪些开启，每一种如何订阅。
+//
+// 扫描循环不接收配置——扫描间隔只有它自己的循环关心。消费者不同：topic、消费组与
+// broker 都是随环境变化的部署事实，应该写在配置文件里；消息体长什么样属于代码。
+//
+// 用 config.Load 解码，default 标签会自动生效；Validate 在解码过程中执行，因此缺
+// topic 会在连接池和日志文件出现之前就失败。
 type Config struct {
 	Consumers Consumers `yaml:"consumers"`
 }
@@ -210,19 +237,33 @@ var (
 	ErrInstanceRequired = errors.New("instance is required")
 )
 
-// Validate checks the enabled consumers. Disabled blocks are ignored, so the
+// Validate checks the enabled consumers. Disabled blocks are ignored, so a
 // shipped config can keep all four visible with enabled: false and still pass.
+//
+// The checks run in a fixed order instead of over a map: with two blocks
+// misconfigured, a map reports whichever one Go happens to visit first, so the
+// same file would produce a different message on each start. The prefix is the
+// field path — consumers.kafka — which is also where the key sits in a config
+// file that maps this struct at its root.
 // Validate 校验已启用的消费者。未启用的配置块直接跳过，因此仓库里的示例配置
 // 可以把四种都列出来并保持 enabled: false。
+//
+// 按固定顺序检查而不是遍历 map：两个配置块同时写错时，map 会报告 Go 恰好先访问的
+// 那一个，同一个文件每次启动给出不同报错。前缀是字段路径 consumers.kafka，也就是把
+// 这个结构映射在根上的配置文件里该键所在的位置。
 func (c Config) Validate() error {
-	for name, check := range map[string]func() error{
-		"worker.consumers.kafka":    c.Consumers.Kafka.validate,
-		"worker.consumers.amqp":     c.Consumers.AMQP.validate,
-		"worker.consumers.rocketmq": c.Consumers.RocketMQ.validate,
-		"worker.consumers.queues":   c.Consumers.Queues.validate,
-	} {
-		if err := check(); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+	blocks := []struct {
+		path  string
+		check func() error
+	}{
+		{"consumers.kafka", c.Consumers.Kafka.validate},
+		{"consumers.amqp", c.Consumers.AMQP.validate},
+		{"consumers.rocketmq", c.Consumers.RocketMQ.validate},
+		{"consumers.queues", c.Consumers.Queues.validate},
+	}
+	for _, block := range blocks {
+		if err := block.check(); err != nil {
+			return fmt.Errorf("%s: %w", block.path, err)
 		}
 	}
 	return nil
@@ -344,14 +385,15 @@ func validateCommon(instance string, concurrency, maxAttempts int) error {
 }
 
 // Connections is the set of already-decoded broker configurations the
-// consumers reuse. Register fills it from config.yaml's kafka/amqp/rocketmq/
-// redis blocks, and each consumer picks its instance by name.
+// consumers reuse. The application fills it from the connection blocks it
+// already decodes — kafka, amqp, rocketmq, redis — keeping the enabled instances
+// only, and each consumer picks its instance by name.
 //
 // Passing the whole map instead of a single config keeps the resolution — and
 // the "instance not enabled" error — at startup, before any consumer goroutine
 // exists.
-// Connections 是消费者复用的 broker 连接配置。Register 从 config.yaml 的
-// kafka/amqp/rocketmq/redis 段填充它，每个消费者按名字挑自己的实例。
+// Connections 是消费者复用的 broker 连接配置。应用用自己已经解码的连接段填充它——
+// kafka、amqp、rocketmq、redis——只保留启用的实例，每个消费者按名字挑自己的那个。
 //
 // 传整张表而不是单个配置，是为了把解析和"实例未启用"的错误留在启动阶段，
 // 那时还没有任何消费者 goroutine。
@@ -362,9 +404,9 @@ type Connections struct {
 	Redis    map[string]gofyredis.Config
 }
 
-// kafka resolves one Kafka connection by instance name.
-// kafka 按实例名解析一个 Kafka 连接。
-func (c Connections) kafka(name string) (gofykafka.Config, error) {
+// KafkaConfig resolves one Kafka connection by instance name.
+// KafkaConfig 按实例名解析一个 Kafka 连接。
+func (c Connections) KafkaConfig(name string) (gofykafka.Config, error) {
 	cfg, ok := c.Kafka[name]
 	if !ok {
 		return gofykafka.Config{}, fmt.Errorf("kafka instance %q is not configured or not enabled", name)
@@ -372,9 +414,9 @@ func (c Connections) kafka(name string) (gofykafka.Config, error) {
 	return cfg, nil
 }
 
-// amqp resolves one AMQP connection by instance name.
-// amqp 按实例名解析一个 AMQP 连接。
-func (c Connections) amqp(name string) (gofyamqp.Config, error) {
+// AMQPConfig resolves one AMQP connection by instance name.
+// AMQPConfig 按实例名解析一个 AMQP 连接。
+func (c Connections) AMQPConfig(name string) (gofyamqp.Config, error) {
 	cfg, ok := c.AMQP[name]
 	if !ok {
 		return gofyamqp.Config{}, fmt.Errorf("amqp instance %q is not configured or not enabled", name)
@@ -382,9 +424,9 @@ func (c Connections) amqp(name string) (gofyamqp.Config, error) {
 	return cfg, nil
 }
 
-// rocketmq resolves one RocketMQ connection by instance name.
-// rocketmq 按实例名解析一个 RocketMQ 连接。
-func (c Connections) rocketmq(name string) (gofyrocketmq.Config, error) {
+// RocketMQConfig resolves one RocketMQ connection by instance name.
+// RocketMQConfig 按实例名解析一个 RocketMQ 连接。
+func (c Connections) RocketMQConfig(name string) (gofyrocketmq.Config, error) {
 	cfg, ok := c.RocketMQ[name]
 	if !ok {
 		return gofyrocketmq.Config{}, fmt.Errorf("rocketmq instance %q is not configured or not enabled", name)
@@ -392,9 +434,9 @@ func (c Connections) rocketmq(name string) (gofyrocketmq.Config, error) {
 	return cfg, nil
 }
 
-// redis resolves one Redis connection by instance name.
-// redis 按实例名解析一个 Redis 连接。
-func (c Connections) redis(name string) (gofyredis.Config, error) {
+// RedisConfig resolves one Redis connection by instance name.
+// RedisConfig 按实例名解析一个 Redis 连接。
+func (c Connections) RedisConfig(name string) (gofyredis.Config, error) {
 	cfg, ok := c.Redis[name]
 	if !ok {
 		return gofyredis.Config{}, fmt.Errorf("redis instance %q is not configured or not enabled", name)
@@ -402,12 +444,12 @@ func (c Connections) redis(name string) (gofyredis.Config, error) {
 	return cfg, nil
 }
 
-// concurrency converts a validated instance count to the worker API's type.
+// Concurrency converts a validated instance count to the worker API's type.
 // Validate has already rejected anything outside 1..255, so the conversion
 // cannot silently wrap.
-// concurrency 把校验过的实例数转成 worker API 的类型。Validate 已经拒绝
+// Concurrency 把校验过的实例数转成 worker API 的类型。Validate 已经拒绝
 // 1..255 之外的值，因此转换不会悄悄回绕。
-func concurrency(n int) uint8 {
+func Concurrency(n int) uint8 {
 	if n <= 0 || n > 255 {
 		return 1
 	}

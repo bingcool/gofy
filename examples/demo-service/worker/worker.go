@@ -21,22 +21,32 @@
 // process has no HTTP stack.
 // worker 复用与 HTTP 处理器相同的数据访问，而不是另写一套查询；它们也不碰
 // support.Router：worker 进程里没有 HTTP 栈。
+//
+// Consumers share support/consumer: the configuration blocks, the envelope, the
+// idempotency ledger and the error classification live there, so a group owns
+// only its protocol adapters and its business handler. Importing it from here
+// instead of inlining it keeps the same rules for every group, including ones
+// added later.
+// 消费者共用 support/consumer：配置块、消息信封、幂等台账与错误分类都在那里，分组只
+// 拥有自己的协议适配器与业务 handler。放在那里而不是摊进分组，是为了每个分组——包括
+// 之后新增的——遵循同一套规则。
 package worker
 
 import (
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/worker/group1"
 	"github.com/yourorg/demo-service/worker/group2"
 )
 
 // Deps is what the groups need from the application: the consumer settings
-// from config.yaml and the broker connection blocks they refer to.
+// from worker/worker.yaml and the broker connection blocks they refer to.
 //
 // The connection maps are the already-decoded kafka/amqp/rocketmq/redis
 // blocks, filtered to enabled instances. Passing them in — instead of letting a
 // group read the file itself — keeps one decoder for the whole binary and makes
 // a missing instance an error at registration, before any goroutine starts.
-// Deps 是分组需要应用提供的东西：config.yaml 里的消费者设置，以及它们引用的
+// Deps 是分组需要应用提供的东西：worker/worker.yaml 里的消费者设置，以及它们引用的
 // broker 连接段。
 //
 // 连接表就是已解码并过滤过启用项的 kafka/amqp/rocketmq/redis 配置。传进来而不是
@@ -45,10 +55,10 @@ import (
 type Deps struct {
 	// Group1 carries the scan defaults plus the four consumer blocks.
 	// Group1 携带扫描默认值与四个消费者配置。
-	Group1 group1.Config
+	Group1 gofyconsumer.Config
 	// Connections resolves the instance names used by the consumers.
 	// Connections 解析消费者引用的实例名。
-	Connections group1.Connections
+	Connections gofyconsumer.Connections
 }
 
 // Register builds every group the binary knows about, in the order `worker

@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
+	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/amqpconsumer"
 )
@@ -27,8 +28,8 @@ const amqpConsumerName = "order-amqp-consumer"
 //
 // 队列在第一次消费时声明 topology，因此启用这个消费者就会创建 exchange、队列与
 // 绑定。示例里这是刻意的：一个配置块就能从零到可用的订阅。
-func newAMQPConsumer(cfg AMQPConsumer, conn gofyamqp.Config) gofyworker.Worker {
-	return gofyworker.Func(amqpConsumerName, concurrency(cfg.Concurrency), func(ctx context.Context) error {
+func newAMQPConsumer(cfg gofyconsumer.AMQPConsumer, conn gofyamqp.Config) gofyworker.Worker {
+	return gofyworker.Func(amqpConsumerName, gofyconsumer.Concurrency(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok {
 			return errors.New("order-amqp-consumer: worker runtime is missing from the context")
@@ -43,7 +44,7 @@ func newAMQPConsumer(cfg AMQPConsumer, conn gofyamqp.Config) gofyworker.Worker {
 		if err != nil {
 			return err
 		}
-		proc, err := newProcessor(rt, processorConfig{
+		proc, err := gofyconsumer.NewProcessor(rt, gofyconsumer.ProcessorConfig{
 			Consumer:    amqpConsumerName,
 			Handler:     handler,
 			Idempotency: cfg.Idempotency,
@@ -109,7 +110,7 @@ func newAMQPConsumer(cfg AMQPConsumer, conn gofyamqp.Config) gofyworker.Worker {
 
 // amqpMessage converts one delivery into the shared message view.
 // amqpMessage 把一次投递转成共用的消息视图。
-func amqpMessage(delivery amqp091.Delivery) Message {
+func amqpMessage(delivery amqp091.Delivery) gofyconsumer.Message {
 	headers := amqpHeaders(delivery.Headers)
 	attempt := int32(1)
 	if delivery.Redelivered {
@@ -118,7 +119,7 @@ func amqpMessage(delivery amqp091.Delivery) Message {
 		// AMQP 只提供重投标志而非次数；重投至少是第二次，这对台账已经足够。
 		attempt = 2
 	}
-	return Message{
+	return gofyconsumer.Message{
 		ID:       amqpMessageID(delivery, headers),
 		Source:   "amqp",
 		Topic:    delivery.RoutingKey,
