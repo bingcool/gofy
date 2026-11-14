@@ -179,3 +179,35 @@ func TestPublishSkipsClosedSlots(t *testing.T) {
 		t.Fatal("Publish ran after Close")
 	}
 }
+
+// TestGetServesHitsFromTheSnapshot pins the fast path: once a name is open, a
+// hit never calls open again and every caller sees the same value.
+// TestGetServesHitsFromTheSnapshot 固定无锁快路径的契约：名字打开之后，命中的调用
+// 不再执行 open，且所有调用方看到同一个值。
+func TestGetServesHitsFromTheSnapshot(t *testing.T) {
+	slots := newSlots(t, nil)
+	var opens atomic.Int32
+	open := func(context.Context) (*int, error) {
+		opens.Add(1)
+		value := 1
+		return &value, nil
+	}
+
+	ctx := context.Background()
+	first, err := slots.Get(ctx, "order", open)
+	if err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	for i := 0; i < 100; i++ {
+		got, err := slots.Get(ctx, "order", open)
+		if err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+		if got != first {
+			t.Fatalf("Get %d returned a different value", i)
+		}
+	}
+	if got := opens.Load(); got != 1 {
+		t.Fatalf("open calls = %d, want 1", got)
+	}
+}

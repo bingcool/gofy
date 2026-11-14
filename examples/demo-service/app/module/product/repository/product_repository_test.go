@@ -20,12 +20,12 @@ func TestConnResolvesInstalledSnapshot(t *testing.T) {
 				t.Fatal("conn did not panic without a published snapshot")
 			}
 		}()
-		_ = r.conn(context.Background())
+		_, _ = r.conn(context.Background())
 	}()
 
 	db := &gorm.DB{}
 	appio.PublishDB(db)
-	if got := r.conn(context.Background()); got != db {
-		t.Fatal("conn did not resolve the published snapshot")
+	if got, err := r.conn(context.Background()); err != nil || got != db {
+		t.Fatalf("conn = %v, %v; want the published snapshot", got, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/module/product/model"
 	"gorm.io/gorm"
 )
@@ -33,16 +34,27 @@ type ProductRepository struct{}
 
 // conn 优先使用 ctx 中的事务；没有事务时用请求快照的默认数据库。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
-func (r *ProductRepository) conn(ctx context.Context) *gorm.DB {
-	return gofydb.WithContext(ctx, appio.WithContext(ctx).DB())
+//
+// 句柄统一经 DBIO 解析：默认库是框架托管的特例，但名字仍走同一条入口，仓库
+// 不需要记住"默认库走另一条路"。
+func (r *ProductRepository) conn(ctx context.Context) (*gorm.DB, error) {
+	db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+	if err != nil {
+		return nil, fmt.Errorf("resolve default database: %w", err)
+	}
+	return gofydb.WithContext(ctx, db), nil
 }
 
 // FindByID returns one product or ErrNotFound.
 // FindByID 按主键取一条产品；记录缺失返回 ErrNotFound，其它失败带上产品 id 包装，
 // 便于上层定位是哪一次查询出错。
 func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*model.Product, error) {
+	db, err := r.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var p model.Product
-	err := r.conn(ctx).WithContext(ctx).First(&p, id).Error
+	err = db.WithContext(ctx).First(&p, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
@@ -61,8 +73,12 @@ func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[ui
 	if len(ids) == 0 {
 		return items, nil
 	}
+	db, err := r.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var rows []model.Product
-	if err := r.conn(ctx).WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+	if err := db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list products: %w", err)
 	}
 	for _, row := range rows {
@@ -78,8 +94,12 @@ func (r *ProductRepository) List(ctx context.Context, offset, limit int) ([]mode
 		items []model.Product
 		total int64
 	)
+	db, err := r.conn(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	q := func() *gorm.DB {
-		return r.conn(ctx).WithContext(ctx).Model(&model.Product{})
+		return db.WithContext(ctx).Model(&model.Product{})
 	}
 	if err := q().Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count products: %w", err)
@@ -97,7 +117,11 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 	if num <= 0 {
 		return 0, fmt.Errorf("decrease product %d stock: num must be positive", id)
 	}
-	res := r.conn(ctx).WithContext(ctx).
+	db, err := r.conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	res := db.WithContext(ctx).
 		Model(&model.Product{}).
 		Where("id = ? AND status = ? AND stock >= ?", id, StatusOnSale, num).
 		Update("stock", gorm.Expr("stock - ?", num))

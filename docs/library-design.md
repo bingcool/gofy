@@ -2797,16 +2797,15 @@ func Load(ctx context.Context, path string) (*Config, error) {
 
 ```go
 // app/appio/snapshot.go —— 本代句柄的只读视图
-func (s *Snapshot) DB() *gorm.DB                      // db.default（框架托管）
-func (s *Snapshot) DBInstance(name string) *gorm.DB   // order、product
-func (s *Snapshot) Redis(name string) *goredis.Client // cache、session、ratelimit
-func (s *Snapshot) AMQP(name string) *amqp.Client     // 本代已打开的实例
-func (s *Snapshot) Kafka(name string) *kafka.Client
-func (s *Snapshot) RocketMQ(name string) *rocketmq.Client
-func (s *Snapshot) UUID() *uuidint.Generator
-func (s *Snapshot) DBIO(context.Context, string) (*gorm.DB, error)              // 按别名懒解析本代 Registry
+//
+// 取句柄只有一条路：按别名解析本代 Registry，一律返回 (句柄, error)。
+// "default" 由框架托管、不在 Registry 里，DBIO 认这个名字并返回默认库。
+func (s *Snapshot) DBIO(context.Context, string) (*gorm.DB, error)
 func (s *Snapshot) RedisIO(context.Context, string) (*goredis.Client, error)
-func (s *Snapshot) AMQPIO/KafkaIO/RocketMQIO(context.Context, string) (...)
+func (s *Snapshot) AMQPIO(context.Context, string) (*amqp.Client, error)
+func (s *Snapshot) KafkaIO(context.Context, string) (*kafka.Client, error)
+func (s *Snapshot) RocketMQIO(context.Context, string) (*rocketmq.Client, error)
+func (s *Snapshot) UUID() *uuidint.Generator // 生成器不是连接，没有 Registry 可解析
 
 func WithSnapshot(context.Context, *Snapshot) context.Context
 func WithContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()；两者都没有直接 panic
@@ -2814,9 +2813,8 @@ func Middleware() support.Middleware         // 请求入口固定当前一代
 ```
 
 ```go
-o, err := appio.WithContext(ctx).DBInstance("order").WithContext(ctx).First(&order)
-s, err := appio.WithContext(ctx).Redis("cache").Get(ctx, "order:1").Result()
-client, err := appio.WithContext(ctx).RedisIO(ctx, "ratelimit") // 首次访问才建连
+db, err := appio.WithContext(ctx).DBIO(ctx, "order")        // 命名库；"default" 解析到框架托管的默认库
+cache, err := appio.WithContext(ctx).RedisIO(ctx, "cache") // 首次访问才建连
 ```
 
 发布与固定机制由 `support/generation`（§3.7.9）提供：`app/appio` 只是把

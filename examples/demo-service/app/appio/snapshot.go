@@ -2,6 +2,7 @@ package appio
 
 import (
 	"context"
+	"strings"
 
 	"github.com/bingcool/gofy/support"
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
@@ -26,6 +27,11 @@ import (
 // 固定一个 Snapshot，后续查询即使横跨 Reload 也落在同一代连接上。
 //
 // Snapshot 本身不可变：字段只在 Start 组装时写入，发布后不再修改。
+//
+// 取句柄只有一条路：DBIO / RedisIO / AMQPIO / KafkaIO / RocketMQIO，按别名解析
+// 本代 Registry，一律返回 (句柄, error)。没有"已经打开的句柄"快捷方法——那会让
+// 同一件事有两种写法，也让"实例没配置"时而 nil、时而 error。UUID 是唯一例外：
+// 生成器不是连接，没有 Registry 可解析，仍由 UUID() 直接返回。
 type Snapshot struct {
 	db       *appdb.Set
 	redis    *appredis.Set
@@ -58,55 +64,10 @@ func newSnapshot(db *appdb.Set, redis *appredis.Set, amqp *appamqp.Set, kafka *a
 	return &Snapshot{db: db, redis: redis, amqp: amqp, kafka: kafka, rocketmq: rocketmq, uuidint: uuidint}
 }
 
-// DB 返回这一代的默认数据库（db.default）；没有安装时为 nil。
-func (s *Snapshot) DB() *gorm.DB {
-	if s == nil {
-		return nil
-	}
-	return s.db.Default()
-}
-
-// DBInstance 返回这一代的命名数据库（order、product）；未配置时为 nil。
-func (s *Snapshot) DBInstance(name string) *gorm.DB {
-	if s == nil {
-		return nil
-	}
-	return s.db.Instance(name)
-}
-
-// Redis 返回这一代的命名 Redis 实例；未启用时为 nil。
-func (s *Snapshot) Redis(name string) *goredis.Client {
-	if s == nil {
-		return nil
-	}
-	return s.redis.Client(name)
-}
-
-// AMQP 返回这一代的命名 AMQP 连接；未启用时为 nil。
-func (s *Snapshot) AMQP(name string) *gofyamqp.Client {
-	if s == nil {
-		return nil
-	}
-	return s.amqp.Client(name)
-}
-
-// Kafka 返回这一代的命名 Kafka 连接；未启用时为 nil。
-func (s *Snapshot) Kafka(name string) *gofykafka.Client {
-	if s == nil {
-		return nil
-	}
-	return s.kafka.Client(name)
-}
-
-// RocketMQ 返回这一代的命名 RocketMQ 生产者；未启用时为 nil。
-func (s *Snapshot) RocketMQ(name string) *gofyrocketmq.Client {
-	if s == nil {
-		return nil
-	}
-	return s.rocketmq.Client(name)
-}
-
 // UUID 返回这一代的 ID 生成器；未启用时为 nil。
+//
+// 它是唯一不带 IO 后缀的取用方法：生成器不是连接，没有 Registry 可按名字解析，
+// 也就没有"解析失败"这种状态。启用与否在 Start 时已经决定。
 func (s *Snapshot) UUID() *gofyuuidint.Generator {
 	if s == nil {
 		return nil
@@ -114,16 +75,32 @@ func (s *Snapshot) UUID() *gofyuuidint.Generator {
 	return s.uuidint.Generator()
 }
 
-// 命名实例懒取用（按别名解析，首次访问才建连）。
+// 命名实例解析（按别名查本代 Registry，首次访问才建连）。
 //
-// DB / DBInstance 与 Redis / AMQP / Kafka / RocketMQ 只返回本代已经打开的句柄；
-// 下面这组方法按别名解析本代 Registry，实例不存在时返回各包的 ErrUnknownInstance。
-// 请求内应始终经 WithContext(ctx) 拿到固定的 Snapshot 再解析，避免解析发生在
-// Reload 边界、读到下一代 Registry。
+// 这组方法是取句柄的唯一入口：名字不存在返回各包的 ErrUnknownInstance，快照或
+// Registry 缺失返回 ErrNotConfigured，调用方据此决定降级还是失败。请求内应始终经
+// WithContext(ctx) 拿到固定的 Snapshot 再解析，避免解析发生在 Reload 边界、读到
+// 下一代 Registry。
 
 // DBIO 在本代 Registry 中按别名解析数据库连接（首次访问才建连）。
+//
+// "default" 是特例：它由框架打开、刻意不在 registry 里，因此这里直接返回本代的
+// defaultDB，而不是交给 Set.NewIO。没有它，调用方就得记住"默认库走另一条路"，
+// 而这正是统一入口要消除的东西。
+// DBIO resolves a database connection by alias in this generation's Registry,
+// opening it on first use.
+//
+// "default" is the one special case: the framework opens it and deliberately
+// keeps it out of the registry, so it resolves to this generation's defaultDB
+// instead of going through Set.NewIO.
 func (s *Snapshot) DBIO(ctx context.Context, name string) (*gorm.DB, error) {
 	if s == nil {
+		return nil, gofydb.ErrNotConfigured
+	}
+	if strings.TrimSpace(name) == appdb.DefaultInstance {
+		if db := s.db.Default(); db != nil {
+			return db, nil
+		}
 		return nil, gofydb.ErrNotConfigured
 	}
 	return s.db.NewIO(ctx, name)

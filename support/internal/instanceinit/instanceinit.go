@@ -6,18 +6,31 @@
 // already-opened values plus the in-flight attempts. Different names open in
 // parallel, concurrent callers of one name share a single attempt, and a failed
 // attempt is never cached, so the next call retries.
+//
+// A hit is lock-free: every successful open republishes an immutable snapshot
+// of the value map, and Get reads it with an atomic load before touching the
+// mutex. Lookups that resolve names on every call — the per-query handle
+// resolution in the demo's repositories, for example — therefore cost an atomic
+// load instead of a mutex round trip. Only the first open and Close take the
+// mutex.
 // 包 instanceinit 为 support/db、support/pg、support/sqlite、support/redis 以及
 // 各消息队列包的命名实例注册表协调按名字的惰性初始化。
 //
 // 注册表持有配置与生命周期，本辅助类型持有已打开的值与进行中的尝试：不同名字
 // 并行打开，同一名字的并发调用共享同一次尝试，失败的尝试不会被缓存，因此下一次
 // 调用会重新尝试。
+//
+// 命中是无锁的：每次成功打开都会重新发布一份不可变的值映射快照，Get 先以一次
+// atomic 读取它，再去碰互斥锁。因此每次调用都按名字解析的场景——例如示例仓储里
+// 每个查询都取一次句柄——成本从一次加锁降到一次 atomic 读；只有首次打开与 Close
+// 才会拿锁。
 package instanceinit
 
 import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrClosed is returned by Get once Close has started. Registries translate it
@@ -40,6 +53,20 @@ type Slots[T any] struct {
 	opening map[string]*attempt[T]
 	closeFn func(name string, value T) error
 	closed  bool
+
+	// snapshot is the immutable copy the lock-free path reads. It is replaced
+	// under mu after every successful open and cleared by Close; a reader that
+	// loaded it just before Close still holds a consistent map, which is the
+	// same value a Get that won the lock at that moment would have returned.
+	// snapshot 是无锁路径读取的不可变副本：每次成功打开后在 mu 保护下整体替换，
+	// Close 时清空。在 Close 之前刚读到它的调用方仍持有一份一致的映射，与当时抢到
+	// 锁的 Get 会返回的值相同。
+	snapshot atomic.Pointer[map[string]T]
+	// down marks the Slots as closing, so the lock-free path answers ErrClosed
+	// without contending with the mutex Close holds while it drains values.
+	// down 标记 Slots 正在关闭，无锁路径因此能直接返回 ErrClosed，不必与正在
+	// 释放值的 Close 争同一把锁。
+	down atomic.Bool
 }
 
 // attempt is one in-flight open. done is closed after value and err are set;
@@ -77,6 +104,14 @@ func (s *Slots[T]) Get(ctx context.Context, name string, open func(context.Conte
 	var zero T
 	if s == nil {
 		return zero, ErrClosed
+	}
+	if s.down.Load() {
+		return zero, ErrClosed
+	}
+	if snapshot := s.snapshot.Load(); snapshot != nil {
+		if value, ok := (*snapshot)[name]; ok {
+			return value, nil
+		}
 	}
 
 	s.mu.Lock()
@@ -121,6 +156,7 @@ func (s *Slots[T]) open(ctx context.Context, name string, call *attempt[T], open
 		default:
 			s.values[name] = value
 			call.value = value
+			s.publishLocked()
 		}
 		s.mu.Unlock()
 
@@ -143,6 +179,20 @@ func (s *Slots[T]) open(ctx context.Context, name string, call *attempt[T], open
 	value, err = open(ctx)
 	completed = true
 	return value, err
+}
+
+// publishLocked republishes the immutable snapshot the lock-free path reads.
+// Callers hold mu, so copies are serialized and a reader never sees a map that
+// is still being written. The copy is O(instances) and only happens on the
+// first open of each name.
+// publishLocked 重新发布无锁路径读取的不可变快照。调用方持有 mu，因此拷贝是串行的，
+// 读方不会看到正在写入的映射。拷贝是 O(实例数)，且只在每个名字首次打开时发生。
+func (s *Slots[T]) publishLocked() {
+	snapshot := make(map[string]T, len(s.values))
+	for name, value := range s.values {
+		snapshot[name] = value
+	}
+	s.snapshot.Store(&snapshot)
 }
 
 // Publish runs fn while the slots are still open, so Install cannot make a
@@ -175,6 +225,8 @@ func (s *Slots[T]) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.down.Store(true)
+	s.snapshot.Store(nil)
 	values := s.values
 	s.values = nil
 	s.mu.Unlock()

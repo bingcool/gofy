@@ -823,6 +823,21 @@ All notable changes to this project are documented here. The format follows
   module, and `v0.0.0` is an unpublished placeholder. §5.3 / §6.2 / §11.8
   record the three experiments and defer removal to the publish step (T2-2).
 
+### Changed
+
+- `support/internal/instanceinit`: a hit in a named-instance Registry is now
+  lock-free. Every successful open republishes an immutable snapshot of the
+  value map, and `Get` reads it with a single atomic load before touching the
+  mutex, so resolving a handle on every query costs an atomic read instead of a
+  lock round trip. Only the first open and `Close` take the mutex; `Close` marks
+  the slots down first so a lookup never waits behind the drain.
+- `examples/demo-service`: the IO snapshot has one way to resolve a handle —
+  `DBIO`, `RedisIO`, `AMQPIO`, `KafkaIO`, `RocketMQIO`, all returning
+  `(handle, error)`. `DB`, `DBInstance`, `Redis`, `AMQP`, `Kafka` and
+  `RocketMQ` are gone, and `DBIO("default")` resolves the framework-managed
+  default, so no caller has to know which pool lives outside the registry.
+  `UUID` stays: a generator is not a connection and has no Registry to resolve.
+
 ### Removed
 
 - The legacy `gofy-interface-service` contract repository has been deleted by

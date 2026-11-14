@@ -213,7 +213,7 @@ type RepositoryDeclare struct {
 （每个服务一个 `sync.Once`，重复取用返回同一实例）。构造期间再次取用同一个槽
 会被判定为依赖成环，直接 panic 并带上服务名，不会让 `sync.Once` 静默死锁；装配
 只在启动期串行执行，不支持并发的首次取用。工厂执行时 `app/appio` 还没 `Start`，
-快照还没发布，仓库在每次查询时解析 `appio.WithContext(ctx).DB()`；`Start` 发布
+快照还没发布，仓库在每次查询时解析 `appio.WithContext(ctx).DBIO(ctx, "default")`；`Start` 发布
 新快照后自动使用新资源。请求进入时中间件把当时的快照固定进 ctx，一次请求不会
 横跨 `Reload` 换连接。脚本也跑同一套 `app/appio` 装配：`script/register.go` 的
 `withIO` 在 `Run` 前后 `Start`/`Stop` 模块，脚本里的仓库因此取到本代完整快照
@@ -379,21 +379,32 @@ product/
 单库（`db.default`）下，repository 的连接解析统一为 `conn(ctx)`：
 
 ```go
-func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
-    return gofydb.WithContext(ctx, appio.WithContext(ctx).DB())
+func (r *OrderRepository) conn(ctx context.Context) (*gorm.DB, error) {
+    db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+    if err != nil {
+        return nil, fmt.Errorf("resolve default database: %w", err)
+    }
+    return gofydb.WithContext(ctx, db), nil
 }
 ```
+
+默认库是唯一特例：它由框架打开、不在 Registry 里，但 `DBIO` 认这个名字，所以
+仓库仍只有一条取句柄的路径。
 
 `appio.WithContext(ctx)` 优先取请求进入时固定的快照，没有时回退到当前已发布的
 快照，因此脚本、消费者这类不经过 HTTP 中间件的调用也能拿到连接；两者都没有说明
 入口没有发布本代，直接 panic，不会把 nil 连接交给下游。
 
-订单 service 的 `Create` 用 `gofydb.Transaction(ctx, appio.WithContext(ctx).DB(), fn)`
-开启事务，事务会放进传给 `fn` 的 context；扣库存与建订单都在 `fn` 里用同一个
-ctx，产品仓库从 ctx 取到同一个事务：
+订单 service 的 `Create` 用 `gofydb.Transaction(ctx, db, fn)` 开启事务（`db` 来自
+`DBIO(ctx, "default")`），事务会放进传给 `fn` 的 context；扣库存与建订单都在
+`fn` 里用同一个 ctx，产品仓库从 ctx 取到同一个事务：
 
 ```go
-err := gofydb.Transaction(ctx, appio.WithContext(ctx).DB(), func(ctx context.Context) error {
+db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+if err != nil {
+    return nil, fmt.Errorf("resolve default database: %w", err)
+}
+err = gofydb.Transaction(ctx, db, func(ctx context.Context) error {
     for _, it := range items {
         if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
             return translateProductErr(it.SkuID, err)
@@ -412,7 +423,7 @@ err := gofydb.Transaction(ctx, appio.WithContext(ctx).DB(), func(ctx context.Con
 
 - 嵌套 `Transaction` 复用外层事务，不创建 savepoint；内层错误冒泡到外层，由最外层
   统一回滚，内层成功也不会提前提交；
-- 没有事务时 `gofydb.WithContext` 回退到 `appio.WithContext(ctx).DB()`；ctx 中的事务永远优先；
+- 没有事务时 `gofydb.WithContext` 回退到 `appio.WithContext(ctx).DBIO(ctx, "default")`；ctx 中的事务永远优先；
 - 跨模块只读调用（如 `validateItems` 的 `ListByIDs`）可以不显式开事务；需要一致性
   的多步读写（扣库存 + 建订单）必须传入同一个 ctx；
 - `Create` 里任一 SKU 扣库存失败或建订单失败，整个事务回滚，已扣的库存一并恢复；

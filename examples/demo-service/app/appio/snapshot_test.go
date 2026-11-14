@@ -77,3 +77,35 @@ func TestSnapshotNewIORequiresGenerationRegistry(t *testing.T) {
 		t.Fatalf("RedisIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
 	}
 }
+
+// TestDBIOResolvesTheFrameworkDefault pins the one special case in the unified
+// entry point: "default" is opened by the framework and stays out of the
+// registry, so DBIO has to resolve it from the generation itself.
+// TestDBIOResolvesTheFrameworkDefault 固定统一入口里唯一的特例："default" 由框架
+// 打开、不在 registry 里，因此 DBIO 必须从这一代自身解析它。
+func TestDBIOResolvesTheFrameworkDefault(t *testing.T) {
+	prev := Current()
+	t.Cleanup(func() { Publish(prev) })
+
+	defaultDB := &gorm.DB{}
+	PublishDB(defaultDB)
+	ctx := context.Background()
+
+	got, err := Current().DBIO(ctx, "default")
+	if err != nil {
+		t.Fatalf("DBIO(default): %v", err)
+	}
+	if got != defaultDB {
+		t.Fatal("DBIO(default) returned a different handle than the framework default")
+	}
+	// 名字两侧空白会被裁剪，调用方不必自己 trim。
+	if got, err := Current().DBIO(ctx, " default "); err != nil || got != defaultDB {
+		t.Fatalf("DBIO(\" default \") = %v, %v", got, err)
+	}
+
+	// 没有默认库的快照（NewSet(nil)）仍然报未配置，而不是返回 nil 句柄。
+	PublishDB(nil)
+	if _, err := Current().DBIO(ctx, "default"); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("DBIO(default) without a default DB = %v, want ErrNotConfigured", err)
+	}
+}
