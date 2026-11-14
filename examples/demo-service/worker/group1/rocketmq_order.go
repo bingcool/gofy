@@ -15,9 +15,10 @@ import (
 // RocketMQ 消费者是一次性对象，因此 worker 只跑一个实例，并行度由 SDK 自己的拉取
 // worker 提供。
 var orderRocketMQ = gofyconsumer.RocketMQConfig{
-	Name:  "order-rocketmq-consumer",
-	Topic: "demo-order-events",
-	Group: "demo-service-order-consumer",
+	Name:        "order-rocketmq-consumer",
+	Topic:       "demo-order-events",
+	Group:       "demo-service-order-consumer",
+	Concurrency: 1,
 	// Tags is an OR list — the SDK joins the entries with "||" into one
 	// subscription expression. Empty, or a single "*", subscribes to every tag.
 	// Tags 是"或"关系：SDK 用 "||" 把各元素拼成一个订阅表达式。留空或只有一个
