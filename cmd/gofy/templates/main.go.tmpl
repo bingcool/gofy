@@ -13,6 +13,9 @@ import (
 {{- if .WithScripts }}
 	appscript "{{.Module}}/script"
 {{- end }}
+{{- if .WithWorker }}
+	appworker "{{.Module}}/worker"
+{{- end }}
 	"{{.Module}}/app/module/example"
 )
 
@@ -52,6 +55,15 @@ func main() {
 {{- end }}
 {{- if .WithScripts }}
 	opts = append(opts, gofy.WithScripts(appscript.Register()...))
+{{- end }}
+{{- if .WithWorker }}
+	// Long-running tasks live in their own process: `{{.Name}} worker --group=default`.
+	// HTTP never starts them, so the same image can run as a Deployment or a worker.
+	workerGroup, err := appworker.Register()
+	if err != nil {
+		log.Fatalf("register workers: %v", err)
+	}
+	opts = append(opts, gofy.WithWorkerGroups(workerGroup))
 {{- end }}
 
 	app, err := gofy.New(opts...)

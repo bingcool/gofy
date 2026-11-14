@@ -13,6 +13,7 @@ func newTestScaffold(name string) scaffold {
 		EnvPrefix:    strings.ToUpper(strings.ReplaceAll(name, "-", "_")),
 		Module:       "example.com/" + name,
 		WithScripts:  true,
+		WithWorker:   true,
 		WithMakefile: true,
 		GoVersion:    "1.24",
 	}
@@ -37,6 +38,8 @@ func TestGenerateDefaults(t *testing.T) {
 		"app/module/example/handler/example.go",
 		"script/register.go",
 		"script/example.go",
+		"worker/register.go",
+		"worker/example.go",
 	}
 	for _, name := range want {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
@@ -68,6 +71,9 @@ func TestGenerateDefaults(t *testing.T) {
 	}
 	if strings.Contains(main, "WithDatabase") {
 		t.Errorf("main.go must not wire a database by default")
+	}
+	if !strings.Contains(main, "gofy.WithWorkerGroups(workerGroup)") {
+		t.Errorf("main.go must register the worker group:\n%s", main)
 	}
 }
 
@@ -122,6 +128,22 @@ func TestGenerateWithoutScripts(t *testing.T) {
 	main := readFile(t, filepath.Join(dir, "main.go"))
 	if strings.Contains(main, "WithScripts") {
 		t.Errorf("main.go must not register scripts when they are disabled")
+	}
+}
+
+func TestGenerateWithoutWorker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "demo")
+	s := newTestScaffold("demo")
+	s.WithWorker = false
+	if err := s.Generate(dir, false); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "worker")); !os.IsNotExist(err) {
+		t.Errorf("worker/ should not be generated when workers are disabled")
+	}
+	main := readFile(t, filepath.Join(dir, "main.go"))
+	if strings.Contains(main, "WithWorkerGroups") {
+		t.Errorf("main.go must not register workers when they are disabled")
 	}
 }
 

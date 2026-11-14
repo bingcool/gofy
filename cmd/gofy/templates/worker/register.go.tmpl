@@ -1,0 +1,15 @@
+package worker
+
+import (
+	gofyworker "github.com/bingcool/gofy/support/worker"
+)
+
+// Register returns the long-running group started by
+// `go run . worker --group=default`. It is wired in main next to the HTTP
+// modules and shares their config, logger and database; nothing here runs while
+// the HTTP server is up.
+// Register 返回 `go run . worker --group=default` 启动的常驻分组。它在 main 里与
+// HTTP 模块一起装配，共用同一份配置、日志与数据库；HTTP 服务运行时它不会启动。
+func Register() (*gofyworker.Group, error) {
+	return gofyworker.NewGroup("default", Example())
+}

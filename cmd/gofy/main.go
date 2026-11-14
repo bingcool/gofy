@@ -32,6 +32,7 @@ type scaffold struct {
 	Replace      string
 	WithDB       bool
 	WithScripts  bool
+	WithWorker   bool
 	WithDocker   bool
 	WithMakefile bool
 	GoVersion    string
@@ -61,6 +62,7 @@ func newNewCmd() *cobra.Command {
 		dir          string
 		withDB       bool
 		withScripts  bool
+		withWorker   bool
 		withDocker   bool
 		withMakefile bool
 		force        bool
@@ -97,6 +99,7 @@ func newNewCmd() *cobra.Command {
 				Replace:      absReplace,
 				WithDB:       withDB,
 				WithScripts:  withScripts,
+				WithWorker:   withWorker,
 				WithDocker:   withDocker,
 				WithMakefile: withMakefile,
 				GoVersion:    goVersion,
@@ -108,6 +111,7 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().StringVar(&dir, "dir", "", "output directory (default ./<name>)")
 	cmd.Flags().BoolVar(&withDB, "with-db", false, "include MySQL/GORM wiring")
 	cmd.Flags().BoolVar(&withScripts, "with-scripts", true, "include the script/ directory")
+	cmd.Flags().BoolVar(&withWorker, "with-worker", true, "include the worker/ entry for long-running tasks")
 	cmd.Flags().BoolVar(&withDocker, "with-docker", false, "include Dockerfile and .dockerignore")
 	cmd.Flags().BoolVar(&withMakefile, "with-makefile", true, "include a Makefile")
 	cmd.Flags().BoolVar(&force, "force", false, "write into a non-empty directory")
@@ -198,6 +202,8 @@ func (s scaffold) enabled(out string) bool {
 		return s.WithMakefile
 	case "script/register.go", "script/example.go":
 		return s.WithScripts
+	case "worker/register.go", "worker/example.go":
+		return s.WithWorker
 	default:
 		return true
 	}
