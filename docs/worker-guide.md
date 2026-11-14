@@ -59,6 +59,8 @@ app, err := gofy.New(
 )
 ```
 
+`WithWorkerGroups` 可以一次传多个分组；装配与配置的写法见 §3.4。
+
 ### 3.2 命令
 
 | 命令 | 作用 |
@@ -77,6 +79,70 @@ app, err := gofy.New(
 | pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid` | 未配置 `pid_file` 则不写 |
 | 日志 | `storage/log/worker/<date>/info/<worker>.log`、`error/<worker>.log`、`error/<worker>-system_error.log` | 文件名取 `--name` 指定的 worker；整组启动退回分组名 |
 | 端口 | 默认不开；配了 `WithWorkerHealth` 才有 `/healthz` | 只报就绪，不做业务健康 |
+
+### 3.4 多个分组
+
+一个进程只跑一个分组，但**一个二进制注册全部分组**：`--group` 在启动时选一个，其余不启动。
+这样同一个镜像既能当 HTTP 服务，也能按需要跑任意分组，不必为每个分组单独出一个二进制。
+
+```go
+// worker/worker.go：分组各自一个文件，这里只列清单
+func Register(cfg Config) ([]*worker.Group, error) {
+	order, err := newOrderGroup(cfg.Order)
+	if err != nil {
+		return nil, err
+	}
+	report, err := newReportGroup(cfg.Report)
+	if err != nil {
+		return nil, err
+	}
+	return []*worker.Group{order, report}, nil
+}
+
+// main.go
+groups, err := appworker.Register(cfg.Worker)
+if err != nil {
+	log.Fatalf("build worker groups: %v", err)
+}
+opts = append(opts,
+	gofy.WithWorkerGroups(groups...),
+	gofy.WithWorkerConcurrency(appworker.Concurrency(cfg.Worker)),
+)
+```
+
+配置按分组名分层，公共项留在 `worker` 顶层；每个分组块的类型定义在它自己的文件里，加一个
+worker 不会碰到别的分组：
+
+```yaml
+worker:
+  health_addr: 127.0.0.1:9091   # 进程级：一个分组一个进程
+  order:
+    scan:
+      concurrency: 2
+      interval: 5s
+  report:
+    summary:
+      concurrency: 1
+      interval: 1h
+```
+
+各维度的隔离程度不一样，部署时按这张表对照：
+
+| 维度 | 随分组隔离 | 说明 |
+| --- | --- | --- |
+| 进程 / Deployment | 是 | 一个分组一个 `worker --group=<g>`，扩缩容、发布互不影响 |
+| pid 文件 | 是 | `-worker-<group>` 后缀，`stop --worker=<g>` 只停该组 |
+| 日志 | 是 | 各自进程写各自的文件；文件名主干是 worker 名，建议带分组前缀保证全局唯一 |
+| 并发数 | 是 | 键为 `group/worker`，写错名字 `New` 直接失败（不再静默退回 1 个实例） |
+| 探针端口 | **否** | `WithWorkerHealth` 是进程级地址；k8s 里每组一个 Pod 不冲突，同机跑两组要换端口或用 `ORDER_CONFIG` 换配置 |
+
+新增一个分组只要三步：写 `report.go`（成员 + 它的配置结构）、在 `Register` 的返回列表里加
+一项、`config.yaml` 加同名配置块。`main.go` 与部署清单不用改结构——复制一份清单，改
+`--group` 和副本数即可。
+
+**不要在一个进程里跑多个分组**：pid、探针、`stop` 的粒度都是分组，混跑会出现"停一半"，
+而且一个分组里某个 worker 反复失败会把另一个分组一起带走。分组就是部署单位，副本数与发布
+节奏不同才是拆组的理由。
 
 ## 4. 四种循环的写法
 

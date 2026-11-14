@@ -93,6 +93,36 @@ type Worker interface {
   `ErrUnknownWorker`，空切片返回原分组；
 - `ValidName(name)` 导出给 CLI 校验（`stop --worker` 会把它拼进文件名）。
 
+### 多个分组
+
+`WithWorkerGroups` 可累加，分组名必须唯一；**一个进程仍然只运行一个分组**，`--group`
+在启动时选一个：
+
+```go
+order, err := worker.NewGroup("order", orderScan, orderHeartbeat)
+report, err := worker.NewGroup("report", reportSummary)
+
+app, err := gofy.New(
+	gofy.WithWorkerGroups(order, report),
+	gofy.WithWorkerConcurrency(map[string]int{
+		"order/order-scan":      2,
+		"report/report-summary": 1,
+	}),
+)
+```
+
+| 维度 | 多分组时 |
+| --- | --- |
+| `worker --list` | 列出全部组，不启动、不连数据库 |
+| `worker --group=x` | 只启动 x；x 不存在时在构建 logger/DB 之前就返回 `ErrWorkerGroupNotFound` |
+| pid 文件 | 每组独立：`<pid_file>` 加 `-worker-<group>` 后缀 |
+| 日志 | 每组独立进程写自己的文件；文件名主干是 worker 名，建议带分组前缀保证全局唯一 |
+| 并发数 | 键 `group/worker`，`New` 会校验它对应真实存在的 worker，改名后写错直接启动失败 |
+| 探针端口 | **进程级**：`WithWorkerHealth` 一个进程一个地址，同机跑多个分组要换端口；k8s 里每组一个 Pod 则无冲突 |
+
+不提供"一个进程跑多个分组"的开关：分组的语义是组内同生共死、一个分组一个部署单位。
+混跑会让 pid 文件、`stop --worker`、就绪探针的粒度同时失效，一个组崩溃也会拖走另一个组。
+
 ### Identity
 
 ```go
@@ -327,7 +357,7 @@ w := worker.Func("settle", func(ctx context.Context) error {
 | --- | --- |
 | `WithWorkerGroups(groups...)` | 注册分组；非法分组让 `New` 失败，重名分组报错 |
 | `WithWorkerPolicy(policy)` | 覆盖默认重启策略 |
-| `WithWorkerConcurrency(map[string]int)` | 键为 `group/worker`，值为实例数，小于 1 报错 |
+| `WithWorkerConcurrency(map[string]int)` | 键为 `group/worker`，值为实例数；小于 1、或键对不上已注册的 worker 都让 `New` 失败 |
 | `WithWorkerDrainTimeout(d)` | 覆盖 20s 的 drain 预算，必须为正 |
 | `WithWorkerHealth(addr)` | 开启 worker 进程的 `/healthz`（就绪 200、drain 503） |
 

@@ -69,15 +69,21 @@ worker/20261106/error/order-consumer-system_error.log
 `worker --list` 这类没有分组的调用落在 `default`。分组名与 worker 名都会先清洗，
 只保留字母、数字、`-` 和 `_`。
 
+多个分组时，日志目录不再按分组分层（早期版本是 `worker/<date>/<group>/info.log`），
+文件名本身就带着分组信息：整组启动用分组名（`order-h1.log`、`report-h1.log`），
+`--name` 启动用 worker 名。因此**同一个应用里 worker 名应全局唯一**——示例用
+`order-scan`、`report-summary` 这样带分组前缀的名字，两个分组同机运行时也不会写到
+同一个文件。
+
 脚本名来自 `systemenv.ScriptName()`：取 `script` 后面的第一个非 flag 参数，
 去掉空白，只保留字母、数字、`-` 和 `_`，防止命令行参数影响目录结构。
 `script --list` 这类没有脚本名的调用仍使用原始文件名（`info/info.log`、
 `error/error.log`、`error/system_error.log`）。
 
-写入路径由 `app/config.Load` 在每次加载配置时追加，模式目录按
-`systemenv.IsScriptService()` 选择：脚本执行写 `script/`，其余命令写 `http/`
-并额外写 `access/`。因此 Nacos 热更新重新加载配置后仍然落在同一个模式目录和
-同一个脚本文件，不会混写。
+写入路径由 `app/config.Load` 在每次加载配置时追加，模式目录按启动方式选择：
+`worker` 子命令写 `worker/`，脚本执行写 `script/`，其余命令写 `http/` 并额外写
+`access/`（判定顺序见 `systemenv.IsWorkerService()` / `IsScriptService()`）。因此
+Nacos 热更新重新加载配置后仍然落在同一个模式目录和同一个文件，不会混写。
 
 `config.yaml` 里的 `log.outputs` 会保留，例如 `stdout` 仍然输出到终端；
 模式目录是追加的，不会覆盖已有输出。`access/` 通过 `log.access_outputs`

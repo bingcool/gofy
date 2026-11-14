@@ -129,7 +129,7 @@ demo-service worker --list
 
 | flag | 默认 | 说明 |
 | --- | --- | --- |
-| `--group` | 空 | 必填（除 `--list`）；对应 `worker.groups.<group>` |
+| `--group` | 空 | 必填（除 `--list`）；对应配置里的同名分组块（如 `worker.order`） |
 | `--name` | 空 | 可重复；只启动列出的 worker，用于排障 |
 | `--concurrency` | 0 | 覆盖全部 worker 的实例数，0 表示按配置 |
 | `--list` | false | 打印分组/worker/并发后退出，不连 MQ、不连 DB |
@@ -156,6 +156,8 @@ demo-service worker --list
 | 退出方式 | SIGTERM + `stop` | 自然结束 | SIGTERM + `stop --worker=<group>` |
 
 ### 3.4 进程内结构
+
+一个二进制注册全部分组，一个进程只运行 `--group` 选中的那一个；下面画的是 order 组（report 组结构相同，只是成员与节奏不同）：
 
 ```
 demo-service worker --group=order
@@ -392,7 +394,9 @@ app, err := gofy.New(
 
 - worker 只依赖 service/repository，**不依赖 `support.Router`、`*gin.Context`、HTTP middleware**。
 - 需要"当前时间/当前用户"这类请求级信息时，从消息体或任务行读取，不从 context 里找 HTTP 值。
-- 构造失败（分组名非法、并发小于 1）在 `main` 里直接返回错误；连接类失败（DB、MQ）在 `Run` 里暴露，由重启策略处理——早失败指编程错误，不是网络抖动。
+- 构造失败（分组名非法、并发小于 1、并发键对不上已注册的 worker）在 `main` 里直接返回错误；连接类失败（DB、MQ）在 `Run` 里暴露，由重启策略处理——早失败指编程错误，不是网络抖动。
+
+多个分组按同样方式各构造一个，`WithWorkerGroups(groups...)` 一次传入；一个进程仍然只运行 `--group` 选中的那个，配置按分组名分层（见 §3.3 与 `docs/worker-guide.md` §3.4）。
 
 
 ---
@@ -774,31 +778,32 @@ worker:
     backoff: 1s
     max_backoff: 30s
     max_restarts: 0          # 0 = 不限
-  groups:
-    order:
-      order-scan:
-        concurrency: 2
-        claim:
-          table: job_task
-          batch: 100
-          lease: 60s
-          max_attempts: 5
-          idle_delay: 2s     # 无任务时的退避
-      order-consumer:
-        concurrency: 1
-        kafka:
-          topic: order.created
-          group: demo-order
-          commit_mode: manual
-    settle:
-      settle-reconcile:
-        concurrency: 1
-        lease:
-          key: settle:reconcile
-          ttl: 15s
+  order:                     # 分组块，名字与 `worker --group` 一致
+    scan:
+      concurrency: 2
+      claim:
+        table: job_task
+        batch: 100
+        lease: 60s
+        max_attempts: 5
+        idle_delay: 2s       # 无任务时的退避
+    consumer:
+      concurrency: 1
+      kafka:
+        topic: order.created
+        group: demo-order
+        commit_mode: manual
+  settle:
+    reconcile:
+      concurrency: 1
+      lease:
+        key: settle-reconcile
+        ttl: 15s
 ```
 
-上层结构由应用定义，框架不解析这一段：`main` 读出来，用 `gofy.WithWorkerConcurrency` 把 `groups.<g>.<w>.concurrency` 映射成 `"<g>/<w>": n`。这样配置键随业务命名走，框架只认 `group/worker → 实例数` 这一种输入。`drain_timeout` 属于框架，用 `WithWorkerDrainTimeout` 设置。
+上层结构由应用定义，框架不解析这一段：`main` 读出来，用 `gofy.WithWorkerConcurrency` 把 `<g>.<w>.concurrency` 映射成 `"<g>/<w>": n`。块内的键不必等于 worker 名（demo 的 `worker.order.scan` 对应 `order/order-scan`），框架只认 `group/worker → 实例数` 这一种输入。`drain_timeout` 属于框架，用 `WithWorkerDrainTimeout` 设置。
+
+每个分组的配置类型定义在它自己的文件里（`order.go`、`report.go`），加一个 worker 只改那个文件；公共项留在 `worker` 顶层。分组块用结构体字段而不是 map，严格解码才能拒绝块内拼错的键，`default` 标签也才会生效。
 
 ### 8.2 默认值
 
@@ -815,7 +820,7 @@ worker:
 | `claim.max_attempts` | `5` | `>= 1` |
 | `claim.idle_delay` | `2s` | `>= 200ms` |
 
-启动时校验并**在错误信息里给出键路径**（`worker.groups.order.order-scan.claim.lease`），不接受"配置错了但悄悄用默认值"。
+启动时校验并**在错误信息里给出键路径**（`worker.order.scan.claim.lease`），不接受"配置错了但悄悄用默认值"。
 
 ### 8.3 与 HTTP 配置的复用
 
@@ -983,7 +988,7 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | T3-3 | 已完成（2026-11-14） | `runner.supervise` + `Policy`：指数退避、±20% 抖动、`MaxRestarts`；用例覆盖「重启到成功」「触顶退出」「ExitOnError 立即退出」「提前返回 nil 视为违约」 |
 | T3-4 | 已完成（2026-11-14） | `Runner.Run` 两级 context：`runCtx` 停止拉取、`drainCtx = WithoutCancel + deadline`；用例断言 drain 期间 `DrainContext` 仍有效且 Runner 等在途任务结束 |
 | T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/info/order-scan-h11.log`（`--name=order-scan`）与 `order-h11.log`（整组），pid 文件用 `-worker-order` 后缀并在退出时清理 |
-| T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker/`（`worker.go` 组装配 + `scan.go`、`heartbeat.go` 各一个循环 + `config.go` 配置类型）、`config.yaml` 的 `worker.scan` 段；实测 `worker --group=order` 起 `order-scan#0/#1` 与 `order-heartbeat`，SIGTERM 后两组日志均为 `stopped`、退出码 0 |
+| T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker/`：`config.go`（公共设置 + 按分组分层的 `Config`）、`worker.go`（`Register` 返回全部组）、`order.go`/`report.go`（各组的成员与配置）、`scan.go`/`heartbeat.go`/`summary.go`（一任务一文件）；`config.yaml` 的 `worker.order.scan` 与 `worker.report.summary` 段。实测 `worker --list` 列出 order（scan×2、heartbeat×1）与 report（summary×1）两组；`--group=order` 与 `--group=report` 各自生成 `-worker-<group>.pid` 与独立日志，SIGTERM 后均 `stopped`、退出码 0 |
 | T3-7 | 已完成（2026-11-14） | `support/claim/{claim.go,claim_test.go,claim_integration_test.go}`；真实 MySQL 8.4 上 1000 行 × 2 个并发 owner 零重复、`job` 隔离、`Succeed/Fail` 的 CAS 拒绝过期 owner、回收过期租约后 `attempts` 递增 |
 | T3-8 | 已完成（2026-11-14） | `claim.Hooks{OnClaim,OnReap,OnLeaseLost}`；用例断言租约丢失回调触发；不引入监控库依赖 |
 | T3-9 | 已完成（2026-11-14） | `support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`；用例断言 handler 收到的是 drain context（投递 ctx 已取消也仍有效）、停机才 `Close`、可重试错误不 `Close` |
@@ -1008,7 +1013,7 @@ P1/P2 全关（M4、M5 达成）。`make check` 与 adapter `make check` 均 EXI
 | --- | --- | --- |
 | `php script.php start` 起多进程 | `app worker --group=<g>` 起多 goroutine | 不 fork；隔离单位从进程换成 Pod |
 | `worker_num` | `concurrency` | 每个 worker 的实例数 |
-| 进程组配置 | `worker.groups.<g>` | 一个组 = 一个 Deployment |
+| 进程组配置 | `worker.<g>` | 一个组 = 一个 Deployment |
 | `reload` 平滑重启 | 滚动更新 + SIGTERM drain | 不做进程内 reload：状态在 DB/MQ，不在内存 |
 | task 进程 + 管道投递 | claim 表 + MQ | Go 生态用存储/队列解耦，不用 IPC |
 | 常驻进程内定时器 | worker 内部 ticker | 框架不管调度语义，避免与 CronJob 双跑 |
