@@ -17,6 +17,7 @@ func Register(cfg *config.Config) []gofyscript.Script {
 	return []gofyscript.Script{
 		withIO(cfg, FixOrder()),
 		GenUUID(cfg),
+		LockCheck(cfg),
 	}
 }
 
@@ -29,7 +30,7 @@ func Register(cfg *config.Config) []gofyscript.Script {
 // Current(): a reload in another entry can withdraw that global in the middle
 // of a script, and a script must keep using the handles it started.
 // withIO 在脚本前后启动、关闭 io 模块，脚本因此和请求一样借用完整的一代实例
-// （db、redis、amqp、kafka、rocketmq、uuidint）；声明 WithoutDatabase 的脚本
+// （db、redis、amqp、kafka、rocketmq、uuidint、lock）；声明 WithoutDatabase 的脚本
 // 不建数据库连接，由脚本自己打开所需实例。
 //
 // 这里显式固定本代，而不是依赖进程级 Current()：别的入口触发的 Reload 可能在脚本
@@ -43,7 +44,7 @@ func withIO(cfg *config.Config, s gofyscript.Script) gofyscript.Script {
 		if rt.DB == nil {
 			return apperr.Internal("database is not configured")
 		}
-		module := appio.NewModule(rt, cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt)
+		module := appio.NewModule(rt, cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock)
 		if err := module.Start(ctx); err != nil {
 			return apperr.Internal("start io module").WithCause(err)
 		}

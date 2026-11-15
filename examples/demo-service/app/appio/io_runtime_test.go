@@ -15,12 +15,14 @@ import (
 	"github.com/bingcool/gofy/core"
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
 	gofykafka "github.com/bingcool/gofy/support/kafka"
+	gofylock "github.com/bingcool/gofy/support/lock"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
 	appredis "github.com/yourorg/demo-service/app/appio/redis"
+	appredislock "github.com/yourorg/demo-service/app/appio/redislock"
 	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
 	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 	"gorm.io/gorm"
@@ -36,6 +38,8 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	}, nil, nil, nil, appuuidint.Config{
 		Enabled: true, RedisInstance: appredis.InstanceRateLimit, Key: "demo:uuid",
 		PoolSize: 5, PoolInterval: time.Hour,
+	}, gofylock.Config{
+		Enabled: true, RedisInstance: appredis.InstanceRateLimit, Prefix: "demo:lock", Expiry: time.Minute,
 	})
 
 	ctx := context.Background()
@@ -96,12 +100,31 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	if raw, err := mr.Get("demo:uuid"); err != nil || raw != "5" {
 		t.Fatalf("uuidint.Get did not consume the pool: value=%q err=%v", raw, err)
 	}
+	// The lock is bound to this generation's Redis client and writes the
+	// configured prefix, which is what makes two applications able to share a db.
+	// 锁绑定本代 Redis 客户端并写入配置的前缀，这正是两个应用能共用同一个库的原因。
+	if appredislock.Default() == nil || Current().RedisLock() == nil {
+		t.Fatal("redislock was not installed")
+	}
+	mu, err := Current().RedisLock().Lock(ctx, "io-test")
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if !mr.Exists("demo:lock:io-test") {
+		t.Fatal("the lock did not reach this generation's redis with the configured prefix")
+	}
+	if err := mu.Unlock(ctx); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
 
 	if err := m.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if appuuidint.Default() != nil {
 		t.Fatal("uuidint.Default was not cleared")
+	}
+	if appredislock.Default() != nil {
+		t.Fatal("redislock.Default was not cleared")
 	}
 	if appredis.RateLimit() != nil {
 		t.Fatal("redis.RateLimit was not cleared")
@@ -149,7 +172,7 @@ func TestStartInstallsAMQPInstance(t *testing.T) {
 				Vhost:    os.Getenv("GOFY_TEST_AMQP_VHOST"),
 			}},
 		}},
-	}, nil, nil, appuuidint.Config{})
+	}, nil, nil, appuuidint.Config{}, gofylock.Config{})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
@@ -202,7 +225,7 @@ func TestStartInstallsKafkaInstance(t *testing.T) {
 			ClientID:    "demo-service-test",
 			DialTimeout: 5 * time.Second,
 		}},
-	}, nil, appuuidint.Config{})
+	}, nil, appuuidint.Config{}, gofylock.Config{})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
@@ -248,7 +271,7 @@ func TestStartInstallsRocketMQInstance(t *testing.T) {
 			Endpoint:    endpoint,
 			SendTimeout: 5 * time.Second,
 		}},
-	}, appuuidint.Config{})
+	}, appuuidint.Config{}, gofylock.Config{})
 
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {

@@ -535,6 +535,25 @@ id, err := gen.Get(ctx)
 ids, err := gen.GetBatch(ctx, 10)
 ```
 
+分布式互斥用 `support/lock`：基于 redsync（DLM）的 Redis 锁，一把锁是「key + 随机
+token + TTL」。`Lock` 按配置重试、拿不到返回 `ErrAlreadyHeld`；`TryLock` 只尝试一次，
+适合请求内防重复提交；`Unlock` 只在 key 里仍是本锁 token 时删除，过期后被接管的锁不会
+被前任释放；临界区可能超过 TTL 时用 `Extend` 续租，锁已丢失会返回 `ErrNotHeld`。
+锁被占、Redis 故障、ctx
+取消是三种不同的错误，因此"正在停机"不会被报成"锁忙"。`lock.Open` 直接吃 YAML 配置
+（`enabled`/`redis_instance_name`/`prefix`/`expiry`/`tries`/`retry_delay`），
+`enabled` 没有默认值——缺配置时不会悄悄开始写锁键。见
+[support/lock/README.md](support/lock/README.md)。
+
+```go
+locker, err := lock.New(lock.WithClient(redisClient), lock.WithPrefix("demo:lock"))
+mu, err := locker.Lock(ctx, "order:123")
+if errors.Is(err, lock.ErrAlreadyHeld) {
+    return nil // 别人在处理
+}
+defer mu.Unlock(ctx)
+```
+
 Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\Excel`，
 底层换成纯 Go 的 excelize（无扩展、无 cgo）。`Export` 支持声明式表头/列宽/
 冻结/筛选与生命周期钩子，`ExportStream` 用 StreamWriter 流式写大数据；
@@ -908,6 +927,7 @@ support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRP
 support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
 support/uuidint/  基于 Redis 的分布式自增 int64 ID（与 PHP Uuid 布局互通）
+support/lock/    基于 Redis/redsync 的分布式互斥锁（TTL 自愈 + token 围栏解锁）
 support/phpoffice/ Excel .xlsx 导出/导入（excelize，纯 Go）
 support/image/   图像缩放/裁剪/旋转/水印/编码（纯 Go，无 GD/Imagick）
 script/        维护脚本描述

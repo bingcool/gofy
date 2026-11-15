@@ -26,19 +26,22 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
+	gofylock "github.com/bingcool/gofy/support/lock"
 	goredis "github.com/redis/go-redis/v9"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
 	appredis "github.com/yourorg/demo-service/app/appio/redis"
+	appredislock "github.com/yourorg/demo-service/app/appio/redislock"
 	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
 	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 )
 
 // Module publishes app/appio/db, app/appio/redis, app/appio/amqp, app/appio/kafka,
-// app/appio/rocketmq and app/appio/uuidint handles during startup.
-// Module 在启动时打开各实例并发布 db、redis、amqp、kafka、rocketmq、uuidint 的
-// 包级句柄；它不注册路由，只负责连接生命周期与快照发布。
+// app/appio/rocketmq, app/appio/uuidint and app/appio/redislock handles during
+// startup.
+// Module 在启动时打开各实例并发布 db、redis、amqp、kafka、rocketmq、uuidint、
+// redislock 的包级句柄；它不注册路由，只负责连接生命周期与快照发布。
 type Module struct {
 	rt          *gofy.Runtime
 	dbCfg       map[string]gofy.DatabaseConfig
@@ -47,6 +50,7 @@ type Module struct {
 	kafkaCfg    appkafka.Config
 	rocketmqCfg approcketmq.Config
 	uuidintCfg  appuuidint.Config
+	lockCfg     gofylock.Config
 
 	dbSet       *appdb.Set
 	redisSet    *appredis.Set
@@ -54,22 +58,23 @@ type Module struct {
 	kafkaSet    *appkafka.Set
 	rocketmqSet *approcketmq.Set
 	uuidintSet  *appuuidint.Set
+	lockSet     *appredislock.Set
 	// snapshot 是本代句柄的只读视图，Start 发布、Stop 只撤回仍指向自己的快照。
 	snapshot *Snapshot
 }
 
 // NewModuleFactory builds the module from the application runtime.
 // NewModuleFactory 把实例配置封进模块工厂；每次装配由框架传入当代的 Runtime。
-func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config) gofy.ModuleFactory {
+func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config, lockCfg gofylock.Config) gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
-		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg, uuidintCfg), nil
+		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg, uuidintCfg, lockCfg), nil
 	}
 }
 
 // NewModule builds a module around rt and the instance configuration.
 // NewModule 用本代 Runtime 与实例配置构造模块；构造函数不建连，连接要到 Start
 // 才建立，因此装配失败不会留下半开的连接。
-func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config) *Module {
+func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config, lockCfg gofylock.Config) *Module {
 	return &Module{
 		rt:          rt,
 		dbCfg:       dbCfg,
@@ -78,6 +83,7 @@ func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg 
 		kafkaCfg:    kafkaCfg,
 		rocketmqCfg: rocketmqCfg,
 		uuidintCfg:  uuidintCfg,
+		lockCfg:     lockCfg,
 	}
 }
 
@@ -158,26 +164,41 @@ func (m *Module) Start(ctx context.Context) error {
 		_ = dbSet.Close()
 		return err
 	}
+	// The lock is pinned to this generation's Redis client for the same reason
+	// the generator is: a reload must not move an acquired lock's connection.
+	// 锁与生成器同因：绑定本代 Redis 客户端，Reload 不会改变已持有锁的连接。
+	lockSet, err := appredislock.Open(m.lockCfg, m.rt.Logger, redisSet.Client(m.lockCfg.RedisInstanceName()))
+	if err != nil {
+		_ = uuidintSet.Close()
+		_ = rocketmqSet.Close()
+		_ = kafkaSet.Close()
+		_ = amqpSet.Close()
+		_ = redisSet.Close()
+		_ = dbSet.Close()
+		return err
+	}
 	m.dbSet = dbSet
 	m.redisSet = redisSet
 	m.amqpSet = amqpSet
 	m.kafkaSet = kafkaSet
 	m.rocketmqSet = rocketmqSet
 	m.uuidintSet = uuidintSet
+	m.lockSet = lockSet
 	dbSet.Install()
 	redisSet.Install()
 	amqpSet.Install()
 	kafkaSet.Install()
 	rocketmqSet.Install()
-	// uuidint 依赖 redis 的命名实例，放在 redis 安装之后发布。
+	// uuidint 与 redislock 依赖 redis 的命名实例，放在 redis 安装之后发布。
 	uuidintSet.Install()
+	lockSet.Install()
 	// The snapshot is published once every handle of this generation is ready.
 	// Publishing it globally serves scripts, tests and code without an entry;
 	// HTTP requests do not depend on it — the framework pins this exact
 	// snapshot through RequestBinder when it publishes this generation.
 	// 快照在本代全部句柄就绪后一次发布。全局发布服务脚本、测试与没有入口的代码；
 	// HTTP 请求不依赖它 —— 框架发布本代时通过 RequestBinder 固定的就是这个快照。
-	m.snapshot = newSnapshot(dbSet, redisSet, amqpSet, kafkaSet, rocketmqSet, uuidintSet)
+	m.snapshot = newSnapshot(dbSet, redisSet, amqpSet, kafkaSet, rocketmqSet, uuidintSet, lockSet)
 	Publish(m.snapshot)
 	return nil
 }
@@ -229,5 +250,6 @@ func (m *Module) Stop(context.Context) error {
 		m.kafkaSet.Close(),
 		m.rocketmqSet.Close(),
 		m.uuidintSet.Close(),
+		m.lockSet.Close(),
 	)
 }

@@ -150,6 +150,7 @@ github.com/bingcool/gofy/
 │   ├── pg/                      # PostgreSQL 连接（gorm.io/driver/postgres + pgx/v5）
 │   ├── sqlite/                  # SQLite 连接（glebarez/sqlite，纯 Go 无 cgo）
 │   ├── uuidint/                 # 基于 Redis 的分布式自增 int64 ID
+│   ├── lock/                    # 基于 Redis/redsync 的分布式互斥锁（TTL 自愈）
 │   ├── phpoffice/               # Excel .xlsx 导出/导入（excelize，纯 Go）
 │   ├── image/                   # 图像缩放/裁剪/旋转/水印/编码（纯 Go）
 │   └── redis/
@@ -186,7 +187,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -212,6 +213,7 @@ gofy (root)
  ├── support/pg ──> gorm.io/driver/postgres (jackc/pgx/v5)
  ├── support/sqlite ──> glebarez/sqlite (modernc, 无 cgo)
  ├── support/uuidint ──> support/redis, go-redis
+ ├── support/lock ──> support/redis, redsync, go-redis
  ├── support/phpoffice ──> xuri/excelize/v2
  ├── support/image ──> golang.org/x/image
  ├── support/redis ──> go-redis
@@ -228,7 +230,7 @@ internal/* ──> core
 
 | 规则 | 原因 |
 | --- | --- |
-| `support`、`script`、`command`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/phpoffice`、`support/image`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
+| `support`、`script`、`command`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`config`、`apperr`、`core` **不得 import 根包 `gofy`** | 防止导入环，保证子包可被业务独立使用 |
 | 根包 **不得 import** `gofytest`、`examples`、`cmd/gofy` | 测试/工具不能进入运行时依赖 |
 | `core` 只依赖 `context`、`time`、`zap`、`gorm` | 它是共享叶子，必须最小 |
 | `logger` 不依赖任何 gofy 子包 | 可被业务独立使用 |

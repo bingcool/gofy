@@ -61,7 +61,7 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	// 工厂的排列顺序不再承载依赖顺序。
 	ctr := container.NewContainer()
 	factories := []gofy.ModuleFactory{
-		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt),
+		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock),
 	}
 	factories = append(factories, ctr.ModuleFactories()...)
 	if r.watch {

@@ -101,6 +101,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/lock`: Redis-backed distributed mutexes on top of redsync
+  (`github.com/go-redsync/redsync/v4`, go-redis v9 adapter). `Lock` retries per
+  policy and reports `ErrAlreadyHeld`; `TryLock` makes exactly one attempt;
+  `Unlock` deletes the key only while it still holds this mutex's token, so an
+  expired lock that another owner took over is never released by its previous
+  holder; `Extend` renews the TTL and reports `ErrNotHeld` once the lock is
+  gone. A busy lock, a Redis failure and a canceled context are three distinct
+  errors, so a shutdown is never logged as contention. `lock.Config` +
+  `lock.Open` take the YAML shape (`enabled`, `redis_instance_name`, `prefix`,
+  `expiry`, `tries`, `retry_delay`); `enabled` has no default so a missing
+  section cannot start writing keys. See `support/lock/README.md`.
+- `examples/demo-service`: `app/appio/redislock` publishes the lock as part of
+  the io generation (`appio.WithContext(ctx).RedisLock()`), bound to that
+  generation's Redis client, with the `lock:` config section; `script lock-check`
+  acquires/holds/releases a key, and `--try` shows the conflict path.
 - `gofy` worker mode: `worker --daemon=1` detaches into its own session and exits
   the parent, the same way `start --daemon` does. The child appends
   `--daemon=false`, so it runs in the foreground of that session; the parent

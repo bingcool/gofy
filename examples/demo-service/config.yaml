@@ -80,7 +80,7 @@ db:
     log_level: warn
     prepare_stmt: false
   # 演示多实例：order/product 复用同一套 dev 库（YAML 锚点），实际项目换成
-  # 各自的 DSN；业务侧句柄见 app/io/db 的 OrderDb、ProductDb。
+  # 各自的 DSN；业务侧用 appio.WithContext(ctx).DBIO(ctx, "order"|"product") 取用。
   order:
     dsn: *demo_dsn
     max_idle_conns: 2
@@ -90,13 +90,13 @@ db:
     max_idle_conns: 2
     max_open_conns: 5
   # 其它名字（如 selectDb）支持任何兼容 MySQL 协议的服务器（MySQL、MariaDB、
-  # TiDB、OceanBase 等），启动时不建连，业务用 db.NewIO(ctx, "selectDb") 懒加载。
+  # TiDB、OceanBase 等），启动时不建连，业务用 DBIO(ctx, "selectDb") 懒加载。
   # selectDb:
   #   dsn: *demo_dsn
   #   max_open_conns: 5
 
-# 多实例 Redis：按名字分组，由 app/io 包在启动时建连、关停时关闭；
-# 业务句柄见 app/io/redis 的 Cache、Session、RateLimit。enabled 为 false
+# 多实例 Redis：按名字分组，由 app/appio 在启动时建连、关停时关闭；
+# 业务只经 appio.WithContext(ctx).RedisIO(ctx, name) 取用。enabled 为 false
 # 时不建连，因此本地没有 Redis 也能启动；dev-redis 启用了密码认证，
 # 三个实例都带 password: redis123，换成免密 Redis 时删掉该行即可。
 # 密码建议通过环境变量注入，不要提交到仓库。
@@ -144,8 +144,22 @@ uuidint:
   pool_size: 200
   pool_interval: 1s
 
-# 多实例 AMQP（RabbitMQ）：按名字分组，由 app/io 建连和关闭。
-# default 对应业务句柄 amqp.Default，其它实例用 amqp.Get("名字") 取用。
+# 分布式锁：app/appio 用 support/lock（redsync）构建，绑定本代 Redis 客户端。
+# redis_instance_name 指向上面已启用的实例；留空即使用 support/redis 的 default 实例。
+# prefix 是键命名空间，实际键为 "<prefix>:<业务键>"，两个应用共用一个库时用它隔离。
+# expiry 必须长于临界区：锁在持有者仍在工作时过期就不再互斥；耗时不确定时在临界区里
+# 调 Extend 续租。tries / retry_delay 只影响阻塞式 Lock，TryLock 永远只尝试一次。
+# 开两个终端跑 `script lock-check --hold 30s` 与 `script lock-check --try` 可验证互斥
+lock:
+  enabled: true
+  redis_instance_name: ratelimit
+  prefix: demo:lock
+  expiry: 10s
+  tries: 3
+  retry_delay: 100ms
+
+# 多实例 AMQP（RabbitMQ）：按名字分组，由 app/appio 建连和关闭。
+# 业务经 appio.WithContext(ctx).AMQPIO(ctx, name) 取用，default 是最常用的名字。
 # 本机 dev-rabbitmq 的凭据来自 dockerfiles/docker-compose.yml
 # （rabbitmq / 123456 / vhost my_vhost）；没有 RabbitMQ 时把 enabled 改成
 # false，服务仍可启动。hosts 可配置多个 broker 节点，按顺序尝试连接。
@@ -170,8 +184,8 @@ amqp:
         password: 123456
         vhost: my_vhost
 
-# 多实例 Kafka：按名字分组，由 app/io 建连和关闭。
-# default 对应业务句柄 kafka.Default，其它实例用 kafka.Get("名字") 取用。
+# 多实例 Kafka：按名字分组，由 app/appio 建连和关闭。
+# 业务经 appio.WithContext(ctx).KafkaIO(ctx, name) 取用，default 是最常用的名字。
 # broker 来自 dockerfiles/docker-compose.yml 的 dev-kafka；容器宣告地址是
 # 宿主机 LAN IP，宿主机 IP 变化时同步修改 brokers，或用
 # HOST_IP=192.168.x.x docker compose up -d 重新启动 Kafka。
@@ -191,8 +205,8 @@ kafka:
     brokers:
       - 127.0.0.1:9092
 
-# 多实例 RocketMQ：按名字分组，由 app/io 建连和关闭。
-# default 对应业务句柄 rocketmq.Default，其它实例用 rocketmq.Get("名字") 取用。
+# 多实例 RocketMQ：按名字分组，由 app/appio 建连和关闭。
+# 业务经 appio.WithContext(ctx).RocketMQIO(ctx, name) 取用，default 是最常用的名字。
 # v5 走 gRPC proxy（默认 8081），不再是 nameserver 9876；topic 由业务在发布时
 # 指定，这里不配置；本机没有 RocketMQ 或 proxy 时把 enabled 保持 false。
 # 集群开启 ACL 时成对填写 access_key / access_secret；消费者按需传 group，

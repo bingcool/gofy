@@ -9,6 +9,7 @@ import (
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logger"
+	gofylock "github.com/bingcool/gofy/support/lock"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
 	"github.com/yourorg/demo-service/app/appio/redis"
@@ -33,6 +34,7 @@ type Config struct {
 	Kafka    appkafka.Config                `yaml:"kafka"`
 	RocketMQ approcketmq.Config             `yaml:"rocketmq"`
 	UUIDInt  appuuidint.Config              `yaml:"uuidint"`
+	Lock     gofylock.Config                `yaml:"lock"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
 	JWT      middleware.JWTConfig           `yaml:"jwt"`
@@ -103,6 +105,9 @@ func Load(ctx context.Context, path string) (*Config, error) {
 	}
 	if err := cfg.UUIDInt.Validate(); err != nil {
 		return nil, fmt.Errorf("config: uuidint: %w", err)
+	}
+	if err := cfg.Lock.Validate(); err != nil {
+		return nil, fmt.Errorf("config: lock: %w", err)
 	}
 	if err := cfg.OTel.Validate(); err != nil {
 		return nil, fmt.Errorf("config: otel: %w", err)

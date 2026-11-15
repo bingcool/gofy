@@ -9,6 +9,7 @@ import (
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/generation"
 	gofykafka "github.com/bingcool/gofy/support/kafka"
+	gofylock "github.com/bingcool/gofy/support/lock"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
 	gofyuuidint "github.com/bingcool/gofy/support/uuidint"
@@ -17,21 +18,23 @@ import (
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
 	appredis "github.com/yourorg/demo-service/app/appio/redis"
+	appredislock "github.com/yourorg/demo-service/app/appio/redislock"
 	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
 	appuuidint "github.com/yourorg/demo-service/app/appio/uuidint"
 	"gorm.io/gorm"
 )
 
 // Snapshot 是一代 IO 句柄的只读视图：默认 DB、命名 DB、Redis、AMQP、Kafka、
-// RocketMQ 与 UUID 生成器。它把一次 Reload 前后的资源隔离开——请求进入时
+// RocketMQ、UUID 生成器与分布式锁。它把一次 Reload 前后的资源隔离开——请求进入时
 // 固定一个 Snapshot，后续查询即使横跨 Reload 也落在同一代连接上。
 //
 // Snapshot 本身不可变：字段只在 Start 组装时写入，发布后不再修改。
 //
 // 取句柄只有一条路：DBIO / RedisIO / AMQPIO / KafkaIO / RocketMQIO，按别名解析
 // 本代 Registry，一律返回 (句柄, error)。没有"已经打开的句柄"快捷方法——那会让
-// 同一件事有两种写法，也让"实例没配置"时而 nil、时而 error。UUID 是唯一例外：
-// 生成器不是连接，没有 Registry 可解析，仍由 UUID() 直接返回。
+// 同一件事有两种写法，也让"实例没配置"时而 nil、时而 error。UUID 与 RedisLock 是
+// 例外：生成器和锁都不是连接，没有 Registry 可解析，仍由 UUID() / RedisLock() 直接
+// 返回。
 type Snapshot struct {
 	db       *appdb.Set
 	redis    *appredis.Set
@@ -39,6 +42,7 @@ type Snapshot struct {
 	kafka    *appkafka.Set
 	rocketmq *approcketmq.Set
 	uuidint  *appuuidint.Set
+	lock     *appredislock.Set
 }
 
 // currentSnapshot 指向当前一代的 Snapshot；发布、读取与请求级固定都由
@@ -60,8 +64,8 @@ func PublishDB(db *gorm.DB) {
 	Publish(&Snapshot{db: appdb.NewSet(db)})
 }
 
-func newSnapshot(db *appdb.Set, redis *appredis.Set, amqp *appamqp.Set, kafka *appkafka.Set, rocketmq *approcketmq.Set, uuidint *appuuidint.Set) *Snapshot {
-	return &Snapshot{db: db, redis: redis, amqp: amqp, kafka: kafka, rocketmq: rocketmq, uuidint: uuidint}
+func newSnapshot(db *appdb.Set, redis *appredis.Set, amqp *appamqp.Set, kafka *appkafka.Set, rocketmq *approcketmq.Set, uuidint *appuuidint.Set, lock *appredislock.Set) *Snapshot {
+	return &Snapshot{db: db, redis: redis, amqp: amqp, kafka: kafka, rocketmq: rocketmq, uuidint: uuidint, lock: lock}
 }
 
 // UUID 返回这一代的 ID 生成器；未启用时为 nil。
@@ -73,6 +77,23 @@ func (s *Snapshot) UUID() *gofyuuidint.Generator {
 		return nil
 	}
 	return s.uuidint.Generator()
+}
+
+// RedisLock 返回这一代的分布式锁；未启用时为 nil。
+//
+// It is named RedisLock rather than Lock because the caller immediately calls
+// Lock on the returned locker: `Lock().Lock(...)` reads like a typo. Like the
+// generator, the lock is not a connection and has no Registry to resolve, so it
+// uses the same single exception to the handle rule.
+//
+// 它叫 RedisLock 而不是 Lock：调用方紧接着就会调 Locker 的 Lock，两个同名方法叠在
+// 一起会写成 `Lock().Lock(...)`，读起来像笔误。锁同样不是连接，没有 Registry 可按
+// 名字解析，因此也走"直接返回句柄"这条唯一例外。
+func (s *Snapshot) RedisLock() *gofylock.Locker {
+	if s == nil {
+		return nil
+	}
+	return s.lock.Locker()
 }
 
 // 命名实例解析（按别名查本代 Registry，首次访问才建连）。
