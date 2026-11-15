@@ -71,6 +71,7 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 				logger:   rt.Logger,
 				onChange: r.reload,
 				onDrain:  r.stopAccepting,
+				onResume: r.resumeAccepting,
 			}, nil
 		})
 	}
@@ -91,6 +92,19 @@ func (r *reloader) stopAccepting(ctx context.Context) error {
 		return errors.New("gofy: application is not ready")
 	}
 	return app.StopAccepting(ctx)
+}
+
+// resumeAccepting is the counterpart of stopAccepting: when the process action
+// failed, the app has to keep serving. Without it a failed exec would leave a
+// live process deregistered and answering 503 until someone restarted it.
+// resumeAccepting 是 stopAccepting 的逆操作：进程动作失败时应用必须继续服务。
+// 没有它，失败的 exec 会留下一个活着、已注销、一直 503 的进程，直到有人重启它。
+func (r *reloader) resumeAccepting(ctx context.Context) error {
+	app := r.app.Load()
+	if app == nil {
+		return errors.New("gofy: application is not ready")
+	}
+	return app.ResumeAccepting(ctx)
 }
 
 // reload re-reads the generated config and swaps the logger, database pool and

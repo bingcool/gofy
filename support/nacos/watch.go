@@ -20,6 +20,7 @@ type Watcher struct {
 
 	onChange       func(ctx context.Context, result Result) error
 	drain          func(ctx context.Context) error
+	resume         func(ctx context.Context) error
 	strategy       ChangeStrategy
 	restartPIDFile string
 	gracePeriod    time.Duration
@@ -67,6 +68,24 @@ func WithOnChange(fn func(ctx context.Context, result Result) error) WatchOption
 // 而为，配置变更仍必须生效。
 func WithDrain(fn func(ctx context.Context) error) WatchOption {
 	return func(w *Watcher) { w.drain = fn }
+}
+
+// WithResume runs fn when the restart or exit action failed after the drain
+// hook already ran. Its job is to undo the drain: reopen the request gate and
+// republish the instance, so the process keeps serving instead of staying alive,
+// deregistered and answering 503 until someone notices.
+//
+// If fn itself fails, the watcher terminates the process rather than leaving a
+// zombie: a supervisor can start a fresh process, while a drained process that
+// cannot be resumed has no way back into service on its own.
+// WithResume 在 drain 钩子已经执行、而 restart / exit 动作失败时调用 fn。它的职责
+// 是撤销摘流：重新打开请求闸门并把实例重新注册，让进程继续服务，而不是活着、已注销、
+// 一直 503 直到有人发现。
+//
+// fn 本身失败时，watcher 会终止进程而不是留下僵尸：监管者能拉起新进程，而一个摘流后
+// 无法恢复的进程没有自救的办法。
+func WithResume(fn func(ctx context.Context) error) WatchOption {
+	return func(w *Watcher) { w.resume = fn }
 }
 
 // WithRestartOnChange forces the exit strategy and terminates the process
@@ -221,14 +240,17 @@ func (w *Watcher) apply(ctx context.Context, result Result) error {
 		// exec 会跳过 defer，替换映像前先把缓冲日志刷出去。
 		w.logger.Info("nacos config changed, re-executing process", zap.String("file", result.File))
 		_ = w.logger.Sync()
-		return w.execSelf()
+		if err := w.execSelf(); err != nil {
+			return w.recoverAfterFailure(ctx, "re-exec", err)
+		}
+		return nil
 	case StrategyExit:
 		if err := w.prepare(ctx); err != nil {
 			return err
 		}
 		pid, err := w.terminate(w.restartPIDFile)
 		if err != nil {
-			return fmt.Errorf("exit: %w", err)
+			return w.recoverAfterFailure(ctx, "terminate", err)
 		}
 		w.logger.Info("nacos config changed, terminating process",
 			zap.Int("pid", pid), zap.String("file", result.File))
@@ -242,6 +264,40 @@ func (w *Watcher) apply(ctx context.Context, result Result) error {
 		}
 		return errors.Join(errs...)
 	}
+}
+
+// recoverAfterFailure undoes the drain when the action that was supposed to
+// replace or terminate the process failed. Without it the process stays alive
+// with every request answered 503 and its Nacos registration withdrawn — worse
+// than a plain failure, because nothing in the process would ever change that
+// state again.
+//
+// When the resume hook is missing or fails, the watcher asks for termination:
+// exiting is recoverable by a supervisor, a permanently drained process is not.
+// recoverAfterFailure 在"本应替换或终止进程的动作"失败时撤销摘流。没有它，进程会
+// 一直活着、所有请求返回 503、Nacos 注册也已撤销 —— 这比直接失败更糟，因为进程内部
+// 再没有任何东西会改变这个状态。
+//
+// resume 钩子缺失或执行失败时，watcher 转而请求终止进程：退出可以由监管者恢复，而
+// 永久摘流的进程不能。
+func (w *Watcher) recoverAfterFailure(ctx context.Context, action string, cause error) error {
+	w.logger.Error("nacos process action failed", zap.String("action", action), zap.Error(cause))
+	if w.resume != nil {
+		resumeErr := w.resume(ctx)
+		if resumeErr == nil {
+			w.logger.Warn("nacos service resumed after failed process action", zap.String("action", action))
+			return fmt.Errorf("%s: %w", action, cause)
+		}
+		w.logger.Error("nacos resume failed, terminating instead of staying drained",
+			zap.String("action", action), zap.Error(resumeErr))
+	}
+	pid, termErr := w.terminate(w.restartPIDFile)
+	if termErr != nil {
+		return fmt.Errorf("%s: %w (resume unavailable and terminate failed: %v)", action, cause, termErr)
+	}
+	w.logger.Warn("nacos process terminating after failed action",
+		zap.Int("pid", pid), zap.String("action", action))
+	return fmt.Errorf("%s: %w", action, cause)
 }
 
 // prepare quiesces the service and waits before a restart or exit. The drain

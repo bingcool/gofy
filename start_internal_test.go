@@ -111,6 +111,17 @@ func TestStopAcceptingBeforeServerExists(t *testing.T) {
 	if app.admission.isOpen() {
 		t.Fatal("gate stayed open before the server was built")
 	}
+	// The gate is the only piece that exists before the server, so the resume
+	// side must work there too: that is exactly the window a startup-time
+	// config change hits.
+	// server 建好之前只有闸门存在，因此恢复侧也必须能在这里工作：启动期配置变更
+	// 命中的正是这个窗口。
+	if err := app.ResumeAccepting(context.Background()); err != nil {
+		t.Fatalf("ResumeAccepting before Run: %v", err)
+	}
+	if !app.admission.isOpen() {
+		t.Fatal("gate stayed closed after ResumeAccepting")
+	}
 }
 
 func TestStopAcceptingOverRealListener(t *testing.T) {

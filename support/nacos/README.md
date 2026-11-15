@@ -273,6 +273,11 @@ worker 启动时拉一次配置，是为了让新起的进程不拿镜像里那�
 重投，handler 必须幂等。想真正做到「等在途任务结束」，应改用 `exit` + supervisor，
 走框架的完整优雅停机链路。
 
+**动作失败会恢复接客**：`exec` / 发信号失败时，watcher 调用 `WithResume` 钩子（demo
+注入的是 `App.ResumeAccepting`）重新打开闸门并重新注册，进程继续对外服务；如果 resume
+本身也失败，watcher 会再请求一次终止，把进程交给监管者 —— 而不是停在「活着、已注销、
+永久 503」的状态。
+
 边界：
 
 - **三种策略只在 HTTP 进程生效**：`worker` 不挂 watcher，`reload` / `restart` /

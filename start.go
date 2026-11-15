@@ -740,6 +740,9 @@ func registerHealth(engine *gin.Engine, rt *core.Runtime) {
 // 该方法幂等，可在任意 goroutine（包括随后要 exec 的 watcher）调用。它刻意不
 // 调用 Shutdown：那会停掉模块、等待 watcher 自身，并在策略动作执行前就让 main
 // 退出。
+//
+// registrar 的引用会保留：动作可能失败，届时 ResumeAccepting 需要它重新注册。
+// 重复 Stop 是 no-op，因此关闭流程里的第二次 Stop 不受影响。
 func (a *App) StopAccepting(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -753,13 +756,48 @@ func (a *App) StopAccepting(ctx context.Context) error {
 
 	a.mu.Lock()
 	registrar := a.registrar
-	a.registrar = nil
 	a.mu.Unlock()
 	if registrar == nil {
 		return nil
 	}
 	if err := registrar.Stop(ctx); err != nil {
 		return fmt.Errorf("gofy: deregister before restart: %w", err)
+	}
+	return nil
+}
+
+// ResumeAccepting reopens the gate after a restart or exit turned out to be
+// impossible. Without it a process whose exec or signal failed would stay alive,
+// deregistered and answering 503 forever — a zombie only a liveness probe keyed
+// on /healthz would ever restart.
+//
+// It is the counterpart of StopAccepting, not a general lifecycle method: it
+// assumes the app is running and only the drain gate was closed.
+// ResumeAccepting 在 restart / exit 未能执行时重新打开闸门。没有它，exec 或发信号
+// 失败的进程会一直活着、已注销、永远 503 —— 只有把 liveness 指到 /healthz 的探针
+// 才会把它重启。
+//
+// 它是 StopAccepting 的逆操作，不是通用生命周期方法：前提是 App 仍在运行，只是
+// 闸门被关闭了。
+func (a *App) ResumeAccepting(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !a.admission.resume() {
+		// Never drained: nothing to undo.
+		// 从未摘流，无需恢复。
+		return nil
+	}
+	a.Logger().Info("application resumed accepting HTTP requests")
+
+	a.mu.Lock()
+	registrar := a.registrar
+	a.mu.Unlock()
+	if registrar == nil {
+		return nil
+	}
+	if err := registrar.Start(ctx); err != nil {
+		return fmt.Errorf("gofy: reregister after failed process action: %w", err)
 	}
 	return nil
 }

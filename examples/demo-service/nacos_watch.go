@@ -28,6 +28,11 @@ type nacosWatchModule struct {
 	// onDrain 在 restart / exit 之前给应用摘流。它不能关闭应用：该钩子运行在
 	// watcher goroutine 里，Shutdown 会反过来等这个 watcher 退出。
 	onDrain func(context.Context) error
+	// onResume undoes onDrain when the process action failed: the app keeps
+	// serving and republishes itself instead of staying drained forever.
+	// onResume 在进程动作失败时撤销 onDrain：应用继续服务并重新注册，而不是永久
+	// 停在摘流状态。
+	onResume func(context.Context) error
 
 	mu        sync.Mutex
 	cancel    context.CancelFunc
@@ -61,6 +66,12 @@ func (m *nacosWatchModule) Start(ctx context.Context) error {
 		// Only restart / exit call this hook; reload keeps serving requests.
 		// 只有 restart / exit 会调它；reload 全程继续对外服务。
 		opts = append(opts, nacos.WithDrain(m.onDrain))
+	}
+	if m.onResume != nil {
+		// Paired with the drain hook: if the action that was supposed to replace
+		// this process failed, the gate has to be reopened here.
+		// 与摘流钩子配对：本应替换进程的动作失败时，闸门要在这里重新打开。
+		opts = append(opts, nacos.WithResume(m.onResume))
 	}
 	var changes chan struct{}
 	// Only reload needs a callback and an executor. The other two strategies

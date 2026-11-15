@@ -330,3 +330,112 @@ func TestWatcherGracePeriodFromConfig(t *testing.T) {
 		t.Fatal("watcher has no pause function")
 	}
 }
+
+// TestWatcherResumesAfterFailedAction is the P2-11 acceptance test: a failed
+// exec or signal must not leave the process drained. The primary action is
+// retried-then-abandoned, the resume hook runs, and the returned error still
+// carries the original cause so the caller can log it.
+// TestWatcherResumesAfterFailedAction 是 P2-11 的验收测试：exec 或发信号失败不能
+// 让进程停在摘流状态。主动作失败后调用 resume 钩子，返回的错误仍携带原始原因，调用方
+// 因此能记下来。
+func TestWatcherResumesAfterFailedAction(t *testing.T) {
+	sentinel := errors.New("exec failed")
+	for _, tc := range []struct {
+		name     string
+		strategy ChangeStrategy
+	}{
+		{name: "restart", strategy: StrategyRestart},
+		{name: "exit", strategy: StrategyExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			w := &Watcher{
+				logger:      zap.NewNop(),
+				strategy:    tc.strategy,
+				drain:       func(context.Context) error { events = append(events, "drain"); return nil },
+				gracePeriod: 0,
+				resume: func(context.Context) error {
+					events = append(events, "resume")
+					return nil
+				},
+				execSelf: func() error {
+					events = append(events, "restart")
+					return sentinel
+				},
+				terminate: func(string) (int, error) {
+					events = append(events, "terminate")
+					return 0, sentinel
+				},
+			}
+			err := w.apply(context.Background(), Result{})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("apply error = %v, want the action error", err)
+			}
+			want := []string{"drain", "restart", "resume"}
+			if tc.strategy == StrategyExit {
+				want = []string{"drain", "terminate", "resume"}
+			}
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("events = %v, want %v", events, want)
+			}
+		})
+	}
+}
+
+// TestWatcherTerminatesWhenResumeFails covers the second half of P2-11: if the
+// gate cannot be reopened there is no way back into service, so the watcher asks
+// for termination instead of leaving a process that answers 503 forever.
+// TestWatcherTerminatesWhenResumeFails 覆盖 P2-11 的另一半：闸门打不开就没有回到
+// 服务的办法，watcher 因此请求终止，而不是留下一个永远 503 的进程。
+func TestWatcherTerminatesWhenResumeFails(t *testing.T) {
+	var events []string
+	w := &Watcher{
+		logger:      zap.NewNop(),
+		strategy:    StrategyRestart,
+		drain:       func(context.Context) error { events = append(events, "drain"); return nil },
+		gracePeriod: 0,
+		resume: func(context.Context) error {
+			events = append(events, "resume")
+			return errors.New("gate stuck")
+		},
+		execSelf: func() error {
+			events = append(events, "restart")
+			return errors.New("exec failed")
+		},
+		terminate: func(string) (int, error) {
+			events = append(events, "terminate")
+			return 42, nil
+		},
+	}
+	if err := w.apply(context.Background(), Result{}); err == nil {
+		t.Fatal("apply hid the failed action")
+	}
+	if want := []string{"drain", "restart", "resume", "terminate"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+// TestWatcherTerminatesWithoutResumeHook keeps the behaviour for hosts that
+// wired only WithDrain: the action failed, the gate is closed, so exit.
+// TestWatcherTerminatesWithoutResumeHook 保留只接了 WithDrain 的宿主的行为：动作
+// 失败、闸门已关，于是退出。
+func TestWatcherTerminatesWithoutResumeHook(t *testing.T) {
+	terminated := 0
+	w := &Watcher{
+		logger:      zap.NewNop(),
+		strategy:    StrategyRestart,
+		drain:       func(context.Context) error { return nil },
+		gracePeriod: 0,
+		execSelf:    func() error { return errors.New("exec failed") },
+		terminate: func(string) (int, error) {
+			terminated++
+			return 42, nil
+		},
+	}
+	if err := w.apply(context.Background(), Result{}); err == nil {
+		t.Fatal("apply hid the failed action")
+	}
+	if terminated != 1 {
+		t.Fatalf("terminate calls = %d, want 1", terminated)
+	}
+}
