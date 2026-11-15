@@ -63,8 +63,8 @@ var delayEventProducerDefaults = DelayEventProducerConfig{
 // newDelayEventProducer schedules the same order event through four delayed
 // streams over three transports: a Redis ZSET, a RocketMQ DELAY topic, and two
 // RabbitMQ TTL + dead-letter workflows (direct and topic). Its four siblings in
-// delay_queues_order.go, rocketmq_delay_order.go, delay_amqp_order.go and
-// delay_amqp_topic_order.go consume them, so group1 demonstrates delayed
+// delay_queues_order.go, rocketmq_delay_order.go, delay_amqp_direct_order.go
+// and delay_amqp_topic_order.go consume them, so group1 demonstrates delayed
 // produce → consume without a second terminal.
 //
 // The subscriptions own the addresses again: keys, topic, tag, staging/target
@@ -72,7 +72,7 @@ var delayEventProducerDefaults = DelayEventProducerConfig{
 // cannot drift away from the consumers it feeds.
 // newDelayEventProducer 把同一个订单事件调度到三条传输上的四条延迟流：Redis ZSET、
 // RocketMQ DELAY topic，以及 RabbitMQ 的 direct / topic 两套 TTL + 死信流程。
-// delay_queues_order.go、rocketmq_delay_order.go、delay_amqp_order.go 与
+// delay_queues_order.go、rocketmq_delay_order.go、delay_amqp_direct_order.go 与
 // delay_amqp_topic_order.go 里的四个消费者负责消费，因此 group1 单进程即可演示
 // 延迟的 生产 → 消费 闭环。
 //

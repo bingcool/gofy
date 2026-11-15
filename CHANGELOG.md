@@ -608,7 +608,7 @@ All notable changes to this project are documented here. The format follows
   already switches to `Delay.Target.Queue`. `QueueConfig()` is the one topology
   both sides publish through, so their queue arguments cannot disagree and trip
   PRECONDITION_FAILED. The demo's `delay_producer.go` gains a third sink and
-  `delay_amqp_order.go` the matching consumer. RabbitMQ only checks the head of
+  `delay_amqp_direct_order.go` the matching consumer. RabbitMQ only checks the head of
   a queue for expiry, so the docs call for one delay per staging queue.
   Verified against the local broker: four events, each arriving on all three
   delayed transports at ~5.3-5.8s, one idempotency row per consumer per event.

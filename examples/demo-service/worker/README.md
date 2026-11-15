@@ -32,8 +32,8 @@ worker/
 │   ├── queues_order.go    # order-queues-consumer（Redis 队列）
 │   ├── delay_queues_order.go    # order-delay-queues-consumer（Redis ZSET）
 │   ├── rocketmq_delay_order.go  # order-rocketmq-delay-consumer（DELAY topic）
-│   ├── delay_amqp_order.go      # order-amqp-delay-consumer（TTL + 死信，direct）
-│   └── delay_amqp_topic_order.go # order-amqp-delay-topic-consumer（TTL + 死信，topic）
+│   ├── delay_amqp_direct_order.go # order-amqp-delay-consumer（TTL + 死信，direct）
+│   └── delay_amqp_topic_order.go  # order-amqp-delay-topic-consumer（TTL + 死信，topic）
 └── group2/
     ├── abc_register.go    # group2 的 NewGroup
     └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
@@ -161,7 +161,7 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 
 ```
 kafka_order.go / amqp_order.go / rocketmq_order.go / queues_order.go
-delay_queues_order.go / rocketmq_delay_order.go / delay_amqp_order.go
+delay_queues_order.go / rocketmq_delay_order.go / delay_amqp_direct_order.go
 delay_amqp_topic_order.go
         一个订阅一个文件：Config + Handler
         ↓
