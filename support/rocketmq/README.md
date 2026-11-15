@@ -314,17 +314,19 @@ consumerCfg := rocketmq.ConsumerConfig{
 配置校验、消息构造限制、失败不缓存、注册表分代和消费回调语义。
 `TestNewFailsWhenEndpointUnreachable` 是唯一依赖 SDK 建连超时的用例，约 5 秒。
 
-集成测试需要真实的 RocketMQ 5.x proxy（其后的 broker 允许自动创建 topic 与
-消费组）：
+集成测试需要真实的 RocketMQ 5.x proxy。5.x 的 gRPC producer 不会自动创建 topic，
+即使 broker 开了 `autoCreateTopicEnable`；这类集群先用 mqadmin 预建一个 topic，再用
+`GOFY_TEST_ROCKETMQ_TOPIC` 传入：
 
 ```bash
 GOFY_TEST_ROCKETMQ_ENDPOINT=127.0.0.1:8081 \
+GOFY_TEST_ROCKETMQ_TOPIC=gofy-integration-test \
   go test ./support/rocketmq -run Integration -v
 ```
 
-集成用例会为每次运行生成唯一的 topic 和消费组，覆盖发布/消费、Tag 过滤、
-JSON 属性与 ack 语义；topic 在首次发送时自动创建。
+不设置 `GOFY_TEST_ROCKETMQ_TOPIC` 时，用例为每次运行生成唯一的 topic，依赖 broker
+自动创建；消费组始终是唯一名称。用例覆盖发布/消费、Tag 过滤、JSON 属性与 ack 语义。
 
-demo 的 `config.yaml` 默认把 `rocketmq` 实例设为 `enabled: false`，本地没有
-RocketMQ proxy 时服务照常启动；接上真实集群后改为 `true`，并把
-`startup_topics` 换成集群里已存在的 topic。
+demo 的 `config.yaml` 默认把 `rocketmq` 实例设为 `enabled: false`，HTTP 进程因此不会
+初始化该句柄；worker 进程的消费者与生产者直接从连接表取 `endpoint` 自行建连，不受这个
+开关影响。接入真实集群时把 `endpoint` 指向可用的 proxy，并确认订阅的 topic 已预建。

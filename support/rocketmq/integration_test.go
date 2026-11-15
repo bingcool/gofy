@@ -9,13 +9,21 @@ import (
 	"time"
 )
 
-// These tests need a reachable RocketMQ 5.x proxy gRPC endpoint. The producer
-// auto-creates the topic (broker default), so no manual provisioning is needed.
-// Run them with:
+// These tests need a reachable RocketMQ 5.x proxy gRPC endpoint. Run them with:
 //
 //	GOFY_TEST_ROCKETMQ_ENDPOINT=127.0.0.1:8081 go test ./support/rocketmq -run Integration
-// 这些测试需要可访问的 RocketMQ 5.x proxy gRPC 端点。Producer 会按 broker 默认
-// 策略自动创建 topic，无需手工准备。运行方式见上方命令。
+//
+// A 5.x proxy does not create topics for gRPC producers even when the broker
+// has autoCreateTopicEnable=true. On such a deployment create the topic with
+// mqadmin and pass it in GOFY_TEST_ROCKETMQ_TOPIC; without it each run uses a
+// unique name and relies on the broker's auto-creation.
+// 这些测试需要可访问的 RocketMQ 5.x proxy gRPC 端点。运行方式：
+//
+//	GOFY_TEST_ROCKETMQ_ENDPOINT=127.0.0.1:8081 go test ./support/rocketmq -run Integration
+//
+// 5.x proxy 不会为 gRPC producer 自动创建 topic，即使 broker 开了
+// autoCreateTopicEnable；这类环境要用 mqadmin 预建 topic 并通过
+// GOFY_TEST_ROCKETMQ_TOPIC 传入，否则每次运行使用唯一名称并依赖 broker 自动创建。
 
 func testEndpoint(t *testing.T) string {
 	t.Helper()
@@ -24,6 +32,17 @@ func testEndpoint(t *testing.T) string {
 		t.Skip("GOFY_TEST_ROCKETMQ_ENDPOINT is not set")
 	}
 	return endpoint
+}
+
+// testTopic lets a proxy deployment supply a pre-created topic. A unique name
+// is still the default on brokers that do auto-create topics.
+// testTopic 让 proxy 部署可以传入预建的 topic；能自动创建 topic 的 broker 仍默认用唯一名称。
+func testTopic(t *testing.T) string {
+	t.Helper()
+	if topic := strings.TrimSpace(os.Getenv("GOFY_TEST_ROCKETMQ_TOPIC")); topic != "" {
+		return topic
+	}
+	return integrationName(t, "topic")
 }
 
 func integrationName(t *testing.T, prefix string) string {
@@ -43,7 +62,7 @@ func TestIntegrationPublishConsume(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	topic := integrationName(t, "topic")
+	topic := testTopic(t)
 	result, err := client.PublishJSON(context.Background(), map[string]string{"id": "1"}, PublishOptions{
 		Topic: topic,
 		Tag:   "created",
