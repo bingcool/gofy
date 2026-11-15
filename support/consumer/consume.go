@@ -283,6 +283,17 @@ type ProcessorConfig struct {
 	// MaxAttempts bounds the retries of one message.
 	// MaxAttempts 限制单条消息的重试次数。
 	MaxAttempts int
+	// ProcessingLease is how long a "processing" row blocks another delivery
+	// from entering the handler; zero means DefaultProcessingLease. It must be
+	// at least the p99 handler duration and at least the broker's redelivery
+	// timeout: a shorter value lets a slow-but-alive handler be taken over by
+	// the copy the broker redelivers, which is the very overlap the ledger
+	// exists to prevent.
+	// ProcessingLease 是一条 processing 记录阻止另一次投递进入 handler 的时长，0
+	// 表示 DefaultProcessingLease。它至少应为处理耗时 p99，且不短于 broker 的重投
+	// 间隔：取值偏小会让"还活着但很慢"的 handler 被 broker 重投的副本接管，而那正是
+	// 台账要消除的重叠。
+	ProcessingLease time.Duration
 }
 
 // Processor is the shared middle of every consumer: it continues the trace,
@@ -302,6 +313,7 @@ type Processor struct {
 	tracer      trace.Tracer
 	propagator  propagation.TextMapPropagator
 	maxAttempts int
+	lease       time.Duration
 }
 
 // NewProcessor builds the shared chain. It fails when idempotency is requested
@@ -323,6 +335,10 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 		tracer:      consumerTracer(rt),
 		propagator:  rt.Propagator,
 		maxAttempts: max(cfg.MaxAttempts, 1),
+		lease:       cfg.ProcessingLease,
+	}
+	if p.lease <= 0 {
+		p.lease = DefaultProcessingLease
 	}
 	if p.logger == nil {
 		p.logger = zap.NewNop()
@@ -334,7 +350,12 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 		if rt.DB == nil {
 			return nil, fmt.Errorf("consumer %s: idempotency requires a database", cfg.Consumer)
 		}
-		p.deduper = &deduper{db: rt.DB, consumer: cfg.Consumer, maxAttempts: p.maxAttempts}
+		p.deduper = &deduper{
+			db:          rt.DB,
+			consumer:    cfg.Consumer,
+			maxAttempts: p.maxAttempts,
+			lease:       p.lease,
+		}
 		if err := p.deduper.ensureSchema(context.Background()); err != nil {
 			return nil, fmt.Errorf("consumer %s: idempotency schema: %w", cfg.Consumer, err)
 		}
@@ -380,8 +401,16 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		zap.Int32("attempt", msg.Attempt),
 	)
 
+	// The attempt number returned by claim is the fence for every write that
+	// records this message's outcome. A redelivery that took the row over
+	// carries a different number, so a slow handler finishing late cannot mark
+	// the new owner's work done or failed.
+	// claim 返回的 attempt 是记录本条消息结果时所有写回的围栏。接管了该行的重投
+	// 持有不同的序号，因此迟到的旧 handler 既不能把新执行者的工作标成完成，也不能
+	// 标成失败。
+	attempt := 0
 	if p.deduper != nil {
-		proceed, err := p.deduper.claim(ctx, msg.ID)
+		c, err := p.deduper.claim(ctx, msg.ID)
 		if err != nil {
 			// The deduplication store being down is not a reason to drop the
 			// message: report it as retryable and let the broker redeliver.
@@ -391,19 +420,33 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			lg.Error("consume claim failed", zap.Error(err), zap.Duration("duration", time.Since(start)))
 			return fmt.Errorf("claim message %s: %w", msg.ID, err)
 		}
-		if !proceed {
+		if c.inFlight {
+			// Another instance holds a valid processing lease. Acknowledge
+			// nothing: the broker must redeliver later, otherwise a copy that
+			// the first handler never finished would be gone for good.
+			// 另一个实例持有有效的 processing 租约。此时不能确认消息：必须由 broker
+			// 稍后重投，否则第一个 handler 没处理完的副本就永久消失了。
+			span.SetAttributes(attribute.Bool("messaging.in_flight", true))
+			span.SetStatus(codes.Error, "in flight")
+			lg.Info("message still in flight on another instance, asking for redelivery",
+				zap.Duration("duration", time.Since(start)),
+			)
+			return fmt.Errorf("message %s: %w", msg.ID, ErrInFlight)
+		}
+		if !c.proceed {
 			span.SetAttributes(attribute.Bool("messaging.duplicate", true))
 			lg.Info("message skipped",
-				zap.String("reason", "already processed or attempts exhausted"),
+				zap.String("reason", c.reason),
 				zap.Duration("duration", time.Since(start)),
 			)
 			return nil
 		}
+		attempt = c.attempt
 	}
 
 	env, err := DecodeEnvelope(msg)
 	if err != nil {
-		p.park(ctx, msg.ID, err)
+		p.park(ctx, msg.ID, attempt, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "decode")
 		lg.Error("message discarded: undecodable envelope",
@@ -418,7 +461,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 	switch {
 	case err == nil:
 		if p.deduper != nil {
-			if markErr := p.deduper.succeed(ctx, msg.ID); markErr != nil {
+			if markErr := p.deduper.succeed(ctx, msg.ID, attempt); markErr != nil {
 				// The side effect already happened, so the message is
 				// acknowledged anyway; a failed marker only means the next
 				// redelivery repeats work the handler must tolerate.
@@ -435,7 +478,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		)
 		return nil
 	case IsPermanent(err):
-		p.park(ctx, msg.ID, err)
+		p.park(ctx, msg.ID, attempt, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "permanent")
 		lg.Error("message discarded: permanent failure",
@@ -447,7 +490,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		return nil
 	default:
 		if p.deduper != nil {
-			if markErr := p.deduper.fail(ctx, msg.ID, err); markErr != nil {
+			if markErr := p.deduper.fail(ctx, msg.ID, attempt, err); markErr != nil {
 				lg.Warn("consume mark failed", zap.Error(markErr))
 			}
 		}
@@ -489,11 +532,11 @@ func consumerTracer(rt *core.Runtime) trace.Tracer {
 // park marks a message as dead so a later redelivery is skipped instead of
 // repeating a failure that cannot succeed.
 // park 把消息标记为 dead，使后续重投被跳过，而不是重复一次不可能成功的失败。
-func (p *Processor) park(ctx context.Context, messageID string, cause error) {
+func (p *Processor) park(ctx context.Context, messageID string, attempt int, cause error) {
 	if p.deduper == nil {
 		return
 	}
-	if err := p.deduper.park(ctx, messageID, cause); err != nil {
+	if err := p.deduper.park(ctx, messageID, attempt, cause); err != nil {
 		// Failing to record the dead state must not hide the original error.
 		// 记录 dead 失败不应该盖掉原始错误。
 		p.logger.Warn("consume mark dead failed",
@@ -512,6 +555,55 @@ const (
 	consumedStatusFailed     = "failed"
 	consumedStatusDead       = "dead"
 )
+
+// DefaultProcessingLease is how long a processing row blocks a second handler
+// when ProcessorConfig.ProcessingLease is zero.
+//
+// It has to cover the slowest legitimate handler: taking over earlier means the
+// broker's redelivered copy runs while the first one is still working, which is
+// exactly the overlap this ledger prevents. Shorten it only when the broker
+// redelivers faster than that and the handler is known to be quick.
+// DefaultProcessingLease 是 ProcessorConfig.ProcessingLease 为零时，一条 processing
+// 记录阻止第二个 handler 的时长。
+//
+// 它必须覆盖最慢的合法处理：过早接管意味着 broker 重投的副本会在第一个副本仍在
+// 处理时开始执行，而这正是台账要消除的重叠。只有当 broker 重投更快、且明确知道
+// handler 很快时才应调小。
+const DefaultProcessingLease = 5 * time.Minute
+
+var (
+	// ErrInFlight reports that another instance holds a valid processing lease
+	// for this message. It is deliberately an error: the caller must ask the
+	// broker for a redelivery instead of acknowledging, because the copy being
+	// handled elsewhere may still fail.
+	// ErrInFlight 表示另一个实例持有该消息有效的 processing 租约。它刻意是错误：
+	// 调用方必须请求 broker 重投而不是确认，因为别处正在处理的副本仍可能失败。
+	ErrInFlight = errors.New("consumer: message is being handled by another instance")
+
+	// ErrStaleClaim reports that a completion found the row owned by a different
+	// attempt. The handler's side effects (if any) already happened, so the
+	// message is acknowledged anyway; the error only tells the caller that the
+	// ledger was not updated.
+	// ErrStaleClaim 表示收尾时发现该行已属于另一次认领。handler 的副作用（如果有）
+	// 已经发生，消息照样确认；这个错误只告诉调用方台账没有被更新。
+	ErrStaleClaim = errors.New("consumer: message claim was superseded")
+)
+
+// messageClaim is what claim decided about one delivery.
+//
+// proceed and inFlight are exclusive: proceed runs the handler with attempt as
+// the fencing value, inFlight asks for a redelivery, and neither means the
+// message is finished (done or dead) and may be acknowledged.
+// messageClaim 是 claim 对一次投递作出的决定。
+//
+// proceed 与 inFlight 互斥：proceed 用 attempt 作为围栏值执行 handler，inFlight
+// 请求 broker 重投，两者都不成立表示消息已终结（done 或 dead），可以确认。
+type messageClaim struct {
+	proceed  bool
+	inFlight bool
+	attempt  int
+	reason   string
+}
 
 // consumedMessage is the idempotency ledger: one row per (consumer, message).
 //
@@ -543,6 +635,7 @@ type deduper struct {
 	db          *gorm.DB
 	consumer    string
 	maxAttempts int
+	lease       time.Duration
 }
 
 // ensureSchema creates the ledger when it is missing.
@@ -584,17 +677,44 @@ func isTableExists(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "already exists")
 }
 
-// claim reserves the message for handling.
+// claim reserves the message for handling and returns the attempt number that
+// fences every later write.
 //
-// It returns true when the caller should proceed: either the row was just
-// created, or an earlier attempt failed and the budget is not exhausted. It
-// returns false for a duplicate that already succeeded and for a message whose
-// attempts ran out.
-// claim 为处理预留这条消息。
+// The state machine is:
 //
-// 返回 true 表示调用方应当继续：要么刚创建了行，要么此前失败但预算还没用完。
-// 已成功处理过的重复消息、以及尝试次数耗尽的消息返回 false。
-func (d *deduper) claim(ctx context.Context, messageID string) (bool, error) {
+//	absent                        -> processing(attempts=1)         run
+//	processing, lease still valid -> nothing changes                 in flight, no ack
+//	processing, lease expired     -> processing(attempts+1)         take over
+//	failed                        -> processing(attempts+1)         retry
+//	done / dead                   -> nothing changes                 skip, ack
+//	attempts exhausted            -> dead                            skip, ack
+//
+// "processing with a live lease" must not be treated like "failed": the first
+// handler may still be running, and acknowledging the redelivered copy would
+// drop the only backup if that handler dies. It returns ErrInFlight through the
+// inFlight flag instead, and the caller asks the broker for another redelivery.
+//
+// The takeover is a single UPDATE guarded by id + status + attempts, so two
+// concurrent redeliveries cannot both enter the handler: the loser sees zero
+// affected rows and is treated as in flight.
+// claim 为处理预留这条消息，并返回给后续每次写回做围栏的 attempt 序号。
+//
+// 状态机：
+//
+//	不存在                        -> processing(attempts=1)         执行
+//	processing 且租约仍有效        -> 不改动                          在途，不确认
+//	processing 且租约已过期        -> processing(attempts+1)         接管
+//	failed                        -> processing(attempts+1)         重试
+//	done / dead                   -> 不改动                          跳过并确认
+//	attempts 耗尽                 -> dead                            跳过并确认
+//
+// "processing 且租约有效"不能当成 "failed"：第一个 handler 可能还在跑，确认掉
+// 重投的副本就等于在它崩溃时丢掉了唯一的备份。此时通过 inFlight 返回
+// ErrInFlight，由调用方请求 broker 再投一次。
+//
+// 接管是一条由 id + status + attempts 围起来的 UPDATE，两次并发重投不可能都进入
+// handler：输的那个看到 0 行受影响，按在途处理。
+func (d *deduper) claim(ctx context.Context, messageID string) (messageClaim, error) {
 	row := consumedMessage{
 		Consumer:  d.consumer,
 		MessageID: messageID,
@@ -607,76 +727,170 @@ func (d *deduper) claim(ctx context.Context, messageID string) (bool, error) {
 	// 用，测试因此不必写 MySQL 专有 SQL。
 	tx := d.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
 	if tx.Error != nil {
-		return false, tx.Error
+		return messageClaim{}, tx.Error
 	}
 	if tx.RowsAffected == 1 {
-		return true, nil
+		return messageClaim{proceed: true, attempt: 1}, nil
 	}
 
 	var existing consumedMessage
 	if err := d.db.WithContext(ctx).
 		Where("consumer = ? AND message_id = ?", d.consumer, messageID).
 		First(&existing).Error; err != nil {
-		return false, err
+		return messageClaim{}, err
 	}
-	if existing.Status == consumedStatusDone {
-		return false, nil
-	}
-	if existing.Attempts >= d.maxAttempts {
-		if existing.Status != consumedStatusDead {
-			_ = d.db.WithContext(ctx).Model(&consumedMessage{}).
-				Where("id = ? AND status <> ?", existing.ID, consumedStatusDone).
-				Updates(map[string]any{
-					"status":     consumedStatusDead,
-					"last_error": "attempts exhausted",
-				})
+
+	switch existing.Status {
+	case consumedStatusDone:
+		return messageClaim{reason: "already processed"}, nil
+	case consumedStatusDead:
+		return messageClaim{reason: "already parked as dead"}, nil
+	case consumedStatusProcessing:
+		if !d.leaseExpired(existing) {
+			return messageClaim{inFlight: true}, nil
 		}
-		return false, nil
+	case consumedStatusFailed:
+		// A recorded failure is the one state that explicitly asks for a
+		// retry; fall through to the takeover.
+		// 记录为 failed 是唯一明确请求重试的状态，继续走接管流程。
+	default:
+		// An unknown status cannot be reasoned about, so neither run the
+		// handler twice nor acknowledge: ask for a redelivery and let an
+		// operator look at the row.
+		// 未知状态无法推断，既不重复执行也不确认：请求重投，让人去看这一行。
+		return messageClaim{inFlight: true}, nil
 	}
-	// The status guard makes two concurrent redeliveries race safely: only one
-	// of them flips the row back to processing and increments the counter.
-	// status 条件让两次并发重投安全竞争：只有其中一个能把行改回 processing 并
-	// 递增计数。
+
+	if existing.Attempts >= d.maxAttempts {
+		if err := d.markExhausted(ctx, existing); err != nil {
+			return messageClaim{}, err
+		}
+		return messageClaim{reason: "attempts exhausted"}, nil
+	}
+
+	// The status and attempt pair is the CAS: only the delivery that read this
+	// exact version can move the row forward.
+	// status 与 attempts 这一对就是 CAS：只有读到这个确切版本的投递才能推进该行。
 	res := d.db.WithContext(ctx).Model(&consumedMessage{}).
-		Where("id = ? AND status <> ?", existing.ID, consumedStatusDone).
+		Where("id = ? AND status = ? AND attempts = ?", existing.ID, existing.Status, existing.Attempts).
 		Updates(map[string]any{
-			"status":   consumedStatusProcessing,
-			"attempts": gorm.Expr("attempts + 1"),
+			"status":     consumedStatusProcessing,
+			"attempts":   gorm.Expr("attempts + 1"),
+			"last_error": "",
 		})
 	if res.Error != nil {
-		return false, res.Error
+		return messageClaim{}, res.Error
 	}
-	return res.RowsAffected == 1, nil
+	if res.RowsAffected != 1 {
+		// Someone else won the takeover between the read and the update.
+		// 在读与更新之间，别人赢得了这次接管。
+		return messageClaim{inFlight: true}, nil
+	}
+	return messageClaim{proceed: true, attempt: existing.Attempts + 1}, nil
 }
 
-// succeed records a completed message.
-// succeed 记录一条已完成的消息。
-func (d *deduper) succeed(ctx context.Context, messageID string) error {
-	return d.db.WithContext(ctx).Model(&consumedMessage{}).
-		Where("consumer = ? AND message_id = ?", d.consumer, messageID).
-		Updates(map[string]any{"status": consumedStatusDone, "last_error": ""}).Error
+// leaseExpired reports whether a processing row may be taken over.
+//
+// updated_at is the implicit lease: it is written on every claim and on every
+// outcome, so "last touched longer than the lease ago" means the handler that
+// owned it is gone. No extra column is added, which keeps the table unchanged
+// for existing deployments and lets SQLite tests cover the path.
+// leaseExpired 报告一条 processing 记录是否可以被接管。
+//
+// updated_at 就是隐式租约：每次认领与每次记录结果都会写它，因此"最近一次触碰距今
+// 超过租约"意味着持有它的 handler 已经不在了。这样不必新增列，已有部署的表结构
+// 不变，SQLite 测试也能覆盖这条路径。
+func (d *deduper) leaseExpired(row consumedMessage) bool {
+	if d.lease <= 0 {
+		return true
+	}
+	if row.UpdatedAt.IsZero() {
+		// A row written outside this package has no lease to trust. Treat it
+		// as expired so a stuck message can progress instead of blocking
+		// forever.
+		// 由本包之外的代码写入的行没有可信任的租约。按过期处理，卡住的消息才能继续
+		// 推进，而不是永久阻塞。
+		return true
+	}
+	return time.Since(row.UpdatedAt) >= d.lease
 }
 
-// fail records a retryable failure so the next attempt sees the reason.
-// fail 记录一次可重试失败，让下一次尝试能看到原因。
-func (d *deduper) fail(ctx context.Context, messageID string, cause error) error {
+// markExhausted moves a row that used up its attempts to the dead state. The
+// CAS keeps it from overwriting a row that another delivery is already
+// finishing; a zero-row result simply means someone else did it.
+// markExhausted 把耗尽重试次数的行转入 dead。CAS 保证它不会覆盖另一个投递正在
+// 收尾的行；影响 0 行只说明别人已经做过了。
+func (d *deduper) markExhausted(ctx context.Context, row consumedMessage) error {
 	return d.db.WithContext(ctx).Model(&consumedMessage{}).
-		Where("consumer = ? AND message_id = ?", d.consumer, messageID).
+		Where("id = ? AND status = ? AND attempts = ?", row.ID, row.Status, row.Attempts).
+		Updates(map[string]any{
+			"status":     consumedStatusDead,
+			"last_error": "attempts exhausted",
+		}).Error
+}
+
+// succeed records a completed message. A zero-row update means the row moved on
+// to a different claim (or was already finished by it), and the caller learns
+// that through ErrStaleClaim.
+// succeed 记录一条已完成的消息。影响 0 行说明该行已归另一次认领（或已由它完成），
+// 调用方通过 ErrStaleClaim 得知。
+func (d *deduper) succeed(ctx context.Context, messageID string, attempt int) error {
+	res := d.db.WithContext(ctx).Model(&consumedMessage{}).
+		Where("consumer = ? AND message_id = ? AND attempts = ? AND status = ?",
+			d.consumer, messageID, attempt, consumedStatusProcessing).
+		Updates(map[string]any{"status": consumedStatusDone, "last_error": ""})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("%w: message %s attempt %d", ErrStaleClaim, messageID, attempt)
+	}
+	return nil
+}
+
+// fail records a retryable failure so the next attempt sees the reason. Only
+// the claim that owns the row may write it, and only while the row is still
+// processing: a late failure must never turn a finished message back into one
+// that gets retried.
+// fail 记录一次可重试失败，让下一次尝试能看到原因。只有持有该行的认领才能写入，
+// 且仅当该行仍处于 processing：迟到的失败绝不能把已完成的消息改回待重试。
+func (d *deduper) fail(ctx context.Context, messageID string, attempt int, cause error) error {
+	res := d.db.WithContext(ctx).Model(&consumedMessage{}).
+		Where("consumer = ? AND message_id = ? AND attempts = ? AND status = ?",
+			d.consumer, messageID, attempt, consumedStatusProcessing).
 		Updates(map[string]any{
 			"status":     consumedStatusFailed,
 			"last_error": truncate(cause.Error(), 512),
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("%w: message %s attempt %d", ErrStaleClaim, messageID, attempt)
+	}
+	return nil
 }
 
-// park records a failure that will not be retried.
-// park 记录一次不再重试的失败。
-func (d *deduper) park(ctx context.Context, messageID string, cause error) error {
-	return d.db.WithContext(ctx).Model(&consumedMessage{}).
-		Where("consumer = ? AND message_id = ?", d.consumer, messageID).
+// park records a failure that will not be retried. done and dead are terminal:
+// the guard excludes them so a late failure cannot reopen a finished message.
+// park 记录一次不再重试的失败。done 与 dead 是终态：条件把它们排除在外，迟到的
+// 失败因此无法把已完成的消息重新打开。
+func (d *deduper) park(ctx context.Context, messageID string, attempt int, cause error) error {
+	res := d.db.WithContext(ctx).Model(&consumedMessage{}).
+		Where("consumer = ? AND message_id = ? AND attempts = ? AND status IN ?",
+			d.consumer, messageID, attempt,
+			[]string{consumedStatusProcessing, consumedStatusFailed}).
 		Updates(map[string]any{
 			"status":     consumedStatusDead,
 			"last_error": truncate(cause.Error(), 512),
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("%w: message %s attempt %d", ErrStaleClaim, messageID, attempt)
+	}
+	return nil
 }
 
 // truncate cuts s to at most n bytes without splitting a rune.
