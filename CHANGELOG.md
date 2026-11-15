@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `examples/demo-service`: `uuidint.fallback_redis_instance_name` optionally
+  names a backup Redis instance. `support/uuidint` already had
+  `WithFallbackClients` / `WithFallbackInstances`; the demo now wires a second
+  per-generation client through `app/appio` and `script gen-uuid`, so an outage
+  of the primary still yields IDs. The option is empty by default, must name an
+  enabled instance different from the primary, and fails at startup when that
+  instance has no client instead of degrading to a package-level alias.
 - `support/uuidint`: `WithFallbackDelay` pauses after the primary exhausts its
   retries and before the first fallback attempt (default 10ms, interruptible by
   ctx, skipped when no fallback is configured). IDs combine a millisecond

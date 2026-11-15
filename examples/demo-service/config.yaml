@@ -121,13 +121,19 @@ redis:
     db: 2
     pool_size: 5
 
-# 分布式自增 ID：由 app/io 用 support/uuidint 构建生成器，复用上面 redis 的
-# 命名实例（redis_instance_name 必须是已启用的 redis 实例）。generator 不持有
-# 连接，每次取号经 support/redis 的别名懒解析；enabled 为 false 时句柄为 nil。
+# 分布式自增 ID：由 app/appio 用 support/uuidint 构建生成器，绑定本代 Redis 客户端，
+# 取号不依赖之后 Reload 安装的新 Registry；enabled 为 false 时句柄为 nil。
+# redis_instance_name 必须指向上面已启用的 redis 实例。
+# 主实例重试全部失败后可降级到备用实例，该选项留空即不启用：
+#   fallback_redis_instance_name: cache
+# 备用同样必须已启用、且不能与主实例同名，可以是另一台独立 Redis：框架在切换前停顿
+# 10ms，让备用的毫秒前缀与主实例错开，两边各自从 1 开始的计数器就不会发出重复 ID。
+# 启用前先把对应 redis 实例的 enabled 改为 true。
 # 脚本模式不经过模块生命周期，可用 script gen-uuid 直接验证（见下方脚本）。
 uuidint:
   enabled: true
   redis_instance_name: ratelimit
+  # fallback_redis_instance_name: cache   # 可选；启用前先把 redis.cache.enabled 改为 true
   key: demo:uuid
   ttl: 15s
   retry_times: 3

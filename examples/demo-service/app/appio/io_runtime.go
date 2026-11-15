@@ -20,6 +20,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
+	goredis "github.com/redis/go-redis/v9"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
@@ -119,8 +120,22 @@ func (m *Module) Start(ctx context.Context) error {
 		_ = dbSet.Close()
 		return err
 	}
-	// 生成器绑定本代 Redis 客户端，取号不再依赖最后安装的包级 Registry。
-	uuidintSet, err := appuuidint.Open(m.uuidintCfg, m.rt.Logger, redisSet.Client(m.uuidintCfg.RedisInstanceName()))
+	// The generator is pinned to this generation's Redis clients, so Get does
+	// not depend on the last installed Registry. An empty fallback alias skips
+	// the lookup; a configured one without an enabled instance fails in Open.
+	// 生成器绑定本代 Redis 客户端，取号不再依赖最后安装的包级 Registry。备用别名
+	// 为空时不查客户端；配置了却没有已启用的实例会由 Open 直接报错。
+	fallbackName := m.uuidintCfg.FallbackRedisInstanceName()
+	var fallbackClient *goredis.Client
+	if fallbackName != "" {
+		fallbackClient = redisSet.Client(fallbackName)
+	}
+	uuidintSet, err := appuuidint.Open(
+		m.uuidintCfg,
+		m.rt.Logger,
+		redisSet.Client(m.uuidintCfg.RedisInstanceName()),
+		fallbackClient,
+	)
 	if err != nil {
 		_ = rocketmqSet.Close()
 		_ = kafkaSet.Close()

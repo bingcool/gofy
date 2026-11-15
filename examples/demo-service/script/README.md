@@ -154,6 +154,11 @@ func Register(cfg *config.Config) []gofyscript.Script {
 - 脚本启动时**不会**从 Nacos 拉取配置：`main.go` 只在 `start` 调用时同步，
   脚本读取的是本地 `config.yaml`，避免一次维护任务被远端配置影响；
 - 用 `ORDER_CONFIG=/path/to/config.yaml` 可以指定其他配置文件；
+- `gen-uuid` 会按 `uuidint.fallback_redis_instance_name` 一并打开备用 Redis 实例；
+  留空时只开主实例。备用必须已启用、且不能与 `--redis` 选中的实例同名，否则脚本
+  在 `Run` 阶段直接报错，不会带着半套连接继续。备用可以是另一台独立 Redis，切换前
+  的 10ms 停顿见 [`support/uuidint/README.md`](../../../support/uuidint/README.md)
+  的「失败与降级」；
 - 走 `withIO` 的脚本需要数据库：配置里没有 `db` 时 `rt.DB` 为 nil，包装层在
   `Start` 前返回 `apperr.Internal("database is not configured")`，`Run` 不会执行；
 - 脚本不需要 HTTP 端口，也不要求 8080 空闲；不会与正在运行的服务实例冲突。

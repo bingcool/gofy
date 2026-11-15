@@ -8,6 +8,7 @@ package uuidint
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,12 +21,21 @@ import (
 // Config configures the demo ID generator.
 // Config 描述示例 ID 生成器；PoolSize 为 0 表示不用本地预取池。
 type Config struct {
-	Enabled       bool          `yaml:"enabled"`
-	RedisInstance string        `yaml:"redis_instance_name" default:"ratelimit"`
-	Key           string        `yaml:"key" default:"demo:uuid"`
-	TTL           time.Duration `yaml:"ttl" default:"15s"`
-	RetryTimes    int           `yaml:"retry_times" default:"3"`
-	RetryInterval time.Duration `yaml:"retry_interval" default:"150ms"`
+	Enabled       bool   `yaml:"enabled"`
+	RedisInstance string `yaml:"redis_instance_name" default:"ratelimit"`
+	// FallbackRedisInstance is optional: an empty value disables the fallback.
+	// It must name an enabled redis instance and must differ from RedisInstance.
+	// A separate Redis server is fine: the generator pauses 10ms before its
+	// first fallback attempt, so the handover lands in a new millisecond — the
+	// only way two counters starting at 1 could otherwise produce a duplicate.
+	// FallbackRedisInstance 可选，留空即不启用。它必须指向已启用的 redis 实例，
+	// 且不能与 RedisInstance 同名。备用可以是另一台独立 Redis：框架在切换前停顿
+	// 10ms 让毫秒前缀错开，两套各自从 1 开始的计数器就不会发出重复 ID。
+	FallbackRedisInstance string        `yaml:"fallback_redis_instance_name"`
+	Key                   string        `yaml:"key" default:"demo:uuid"`
+	TTL                   time.Duration `yaml:"ttl" default:"15s"`
+	RetryTimes            int           `yaml:"retry_times" default:"3"`
+	RetryInterval         time.Duration `yaml:"retry_interval" default:"150ms"`
 	// PoolSize 为 0 表示不用本地预取池；大于 0 时启动即预热一批，
 	// 并按 PoolInterval 定时补货。
 	PoolSize     int           `yaml:"pool_size"`
@@ -47,14 +57,29 @@ type Set struct {
 	gen *gofyuuidint.Generator
 }
 
-// Validate checks the configuration without touching Redis.
-// Validate 只校验配置、不访问 Redis，因此可以在启动期安全调用。
+// Validate checks the configuration without touching Redis. A fallback alias
+// equal to the primary is rejected here, before any connection is opened.
+// Validate 只校验配置、不访问 Redis；备用别名与主实例同名会在建连之前被拒绝。
 func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	_, err := c.newGenerator(zap.NewNop(), nil)
+	c = c.withDefaults()
+	if err := c.validateFallback(); err != nil {
+		return err
+	}
+	_, err := c.newGenerator(zap.NewNop(), nil, nil)
 	return err
+}
+
+// validateFallback rejects a fallback that would only retry the same broken
+// connection. An empty alias means the feature is off.
+// validateFallback 拒绝与主实例同名的备用——那只是把失败的连接再试一遍；空串表示未启用。
+func (c Config) validateFallback() error {
+	if c.FallbackRedisInstance == "" || c.FallbackRedisInstance != c.RedisInstance {
+		return nil
+	}
+	return fmt.Errorf("fallback_redis_instance_name %q must differ from redis_instance_name", c.FallbackRedisInstance)
 }
 
 // RedisInstanceName returns the Redis alias after applying defaults; app/appio uses
@@ -65,12 +90,20 @@ func (c Config) RedisInstanceName() string {
 	return c.withDefaults().RedisInstance
 }
 
+// FallbackRedisInstanceName returns the optional backup alias; an empty string
+// means no fallback, so callers can skip looking up a client entirely.
+// FallbackRedisInstanceName 返回可选的备用别名；空串表示未配置，调用方无需查找客户端。
+func (c Config) FallbackRedisInstanceName() string {
+	return c.withDefaults().FallbackRedisInstance
+}
+
 func (c Config) withDefaults() Config {
 	out := c
 	out.RedisInstance = strings.TrimSpace(out.RedisInstance)
 	if out.RedisInstance == "" {
 		out.RedisInstance = "ratelimit"
 	}
+	out.FallbackRedisInstance = strings.TrimSpace(out.FallbackRedisInstance)
 	out.Key = strings.TrimSpace(out.Key)
 	if out.Key == "" {
 		out.Key = "demo:uuid"
@@ -90,12 +123,15 @@ func (c Config) withDefaults() Config {
 	return out
 }
 
-// newGenerator builds the generator. A non-nil client pins it to this
-// generation's Redis connection; nil keeps the alias-resolution path, which
-// Validate uses because it runs before any connection exists.
-// newGenerator 构造生成器。client 非 nil 时固定在传入的本代连接上；为 nil 时
-// 走别名解析，Validate 用的就是这条路径，因为它在任何连接建立之前执行。
-func (c Config) newGenerator(logger *zap.Logger, client *goredis.Client) (*gofyuuidint.Generator, error) {
+// newGenerator builds the generator. A non-nil client pins the primary source
+// to this generation's Redis connection; nil keeps the alias-resolution path,
+// which Validate uses because it runs before any connection exists. The
+// fallback follows the same split: a client when one was built, otherwise the
+// alias resolved lazily through support/redis.
+// newGenerator 构造生成器。client 非 nil 时主连接固定在传入的本代连接上；为 nil 时
+// 走别名解析，Validate 用的就是这条路径，因为它在任何连接建立之前执行。备用同样
+// 分两路：有本代客户端就用它，否则退回 support/redis 按别名懒解析。
+func (c Config) newGenerator(logger *zap.Logger, client, fallbackClient *goredis.Client) (*gofyuuidint.Generator, error) {
 	c = c.withDefaults()
 	opts := []gofyuuidint.Option{
 		gofyuuidint.WithTTL(c.TTL),
@@ -106,27 +142,47 @@ func (c Config) newGenerator(logger *zap.Logger, client *goredis.Client) (*gofyu
 	} else {
 		opts = append(opts, gofyuuidint.WithInstance(c.RedisInstance))
 	}
+	if c.FallbackRedisInstance != "" {
+		if fallbackClient != nil {
+			opts = append(opts, gofyuuidint.WithFallbackClients(fallbackClient))
+		} else {
+			opts = append(opts, gofyuuidint.WithFallbackInstances(c.FallbackRedisInstance))
+		}
+	}
 	if c.PoolSize > 0 {
 		opts = append(opts, gofyuuidint.WithPool(c.PoolSize, c.PoolInterval))
 	}
 	if logger != nil {
 		opts = append(opts, gofyuuidint.WithErrorHandler(func(err error) {
-			logger.Warn("uuidint primary redis failed", zap.String("redis_instance_name", c.RedisInstance), zap.Error(err))
+			logger.Warn("uuidint primary redis failed",
+				zap.String("redis_instance_name", c.RedisInstance),
+				zap.String("fallback_redis_instance_name", c.FallbackRedisInstance),
+				zap.Error(err))
 		}))
 	}
 	return gofyuuidint.New(c.Key, opts...)
 }
 
-// Open builds the generator for cfg. client is this generation's Redis client
-// for RedisInstanceName; when nil the generator falls back to resolving the
-// alias through support/redis. A disabled config returns an empty Set.
-// Open 为 cfg 构造生成器。client 是本代 RedisInstanceName 对应的客户端；为 nil
-// 时退回 support/redis 按别名解析。配置未启用时返回空 Set，后续调用都是 no-op。
-func Open(cfg Config, logger *zap.Logger, client *goredis.Client) (*Set, error) {
+// Open builds the generator for cfg. client and fallbackClient are this
+// generation's Redis clients; a nil primary falls back to alias resolution.
+// A configured fallback without a client is an error: silently degrading to
+// the package-level alias would hide a misconfigured redis instance until the
+// first failure, when it is too late to fix.
+// Open 为 cfg 构造生成器。client 与 fallbackClient 是本代 Redis 客户端；主客户端为
+// nil 时走别名解析。配置了备用却没有客户端会直接报错：悄悄退化到包级别名会把
+// "实例没启用"藏到第一次故障才暴露，那时已经来不及修。
+func Open(cfg Config, logger *zap.Logger, client, fallbackClient *goredis.Client) (*Set, error) {
 	if !cfg.Enabled {
 		return &Set{}, nil
 	}
-	gen, err := cfg.newGenerator(logger, client)
+	c := cfg.withDefaults()
+	if err := c.validateFallback(); err != nil {
+		return nil, err
+	}
+	if c.FallbackRedisInstance != "" && fallbackClient == nil {
+		return nil, fmt.Errorf("uuidint: fallback redis instance %q has no client; enable it in the redis config", c.FallbackRedisInstance)
+	}
+	gen, err := c.newGenerator(logger, client, fallbackClient)
 	if err != nil {
 		return nil, err
 	}
