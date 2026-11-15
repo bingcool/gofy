@@ -642,7 +642,11 @@ nacos:
   [`support/nacos/README.md`](support/nacos/README.md#配置变更策略)；
 - `restart_grace_period`（秒，默认 `0`）让 `restart` / `exit` 先调用应用的摘流钩子
   （demo 中是 `App.StopAccepting`：新请求 503、从 Nacos 注销，在途请求继续），再固定
-  等待若干秒。它只降低切断在途任务的概率，不保证任务跑完；`reload` 不走这一步；
+  等待若干秒。它只降低切断在途任务的概率，不保证任务跑完，**不是严格优雅关停**；
+  `reload` 不走这一步。动作失败时 `WithResume` 钩子（`App.ResumeAccepting`）会重新
+  打开闸门并重新注册，进程因此不会停在「活着、已注销、永久 503」；
+  部署预算（grace ≥ handler p99、`terminationGracePeriodSeconds` ≥ grace + 清理预算）
+  见 [`support/nacos/README.md`](support/nacos/README.md#部署预算)；
 - **三种策略只在 HTTP 进程生效**：`worker --group=<g>` 启动时 `Sync` 一次但**不监听**，
   运行期配置保持不变；`script` / `stop` / `version` / `worker --list` 完全不访问 Nacos。
   worker 的配置变更由部署层滚动重启负责，`restart` 仅用于没有外部监管者的物理机 /

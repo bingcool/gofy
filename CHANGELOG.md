@@ -41,9 +41,61 @@ All notable changes to this project are documented here. The format follows
 - `gofy-interface-api`: `WithQuery` no longer panics. `newCallOptions`
   initializes `query`, so ordinary calls, repeated keys and the streaming
   helpers all accept the option.
+- `gofy`: the drain gate is now an admission gate. The open/closed check and
+  the generation lease acquisition happen under one read lock, so once
+  `StopAccepting` returns no further request can enter a handler — the previous
+  check-then-acquire left a window where a request that read "open" still got
+  in. `ServeHTTP` also releases the lease with `defer`, so a handler panic
+  (`http.ErrAbortHandler`, or any panic with Recovery disabled) no longer leaves
+  the counter elevated and adds a drain timeout to every later reload.
+- `gofy`: a failed `restart` / `exit` no longer leaves the process alive,
+  deregistered and answering 503. `StopAccepting` keeps the registrar reference,
+  `App.ResumeAccepting` reopens the gate and republishes the instance, and
+  `nacos.WithResume` calls it when `exec` or the termination signal fails. If the
+  resume itself fails the watcher asks for termination, so a supervisor can
+  recover instead of the process becoming a zombie.
+- `gofy`: a config change that arrives while the process is still registering in
+  Nacos can no longer leave it advertised but drained. Registration is checked
+  against the gate afterwards and withdrawn immediately; failing to withdraw
+  fails startup.
+- `gofy-interface-api`: `StreamSSE` re-resolves the base URL on every reconnect,
+  so a Resolver can move the stream to another instance instead of retrying the
+  endpoint that just dropped. A fixed `BaseURL` still returns the same address,
+  and `Last-Event-ID` is carried across the switch.
+- `gofy-interface-api`: the `WithConnectTimeout` derived-client cache is bounded
+  (`maxDerivedClients`, 32) and now has a lifecycle. Entries beyond the cap still
+  serve the call but are not kept, and `Client.Close` releases the idle
+  connections of the pools this package created while leaving a
+  `Config.HTTPClient` alone.
+- `gofy-adapter`: `k8slease.Locker` is single-flight per key within the process.
+  Re-acquiring a lease the same identity already holds still keeps the token —
+  that rule exists for a *restarted* pod, not for concurrent callers — but a
+  second `Acquire` in the same process now returns `ErrHeld` instead of silently
+  joining the same term. `Release`, and a `Renew` that discovers another holder,
+  free the reservation.
+- `support/worker/consumer/rocketmqconsumer`: a single-use consumer could not
+  survive a Runner restart — the second `Run` consumed from a client that had
+  already been consumed. `NewFactory` builds a fresh consumer per `Run` and
+  always closes it; `New` keeps the one-shot contract and says so.
+
+### Changed
+
+- `gofy-adapter`: README documents the Kubernetes Lease adapter — minimal RBAC,
+  Lease naming, identity uniqueness, why the object must not be deleted (the
+  fencing token resets), and the single-flight rule. The import guard now rejects
+  gin and the gofy root package inside that adapter, which keeps it usable from a
+  worker-only process.
+- `examples/demo-service`: the order query returns `MaxOrderID` / `max_order_id`
+  instead of `LastOrderID`. `MAX(id)` is the largest primary key, not the most
+  recently created order, and the old name implied the latter.
 
 ### Added
 
+- `support/worker/consumer/rocketmqconsumer`: `NewFactory(name, factory, cfg)`
+  and `ConsumerFactory`, for the Runner restart path.
+- `gofy`: `App.ResumeAccepting(ctx)` and `nacos.WithResume(fn)`, the counterpart
+  of the drain hook.
+- `gofy-interface-api`: `Client.Close()`.
 - `examples/demo-service`: new read-only `query` layer in the order module
   (`app/module/order/query`) for raw SQL, joins and `EXISTS` / `NOT EXISTS`
   reads. Each module can carry its own query package; it resolves its connection
