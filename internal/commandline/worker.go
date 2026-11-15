@@ -53,6 +53,10 @@ type WorkerOptions struct {
 	// List prints the registered groups and exits without starting anything.
 	// List 打印已注册的分组后退出，不启动任何 worker。
 	List bool
+	// Daemon detaches into the background and exits the parent process instead of
+	// holding the terminal that started it.
+	// Daemon 脱离到后台并让父进程退出，而不是占用启动它的终端。
+	Daemon bool
 }
 
 // WorkerInfo describes one worker for `worker --list`.
@@ -96,6 +100,7 @@ func newWorkerCmd(d Deps) *cobra.Command {
 	cmd.Flags().StringSliceVar(&opts.Names, "name", nil, "run only the named workers (repeatable)")
 	cmd.Flags().IntVar(&opts.Concurrency, "concurrency", 0, "override the instance count of every worker (0 = config)")
 	cmd.Flags().BoolVar(&opts.List, "list", false, "list groups and workers, then exit")
+	cmd.Flags().BoolVar(&opts.Daemon, "daemon", false, "detach into the background and exit the parent process")
 	return cmd
 }
 

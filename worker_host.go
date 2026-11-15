@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/bingcool/gofy/core"
@@ -42,6 +43,29 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		if groups[0], err = groups[0].Subset(opts.Names); err != nil {
 			return err
 		}
+	}
+
+	// Resolve the pid file before anything is built. The daemon path needs it to
+	// refuse a duplicate instance while the error can still reach the terminal;
+	// the foreground path reuses the same value below.
+	//
+	// The worker process keeps its own pid file: sharing the HTTP one would let
+	// `stop` kill the API server and make a second group look like a duplicate
+	// instance. Running every group at once still owns a single pid file, named
+	// after the wildcard rather than after a group that is not the whole process.
+	// 在构建任何资源之前先解析 pid 文件：daemon 路径需要它在错误还能打到终端时挡住重复
+	// 实例，前台路径随后复用同一个值。
+	//
+	// worker 进程使用独立 pid 文件：共用 HTTP 的那个会让 `stop` 误杀 API 服务，
+	// 也会让第二个分组被误判为重复实例。全部分组同跑时仍然只有一个 pid 文件，
+	// 名字取通配符而不是某个并不代表整个进程的分组名。
+	pidPath, err := a.resolvePIDPath()
+	if err != nil {
+		return err
+	}
+	pidPath = workerPIDPath(pidPath, workerPIDGroup(groups))
+	if opts.Daemon {
+		return a.daemonizeWorker(groups, pidPath)
 	}
 
 	if err := a.beginStart(false); err != nil {
@@ -101,18 +125,6 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		}
 	}
 
-	pidPath, err := a.resolvePIDPath()
-	if err != nil {
-		return a.abort(err)
-	}
-	// The worker process keeps its own pid file: sharing the HTTP one would let
-	// `stop` kill the API server and make a second group look like a duplicate
-	// instance. Running every group at once still owns a single pid file, named
-	// after the wildcard rather than after a group that is not the whole process.
-	// worker 进程使用独立 pid 文件：共用 HTTP 的那个会让 `stop` 误杀 API 服务，
-	// 也会让第二个分组被误判为重复实例。全部分组同跑时仍然只有一个 pid 文件，
-	// 名字取通配符而不是某个并不代表整个进程的分组名。
-	pidPath = workerPIDPath(pidPath, workerPIDGroup(groups))
 	if pidPath != "" {
 		if existing, readErr := pidfile.Read(pidPath); readErr == nil && process.Alive(existing) {
 			return a.abort(fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath))
@@ -282,6 +294,56 @@ func (a *App) selectWorkerGroups(name string) ([]*worker.Group, error) {
 // workerPIDGroup 为解析出的分组决定 pid 文件名：只跑一个分组时用组名，进程托管全部分组
 // 时用通配符对应的名字。
 func workerPIDGroup(groups []*worker.Group) string {
+	if len(groups) == 1 {
+		return groups[0].Name()
+	}
+	return commandline.WorkerAllPIDToken
+}
+
+// daemonizeWorker re-executes this process in its own session and exits the
+// parent, the same way `start --daemon` does. The child gets --daemon=false so it
+// runs in the foreground of that session instead of detaching again.
+// daemonizeWorker 在一个独立会话里重新执行本进程并让父进程退出，做法与
+// `start --daemon` 相同。子进程收到 --daemon=false，因此它在该会话里前台运行，不会
+// 再次脱离。
+func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string) error {
+	if runtime.GOOS == "windows" {
+		return ErrUnsupported
+	}
+	// Refuse before detaching. The child's stdout and stderr go to /dev/null, so a
+	// duplicate instance would die silently while the parent reported success.
+	// 脱离之前先挡住重复实例：子进程的 stdout / stderr 都指向 /dev/null，重复实例
+	// 会静默退出，而父进程已经报了成功。
+	if pidPath != "" {
+		if existing, err := pidfile.Read(pidPath); err == nil && process.Alive(existing) {
+			return fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath)
+		}
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("gofy: resolve executable: %w", err)
+	}
+	args := append(append([]string{}, os.Args[1:]...), "--daemon=false")
+	pid, err := process.Detach(executable, args)
+	if err != nil {
+		return fmt.Errorf("gofy: daemonize worker: %w", err)
+	}
+	label := workerGroupLabel(groups)
+	c := a.con()
+	c.Success("worker 分组【%s】已在后台启动 (pid %d)", label, pid)
+	// No binary name in the hint: how this process was launched is not something
+	// the process can know — `go run .`, an absolute path and a bare name all
+	// reach here — so naming demo-service would be a command that may not exist.
+	// 提示里不带二进制名：本进程无从知道自己是怎么被启动的（`go run .`、绝对路径、
+	// 裸命令名都会走到这里），写上 demo-service 反而可能是一条并不存在的命令。
+	c.Note("使用 stop --worker=%s 停止", label)
+	return nil
+}
+
+// workerGroupLabel names the groups a daemonized process hosts, for messages.
+// workerGroupLabel 为消息命名被托管的 daemon 分组。
+func workerGroupLabel(groups []*worker.Group) string {
 	if len(groups) == 1 {
 		return groups[0].Name()
 	}

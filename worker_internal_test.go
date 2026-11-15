@@ -362,3 +362,36 @@ func TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemonWorkerRefusesWhenAlreadyRunning checks the pre-flight that the
+// daemon path needs: the child's stdio goes to /dev/null, so a duplicate has to
+// be refused while the parent can still print why.
+// TestDaemonWorkerRefusesWhenAlreadyRunning 校验 daemon 路径需要的前置检查：子进程的
+// stdio 指向 /dev/null，重复实例必须在父进程还能说明原因时就挡住。
+func TestDaemonWorkerRefusesWhenAlreadyRunning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("daemonizing a worker is not supported on windows")
+	}
+	order, err := worker.NewGroup("order", worker.Func("scan", 1, func(context.Context) error { return nil }))
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	pidPath := filepath.Join(t.TempDir(), "demo.pid")
+	if err := os.WriteFile(workerPIDPath(pidPath, "order"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	app, err := New(
+		WithName("daemon-worker-test"),
+		WithPIDFile(pidPath),
+		WithWorkerGroups(order),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = app.runWorker(context.Background(), commandline.WorkerOptions{Group: "order", Daemon: true})
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("runWorker daemon = %v, want ErrAlreadyRunning", err)
+	}
+}

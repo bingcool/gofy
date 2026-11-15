@@ -241,3 +241,22 @@ func TestWorkerRequiresGroupButSuggestsTheAlias(t *testing.T) {
 		t.Fatalf("worker without --group = %v, want an error naming --group=all", err)
 	}
 }
+
+func TestWorkerDaemonFlag(t *testing.T) {
+	var got commandline.WorkerOptions
+	d := commandline.Deps{
+		Name: "app",
+		RunWorker: func(_ context.Context, opts commandline.WorkerOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker", "--group=order", "--daemon=1"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	if !got.Daemon || got.Group != "order" {
+		t.Fatalf("worker options = %+v", got)
+	}
+}
