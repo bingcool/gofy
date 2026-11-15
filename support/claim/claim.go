@@ -67,11 +67,18 @@ var (
 	ErrOwnerRequired = errors.New("claim: owner is required")
 
 	// ErrLeaseLost means the row no longer belongs to the caller: another owner
-	// took it over after a lease expired. The handler must not retry its side
-	// effects.
-	// ErrLeaseLost 表示该行已不属于调用方：租约过期后被其它 owner 接管。业务
-	// 不得重试其副作用。
+	// took it over after a lease expired, or the same owner claimed it again
+	// after a reap. The handler must not retry its side effects.
+	// ErrLeaseLost 表示该行已不属于调用方：租约过期后被其它 owner 接管，或同一
+	// owner 在 Reap 之后再次认领。业务不得重试其副作用。
 	ErrLeaseLost = errors.New("claim: lease lost")
+
+	// ErrInvalidTask means Succeed, Fail or Dead received a task without the
+	// owner and attempts values that Claim returned. Those two fields are the
+	// fencing pair; a hand-built task cannot prove it still owns the row.
+	// ErrInvalidTask 表示 Succeed、Fail、Dead 收到的 task 缺少 Claim 返回的 owner
+	// 与 attempts。这两个字段是围栏组合，手工拼出来的 task 无法证明自己仍持有该行。
+	ErrInvalidTask = errors.New("claim: task must carry the owner and attempts returned by claim")
 
 	// ErrInvalidStatus means Succeed or Fail saw a row in an unexpected state.
 	// ErrInvalidStatus 表示 Succeed 或 Fail 遇到非预期状态的行。
@@ -241,16 +248,40 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
    SET status = %d, owner = ?, attempts = attempts + 1,
        lease_until = DATE_ADD(NOW(3), INTERVAL ? MICROSECOND)
  WHERE id IN (?)`, table, StatusClaimed)
+	// Every completion statement is fenced by owner, status and attempts.
+	//
+	// attempts is the per-claim fencing token: Claim increments it on every
+	// takeover, so a handler that was superseded — lease expired, row reaped,
+	// claimed again by the same worker or by another one — writes with a stale
+	// number and matches no row. Owner alone cannot do that: the same worker
+	// instance claims the same row again with the same owner string.
+	//
+	// The statements intentionally do not compare lease_until with NOW(3): a
+	// handler that finishes just after its lease expired but before Reap ran
+	// still owns the row (nothing else could have taken it), and completing it
+	// is better than failing a task whose side effects already happened. Once
+	// Reap has run, attempts has moved on and this CAS rejects the stale write.
+	//
+	// 每条收尾语句都由 owner、status 与 attempts 三重围栏。
+	//
+	// attempts 就是"每次认领"的围栏值：Claim 在每次接管时自增，因此被取代的
+	// handler——租约过期、行被 Reap、又被同一个 worker 或别的 worker 认领——带着
+	// 过期的序号写回时匹配不到任何行。仅靠 owner 做不到这一点：同一个 worker
+	// 实例会用同样的 owner 字符串再次认领同一行。
+	//
+	// 这些语句刻意不与 NOW(3) 比较 lease_until：租约刚过期但 Reap 还没跑的
+	// handler 仍持有该行（没有别人能拿走），让它完成比判定失败更合理，毕竟副作用
+	// 已经发生。Reap 一旦跑过，attempts 就变了，这个 CAS 会拒绝过期写回。
 	q.succeedSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
- WHERE id = ? AND owner = ? AND status = %d`, table, StatusDone, StatusClaimed)
+ WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDone, StatusClaimed)
 	q.failSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL,
        next_run_at = DATE_ADD(NOW(3), INTERVAL ? MICROSECOND)
- WHERE id = ? AND owner = ? AND status = %d`, table, StatusPending, StatusClaimed)
+ WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusPending, StatusClaimed)
 	q.deadSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
- WHERE id = ? AND owner = ? AND status = %d`, table, StatusDead, StatusClaimed)
+ WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDead, StatusClaimed)
 	q.reapSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
  WHERE job = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
@@ -279,7 +310,15 @@ func (q *Queue) Lease() time.Duration { return q.lease }
 func (q *Queue) MaxAttempts() int { return q.maxAttempts }
 
 // Task is one claimed row.
+//
+// Owner and Attempts are the fencing pair: every completion statement compares
+// both, so a Task must be passed on exactly as Claim returned it. Attempts is
+// what distinguishes "this claim" from "the previous claim by the same owner".
 // Task 是一条被认领的行。
+//
+// Owner 与 Attempts 组成围栏：每条收尾语句都会比较这两个值，因此 Task 必须按
+// Claim 返回的原样传下去。Attempts 区分的正是"本次认领"与"同一 owner 的上一次
+// 认领"。
 type Task struct {
 	ID       uint64
 	Job      string
@@ -337,16 +376,16 @@ func (q *Queue) Claim(ctx context.Context, owner string, n int) ([]Task, error) 
 	return tasks, nil
 }
 
-// Succeed closes a task. ErrLeaseLost means another owner took the row over, so
-// the handler must not repeat its side effects.
-// Succeed 结束任务。返回 ErrLeaseLost 表示该行已被别的 owner 接管，业务不得重复
-// 其副作用。
+// Succeed closes a task. ErrLeaseLost means the row was taken over after this
+// claim, so the handler must not repeat its side effects.
+// Succeed 结束任务。返回 ErrLeaseLost 表示该行在本次认领之后已被接管，业务不得
+// 重复其副作用。
 func (q *Queue) Succeed(ctx context.Context, task Task) error {
-	owner := strings.TrimSpace(task.Owner)
-	if owner == "" {
-		return ErrOwnerRequired
+	owner, err := claimFields(task)
+	if err != nil {
+		return err
 	}
-	res := q.db.WithContext(ctx).Exec(q.succeedSQL, task.ID, owner)
+	res := q.db.WithContext(ctx).Exec(q.succeedSQL, task.ID, owner, task.Attempts)
 	if res.Error != nil {
 		return fmt.Errorf("claim: succeed: %w", res.Error)
 	}
@@ -359,19 +398,19 @@ func (q *Queue) Succeed(ctx context.Context, task Task) error {
 
 // Fail records an attempt and schedules a retry with exponential backoff, or
 // moves the task to the dead state once MaxAttempts is reached. It returns
-// ErrLeaseLost when another owner already took the row over.
+// ErrLeaseLost when the row was taken over after this claim.
 // Fail 记录一次失败并按指数退避安排重试；达到 MaxAttempts 后转为死亡态。若该行
-// 已被别的 owner 接管，返回 ErrLeaseLost。
+// 在本次认领之后已被接管，返回 ErrLeaseLost。
 func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
-	owner := strings.TrimSpace(task.Owner)
-	if owner == "" {
-		return ErrOwnerRequired
+	owner, err := claimFields(task)
+	if err != nil {
+		return err
 	}
 	// Attempts was incremented at claim time, so reaching the cap here means
 	// this failure was the last allowed try.
 	// attempts 在认领时已自增，因此这里达到上限意味着本次失败就是最后一次尝试。
 	if task.Attempts >= q.maxAttempts {
-		res := q.db.WithContext(ctx).Exec(q.deadSQL, task.ID, owner)
+		res := q.db.WithContext(ctx).Exec(q.deadSQL, task.ID, owner, task.Attempts)
 		if res.Error != nil {
 			return fmt.Errorf("claim: dead: %w", res.Error)
 		}
@@ -382,7 +421,7 @@ func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
 		return nil
 	}
 	delay := backoffFor(q.backoff, q.maxBackoff, task.Attempts)
-	res := q.db.WithContext(ctx).Exec(q.failSQL, delay.Microseconds(), task.ID, owner)
+	res := q.db.WithContext(ctx).Exec(q.failSQL, delay.Microseconds(), task.ID, owner, task.Attempts)
 	if res.Error != nil {
 		return fmt.Errorf("claim: fail: %w", res.Error)
 	}
@@ -391,6 +430,19 @@ func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
 		return fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
 	}
 	return nil
+}
+
+// claimFields validates the fencing pair a completion needs.
+// claimFields 校验收尾所需的围栏组合。
+func claimFields(task Task) (string, error) {
+	owner := strings.TrimSpace(task.Owner)
+	if owner == "" {
+		return "", ErrOwnerRequired
+	}
+	if task.Attempts < 1 {
+		return "", fmt.Errorf("%w: task %d", ErrInvalidTask, task.ID)
+	}
+	return owner, nil
 }
 
 // Reap returns expired leases to the pending state and moves exhausted rows to

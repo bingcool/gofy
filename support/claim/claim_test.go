@@ -125,19 +125,43 @@ func TestSQLUsesSkipLockedAndGuards(t *testing.T) {
 	if !strings.Contains(q.selectSQL, "FOR UPDATE SKIP LOCKED") {
 		t.Fatalf("selectSQL lacks SKIP LOCKED: %s", q.selectSQL)
 	}
-	// Every completion statement is guarded by owner and status, which is the
-	// CAS that makes a stale holder harmless.
-	// 每条收尾语句都带 owner 与 status 条件，这个 CAS 让过期的持有者无法写入。
+	// Every completion statement is guarded by owner, status and attempts. The
+	// attempts value is the per-claim fence: owner + status alone would let the
+	// same worker instance write back after its row was reaped and re-claimed.
+	// 每条收尾语句都带 owner、status 与 attempts 条件；attempts 才是"每次认领"的
+	// 围栏：只有 owner + status 时，同一 worker 实例在行被回收并重新认领后仍能写回。
 	for name, sql := range map[string]string{
 		"succeed": q.succeedSQL,
 		"fail":    q.failSQL,
 		"dead":    q.deadSQL,
 	} {
-		if !strings.Contains(sql, "WHERE id = ? AND owner = ? AND status = 1") {
-			t.Fatalf("%sSQL lacks the owner/status guard: %s", name, sql)
+		if !strings.Contains(sql, "WHERE id = ? AND owner = ? AND status = 1 AND attempts = ?") {
+			t.Fatalf("%sSQL lacks the owner/status/attempts guard: %s", name, sql)
 		}
 	}
 	if !strings.Contains(q.reapSQL, "lease_until < NOW(3)") || !strings.Contains(q.reapSQL, "attempts < ?") {
 		t.Fatalf("reapSQL lacks the expiry or attempt guard: %s", q.reapSQL)
+	}
+}
+
+// TestCompletionRequiresFencingPair rejects hand-built tasks: without the
+// attempts value Claim returned, a completion cannot prove it still owns the
+// row, so it fails before any statement runs.
+// TestCompletionRequiresFencingPair 拒绝手工拼的 task：没有 Claim 返回的 attempts，
+// 收尾无法证明自己仍持有该行，因此在执行任何语句之前就失败。
+func TestCompletionRequiresFencingPair(t *testing.T) {
+	q, err := New(new(gorm.DB), Config{Table: "job_task", Job: "order"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	task := Task{ID: 7, Owner: "worker-a"}
+	if err := q.Succeed(context.Background(), task); !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("Succeed without attempts = %v, want ErrInvalidTask", err)
+	}
+	if err := q.Fail(context.Background(), task, errors.New("boom")); !errors.Is(err, ErrInvalidTask) {
+		t.Fatalf("Fail without attempts = %v, want ErrInvalidTask", err)
+	}
+	if err := q.Succeed(context.Background(), Task{ID: 7, Attempts: 1}); !errors.Is(err, ErrOwnerRequired) {
+		t.Fatalf("Succeed without owner = %v, want ErrOwnerRequired", err)
 	}
 }

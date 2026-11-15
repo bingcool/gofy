@@ -35,6 +35,31 @@ func (i Identity) String() string {
 	return fmt.Sprintf("%s/%s#%d", i.Group, i.Name, i.Index)
 }
 
+// Owner renders the identity as a claim owner: group/name#index@host when the
+// hostname is known, and the same value as String otherwise.
+//
+// Use it for claim.Queue.Claim instead of String: two pods running the same
+// group, worker and instance index are different instances, and their owner
+// values must differ so an operator can tell them apart in the task table.
+//
+// Owner identifies the instance, not the claim: it does not change when the
+// same instance claims the same row again after a reap. That is why claim
+// fences completions with attempts as well — see claim.Task.
+// Owner 把身份渲染成认领用的 owner：知道主机名时是 group/name#index@host，否则与
+// String 相同。
+//
+// 调用 claim.Queue.Claim 时应当用它而不是 String：两个 Pod 跑同样的分组、worker
+// 与实例序号时仍是不同实例，owner 值必须不同，运维才能在任务表里区分它们。
+//
+// Owner 标识的是实例，不是某一次认领：同一实例在 Reap 之后重新认领同一行时，它的值
+// 不变。这正是 claim 的收尾还要用 attempts 做围栏的原因——见 claim.Task。
+func (i Identity) Owner() string {
+	if i.Host == "" {
+		return i.String()
+	}
+	return i.String() + "@" + i.Host
+}
+
 type identityKey struct{}
 type drainKey struct{}
 

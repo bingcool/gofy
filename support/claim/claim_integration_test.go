@@ -149,7 +149,7 @@ func TestIntegrationSucceedCAS(t *testing.T) {
 	}
 	task := tasks[0]
 
-	if err := q.Succeed(context.Background(), Task{ID: task.ID, Owner: "worker-b"}); !errors.Is(err, ErrLeaseLost) {
+	if err := q.Succeed(context.Background(), Task{ID: task.ID, Owner: "worker-b", Attempts: task.Attempts}); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("Succeed as other owner error = %v, want ErrLeaseLost", err)
 	}
 	if lost != 1 {
@@ -261,6 +261,65 @@ func TestIntegrationFailAfterLeaseLost(t *testing.T) {
 	}
 	if err := q.Fail(context.Background(), tasks[0], errors.New("late")); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("Fail error = %v, want ErrLeaseLost", err)
+	}
+}
+
+// TestIntegrationStaleClaimOfSameOwnerCannotWriteBack is the exact scenario the
+// owner check cannot catch: the lease expires, the row is reaped, and the same
+// worker instance claims it again. Owner is identical for both claims; attempts
+// is not, so the first claim's completion must be rejected.
+// TestIntegrationStaleClaimOfSameOwnerCannotWriteBack 正是 owner 检查抓不到的场景：
+// 租约过期、行被回收，同一个 worker 实例再次认领。两次认领的 owner 完全相同，
+// 只有 attempts 不同，因此第一次认领的收尾必须被拒绝。
+func TestIntegrationStaleClaimOfSameOwnerCannotWriteBack(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:         "orders",
+		Lease:       time.Minute,
+		MaxAttempts: 5,
+	})
+	seed(t, db, q.tableName(), "orders", 1)
+
+	first, err := q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first Claim = %v, %v", first, err)
+	}
+	if first[0].Attempts != 1 {
+		t.Fatalf("first attempts = %d, want 1", first[0].Attempts)
+	}
+
+	// Reap semantics without waiting for the lease: the row goes back to
+	// pending with its attempt counter intact.
+	// 不等租约到期，直接按 Reap 的语义把行放回待处理态，attempts 保持不变。
+	if err := db.Exec("UPDATE `"+q.tableName()+
+		"` SET status = 0, owner = '', lease_until = NULL WHERE id = ?", first[0].ID).Error; err != nil {
+		t.Fatalf("reap row: %v", err)
+	}
+	second, err := q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second Claim = %v, %v", second, err)
+	}
+	if second[0].Attempts != 2 {
+		t.Fatalf("second attempts = %d, want 2", second[0].Attempts)
+	}
+	if second[0].Owner != first[0].Owner {
+		t.Fatalf("owners differ (%q vs %q); the test must exercise the same owner",
+			first[0].Owner, second[0].Owner)
+	}
+
+	if err := q.Succeed(context.Background(), first[0]); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("stale Succeed = %v, want ErrLeaseLost", err)
+	}
+	if err := q.Fail(context.Background(), first[0], errors.New("late")); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("stale Fail = %v, want ErrLeaseLost", err)
+	}
+	if got := q.statusOf(t, first[0].ID); got != StatusClaimed {
+		t.Fatalf("status after stale writes = %d, want %d (still claimed)", got, StatusClaimed)
+	}
+	if err := q.Succeed(context.Background(), second[0]); err != nil {
+		t.Fatalf("current Succeed: %v", err)
+	}
+	if got := q.statusOf(t, second[0].ID); got != StatusDone {
+		t.Fatalf("status = %d, want %d", got, StatusDone)
 	}
 }
 
