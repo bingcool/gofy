@@ -605,6 +605,23 @@ func (a *App) startNacosRegistration(ctx context.Context, listener net.Listener,
 	a.mu.Lock()
 	a.registrar = registrar
 	a.mu.Unlock()
+
+	// The watcher module starts before this point, so a config change can close
+	// the gate while registration is in flight. Checking afterwards — rather
+	// than only before — covers both orders: whatever was just registered is
+	// withdrawn again, and the process never advertises an instance that already
+	// answers 503. Failing to withdraw is fatal here: starting anyway would
+	// leave exactly the inconsistent state this check exists to prevent.
+	// watcher 模块在此前就已启动，因此注册进行中配置变更可能已经关闭闸门。注册之后
+	// 再检查（而不是只在之前检查）覆盖了两种顺序：刚注册的实例会被撤销，进程绝不会
+	// 对外通告一个已经在返回 503 的实例。撤销失败在这里是致命错误：继续启动恰好会留下
+	// 这个检查要消除的不一致状态。
+	if !a.admission.isOpen() {
+		lg.Info("drain requested during startup, withdrawing the registration")
+		if err := registrar.Stop(ctx); err != nil {
+			return fmt.Errorf("gofy: nacos service deregistration during startup: %w", err)
+		}
+	}
 	return nil
 }
 
