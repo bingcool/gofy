@@ -13,8 +13,11 @@
 ```
 demo-service start                      → HTTP，不启动任何 worker
 demo-service worker --group=order       → 只跑 order 组，不开端口、不注册路由
+demo-service worker --group=order --daemon=1 → 同上，脱离到后台
+demo-service worker stop                → 停所有 worker 进程，不碰 HTTP
+demo-service worker restart --group=order → 停 order 组后再起（默认后台）
 demo-service stop                       → 停 HTTP
-demo-service stop --worker=order        → 只停 order 组，不碰 HTTP
+demo-service stop --worker=order        → 只停 order 组，不碰 HTTP（旧写法，仍然可用）
 ```
 
 ## 2. 先选原语，再写循环
@@ -68,20 +71,27 @@ app, err := gofy.New(
 | `app worker --group=order` | 跑 order 组全部 worker |
 | `app worker --group=order --name=order-scan` | 只跑组内指定 worker（可重复） |
 | `app worker --group=order --concurrency=4` | 覆盖组内所有 worker 的实例数 |
-| `app worker --group='*'` | 在一个进程里跑全部已注册分组，仅本地调试与冒烟测试 |
-| `app stop --worker=order` | 按 pid 文件停掉该组 |
-| `app stop --worker=order --force` | 跳过确认，超时发 SIGKILL |
-| `app stop --worker='*'` | 停掉 `--group='*'` 起的那个进程（pid 后缀为 `all`） |
+| `app worker --group=order --daemon=1` | 脱离到后台，父进程打印 pid 后退出 |
+| `app worker --group=all` | 在一个进程里跑全部已注册分组，仅本地调试与冒烟测试 |
+| `app worker stop` | 停掉所有留下 pid 文件的 worker 进程 |
+| `app worker stop --group=order` | 只停 order 组（等价 `app stop --worker=order`） |
+| `app worker restart --group=order` | 先停再起，默认仍后台（`--daemon=false` 回前台） |
 
-`--group='*'` 要加引号，否则 shell 会先把它展开成当前目录的文件名。通配符运行不允许
-再配 `--name`：worker 名只属于某一个分组，跨组过滤会静默跳过不含它的分组，直接写
-`--group=<拥有该 worker 的组>` 更清楚。
+`--group` 选全部已注册分组时写 `all`：`*` 在进程启动之前就会被 shell 展开，zsh 直接报
+`no matches found: --group=*` 并拒绝执行，bash 只是因为当前目录没有匹配项才把它原样传
+下来。确实要用 `*` 时写 `--group='*'`、`--group=\*`，或 `noglob app worker --group=*`。
+通配符运行不允许再配 `--name`：worker 名只属于某一个分组，跨组过滤会静默跳过不含它的
+分组，直接写 `--group=<拥有该 worker 的组>` 更清楚。
+
+不带 `--group` 的 `worker stop` 扫 `<pid_file>` 旁边的 `-worker-*.pid`：分组可能是分别
+启动的，只停通配符那个文件会漏掉其余的。`worker restart` 不带 `--group` 时按通配符重启。
+两者不带 `--force` 都先问一次确认。
 
 ### 3.3 进程留下的东西
 
 | 产物 | 位置 | 说明 |
 | --- | --- | --- |
-| pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid` | 未配置 `pid_file` 则不写 |
+| pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid`；通配符启动写 `-worker-all.pid` | 未配置 `pid_file` 则不写；`worker stop` 按这个模式扫全部 |
 | 日志 | `storage/log/worker/<date>/info/<worker>.log`、`error/<worker>.log`、`error/<worker>-system_error.log` | 文件名取 `--name` 指定的 worker；整组启动为 `worker` |
 | 端口 | 默认不开；配了 `WithWorkerHealth` 才有 `/healthz` | 只报就绪，不做业务健康 |
 

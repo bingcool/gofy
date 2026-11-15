@@ -423,16 +423,21 @@ go run . worker --group=group1 --name=order-scan
 go run . worker --group=group1 --name=order-queues-consumer
 ```
 
-本地调试时可以用通配符把全部注册分组放进同一个进程：
+本地调试时可以用通配符把全部注册分组放进同一个进程。**写 `all`，不要写 `*`**：
 
 ```bash
-$ go run . worker --group='*'
+$ go run . worker --group=all
 {"level":"info","caller":"gofy/worker_host.go:145","msg":"worker groups started","workers":7,"groups":["group1","group2"]}
 ```
 
+`--group='*'` 等价，但 `*` 在进程启动之前就被 shell 展开：zsh 直接报
+`no matches found: --group=*` 并拒绝执行，bash 只是因为当前目录没有匹配项才把它原样
+传下来。想要“不用引号”，就用 `all`；确实要用 `*` 时写 `--group='*'`、`--group=\*`，
+或者 `noglob go run . worker --group=*`。
+
 它只解决“一条命令起全部循环”，不改变部署语义：pid 变成 `-worker-all.pid`，
-`stop --worker='*'` 一次停掉全部，任一分组失败会取消其余分组。引号不能省，否则 shell 先
-展开 `*`；也不能和 `--name` 同用——worker 名只属于一个分组，跨组过滤会静默跳过不含它的组。
+`worker stop` 一次停掉全部，任一分组失败会取消其余分组。也不能和 `--name` 同用——worker
+名只属于一个分组，跨组过滤会静默跳过不含它的组。
 
 只跑组内某个 worker，或临时改实例数（不改代码）：
 
@@ -449,12 +454,37 @@ go run . worker --group=group1 --concurrency=1     # 组内所有 worker 都变 
 > 本地调试建议先 `go build -o /tmp/demo .` 再跑二进制：`go run` 会把信号交给 go 工具链，
 > Ctrl+C 下 worker 的 drain 过程和退出码看不准确。
 
+### 后台运行与启停
+
+`--daemon=1` 让 worker 在独立会话里重新执行自身，父进程打印 pid 后退出：
+
+```bash
+$ ./demo-service worker --group=all --daemon=1
+[ OK ] worker 分组【all】已在后台启动 (pid 80656)
+使用 worker stop --group=all 停止，worker restart --group=all 重启
+```
+
+子进程的 stdout / stderr 指向 `/dev/null`，日志照常写 `storage/log/worker/...`。脱离之前
+父进程先查 pid 文件：已在运行时直接报 `another instance is running`，不会出现“父进程报
+成功、子进程立刻退出”的假成功。提示里不写 `demo-service` 前缀——进程不知道自己是怎么被
+启动的（`go run .`、绝对路径、PATH 上的名字都会走到这里），写出来可能是一条不存在的命令。
+
+| 命令 | 作用 |
+| --- | --- |
+| `worker --group=group1 --daemon=1` | 后台运行该分组，父进程退出 |
+| `worker stop` | 停掉所有留下 pid 文件的 worker 进程 |
+| `worker stop --group=group1` | 只停这一组 |
+| `worker restart --group=group1` | 先停再起，默认仍后台（`--daemon=false` 回前台） |
+
+`worker restart` 不带 `--group` 时按通配符重启：一个进程托管全部分组。它默认后台，因为
+重启一个原本在后台跑的服务，不该悄悄把它挂到当前终端上。
+
 ## 进程留下的东西
 
 | 产物 | 位置 | 说明 |
 | --- | --- | --- |
 | pid 文件 | `app/demo-service-worker-group1.pid` | 默认 pid 文件的 `-worker-<分组>` 后缀；未配置 `pid_file` 则不写 |
-| pid 文件 | `app/demo-service-worker-all.pid` | `--group='*'` 时用这个后缀，`stop --worker='*'` 解析同一个文件 |
+| pid 文件 | `app/demo-service-worker-all.pid` | `--group=all` / `--group='*'` 时用这个后缀；`worker stop` 会连同各分组的文件一起处理 |
 | 日志 | `storage/log/worker/<date>/info/worker-h15.log` | 整组启动写 `worker-<host>.log` |
 | 日志 | `storage/log/worker/<date>/info/order-scan-h15.log` | `--name` 只跑一个 worker 时用它的名字 |
 | 表 | `worker_consumed_messages` | 消费幂等台账；消费者首次启动自动建表，也可先跑 `migrations/0003_worker_consumed_messages.sql` |
@@ -469,23 +499,31 @@ demo 没开就绪探针：`options.go` 里没有 `gofy.WithWorkerHealth`，worke
 ## 停止
 
 ```bash
-$ go run . stop --worker=group1 --force
+# 不带 --group：停掉所有留下 pid 文件的 worker 进程
+$ go run . worker stop --force
 [INFO] 正在停止 worker 分组【group1】 (pid 80656)
 [ OK ] worker 分组【group1】 已停止 (pid 80656)
+[INFO] 正在停止 worker 分组【group2】 (pid 80657)
+[ OK ] worker 分组【group2】 已停止 (pid 80657)
 
-# 停掉 --group='*' 起的那个进程
-$ go run . stop --worker='*' --force
-[INFO] 正在停止 worker 分组【all】 (pid 80656)
-[ OK ] worker 分组【all】 已停止 (pid 80656)
+# 只停一组
+$ go run . worker stop --group=group1 --force
+[INFO] 正在停止 worker 分组【group1】 (pid 80656)
+[ OK ] worker 分组【group1】 已停止 (pid 80656)
 ```
 
-不带 `--force` 会先问一次 `你确定 [停止] 应用【demo-service】? (yes or no):`。
+不带 `--group`（或写 `--group=*` / `--group=all`）时，`worker stop` 扫
+`app/demo-service-worker-*.pid`，把每个活着的 worker 进程都停掉——分组可能是分别起的，
+只停 `-worker-all.pid` 会漏掉其余的。`stop --worker=group1` 仍然可用，与
+`worker stop --group=group1` 等价，区别只是 `worker stop` 与启动命令同形。
+
+不带 `--force` 会先问一次 `你确定 [停止] worker 分组【group1】? (yes or no):`。
 停止走 SIGTERM：worker 的拉取先停（`runCtx` 取消），在途任务继续跑到
 `drain_timeout`（默认 20s，`gofy.WithWorkerDrainTimeout` 可改），然后进程退出，pid
 文件清理。超时未退才在 `--force` 下补 SIGKILL。
 
-`stop` 的粒度是分组，`stop --worker=group1` 不会碰到 group2，也不会碰 HTTP 进程。
-`restart` 只用于 HTTP 实例，worker 用 `stop` + 重新启动。
+`stop` 的粒度是分组，`worker stop --group=group1` 不会碰到 group2，也不会碰 HTTP 进程。
+`worker restart` 先停再起（默认后台，`--daemon=false` 回前台）；HTTP 实例仍然用 `restart`。
 
 ## 参数
 

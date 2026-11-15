@@ -127,15 +127,28 @@ demo-service worker --group=order --concurrency=4
 demo-service worker --list
 
 # 全部已注册分组塞进一个进程（本地调试/冒烟，不是部署形态）
-demo-service worker --group='*'
+demo-service worker --group=all
+
+# 脱离终端运行，以及按 pid 文件停止 / 重启
+demo-service worker --group=order --daemon=1
+demo-service worker stop            # 全部 worker 进程
+demo-service worker stop --group=order
+demo-service worker restart --group=order   # 默认仍后台（--daemon=false 回前台）
 ```
 
 | flag | 默认 | 说明 |
 | --- | --- | --- |
-| `--group` | 空 | 必填（除 `--list`）；对应配置里的同名分组块（如 `worker.order`）；`*` 表示全部已注册分组 |
+| `--group` | 空 | 必填（除 `--list`、`stop`、`restart`）；对应配置里的同名分组块（如 `worker.order`）；`all` 或 `*` 表示全部已注册分组 |
 | `--name` | 空 | 可重复；只启动列出的 worker，用于排障 |
 | `--concurrency` | 0 | 覆盖全部 worker 的实例数，0 表示按配置 |
 | `--list` | false | 打印分组/worker/并发后退出，不连 MQ、不连 DB |
+| `--daemon` | false（`restart` 为 true） | 脱离到独立会话后由父进程退出；`restart` 默认仍后台 |
+
+`--group=all` 是通配符的免引号写法：`*` 会被 shell 先展开，zsh 直接报
+`no matches found` 并拒绝执行。两者在解析、pid 文件（`-worker-all.pid`）与 `stop` 上完全
+等价。`worker stop` 不带 `--group` 时扫 `<pid_file>` 旁边的 `-worker-*.pid`，因为分组可能
+是分别启动的；`stop --worker=<g>` 这个旧写法保留，`worker stop --group=<g>` 是它的同形
+替代。
 
 保留字与校验：`worker` 加入 `commandline` 的保留命令名；worker 名沿用模块名规则 `^[a-z][a-z0-9-]{0,62}$`，重名在启动时报错。
 
@@ -145,7 +158,7 @@ demo-service worker --group='*'
 - 分组依据：故障域一致 + 资源画像接近 + 发布节奏一致。典型切法：`order`、`settle`、`notify`、`maintenance`。
 - 组内某个 worker 触发 fatal，整个进程退出（由 k8s 重启容器），避免"进程活着但只剩一半 worker"的静默降级。
 - 不同组之间无共享状态，可独立扩缩容。
-- 例外是 `--group='*'`：它把全部分组放进一个进程，用于本地调试与冒烟测试。pid 后缀变成 `all`，`stop --worker='*'` 对应同一个文件；组间隔离随之消失，任一组失败会取消其余组。部署仍然是一组一个进程——通配符不是把"多组同进程"合法化，只是省掉本地连起三个进程的动作。
+- 例外是 `--group=all`（或加引号的 `--group='*'`）：它把全部分组放进一个进程，用于本地调试与冒烟测试。pid 后缀变成 `all`，`worker stop` 会连同各分组的 pid 文件一起处理；组间隔离随之消失，任一组失败会取消其余组。部署仍然是一组一个进程——通配符不是把"多组同进程"合法化，只是省掉本地连起三个进程的动作。
 
 ### 3.3 与现有命令的对比
 

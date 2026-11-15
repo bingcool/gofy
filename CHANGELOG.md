@@ -80,6 +80,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `gofy` worker mode: `--group=all` selects every registered group. The wildcard
+  `*` still works but a shell expands it before the process starts — zsh refuses
+  to run the command at all (`no matches found`), bash only passes it through
+  because nothing matched — so the alias is the spelling that survives every
+  shell. `worker --list` and the missing-`--group` error both point at it.
+- `gofy` worker mode: `stop --worker=*` now stops every worker process instead of
+  only the pid file the wildcard run wrote. Groups are often started as separate
+  processes, and stopping "all" while leaving those running was the wrong answer.
+  `worker stop --group=<g>` remains the single-group form, identical to
+  `stop --worker=<g>`.
 - `gofy-adapter`: README documents the Kubernetes Lease adapter — minimal RBAC,
   Lease naming, identity uniqueness, why the object must not be deleted (the
   fencing token resets), and the single-flight rule. The import guard now rejects
@@ -91,6 +101,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `gofy` worker mode: `worker --daemon=1` detaches into its own session and exits
+  the parent, the same way `start --daemon` does. The child appends
+  `--daemon=false`, so it runs in the foreground of that session; the parent
+  checks the pid file first, because the child's stdio goes to `/dev/null` and a
+  duplicate would otherwise die silently after the parent reported success.
+- `gofy` worker mode: `worker stop` and `worker restart` subcommands, sharing
+  `--group` with the run form. Without `--group`, `stop` stops every worker that
+  left a pid file and `restart` brings the group back as one wildcard process;
+  `restart` defaults to `--daemon=true`, since a service that ran detached has to
+  come back detached (`--daemon=false` keeps it in the foreground).
 - `support/worker/consumer/rocketmqconsumer`: `NewFactory(name, factory, cfg)`
   and `ConsumerFactory`, for the Runner restart path.
 - `gofy`: `App.ResumeAccepting(ctx)` and `nacos.WithResume(fn)`, the counterpart
