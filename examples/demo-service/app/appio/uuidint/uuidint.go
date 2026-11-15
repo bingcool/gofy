@@ -8,6 +8,7 @@ package uuidint
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -21,8 +22,12 @@ import (
 // Config configures the demo ID generator.
 // Config 描述示例 ID 生成器；PoolSize 为 0 表示不用本地预取池。
 type Config struct {
-	Enabled       bool   `yaml:"enabled"`
-	RedisInstance string `yaml:"redis_instance_name" default:"ratelimit"`
+	Enabled bool `yaml:"enabled"`
+	// RedisInstance names the Redis instance holding the counter. It is
+	// required: a default would silently write IDs into the wrong key space.
+	// RedisInstance 指定承载计数器的 Redis 实例，必填；给默认值会把 ID 悄悄写进
+	// 错误的键空间。
+	RedisInstance string `yaml:"redis_instance_name"`
 	// FallbackRedisInstance is optional: an empty value disables the fallback.
 	// It must name an enabled redis instance and must differ from RedisInstance.
 	// A separate Redis server is fine: the generator pauses 10ms before its
@@ -31,11 +36,14 @@ type Config struct {
 	// FallbackRedisInstance 可选，留空即不启用。它必须指向已启用的 redis 实例，
 	// 且不能与 RedisInstance 同名。备用可以是另一台独立 Redis：框架在切换前停顿
 	// 10ms 让毫秒前缀错开，两套各自从 1 开始的计数器就不会发出重复 ID。
-	FallbackRedisInstance string        `yaml:"fallback_redis_instance_name"`
-	Key                   string        `yaml:"key" default:"demo:uuid"`
-	TTL                   time.Duration `yaml:"ttl" default:"15s"`
-	RetryTimes            int           `yaml:"retry_times" default:"3"`
-	RetryInterval         time.Duration `yaml:"retry_interval" default:"150ms"`
+	FallbackRedisInstance string `yaml:"fallback_redis_instance_name"`
+	// Key is the Redis counter key. It is required for the same reason as the
+	// instance: two deployments on different keys are not one ID sequence.
+	// Key 是 Redis 计数器的键名，同样必填：两个部署用不同键就不是同一条 ID 序列。
+	Key           string        `yaml:"key"`
+	TTL           time.Duration `yaml:"ttl" default:"15s"`
+	RetryTimes    int           `yaml:"retry_times" default:"3"`
+	RetryInterval time.Duration `yaml:"retry_interval" default:"150ms"`
 	// PoolSize 为 0 表示不用本地预取池；大于 0 时启动即预热一批，
 	// 并按 PoolInterval 定时补货。
 	PoolSize     int           `yaml:"pool_size"`
@@ -57,19 +65,35 @@ type Set struct {
 	gen *gofyuuidint.Generator
 }
 
-// Validate checks the configuration without touching Redis. A fallback alias
-// equal to the primary is rejected here, before any connection is opened.
-// Validate 只校验配置、不访问 Redis；备用别名与主实例同名会在建连之前被拒绝。
+// Validate checks the configuration without touching Redis. Both identity
+// fields are required; a fallback alias equal to the primary is rejected here,
+// before any connection is opened.
+// Validate 只校验配置、不访问 Redis：两个标识字段必填；备用别名与主实例同名会在
+// 建连之前被拒绝。
 func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
 	c = c.withDefaults()
-	if err := c.validateFallback(); err != nil {
+	if err := c.validate(); err != nil {
 		return err
 	}
 	_, err := c.newGenerator(zap.NewNop(), nil, nil)
 	return err
+}
+
+// validate holds the checks shared by Validate and Open. Open calls it again
+// because a script can modify Config after config.Load has validated it.
+// validate 收集 Validate 与 Open 共用的校验。Open 会再校验一次：脚本可能在
+// config.Load 之后改写 Config。
+func (c Config) validate() error {
+	if c.RedisInstance == "" {
+		return errors.New("redis_instance_name is required")
+	}
+	if c.Key == "" {
+		return errors.New("key is required")
+	}
+	return c.validateFallback()
 }
 
 // validateFallback rejects a fallback that would only retry the same broken
@@ -97,17 +121,16 @@ func (c Config) FallbackRedisInstanceName() string {
 	return c.withDefaults().FallbackRedisInstance
 }
 
+// withDefaults trims the names and fills in numeric defaults. The two identity
+// fields (RedisInstance, Key) are deliberately left empty when absent so
+// validate can reject them instead of guessing a counter location.
+// withDefaults 只做名称去空白与数值默认值。RedisInstance 与 Key 这两个标识字段
+// 缺失时保持为空，交由 validate 拒绝，而不是猜一个计数器位置。
 func (c Config) withDefaults() Config {
 	out := c
 	out.RedisInstance = strings.TrimSpace(out.RedisInstance)
-	if out.RedisInstance == "" {
-		out.RedisInstance = "ratelimit"
-	}
 	out.FallbackRedisInstance = strings.TrimSpace(out.FallbackRedisInstance)
 	out.Key = strings.TrimSpace(out.Key)
-	if out.Key == "" {
-		out.Key = "demo:uuid"
-	}
 	if out.TTL == 0 {
 		out.TTL = 15 * time.Second
 	}
@@ -176,7 +199,7 @@ func Open(cfg Config, logger *zap.Logger, client, fallbackClient *goredis.Client
 		return &Set{}, nil
 	}
 	c := cfg.withDefaults()
-	if err := c.validateFallback(); err != nil {
+	if err := c.validate(); err != nil {
 		return nil, err
 	}
 	if c.FallbackRedisInstance != "" && fallbackClient == nil {

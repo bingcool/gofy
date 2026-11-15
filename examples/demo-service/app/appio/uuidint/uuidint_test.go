@@ -44,11 +44,12 @@ func deadClient(t *testing.T) *goredis.Client {
 	return client
 }
 
-// TestConfigValidateFallback covers the optional flag: absent, present with a
-// distinct alias, and the same alias as the primary, which would only retry the
-// connection that just failed. A disabled config ignores the whole section.
-// TestConfigValidateFallback 覆盖可选开关：未配置、配置了不同别名、以及与主实例同名
-// （那只是把刚失败的连接再试一遍）。禁用时整段配置都被忽略。
+// TestConfigValidateFallback covers the optional flag and the two required
+// identity fields: absent, present with a distinct alias, the same alias as the
+// primary (which would only retry the connection that just failed), and either
+// identity left blank. A disabled config ignores the whole section.
+// TestConfigValidateFallback 覆盖可选备用开关与两个必填标识字段：未配置、配置了不同
+// 别名、与主实例同名（那只是把刚失败的连接再试一遍）、以及标识留空。禁用时整段忽略。
 func TestConfigValidateFallback(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -59,9 +60,18 @@ func TestConfigValidateFallback(t *testing.T) {
 		{name: "distinct alias", mutate: func(c *Config) { c.FallbackRedisInstance = "backup" }},
 		{name: "whitespace only is absent", mutate: func(c *Config) { c.FallbackRedisInstance = "   " }},
 		{name: "same as primary", mutate: func(c *Config) { c.FallbackRedisInstance = "ratelimit" }, wantErr: true},
+		{name: "missing redis instance", mutate: func(c *Config) { c.RedisInstance = "" }, wantErr: true},
+		{name: "blank redis instance", mutate: func(c *Config) { c.RedisInstance = "  " }, wantErr: true},
+		{name: "missing key", mutate: func(c *Config) { c.Key = "" }, wantErr: true},
+		{name: "blank key", mutate: func(c *Config) { c.Key = " " }, wantErr: true},
 		{name: "disabled ignores fallback", mutate: func(c *Config) {
 			c.Enabled = false
 			c.FallbackRedisInstance = "ratelimit"
+		}},
+		{name: "disabled ignores missing fields", mutate: func(c *Config) {
+			c.Enabled = false
+			c.RedisInstance = ""
+			c.Key = ""
 		}},
 	}
 	for _, tc := range cases {
@@ -116,6 +126,32 @@ func TestOpenRequiresFallbackClient(t *testing.T) {
 	defer func() { _ = set.Close() }()
 	if set.Generator() == nil {
 		t.Fatal("generator is nil")
+	}
+}
+
+// TestOpenRejectsMissingIdentityFields checks the assembly path too: a script
+// can change Config after config.Load validated it, so Open cannot assume
+// validation already happened upstream.
+// TestOpenRejectsMissingIdentityFields 校验装配路径：脚本可能在 config.Load 之后
+// 改写 Config，Open 不能假设上游已经校验过。
+func TestOpenRejectsMissingIdentityFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{name: "redis instance", mutate: func(c *Config) { c.RedisInstance = "" }, want: "redis_instance_name is required"},
+		{name: "key", mutate: func(c *Config) { c.Key = "" }, want: "key is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			tc.mutate(&cfg)
+			_, err := Open(cfg, nil, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Open error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

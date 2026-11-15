@@ -707,6 +707,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: `uuidint.redis_instance_name` and `uuidint.key` are
+  required when `uuidint.enabled` is true. Their `default` tags and the matching
+  fallbacks in `withDefaults()` are gone, so omitting either fails at config
+  load with `config: uuidint: ... is required` instead of silently allocating
+  IDs in the `ratelimit` instance under `demo:uuid`. Numeric settings (TTL,
+  retries, pool interval) keep their defaults. `Open` repeats the check because
+  a script can modify `Config` after `config.Load` validated it.
 - `examples/demo-service`: `appio.WithContext` now panics when neither the
   context nor the published generation carries a snapshot, instead of returning
   a nil handle that panicked later inside GORM. Every entry point (request
