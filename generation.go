@@ -134,11 +134,12 @@ func (l *generationLease) wait(ctx context.Context, timeout time.Duration) bool 
 // listener.
 // handlerSwap 让 Reload 在进程保留 listener 的情况下替换 generation。
 type handlerSwap struct {
-	inner atomic.Pointer[generation]
+	inner     atomic.Pointer[generation]
+	accepting *atomic.Bool
 }
 
-func newHandlerSwap(gen *generation) *handlerSwap {
-	s := &handlerSwap{}
+func newHandlerSwap(gen *generation, accepting *atomic.Bool) *handlerSwap {
+	s := &handlerSwap{accepting: accepting}
 	s.Store(gen)
 	return s
 }
@@ -151,10 +152,24 @@ func (s *handlerSwap) Load() *generation { return s.inner.Load() }
 // was retired between the load and the acquire, it retries with the current
 // one. A repeatedly failing acquire means a reload is racing this request; it
 // is answered with 503 rather than entering a generation that is shutting down.
+//
+// The drain gate comes first: once StopAccepting cleared it, every new request
+// gets 503 without entering a generation, while requests already inside one
+// keep their lease and finish. Closing the listener instead would make Serve
+// return and take the whole process out of the watcher's control.
 // ServeHTTP 对它载入的 generation 获取 lease。若该代在载入与获取之间被退役，
 // 就改用当前代重试；尝试多次仍获取失败说明有 Reload 与本次请求竞争，此时返回
 // 503，而不是进入正在关闭的代。
+//
+// 摘流闸门检查放在最前面：StopAccepting 清零后，新请求不进入任何 generation，
+// 直接返回 503；已经进入 generation 的请求仍持有 lease，可以继续跑完。这里
+// 不关 listener —— 那会让 Serve 返回、整个进程脱离 watcher 的掌控。
 func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.accepting != nil && !s.accepting.Load() {
+		w.Header().Set("Connection", "close")
+		http.Error(w, "service is draining", http.StatusServiceUnavailable)
+		return
+	}
 	for attempt := 0; attempt < 8; attempt++ {
 		gen := s.inner.Load()
 		if gen == nil {

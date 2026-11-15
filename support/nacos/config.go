@@ -110,6 +110,18 @@ type Config struct {
 	// 与 NACOS_CONFIG_CHANGE_STRATEGY，默认 reload。
 	ChangeStrategy ChangeStrategy
 
+	// RestartGracePeriod is the fixed pause between quiescing the service and
+	// the restart/exit action. It maps to application.yaml
+	// nacos.restart_grace_period (seconds) and NACOS_RESTART_GRACE_PERIOD.
+	// Zero (the default) keeps the old immediate action. The pause does not
+	// know whether in-flight work actually finished: it only lowers the chance
+	// of cutting a request, handler or transaction in half.
+	// RestartGracePeriod 是摘流之后、restart / exit 动作之前的固定等待。对应
+	// application.yaml 的 nacos.restart_grace_period（单位秒）与
+	// NACOS_RESTART_GRACE_PERIOD。默认 0，保持原来的立即执行。它不感知在途任务
+	// 是否真的跑完，只是降低把请求、handler 或事务切断的概率。
+	RestartGracePeriod time.Duration
+
 	// Timeout bounds a single config or auth request.
 	// Timeout 限制单次配置请求或鉴权请求的耗时。
 	Timeout time.Duration
@@ -246,7 +258,8 @@ func DefaultConfig() Config {
 //	NACOS_ENABLED, NACOS_ADDR, NACOS_HOST, NACOS_PORT,
 //	NACOS_USERNAME, NACOS_PASSWORD, NACOS_NAMESPACE,
 //	NACOS_DATA_ID, NACOS_GROUP, NACOS_FILE, NACOS_CONFIG_CHANGE_STRATEGY,
-//	NACOS_TIMEOUT_MS, NACOS_LISTENER_TIMEOUT_MS, NACOS_LISTENER_FAILED_MS
+//	NACOS_RESTART_GRACE_PERIOD, NACOS_TIMEOUT_MS,
+//	NACOS_LISTENER_TIMEOUT_MS, NACOS_LISTENER_FAILED_MS
 //
 // FromEnv 在默认配置基础上用环境变量覆盖后返回配置，可识别的变量见上方列表。
 // 返回值已完成归一化，环境变量缺失或取值非法时沿用默认值。
@@ -287,6 +300,7 @@ func FromEnv() Config {
 	if v, ok := lookupEnv("NACOS_CONFIG_CHANGE_STRATEGY"); ok {
 		cfg.ChangeStrategy = ChangeStrategy(v)
 	}
+	cfg.RestartGracePeriod = envSeconds("NACOS_RESTART_GRACE_PERIOD", 0)
 	cfg.Timeout = envDurationMS("NACOS_TIMEOUT_MS", cfg.Timeout)
 	cfg.PollTimeout = envDurationMS("NACOS_LISTENER_TIMEOUT_MS", cfg.PollTimeout)
 	cfg.RetryDelay = envDurationMS("NACOS_LISTENER_FAILED_MS", cfg.RetryDelay)
@@ -328,6 +342,7 @@ func LoadConfig(path string) (Config, error) {
 //	application.yaml   nacos.service_config.data_id/group/tenant
 //	                   nacos.enable_nacos_config_change_restart
 //	                   nacos.config_change_strategy
+//	                   nacos.restart_grace_period
 //	                   nacos.monitor_config_change.listener_timeout_ms
 //	                   nacos.monitor_config_change.failed_wait_ms
 //
@@ -487,6 +502,7 @@ type rawApplication struct {
 		} `yaml:"discovery_service_client"`
 		EnableNacosConfigChangeRestart *bool  `yaml:"enable_nacos_config_change_restart"`
 		ConfigChangeStrategy           string `yaml:"config_change_strategy"`
+		RestartGracePeriod             int    `yaml:"restart_grace_period"`
 		MonitorConfigChange            struct {
 			ListenerTimeoutMS int `yaml:"listener_timeout_ms"`
 			FailedWaitMS      int `yaml:"failed_wait_ms"`
@@ -524,15 +540,24 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 		// 重启由回调决定。
 		cfg.Watch = *app.Nacos.EnableNacosConfigChangeRestart
 	}
-	// The strategy belongs to the deployment rather than the image, so an
-	// environment override wins over the file: a k8s manifest or docker -e
+	// Strategy and grace period belong to the deployment rather than the image,
+	// so an environment override wins over the file: a k8s manifest or docker -e
 	// must be able to turn an image whose application.yaml says reload into
-	// exit. Every other key in this layout keeps file > environment > default.
-	// 策略属于部署形态而不是镜像内容，因此环境变量优先于文件：镜像里写着 reload，
-	// 也要允许 k8s 清单或 docker -e 把它切成 exit。本布局其余键仍保持
-	// 文件 > 环境变量 > 默认值。
+	// exit, or retune its drain. Every other key in this layout keeps
+	// file > environment > default.
+	// 策略与等待时长属于部署形态而不是镜像内容，因此环境变量优先于文件：镜像里
+	// 写着 reload，也要允许 k8s 清单或 docker -e 把它切成 exit，或重新设定摘流
+	// 等待。本布局其余键仍保持 文件 > 环境变量 > 默认值。
 	if v := strings.TrimSpace(app.Nacos.ConfigChangeStrategy); v != "" && !envSet("NACOS_CONFIG_CHANGE_STRATEGY") {
 		cfg.ChangeStrategy = ChangeStrategy(v)
+	}
+	// The grace period is a deployment knob too, so it follows the same
+	// environment-wins rule as the strategy: a k8s manifest or docker -e can
+	// shorten or lengthen the drain without rebuilding the image.
+	// 等待时长同样属于部署参数，与策略一致采用环境变量优先：k8s 清单或
+	// docker -e 可以调整摘流后的等待，不必重建镜像。
+	if app.Nacos.RestartGracePeriod > 0 && !envSet("NACOS_RESTART_GRACE_PERIOD") {
+		cfg.RestartGracePeriod = time.Duration(app.Nacos.RestartGracePeriod) * time.Second
 	}
 	monitor := app.Nacos.MonitorConfigChange
 	if monitor.ListenerTimeoutMS > 0 {
@@ -651,6 +676,9 @@ func (c Config) normalize() Config {
 	c.ChangeStrategy = ChangeStrategy(strings.ToLower(strings.TrimSpace(string(c.ChangeStrategy))))
 	if c.ChangeStrategy == "" {
 		c.ChangeStrategy = StrategyReload
+	}
+	if c.RestartGracePeriod < 0 {
+		c.RestartGracePeriod = 0
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = 10 * time.Second

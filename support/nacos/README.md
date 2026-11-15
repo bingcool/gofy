@@ -105,6 +105,7 @@ nacos:
     tenant: ''                        # 仅当 nacos.yaml 未配置 namespace 时生效
   enable_nacos_config_change_restart: true
   config_change_strategy: reload    # reload | restart | exit，见「配置变更策略」
+  restart_grace_period: 5          # 秒；restart / exit 前摘流后的固定等待，0 表示不等
   monitor_config_change:
     listener_timeout_ms: 30000
     failed_wait_ms: 3000
@@ -142,8 +143,11 @@ nacos:
 - `enable_nacos_config_change_restart` 对应 `Config.Watch`，只控制启动后是否继续
   监听；键名沿用 swoolefy，变更后的动作由 `config_change_strategy` 决定；
 - `config_change_strategy` 决定变更落盘后的动作，可选 `reload` / `restart` / `exit`，
-  默认 `reload`。**这是唯一环境变量优先于文件的键**：部署形态属于运行环境而不是
-  镜像内容，`NACOS_CONFIG_CHANGE_STRATEGY` 可以覆盖镜像里写死的取值；
+  默认 `reload`；`restart_grace_period` 是 `restart` / `exit` 动作前摘流后的固定等待
+  （单位秒，默认 `0` 即不等）；
+- **这两个键环境变量优先于文件**：部署形态属于运行环境而不是镜像内容，
+  `NACOS_CONFIG_CHANGE_STRATEGY` / `NACOS_RESTART_GRACE_PERIOD` 可以覆盖镜像里
+  写死的取值；其余键仍保持 文件 > 环境变量 > 默认值；
 - `service_register.namespace_id` / `group_name` 为空时继承连接命名空间与
   `DEFAULT_GROUP`；
 - `discovery_service_client` 的 `namespace_id` / `group_name` 为空时继承
@@ -163,6 +167,7 @@ nacos:
 | `NACOS_DATA_ID` / `NACOS_GROUP` | 配置项标识 | — / `DEFAULT_GROUP` |
 | `NACOS_FILE` | 本地生成文件 | `config.yaml` |
 | `NACOS_CONFIG_CHANGE_STRATEGY` | 变更策略，优先于 application.yaml | `reload` |
+| `NACOS_RESTART_GRACE_PERIOD` | restart / exit 前摘流后的等待秒数，优先于 application.yaml | `0` |
 | `NACOS_TIMEOUT_MS` | 单次请求超时 | `10000` |
 | `NACOS_LISTENER_TIMEOUT_MS` | 长轮询挂起时间 | `30000` |
 | `NACOS_LISTENER_FAILED_MS` | 监听/应用失败后的重试间隔 | `3000` |
@@ -204,6 +209,7 @@ nacos:
 ```go
 go nacos.Watch(ctx, nx,
     nacos.WithLogger(logger),
+    nacos.WithDrain(app.StopAccepting),
     nacos.WithOnChange(func(ctx context.Context, r nacos.Result) error {
         // 文件已经替换完成
         return app.Reload(ctx, spec)
@@ -214,6 +220,8 @@ go nacos.Watch(ctx, nx,
 - 通过 `configs/listener` 长轮询检查变化，服务端挂起最短 30 秒；
 - 监听失败按 `RetryDelay` 重试；远端内容非法时只记录错误，不替换文件；
 - `WithOnChange` 在文件写入后执行，返回的错误只记录日志；只在 `reload` 策略下调用；
+- `WithDrain` 只在 `restart` / `exit` 策略下、动作执行前调用，用于停止接受新请求；
+  错误只记录日志，不取消动作。钩子内不要调用 `App.Shutdown`（会与 watcher 自等待）；
 - `WithRestartOnChange(pidFile)` 是 `config_change_strategy: exit` 的兼容写法，
   强制发送 SIGTERM 交给 supervisor 重启；推荐改用配置化策略。
 
@@ -226,24 +234,43 @@ go nacos.Watch(ctx, nx,
 | 策略 | 动作 | 适用部署 | 进程 / pid |
 | --- | --- | --- | --- |
 | `reload`（默认） | 调用 `WithOnChange`，应用侧执行 `App.Reload` 原地重建模块与连接池 | 本地开发 | 不变，不退出 |
-| `restart` | `syscall.Exec` 重新执行当前二进制，从 `main` 开头再走一遍 | 物理机 / 云主机，无外部监管 | pid 不变，进程映像全新 |
-| `exit` | 给自己发 SIGTERM，优雅退出后由外部拉起 | k8s、Docker restart policy、systemd | 进程退出，pid 变化 |
+| `restart` | 摘流 → 等待 → `syscall.Exec` 重新执行当前二进制，从 `main` 开头再走一遍 | 物理机 / 云主机，无外部监管 | pid 不变，进程映像全新 |
+| `exit` | 摘流 → 等待 → 给自己发 SIGTERM，优雅退出后由外部拉起 | k8s、Docker restart policy、systemd | 进程退出，pid 变化 |
 
 配置写在本地 `application.yaml`（不会被 `Sync` 覆盖），也可用
-`NACOS_CONFIG_CHANGE_STRATEGY` 注入。策略是唯一环境变量优先于文件的键：镜像里写着
-`reload`，k8s 清单或 `docker -e` 仍能把它切成 `exit`。取值非法时 `Load` 直接报错，
-不静默回落默认值。
+`NACOS_CONFIG_CHANGE_STRATEGY` / `NACOS_RESTART_GRACE_PERIOD` 注入。这两个键是
+环境变量优先于文件的键：镜像里写着 `reload`，k8s 清单或 `docker -e` 仍能把它切成
+`exit`，或重新设定摘流等待。策略取值非法时 `Load` 直接报错，不静默回落默认值。
+
+#### 摘流与 grace period
+
+`restart` / `exit` 在动作之前执行两步，**`reload` 不执行**、全程继续对外服务：
+
+1. `WithDrain(fn)` 钩子：应用应在这里停止接受新的 HTTP 请求。demo-service 注入的是
+   `App.StopAccepting(ctx)` —— 它把 HTTP handler 的闸门关掉（新请求直接 503，
+   带 `Connection: close`，健康检查也会变红），并从 Nacos 命名服务注销；listener
+   保持打开、`Serve` 继续运行、在途请求仍持有 generation lease 可以跑完。
+   **钩子不能调用 `App.Shutdown`**：它运行在 watcher goroutine 里，Shutdown 会停掉
+   该 watcher 所属模块并等它退出，形成自等待死锁。钩子报错只记日志，不取消动作。
+2. `restart_grace_period`（秒，默认 `0`）：固定等待，给在途请求、worker tick、
+   consumer handler 一点收尾时间。等待可被 ctx 取消（例如进程已收到 SIGTERM）。
+
+这是**最小折中**：框架不等待任何具体任务，只是降低把请求、handler 或事务切断的
+概率。超过该秒数仍未跑完的工作照样会被 `exec` / SIGTERM 切断；未 ack 的消息仍会
+重投，handler 必须幂等。想真正做到「等在途任务结束」，应改用 `exit` + supervisor，
+走框架的完整优雅停机链路。
 
 边界：
 
 - `reload` 只在应用注入了 `WithOnChange` 时才有意义；另外两种策略不调用回调。
-- `restart` 用 `exec` 替换进程映像，**不执行 defer**、在途请求会被切断、监听 fd 因
-  close-on-exec 释放；环境变量被继承，若应用用 `GOFY_ENV` 判断"是否显式设置"，
-  自重启后会误判为显式设置。Windows 不支持该策略，返回错误。
+- `restart` 用 `exec` 替换进程映像，**不执行 defer**、监听 fd 因 close-on-exec 释放；
+  环境变量被继承，若应用用 `GOFY_ENV` 判断"是否显式设置"，自重启后会误判为显式
+  设置。Windows 不支持该策略，返回错误。
 - `exit` 只负责退出，不会自己拉起新进程；没有 `--restart=always` / k8s
   `restartPolicy` / systemd 监管时服务会一直停着。新进程启动时 `Sync` 会再拉一次
   配置，因此读到的必然是最新内容。
-- `WithRestartOnChange(pidFile)` 是 `exit` 的兼容入口，仍可用但推荐改用配置。
+- `WithRestartOnChange(pidFile)` 是 `exit` 的兼容入口，仍可用但推荐改用配置；
+  它同样会走摘流与等待流程。
 
 ## 服务注册
 

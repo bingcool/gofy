@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/nacos` / `gofy`: config changes using the `restart` or `exit`
+  strategy now quiesce before acting. `nacos.WithDrain` injects a hook and
+  `App.StopAccepting(ctx)` refuses new HTTP requests with 503 (closing the
+  connection) and deregisters from Nacos naming, while in-flight requests keep
+  their generation lease and the listener stays open. The hook must not call
+  `App.Shutdown` — it runs inside the watcher goroutine and would self-join.
+  The new `restart_grace_period` (application.yaml, seconds, or
+  `NACOS_RESTART_GRACE_PERIOD`) is a fixed, ctx-cancellable pause between
+  quiescing and exec/SIGTERM. Like the strategy it is environment-over-file.
+  Default `0` keeps the previous immediate action; the pause only lowers the
+  chance of cutting work in half, it does not join in-flight tasks.
+- `examples/demo-service`: wires `reloader.stopAccepting` as the drain hook and
+  sets `restart_grace_period: 5`.
 - `support/nacos`: `config_change_strategy` (application.yaml, or
   `NACOS_CONFIG_CHANGE_STRATEGY`) selects what happens after a changed config
   is written. `reload` (default) calls `WithOnChange` so an app can run

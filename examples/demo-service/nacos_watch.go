@@ -22,6 +22,12 @@ type nacosWatchModule struct {
 	cfg      nacos.Config
 	logger   *zap.Logger
 	onChange func(context.Context) error
+	// onDrain quiesces the app before a restart or exit. It must not shut the
+	// app down: it runs inside the watcher goroutine, and Shutdown would wait
+	// for that same watcher to exit.
+	// onDrain 在 restart / exit 之前给应用摘流。它不能关闭应用：该钩子运行在
+	// watcher goroutine 里，Shutdown 会反过来等这个 watcher 退出。
+	onDrain func(context.Context) error
 
 	mu        sync.Mutex
 	cancel    context.CancelFunc
@@ -51,6 +57,11 @@ func (m *nacosWatchModule) Start(ctx context.Context) error {
 	m.mu.Unlock()
 
 	opts := []nacos.WatchOption{nacos.WithLogger(m.logger)}
+	if m.onDrain != nil {
+		// Only restart / exit call this hook; reload keeps serving requests.
+		// 只有 restart / exit 会调它；reload 全程继续对外服务。
+		opts = append(opts, nacos.WithDrain(m.onDrain))
+	}
 	var changes chan struct{}
 	// Only reload needs a callback and an executor. The other two strategies
 	// end this process, so a reload running in parallel would be wasted work.

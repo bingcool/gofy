@@ -40,7 +40,12 @@ nacos:
   #   exit    - 退出进程，交给 k8s / docker restart policy / systemd 拉起新进程
   # 容器与 k8s 可用 NACOS_CONFIG_CHANGE_STRATEGY 环境变量覆盖，不必改镜像内文件。
   # 该键放在本地 application.yaml 而非远端 config.yaml：Sync 会覆盖后者。
-  config_change_strategy: reload
+  config_change_strategy: restart
+  # restart / exit 前先摘流（新请求返回 503、从 Nacos 注销），再固定等待这些秒数，
+  # 给在途请求 / worker tick / consumer handler 一点收尾时间。单位：秒，0 表示不等。
+  # 这是"降低撞上的概率"，不保证任务真的跑完；超过该时长的任务仍会被切断。
+  # 容器与 k8s 可用 NACOS_RESTART_GRACE_PERIOD 环境变量覆盖。
+  restart_grace_period: 5
   monitor_config_change:
     listener_timeout_ms: 30000
     failed_wait_ms: 3000

@@ -180,7 +180,7 @@ func (a *App) run(parent context.Context) error {
 	// generation stored inside it, so the listener is never touched.
 	// server 整个生命周期都持有这个包装器；Reload 只替换其中存放的 generation，
 	// listener 因此始终不动。
-	a.handlerRef = newHandlerSwap(gen)
+	a.handlerRef = newHandlerSwap(gen, &a.accepting)
 	a.gen = gen
 	a.setState(stateRunning)
 
@@ -716,6 +716,44 @@ func registerHealth(engine *gin.Engine, rt *core.Runtime) {
 	})
 }
 
+// StopAccepting refuses new HTTP requests and removes this instance from Nacos
+// naming without stopping the server. It is the quiesce step used by the nacos
+// restart and exit strategies: the listener stays open so Serve keeps running,
+// requests already in flight keep their generation lease, and a readiness probe
+// sees 503 while the watcher waits out the grace period before exec/terminate.
+//
+// It is idempotent and safe to call from any goroutine, including the watcher
+// that will later exec the process. It deliberately does not call Shutdown:
+// doing so would stop the modules, join that very watcher and take main out of
+// the process before the strategy action runs.
+// StopAccepting 拒绝新的 HTTP 请求并从 Nacos 注销本实例，但不停止 server。它是
+// nacos restart / exit 策略的摘流步骤：listener 保持打开，Serve 继续运行，在途
+// 请求仍持有 generation lease，健康检查在 watcher 等待 grace period 期间读到
+// 503，然后才 exec / terminate。
+//
+// 该方法幂等，可在任意 goroutine（包括随后要 exec 的 watcher）调用。它刻意不
+// 调用 Shutdown：那会停掉模块、等待 watcher 自身，并在策略动作执行前就让 main
+// 退出。
+func (a *App) StopAccepting(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.accepting.Store(false)
+	a.Logger().Info("application stopped accepting HTTP requests")
+
+	a.mu.Lock()
+	registrar := a.registrar
+	a.registrar = nil
+	a.mu.Unlock()
+	if registrar == nil {
+		return nil
+	}
+	if err := registrar.Stop(ctx); err != nil {
+		return fmt.Errorf("gofy: deregister before restart: %w", err)
+	}
+	return nil
+}
+
 // Shutdown triggers a graceful stop. It is idempotent and safe to call
 // concurrently. Calling it before the app starts is a no-op.
 // Shutdown 触发优雅停止：可重复调用，也可并发调用；App 尚未启动时调用是 no-op。
@@ -787,11 +825,14 @@ func (a *App) cleanup() error {
 		// routing new requests here while in-flight ones finish.
 		// 先注销再关闭 server：发现服务的客户端会停止把新请求路由过来，在途请求
 		// 仍能正常结束。
-		if a.registrar != nil {
-			if err := a.registrar.Stop(ctx); err != nil {
+		a.mu.Lock()
+		registrar := a.registrar
+		a.registrar = nil
+		a.mu.Unlock()
+		if registrar != nil {
+			if err := registrar.Stop(ctx); err != nil {
 				lg.Warn("nacos service deregistration failed", zap.Error(err))
 			}
-			a.registrar = nil
 		}
 
 		if a.srv != nil && a.serving {

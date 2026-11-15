@@ -3,8 +3,10 @@ package nacos
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -176,5 +178,155 @@ func TestWatcherStrategyFromConfig(t *testing.T) {
 	base.ChangeStrategy = "bogus"
 	if _, err := NewWatcher(base); err == nil {
 		t.Fatal("NewWatcher accepted an unknown strategy")
+	}
+}
+
+func TestLoadConfigRestartGracePeriod(t *testing.T) {
+	const plainApp = "nacos:\n  service_config:\n    data_id: gofy-service\n    group: GO_GROUP\n"
+	cases := []struct {
+		name    string
+		appYAML string
+		env     string
+		want    time.Duration
+	}{
+		{name: "default is zero", appYAML: plainApp, want: 0},
+		{name: "seconds from application file", appYAML: plainApp + "  restart_grace_period: 5\n", want: 5 * time.Second},
+		{name: "seconds from environment", appYAML: plainApp, env: "7", want: 7 * time.Second},
+		{name: "environment wins over file", appYAML: plainApp + "  restart_grace_period: 5\n", env: "7", want: 7 * time.Second},
+		{name: "invalid environment is ignored", appYAML: plainApp, env: "abc", want: 0},
+		{name: "negative file value is ignored", appYAML: plainApp + "  restart_grace_period: -3\n", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearNacosEnv(t)
+			if tc.env != "" {
+				t.Setenv("NACOS_RESTART_GRACE_PERIOD", tc.env)
+			}
+			dir := t.TempDir()
+			nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 127.0.0.1\n  namespace: dev\n")
+			appPath := writeTestFile(t, dir, "application.yaml", tc.appYAML)
+
+			cfg, err := Load(nacosPath, appPath)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RestartGracePeriod != tc.want {
+				t.Fatalf("RestartGracePeriod = %v, want %v", cfg.RestartGracePeriod, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatcherDrainAndGraceBeforeAction(t *testing.T) {
+	const grace = 3 * time.Second
+	cases := []struct {
+		name     string
+		strategy ChangeStrategy
+		want     []string
+	}{
+		{name: "reload keeps serving", strategy: StrategyReload, want: []string{"reload"}},
+		{name: "restart drains first", strategy: StrategyRestart, want: []string{"drain", "pause", "restart"}},
+		{name: "exit drains first", strategy: StrategyExit, want: []string{"drain", "pause", "exit"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			w := &Watcher{
+				logger:      zap.NewNop(),
+				strategy:    tc.strategy,
+				gracePeriod: grace,
+				drain: func(context.Context) error {
+					events = append(events, "drain")
+					return nil
+				},
+				onChange: func(context.Context, Result) error {
+					events = append(events, "reload")
+					return nil
+				},
+				pause: func(_ context.Context, d time.Duration) bool {
+					if d != grace {
+						t.Errorf("pause duration = %v, want %v", d, grace)
+					}
+					events = append(events, "pause")
+					return true
+				},
+				execSelf: func() error {
+					events = append(events, "restart")
+					return nil
+				},
+				terminate: func(string) (int, error) {
+					events = append(events, "exit")
+					return 42, nil
+				},
+			}
+			if err := w.apply(context.Background(), Result{File: "config.yaml", Changed: true}); err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			if !reflect.DeepEqual(events, tc.want) {
+				t.Fatalf("events = %v, want %v", events, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatcherDrainFailureStillRunsAction(t *testing.T) {
+	sentinel := errors.New("deregister failed")
+	acted := false
+	w := &Watcher{
+		logger:      zap.NewNop(),
+		strategy:    StrategyRestart,
+		drain:       func(context.Context) error { return sentinel },
+		gracePeriod: time.Second,
+		pause:       func(context.Context, time.Duration) bool { return true },
+		execSelf: func() error {
+			acted = true
+			return nil
+		},
+	}
+	if err := w.apply(context.Background(), Result{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !acted {
+		t.Fatal("a drain hook error cancelled the restart")
+	}
+}
+
+func TestWatcherCancelledContextSkipsAction(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	acted := false
+	w := &Watcher{
+		logger:      zap.NewNop(),
+		strategy:    StrategyRestart,
+		gracePeriod: 5 * time.Second,
+		pause:       sleep,
+		execSelf: func() error {
+			acted = true
+			return nil
+		},
+	}
+	if err := w.apply(ctx, Result{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("apply error = %v, want context.Canceled", err)
+	}
+	if acted {
+		t.Fatal("restart ran after the grace period was cancelled")
+	}
+}
+
+func TestWatcherGracePeriodFromConfig(t *testing.T) {
+	cfg := Config{
+		Enabled: true, Addr: "http://127.0.0.1:8848",
+		DataID: "gofy-service", File: "config.yaml",
+		RestartGracePeriod: 4 * time.Second,
+	}
+	w, err := NewWatcher(cfg)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if w.gracePeriod != 4*time.Second {
+		t.Fatalf("gracePeriod = %v, want 4s", w.gracePeriod)
+	}
+	if w.pause == nil {
+		t.Fatal("watcher has no pause function")
 	}
 }

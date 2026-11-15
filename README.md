@@ -622,6 +622,7 @@ nacos:
     tenant: ''            # 仅当 nacos.yaml 未配置 namespace 时生效
   enable_nacos_config_change_restart: true
   config_change_strategy: reload    # reload | restart | exit
+  restart_grace_period: 5          # 秒；restart / exit 前摘流后的等待，0 表示不等
   monitor_config_change:
     listener_timeout_ms: 30000
     failed_wait_ms: 3000
@@ -639,7 +640,11 @@ nacos:
   原地热更新（本地开发，默认）、`restart` 重新执行进程（物理机/云主机）、
   `exit` 退出交给 k8s/docker 拉起，详见
   [`support/nacos/README.md`](support/nacos/README.md#配置变更策略)；
-- `NACOS_CONFIG_CHANGE_STRATEGY` 环境变量优先于该文件中的策略，便于容器与 k8s 注入；
+- `restart_grace_period`（秒，默认 `0`）让 `restart` / `exit` 先调用应用的摘流钩子
+  （demo 中是 `App.StopAccepting`：新请求 503、从 Nacos 注销，在途请求继续），再固定
+  等待若干秒。它只降低切断在途任务的概率，不保证任务跑完；`reload` 不走这一步；
+- `NACOS_CONFIG_CHANGE_STRATEGY` 与 `NACOS_RESTART_GRACE_PERIOD` 环境变量优先于该
+  文件中对应的两个键，便于容器与 k8s 注入；
 - `monitor_config_change` 覆盖 `NACOS_LISTENER_TIMEOUT_MS` / `NACOS_LISTENER_FAILED_MS`；
 - `nacos.yaml` 不存在时 `Load` 返回的错误满足 `errors.Is(err, fs.ErrNotExist)`，
   可回退到 `nacos.FromEnv()`（示例见 `examples/demo-service/main.go`）。

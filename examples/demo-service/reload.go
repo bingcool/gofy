@@ -70,10 +70,27 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 				cfg:      r.nacosCfg,
 				logger:   rt.Logger,
 				onChange: r.reload,
+				onDrain:  r.stopAccepting,
 			}, nil
 		})
 	}
 	return factories
+}
+
+// stopAccepting is the watcher's drain hook for the restart and exit
+// strategies. It refuses new HTTP requests and deregisters from Nacos naming,
+// so the watcher's grace period is spent on work already in flight. It only
+// flips the App's gate: a full Shutdown here would stop the module that is
+// calling this hook and deadlock waiting for it.
+// stopAccepting 是 restart / exit 策略的摘流钩子：拒绝新的 HTTP 请求并从 Nacos
+// 注销，让 watcher 的 grace period 只用于等在途任务收尾。它只翻 App 的闸门；
+// 在这里执行完整 Shutdown 会停掉正在调用本钩子的模块，并等它退出而死锁。
+func (r *reloader) stopAccepting(ctx context.Context) error {
+	app := r.app.Load()
+	if app == nil {
+		return errors.New("gofy: application is not ready")
+	}
+	return app.StopAccepting(ctx)
 }
 
 // reload re-reads the generated config and swaps the logger, database pool and

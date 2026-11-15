@@ -19,15 +19,19 @@ type Watcher struct {
 	logger *zap.Logger
 
 	onChange       func(ctx context.Context, result Result) error
+	drain          func(ctx context.Context) error
 	strategy       ChangeStrategy
 	restartPIDFile string
+	gracePeriod    time.Duration
 
-	// execSelf and terminate are replaceable so a test can observe dispatch
-	// without re-executing the test binary or signalling the test process.
-	// execSelf 与 terminate 可替换，测试能观察分发而不必真的重执行测试二进制或
-	// 给测试进程发信号。
+	// execSelf, terminate and pause are replaceable so a test can observe
+	// dispatch without re-executing the test binary, signalling the test
+	// process, or actually sleeping through a grace period.
+	// execSelf、terminate 与 pause 可替换，测试能观察分发而不必真的重执行测试
+	// 二进制、给测试进程发信号，或真的等待一个 grace period。
 	execSelf  func() error
 	terminate func(string) (int, error)
+	pause     func(context.Context, time.Duration) bool
 }
 
 // WatchOption customizes a Watcher.
@@ -49,6 +53,20 @@ func WithLogger(logger *zap.Logger) WatchOption {
 // WithOnChange 在变更后的配置写入完成后执行 fn；调用 fn 时新文件已就位。
 func WithOnChange(fn func(ctx context.Context, result Result) error) WatchOption {
 	return func(w *Watcher) { w.onChange = fn }
+}
+
+// WithDrain runs fn before a restart or exit action, after the changed config
+// has been written. It is the quiesce hook: the application should stop
+// accepting new requests here, so the grace period that follows is spent on
+// work already in flight. It is not called for reload, which keeps serving
+// throughout. A returned error is logged but does not cancel the action —
+// refusing new work is best effort, while the config change must still land.
+// WithDrain 在 restart / exit 动作之前、变更配置落盘之后执行 fn。它是摘流钩子：
+// 应用应在这里停止接受新请求，随后的 grace period 才留给在途任务。reload 全程
+// 继续服务，因此不会调用它。返回的错误只记日志、不取消动作：拒绝新请求是尽力
+// 而为，配置变更仍必须生效。
+func WithDrain(fn func(ctx context.Context) error) WatchOption {
+	return func(w *Watcher) { w.drain = fn }
 }
 
 // WithRestartOnChange forces the exit strategy and terminates the process
@@ -83,7 +101,8 @@ func NewWatcher(cfg Config, opts ...WatchOption) (*Watcher, error) {
 	}
 	w := &Watcher{
 		client: client, logger: zap.NewNop(), strategy: client.cfg.ChangeStrategy,
-		execSelf: selfRestart, terminate: restartProcess,
+		gracePeriod: client.cfg.RestartGracePeriod,
+		execSelf:    selfRestart, terminate: restartProcess, pause: sleep,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -122,6 +141,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		zap.String("group", cfg.Group),
 		zap.String("file", cfg.File),
 		zap.String("strategy", string(w.strategy)),
+		zap.Duration("grace_period", w.gracePeriod),
 	)
 
 	current, err := w.prime(ctx)
@@ -186,19 +206,26 @@ func (w *Watcher) prime(ctx context.Context) (string, error) {
 // apply dispatches a written change according to the deployment strategy:
 // reload hands the result to WithOnChange, restart replaces the process image,
 // and exit terminates it for an external supervisor. Only reload calls the
-// callback — the other two start the process from main again.
+// callback — the other two quiesce, wait out the grace period and start the
+// process from main again.
 // apply 按部署策略分发已落盘的变更：reload 交给 WithOnChange，restart 替换进程
-// 映像，exit 终止进程交由外部监管者。只有 reload 会调回调，另外两种会让进程
-// 从 main 重新运行。
+// 映像，exit 终止进程交由外部监管者。只有 reload 会调回调；另外两种先摘流、
+// 等满 grace period，再让进程从 main 重新运行。
 func (w *Watcher) apply(ctx context.Context, result Result) error {
 	switch w.strategy {
 	case StrategyRestart:
+		if err := w.prepare(ctx); err != nil {
+			return err
+		}
 		// exec skips defers, so flush buffered logs before the image is lost.
 		// exec 会跳过 defer，替换映像前先把缓冲日志刷出去。
 		w.logger.Info("nacos config changed, re-executing process", zap.String("file", result.File))
 		_ = w.logger.Sync()
 		return w.execSelf()
 	case StrategyExit:
+		if err := w.prepare(ctx); err != nil {
+			return err
+		}
 		pid, err := w.terminate(w.restartPIDFile)
 		if err != nil {
 			return fmt.Errorf("exit: %w", err)
@@ -215,6 +242,49 @@ func (w *Watcher) apply(ctx context.Context, result Result) error {
 		}
 		return errors.Join(errs...)
 	}
+}
+
+// prepare quiesces the service and waits before a restart or exit. The drain
+// hook stops new HTTP requests (typically App.StopAccepting); the fixed pause
+// then gives requests, worker ticks and consumer handlers already in flight a
+// chance to finish. Nothing here joins those tasks, so the action still cuts
+// off work that outlives the configured seconds.
+//
+// prepare must not call App.Shutdown: it runs inside the watcher goroutine, and
+// a shutdown would stop the very module this goroutine belongs to and wait for
+// it — a self-join deadlock. That is why the hook only flips a drain gate.
+// prepare 在 restart / exit 之前摘流并等待。摘流钩子停止接受新的 HTTP 请求
+// （通常是 App.StopAccepting），随后的固定等待给在途请求、worker tick 与
+// consumer handler 一点收尾时间。这里不等待任何具体任务，超过设定秒数仍未
+// 跑完的工作照样会被切断。
+//
+// prepare 不能调用 App.Shutdown：它运行在 watcher goroutine 里，Shutdown 会去
+// 停本 goroutine 所属的模块并等它退出，形成自等待死锁。因此钩子只翻摘流闸门。
+func (w *Watcher) prepare(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if w.drain != nil {
+		if err := w.drain(ctx); err != nil {
+			w.logger.Warn("nacos drain hook failed", zap.Error(err))
+		}
+	}
+	if w.gracePeriod <= 0 {
+		return nil
+	}
+	w.logger.Info("nacos config changed, draining before process action",
+		zap.Duration("grace_period", w.gracePeriod))
+	pause := w.pause
+	if pause == nil {
+		pause = sleep
+	}
+	if !pause(ctx, w.gracePeriod) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("nacos: grace period interrupted")
+	}
+	return nil
 }
 
 func restartProcess(pidFile string) (int, error) {

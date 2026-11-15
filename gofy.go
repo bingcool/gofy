@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bingcool/gofy/command"
@@ -60,6 +61,15 @@ type App struct {
 	done      chan struct{}
 	ready     chan struct{}
 	readyOnce sync.Once
+
+	// accepting is the drain gate read by the HTTP handler. StopAccepting clears
+	// it before a restart or exit, so new requests are refused with 503 while
+	// in-flight ones keep running. The gate lives on App rather than on the
+	// handlerSwap because a watcher may clear it before the server exists.
+	// accepting 是 HTTP handler 读取的摘流闸门。restart / exit 前 StopAccepting
+	// 会把它清零：新请求返回 503，在途请求继续跑完。闸门放在 App 而不是
+	// handlerSwap 上，是因为 watcher 可能在 server 建好之前就触发摘流。
+	accepting atomic.Bool
 
 	cleanupOnce sync.Once
 	cleanupErr  error
@@ -133,6 +143,7 @@ func New(opts ...Option) (*App, error) {
 		done:   make(chan struct{}),
 		ready:  make(chan struct{}),
 	}
+	a.accepting.Store(true)
 	if o.hasVer {
 		a.version = o.version
 	} else {
