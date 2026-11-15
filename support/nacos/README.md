@@ -273,6 +273,20 @@ worker 启动时拉一次配置，是为了让新起的进程不拿镜像里那�
 重投，handler 必须幂等。想真正做到「等在途任务结束」，应改用 `exit` + supervisor，
 走框架的完整优雅停机链路。
 
+**不要把它当成严格优雅关停**。准确的说法是「摘流 + 固定等待 + 换/退进程」：它不知道
+任何具体请求是否结束，只知道已经等了几秒。
+
+#### 部署预算
+
+固定等待只有在部署预算配好时才安全，四项缺一不可：
+
+| 需要保证 | 原因 |
+| --- | --- |
+| `grace_period` ≥ HTTP handler 与 MQ handler 的 p99（含下游超时） | 小于实际耗时等于按概率切断请求与事务 |
+| k8s `terminationGracePeriodSeconds` ≥ `grace_period` + 退出清理预算 | `exit` 先等 grace，再走完整停机链路（`shutdownTimeout` 默认 10s，worker `DrainTimeout` 默认 20s）；总预算不够会被 kubelet 直接 SIGKILL |
+| 摘流（闸门 503 + Nacos 注销）严格先于动作 | 顺序反过来的话，等待期间新流量还在进来，等待就失去意义 |
+| 不可中断任务自身幂等、可恢复 | 任何固定等待都会切到它们；未 ack 消息靠 broker 重投，副作用靠 `support/claim` 的 owner+attempts fencing |
+
 **动作失败会恢复接客**：`exec` / 发信号失败时，watcher 调用 `WithResume` 钩子（demo
 注入的是 `App.ResumeAccepting`）重新打开闸门并重新注册，进程继续对外服务；如果 resume
 本身也失败，watcher 会再请求一次终止，把进程交给监管者 —— 而不是停在「活着、已注销、
