@@ -225,11 +225,24 @@ go nacos.Watch(ctx, nx,
 - `WithRestartOnChange(pidFile)` 是 `config_change_strategy: exit` 的兼容写法，
   强制发送 SIGTERM 交给 supervisor 重启；推荐改用配置化策略。
 
-仅 `start` 路径需要调用 `Sync` / `Watch`，`stop` 等命令不应依赖 Nacos。
+**命令边界**：
+
+| 命令 | 启动时 `Sync` | 运行期 `Watch` | 三种变更策略 |
+| --- | --- | --- | --- |
+| `start` / 无子命令（HTTP） | 一次 | 有 | 生效 |
+| `worker --group=<g>` | 一次 | **无** | **不生效** |
+| `worker --list` / `--help`、`script`、`stop`、`version` | 无 | 无 | 不生效 |
+| `restart`（进程内 stop + Run） | 无 | 无 | 不生效 |
+
+worker 启动时拉一次配置，是为了让新起的进程不拿镜像里那份可能已过期的
+`config.yaml` 启动；运行期保持不可变，配置变更由部署层滚动重启生效。查询类命令
+完全不访问 Nacos，配置中心不可用时仍要可用。`restart` 不重新执行 `main`，沿用本次
+进程启动时加载的配置，因此也不挂 watcher。
 
 ### 配置变更策略
 
-`config_change_strategy` 决定变更内容写入本地文件之后做什么，三种取值对应三种部署形态：
+这三种策略由 HTTP 进程的 watcher 执行，`config_change_strategy` 决定变更内容写入
+本地文件之后做什么，三种取值对应三种部署形态：
 
 | 策略 | 动作 | 适用部署 | 进程 / pid |
 | --- | --- | --- | --- |
@@ -262,6 +275,13 @@ go nacos.Watch(ctx, nx,
 
 边界：
 
+- **三种策略只在 HTTP 进程生效**：`worker` 不挂 watcher，`reload` / `restart` /
+  `exit` 对它都不执行；`reload` 还依赖 `App.Reload` 的 generation 换代机制，worker
+  进程本来就没有这套东西。worker 的配置变更由部署层滚动重启负责，与「进程不可变、
+  配置变更等于发布一个新版本」的云原生惯例一致，也避免同一批实例热更新进度不一致。
+- `restart` 只用于**没有外部监管者**的物理机 / 云主机 / 本地环境。有 k8s、
+  Docker restart policy、systemd 时应优先用 `exit`，或干脆不监听 Nacos、由部署层
+  滚动更新：这样变更有 revision、可回滚、可审计，且每个实例拿到的是同一版配置。
 - `reload` 只在应用注入了 `WithOnChange` 时才有意义；另外两种策略不调用回调。
 - `restart` 用 `exec` 替换进程映像，**不执行 defer**、监听 fd 因 close-on-exec 释放；
   环境变量被继承，若应用用 `GOFY_ENV` 判断"是否显式设置"，自重启后会误判为显式

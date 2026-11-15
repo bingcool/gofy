@@ -46,3 +46,48 @@ func isStartInvocation(args []string) bool {
 	}
 	return true
 }
+
+// isWorkerStartInvocation reports whether args start a resident worker group.
+// Query forms (--list, --help) are excluded so they keep working when the
+// config server is down; every other subcommand is excluded too.
+// isWorkerStartInvocation 判断参数是否要真正启动常驻 worker 分组。查询形态
+// （--list、--help）与其它子命令都排除在外：配置中心不可用时它们仍要可用。
+func isWorkerStartInvocation(args []string) bool {
+	command := ""
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		command = arg
+		break
+	}
+	if command != "worker" {
+		return false
+	}
+	for _, arg := range args {
+		if arg == "--list" || strings.HasPrefix(arg, "--list=") ||
+			arg == "--help" || arg == "-h" {
+			return false
+		}
+	}
+	return true
+}
+
+// configInvocation classifies the command line into startup config needs.
+// sync pulls the current remote config once, so a freshly launched process
+// never runs on a stale local config.yaml. watch hosts the watcher and applies
+// the change strategy; it belongs to the HTTP process only, because a worker
+// stays immutable at runtime and picks up changes through a rolling restart
+// by the deployment layer.
+// configInvocation 把命令行归类成启动期配置需求。sync 表示启动时拉一次远端配置，
+// 避免新进程拿陈旧的本地 config.yaml 启动；watch 表示运行期挂监听并应用变更策略，
+// 只属于 HTTP 进程——worker 运行期保持不变，配置变更由部署层滚动重启生效。
+func configInvocation(args []string) (sync, watch bool) {
+	if isStartInvocation(args) {
+		return true, true
+	}
+	if isWorkerStartInvocation(args) {
+		return true, false
+	}
+	return false, false
+}

@@ -13,6 +13,19 @@ worker 进程没有 HTTP 栈，也不注册路由。轮询类任务通过框架�
 logger 与数据库，MQ 消费者则在 `Run` 里按配置自建连接——worker 进程不运行 `app/appio`
 模块，因此没有现成的连接句柄可以引用，这一点与 HTTP 进程不同。
 
+## 配置与 Nacos
+
+- **启动时拉一次**：worker 启动会从 Nacos `Sync` 一次配置到 `config.yaml`，保证新起的
+  进程不会用镜像里那份可能已过期的配置。`Sync` 失败按启动错误处理（直接退出），
+  不静默回落到旧文件。
+- **运行期不监听**：worker 不挂 `nacosWatchModule`，因此 `config_change_strategy` 的
+  `reload` / `restart` / `exit` 三种策略对它都不生效。进程一旦启动配置就固定下来，
+  避免消费位点、分区分配与在途消息被中途换配置搅乱。
+- **配置变更靠滚动重启**：由部署层重建进程（k8s 滚动更新 / 容器重新拉起 /
+  systemd 重启）；停机走 SIGTERM + `Runner` drain，`workerHealth` 会先返回 503 摘流。
+  这是「进程不可变、配置变更等于发布一个新版本」的惯例，也避免同一批实例配置漂移。
+- `worker --list` / `--help` 不访问 Nacos，配置中心不可用时仍能查分组清单。
+
 ## 目录
 
 ```

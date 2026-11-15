@@ -36,14 +36,24 @@ func main() {
 	if strings.TrimSpace(os.Getenv("NACOS_FILE")) == "" {
 		nacosCfg.File = configPath()
 	}
-	// stop/version/script must work without reaching Nacos.
-	// stop/version/script 子命令不访问 Nacos 也必须可用，因此只在 start 时拉配置。
-	pullConfig := enableNacosSyncConfig && nacosCfg.Enabled && isStartInvocation(os.Args[1:])
+	// HTTP and worker processes both pull the config once at startup, so a
+	// freshly launched worker never runs on a stale local config.yaml. Only
+	// the HTTP process hosts the watcher: workers stay immutable at runtime
+	// and pick up changes through a rolling restart by the deployment layer.
+	// Query commands (worker --list, --help, stop, script, version) never
+	// reach Nacos and keep working when the config server is down.
+	// HTTP 与 worker 进程启动时都拉一次配置，避免新起的 worker 用陈旧的本地
+	// config.yaml 启动。只有 HTTP 进程挂监听：worker 运行期保持不变，配置变更
+	// 由部署层滚动重启生效。查询类命令（worker --list、--help、stop、script、
+	// version）完全不访问 Nacos，配置中心不可用时仍可用。
+	syncConfig, watchConfig := configInvocation(os.Args[1:])
+	pullConfig := enableNacosSyncConfig && nacosCfg.Enabled && syncConfig
 	if pullConfig {
 		if _, err := nacos.Sync(ctx, nacosCfg); err != nil {
 			fatalf("sync nacos config: %v", err)
 		}
 	}
+	watchEnabled := pullConfig && nacosCfg.Watch && watchConfig
 
 	cfg, err := config.Load(ctx, configPath())
 	if err != nil {
@@ -60,7 +70,7 @@ func main() {
 
 	reload := &reloader{
 		nacosCfg:       nacosCfg,
-		watch:          pullConfig && nacosCfg.Watch,
+		watch:          watchEnabled,
 		httpCfg:        cfg.HTTP,
 		envFromProcess: envFromProcess,
 	}

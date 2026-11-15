@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `examples/demo-service`: `worker --group=<g>` now pulls the Nacos config once
+  at startup but never watches it. A freshly launched worker starts on the
+  current remote config rather than a possibly stale config.yaml baked into the
+  image, while staying immutable at runtime — config changes reach workers
+  through a rolling restart by the deployment layer. Query commands
+  (`worker --list`, `script`, `stop`, `version`) still never contact Nacos.
+  Docs now state that the three change strategies apply to the HTTP process
+  only, and that `restart` is for hosts without an external supervisor.
 - `support/nacos` / `gofy`: config changes using the `restart` or `exit`
   strategy now quiesce before acting. `nacos.WithDrain` injects a hook and
   `App.StopAccepting(ctx)` refuses new HTTP requests with 503 (closing the
