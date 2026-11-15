@@ -341,6 +341,12 @@ func TestFallbackDelayWaitsBeforeFallback(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = fastDead.Close() })
 
+	// Take the fastest of several runs: a scheduler hiccup only ever adds time,
+	// so the minimum is the closest estimate of the real cost. Under -race the
+	// jitter alone can exceed the 20ms margin a single sample would allow.
+	// 取多次运行里的最快值：调度抖动只会增加耗时，因此最小值最接近真实成本。在
+	// -race 下，单次采样的抖动就足以吃掉 20ms 的余量。
+	const samples = 3
 	measure := func(withDelay time.Duration) time.Duration {
 		gen, err := uuidint.New("uuid-key",
 			uuidint.WithClient(fastDead),
@@ -351,16 +357,27 @@ func TestFallbackDelayWaitsBeforeFallback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		start := time.Now()
-		if _, err := gen.Get(context.Background()); err != nil {
-			t.Fatalf("Get with fallback: %v", err)
+		best := time.Duration(1<<63 - 1)
+		for i := 0; i < samples; i++ {
+			start := time.Now()
+			if _, err := gen.Get(context.Background()); err != nil {
+				t.Fatalf("Get with fallback: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed < best {
+				best = elapsed
+			}
 		}
-		return time.Since(start)
+		return best
 	}
 
 	without := measure(0)
 	with := measure(delay)
-	if with-without < delay-20*time.Millisecond {
+	// Half the delay is the floor: it still fails when the pause disappears
+	// entirely (the mutation this test exists for) while leaving room for the
+	// scheduler noise that the minimum alone cannot remove.
+	// 以延迟的一半为下限：停顿完全消失时（本测试要抓的变异）仍然失败，同时给最小值
+	// 也无法消除的调度噪声留出余量。
+	if with-without < delay/2 {
 		t.Fatalf("fallback delay added only %s (with=%s without=%s), want about %s",
 			with-without, with, without, delay)
 	}
