@@ -186,7 +186,7 @@ func (a *App) run(parent context.Context) error {
 	// generation stored inside it, so the listener is never touched.
 	// server 整个生命周期都持有这个包装器；Reload 只替换其中存放的 generation，
 	// listener 因此始终不动。
-	a.handlerRef = newHandlerSwap(gen, &a.accepting)
+	a.handlerRef = newHandlerSwap(gen, a.admission)
 	a.gen = gen
 	a.setState(stateRunning)
 
@@ -744,7 +744,11 @@ func (a *App) StopAccepting(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	a.accepting.Store(false)
+	if !a.admission.close() {
+		// Already draining: do not deregister twice or log twice.
+		// 已经在摘流：不重复注销，也不重复记日志。
+		return nil
+	}
 	a.Logger().Info("application stopped accepting HTTP requests")
 
 	a.mu.Lock()

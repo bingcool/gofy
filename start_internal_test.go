@@ -57,7 +57,7 @@ func TestStopAcceptingRefusesNewRequestsButDrainsInFlight(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	swap := newHandlerSwap(newGeneration(1, handler), &app.accepting)
+	swap := newHandlerSwap(newGeneration(1, handler), app.admission)
 
 	before := httptest.NewRecorder()
 	swap.ServeHTTP(before, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -102,13 +102,13 @@ func TestStopAcceptingBeforeServerExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if !app.accepting.Load() {
+	if !app.admission.isOpen() {
 		t.Fatal("a new app must accept requests")
 	}
 	if err := app.StopAccepting(context.Background()); err != nil {
 		t.Fatalf("StopAccepting before Run: %v", err)
 	}
-	if app.accepting.Load() {
+	if app.admission.isOpen() {
 		t.Fatal("gate stayed open before the server was built")
 	}
 }

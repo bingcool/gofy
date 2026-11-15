@@ -177,12 +177,20 @@ func composeRequestBinders(modules []support.Module) func(context.Context) conte
 // listener.
 // handlerSwap 让 Reload 在进程保留 listener 的情况下替换 generation。
 type handlerSwap struct {
-	inner     atomic.Pointer[generation]
-	accepting *atomic.Bool
+	inner atomic.Pointer[generation]
+	gate  *admissionGate
 }
 
-func newHandlerSwap(gen *generation, accepting *atomic.Bool) *handlerSwap {
-	s := &handlerSwap{accepting: accepting}
+// newHandlerSwap builds the wrapper the server keeps for its whole life. A nil
+// gate becomes a fresh open one, so a test can build the wrapper without caring
+// about the lifecycle.
+// newHandlerSwap 构造 server 整个生命周期持有的包装器。gate 为 nil 时新建一个
+// 打开状态的闸门，测试因此不必关心生命周期就能构造它。
+func newHandlerSwap(gen *generation, gate *admissionGate) *handlerSwap {
+	if gate == nil {
+		gate = newAdmissionGate()
+	}
+	s := &handlerSwap{gate: gate}
 	s.Store(gen)
 	return s
 }
@@ -191,51 +199,55 @@ func (s *handlerSwap) Store(gen *generation) { s.inner.Store(gen) }
 
 func (s *handlerSwap) Load() *generation { return s.inner.Load() }
 
-// ServeHTTP acquires a lease on the generation it loaded. If that generation
-// was retired between the load and the acquire, it retries with the current
-// one. A repeatedly failing acquire means a reload is racing this request; it
-// is answered with 503 rather than entering a generation that is shutting down.
-//
-// The drain gate comes first: once StopAccepting cleared it, every new request
-// gets 503 without entering a generation, while requests already inside one
-// keep their lease and finish. Closing the listener instead would make Serve
-// return and take the whole process out of the watcher's control.
+// ServeHTTP admits the request through the gate, which both checks the drain
+// state and acquires the lease on the generation the request loaded. A retired
+// generation makes the caller retry with the current one; a closed gate answers
+// 503 without entering any generation.
 //
 // The generation's binder runs after the lease is held: a request enters the
 // generation whose lease it owns, and reads that generation's module state -
 // never the state a half-finished reload has already installed globally.
-// ServeHTTP 对它载入的 generation 获取 lease。若该代在载入与获取之间被退役，
-// 就改用当前代重试；尝试多次仍获取失败说明有 Reload 与本次请求竞争，此时返回
-// 503，而不是进入正在关闭的代。
-//
-// 摘流闸门检查放在最前面：StopAccepting 清零后，新请求不进入任何 generation，
-// 直接返回 503；已经进入 generation 的请求仍持有 lease，可以继续跑完。这里
-// 不关 listener —— 那会让 Serve 返回、整个进程脱离 watcher 的掌控。
+// ServeHTTP 让请求穿过闸门：一步完成摘流状态检查与本代 lease 的获取。代已退役时
+// 调用方改用当前代重试；闸门已关闭时不进入任何代，直接返回 503。
 //
 // 本代的 binder 在持有 lease 之后执行：请求进入的是它持有 lease 的那一代，读到
 // 的也是那一代的模块状态，绝不会读到半途完成的 Reload 已经装到全局的新状态。
 func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.accepting != nil && !s.accepting.Load() {
-		w.Header().Set("Connection", "close")
-		http.Error(w, "service is draining", http.StatusServiceUnavailable)
-		return
-	}
 	for attempt := 0; attempt < 8; attempt++ {
 		gen := s.inner.Load()
 		if gen == nil {
 			break
 		}
-		if !gen.lease.acquire() {
+		switch s.gate.admit(gen.lease) {
+		case admitClosed:
+			w.Header().Set("Connection", "close")
+			http.Error(w, "service is draining", http.StatusServiceUnavailable)
+			return
+		case admitRetired:
+			// A reload is swapping generations right now; load the current one.
+			// 此刻有 Reload 正在换代，重新载入当前代。
 			continue
 		}
-		if gen.bind != nil {
-			r = r.WithContext(gen.bind(r.Context()))
-		}
-		gen.handler.ServeHTTP(w, r)
-		gen.lease.release()
+		s.serve(w, r, gen)
 		return
 	}
 	http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+}
+
+// serve runs one generation whose lease admission already took. The release is
+// deferred on purpose: a handler that panics — including http.ErrAbortHandler,
+// which the server turns into a connection abort — must not leave the counter
+// elevated, or every later Reload would wait out a full drain timeout before it
+// can release that generation.
+// serve 运行已由准入流程取得 lease 的那一代。release 刻意用 defer：panic 的
+// handler（包括 http.ErrAbortHandler，server 会把它变成连接中断）不能把计数留在
+// 高位，否则之后每次 Reload 都要等满一个 drain 超时才能释放该代。
+func (s *handlerSwap) serve(w http.ResponseWriter, r *http.Request, gen *generation) {
+	defer gen.lease.release()
+	if gen.bind != nil {
+		r = r.WithContext(gen.bind(r.Context()))
+	}
+	gen.handler.ServeHTTP(w, r)
 }
 
 // retireGeneration drains gen and then releases the resources it owns. It is
