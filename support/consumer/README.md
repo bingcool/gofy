@@ -120,6 +120,12 @@ Kafka 没有 `max.poll.interval.ms` 可调：franz-go 的心跳在独立 gorouti
 把成员踢出组。想避免重平衡落在 handler 与提交之间，用 `BlockRebalanceOnPoll: true`——当前
 批次跑完、位点提交后才放行。`AutoCommitInterval` 只在 `CommitMode: auto` 下生效。
 
+`CommitMode: manual`（默认）下 handler **不自己提交位点**：传输层给 franz-go 加
+`DisableAutoCommit()`，在每个分区的一批处理完后提交 handler 接受的最后一条记录。
+因此 handler 的返回值就是提交决策——`nil` 确认、可重试错误不提交并整批重投、
+`Permanent` 记为 dead 但仍确认（避免毒消息卡住分区）。逐条决策日志与三条路径的
+实跑样例见 [demo worker README](../../examples/demo-service/worker/README.md#kafka-手动提交)。
+
 RocketMQ 的 `Tags` 是"或"列表：SDK 用 `||` 把元素拼成一个订阅表达式，因此元素在构造时
 去掉首尾空格（原样拼接的话，多一个空格就是永远匹配不上的 tag），空元素或自身含 `||`
 的元素在注册阶段报错。留空或只有一个 `*` 表示订阅全部 tag。

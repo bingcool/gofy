@@ -65,9 +65,9 @@ var orderEventProducerDefaults = OrderEventProducerConfig{
 	EventType:   "order.paid",
 }
 
-// publishTimeout bounds one fan-out. It is per tick, not per send: four brokers
+// publishTimeout bounds one fan-out. It is per tick, not per send: brokers
 // that are all slow should fail the tick, not stretch it to twenty seconds.
-// publishTimeout 限制一次群发的耗时。它是每 tick 而不是每次发送：四个都慢的 broker
+// publishTimeout 限制一次群发的耗时。它是每 tick 而不是每次发送：所有 broker 都慢
 // 应该让这个 tick 失败，而不是把它拖到二十秒。
 const publishTimeout = 5 * time.Second
 
@@ -76,13 +76,15 @@ const publishTimeout = 5 * time.Second
 // reason is what the payload carries as its provenance: one line per
 // transport, saying which queue the event came in on. The consumer's success
 // log carries the transport too, so one `docker logs` pass shows the same
-// event arriving four times through four queues — which is the whole point of
-// running one event through four transports.
+// event arriving once per sink — which is the whole point of running one event
+// through every transport. The manual-commit Kafka topic is a second sink of
+// the same kind, with its own reason.
 // eventSink 是生产者会写入的一个传输层。
 //
-// reason 是 payload 里携带的来源记录：每种传输一行，写明事件来自哪个队列。消费端
-// 成功日志也会带上传输名，因此翻一遍 `docker logs` 就能看到同一事件从四个队列各到达
-// 一次——这正是让一个事件走四种传输的意义。
+// reason 是 payload 里携带的来源记录：每个 sink 一行，写明事件来自哪个队列。消费端
+// 成功日志也会带上传输名，因此翻一遍 `docker logs` 就能看到同一事件在每个 sink 各到达
+// 一次——这正是让一个事件走遍每种传输的意义。手动提交的 Kafka topic 是同种传输的第二个
+// sink，有自己的 reason。
 type eventSink struct {
 	transport string
 	reason    string
@@ -90,15 +92,17 @@ type eventSink struct {
 }
 
 // newOrderEventProducer publishes the same order event to Kafka, RabbitMQ,
-// RocketMQ and a Redis queue every interval, so the four consumers in this group
-// have something to consume without a second terminal.
+// RocketMQ, a Redis queue and the manual-commit Kafka topic every interval, so
+// the immediate consumers in this group have something to consume without a
+// second terminal.
 //
 // The consumers are the contract: topic, exchange, queue key and tag are read
 // from their config values rather than repeated here, so moving a subscription
 // moves its producer with it. Only the connection name and the payload are the
 // producer's own.
-// newOrderEventProducer 每间隔把同一个订单事件发往 Kafka、RabbitMQ、RocketMQ 与
-// Redis 队列，本组的四个消费者因此不需要另开一个终端就能一直有消息可消费。
+// newOrderEventProducer 每间隔把同一个订单事件发往 Kafka、RabbitMQ、RocketMQ、
+// Redis 队列与手动提交的 Kafka topic，本组的立即消费者因此不需要另开一个终端就能一直
+// 有消息可消费。
 //
 // 契约在消费者那边：topic、exchange、队列 key 与 tag 都从它们的配置值读，而不是在这里
 // 再写一遍，因此改订阅就等于改生产端。生产者自己只有连接名与 payload。
@@ -148,11 +152,13 @@ func newOrderEventProducer(conns gofyconsumer.Connections, cfg OrderEventProduce
 			publishCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), publishTimeout)
 			defer cancel()
 
-			// One id for all four deliveries: the fan-out is one event, and the
+			// One id for every delivery: the fan-out is one event, and the
 			// consumer-side ledger is keyed by (consumer, message id), so the
-			// shared id cannot collide across transports.
-			// 四条投递共用一个 ID：群发的是一个事件；消费端台账按 (consumer,
-			// message id) 记账，因此这个共享 ID 不会跨传输撞车。
+			// shared id cannot collide across transports — even between the two
+			// Kafka subscriptions, which are separate consumers.
+			// 所有投递共用一个 ID：群发的是一个事件；消费端台账按 (consumer,
+			// message id) 记账，因此这个共享 ID 不会跨传输撞车——两个 Kafka 订阅是
+			// 不同的 consumer，也不会互相撞。
 			eventID := uuid.NewString()
 			if err := publishOrderEvent(publishCtx, sinks, cfg, eventID); err != nil {
 				return err
@@ -169,13 +175,13 @@ func newOrderEventProducer(conns gofyconsumer.Connections, cfg OrderEventProduce
 
 // publishOrderEvent writes one event to every sink and joins the failures.
 //
-// A broken transport must not silence the other three: each send is attempted,
-// and what fails is reported together with the transport that failed. The
-// caller gets nil only when all four accepted the event.
+// A broken transport must not silence the others: each send is attempted, and
+// what fails is reported together with the transport that failed. The caller
+// gets nil only when every sink accepted the event.
 // publishOrderEvent 把同一个事件写入每个 sink 并合并失败。
 //
-// 一个传输坏掉不能让其剩下三个闭嘴：每次发送都会尝试，失败与失败的传输名一起上报。
-// 只有四个都收下，调用方才拿到 nil。
+// 一个传输坏掉不能让其它传输闭嘴：每次发送都会尝试，失败与失败的传输名一起上报。
+// 只有所有 sink 都收下，调用方才拿到 nil。
 func publishOrderEvent(ctx context.Context, sinks []eventSink, cfg OrderEventProducerConfig, eventID string) error {
 	occurredAt := time.Now()
 	var errs []error
@@ -202,15 +208,18 @@ func publishOrderEvent(ctx context.Context, sinks []eventSink, cfg OrderEventPro
 	return errors.Join(errs...)
 }
 
-// openEventSinks connects the four transports and returns them with one closer.
+// openEventSinks connects every immediate sink and returns them with one
+// closer. There are five sinks over four transports: Kafka appears twice, once
+// for the default subscription and once for the manual-commit sample.
 //
 // It fails on the first broken transport instead of starting a producer that
-// silently writes to three: a fan-out demo with a missing leg is worse than no
-// demo, because the absent messages look like a consumer bug.
-// openEventSinks 连接四个传输层，并把它们与一个关闭函数一起返回。
+// silently writes to the rest: a fan-out demo with a missing leg is worse than
+// no demo, because the absent messages look like a consumer bug.
+// openEventSinks 连接所有立即链路的 sink 并把它们与一个关闭函数一起返回。四种传输共有
+// 五个 sink：Kafka 出现两次，一次给默认订阅，一次给手动提交样例。
 //
-// 任一传输层坏掉就直接失败，而不是启动一个只写三处的生产者：少一条腿的群发示例比没有
-// 示例更糟——缺失的消息看起来会像消费端的 bug。
+// 任一传输层坏掉就直接失败，而不是启动一个只写其余部分的生产者：少一条腿的群发示例比
+// 没有示例更糟——缺失的消息看起来会像消费端的 bug。
 func openEventSinks(ctx context.Context, conns gofyconsumer.Connections, cfg OrderEventProducerConfig) ([]eventSink, func(), error) {
 	var closers []func()
 	closeAll := func() {
@@ -220,12 +229,12 @@ func openEventSinks(ctx context.Context, conns gofyconsumer.Connections, cfg Ord
 	}
 
 	// Opened in one loop, closed in reverse order: the list is what keeps the
-	// four near-identical openers from turning into four near-identical error
-	// branches.
-	// 用一次循环打开、逆序关闭：有了这张列表，四个几乎相同的 opener 才不会退化成四段
+	// near-identical openers from turning into near-identical error branches.
+	// 用一次循环打开、逆序关闭：有了这张列表，几乎相同的 opener 才不会退化成一段段
 	// 几乎相同的错误分支。
 	open := []func(context.Context, gofyconsumer.Connections, OrderEventProducerConfig) (eventSink, func(), error){
 		openKafkaSink,
+		openKafkaManualSink,
 		openAMQPSink,
 		openRocketMQSink,
 		openQueuesSink,
@@ -244,7 +253,26 @@ func openEventSinks(ctx context.Context, conns gofyconsumer.Connections, cfg Ord
 }
 
 func openKafkaSink(ctx context.Context, conns gofyconsumer.Connections, cfg OrderEventProducerConfig) (eventSink, func(), error) {
-	name := orderKafka.Instance
+	return openKafkaTopicSink(ctx, conns, cfg, orderKafka, "kafka", "记录来自 kafka 队列")
+}
+
+// openKafkaManualSink feeds the manual-commit subscription. It is a second
+// topic, not a second group on the first: the sample's whole point is a set of
+// committed offsets that can be read on its own.
+// openKafkaManualSink 给手动提交订阅供消息。它是第二个 topic，而不是第一个 topic 上的
+// 第二个组：本样例的重点就是一组可以单独查看的已提交位点。
+func openKafkaManualSink(ctx context.Context, conns gofyconsumer.Connections, cfg OrderEventProducerConfig) (eventSink, func(), error) {
+	return openKafkaTopicSink(ctx, conns, cfg, orderKafkaManual, "kafka_manual", "记录来自 kafka 手动提交队列")
+}
+
+func openKafkaTopicSink(
+	ctx context.Context,
+	conns gofyconsumer.Connections,
+	cfg OrderEventProducerConfig,
+	sub gofyconsumer.KafkaConfig,
+	transport, reason string,
+) (eventSink, func(), error) {
+	name := sub.Instance
 	conn, ok := conns.Kafka[name]
 	if !ok {
 		return eventSink{}, nil, fmt.Errorf("kafka instance %q is not configured", name)
@@ -253,14 +281,14 @@ func openKafkaSink(ctx context.Context, conns gofyconsumer.Connections, cfg Orde
 	if err != nil {
 		return eventSink{}, nil, fmt.Errorf("kafka instance %q: %w", name, err)
 	}
-	producer, err := gofykafka.NewProducer(client, gofykafka.ProducerConfig{Topic: orderKafka.Topic})
+	producer, err := gofykafka.NewProducer(client, gofykafka.ProducerConfig{Topic: sub.Topic})
 	if err != nil {
 		_ = client.Close()
-		return eventSink{}, nil, fmt.Errorf("kafka topic %q: %w", orderKafka.Topic, err)
+		return eventSink{}, nil, fmt.Errorf("kafka topic %q: %w", sub.Topic, err)
 	}
 	return eventSink{
-			transport: "kafka",
-			reason:    "记录来自 kafka 队列",
+			transport: transport,
+			reason:    reason,
 			send: func(ctx context.Context, event gofyconsumer.Envelope) error {
 				// The order id as key keeps one order's events on one
 				// partition, which is what makes per-order order possible.

@@ -20,13 +20,14 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、两个生产者、八个消费者与心跳
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、两个生产者、九个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
-│   ├── producer.go        # order-event-producer：每 5s 群发同一订单事件到四个队列
+│   ├── producer.go        # order-event-producer：每 5s 群发同一订单事件到五个 sink
 │   ├── delay_producer.go  # order-delay-producer：每 10s 调度一条 5s 后到期的事件
 │   ├── kafka_order.go     # order-kafka-consumer：一个订阅 + 它的配置
+│   ├── kafka_manual_order.go # order-kafka-manual-consumer：手动提交位点样例
 │   ├── amqp_order.go      # order-amqp-consumer
 │   ├── rocketmq_order.go  # order-rocketmq-consumer
 │   ├── queues_order.go    # order-queues-consumer（Redis 队列）
@@ -59,9 +60,10 @@ worker/
 | 分组 | worker | 实例数 | 节奏 | 说明 |
 | --- | --- | --- | --- | --- |
 | group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
-| group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到四个队列，闭环演示生产 → 消费 |
+| group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到五个 sink（Kafka 两个 topic），闭环演示生产 → 消费 |
 | group1 | `order-delay-producer` | 1 | 10s | 每 10s 调度一条 5s 后到期的事件到 Redis ZSET、RocketMQ DELAY topic 与 RabbitMQ direct / topic 延迟队列 |
-| group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅，手动提交位点 |
+| group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅 `demo.order.events`，默认手动提交位点 |
+| group1 | `order-kafka-manual-consumer` | 1 | 常驻 | 独立 topic / group 的手动提交样例，逐条打印位点提交决策 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
 | group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `test-demo` / `tag=demo`，SDK 侧拉取 |
 | group1 | `order-queues-consumer` | 2 | 常驻 | Redis 队列，弹出即删除 |
@@ -75,24 +77,91 @@ worker/
 拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
-八个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
+九个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
 实际跑哪些用 `--name` 选；注册不建连，所以 `--list` 和被过滤掉的消费者都不产生成本。
 实例数写在各自的配置文件里，`--concurrency` 仍可覆盖。
 
 ## 生产-消费闭环
 
 `producer.go` 是示例的生产端：一个 worker，每 5 秒生成一条指向订单 1 的
-`order.paid` 事件，同一时刻发到 Kafka、RabbitMQ、RocketMQ 与 Redis 队列——正是
-group1 四个消费者订阅的那四条流。payload 里的 `reason` 写明这条事件来自哪个队列
-（`记录来自 kafka 队列`……），`docker logs` 里对同一个 `event_id` 能看到四条
-`message consumed`，各带一个 `source`。
+`order.paid` 事件，同一时刻发到四个传输层的**五个 sink**（Kafka 占两个 topic：默认订阅与
+手动提交样例），正是 group1 立即订阅消费的那些流。payload 里的 `reason` 写明这条事件来自
+哪个 sink（`记录来自 kafka 队列`……），`docker logs` 里对同一个 `event_id` 能看到五条
+`message consumed`，各带一个 `consumer` / `source`。
 
 契约在消费者那边：topic、exchange、绑定键、tag 都从订阅配置读，生产者不重复声明，
 因此移动订阅等于移动生产端。传输地址来自 `ConnectionsFrom` 的同一张连接表，一个
 地址只有一个家。发送各带各的关键字：Kafka 用订单号做 key 保分区有序、`message_id`
 头带事件 UUID 供去重；AMQP 用事件类型做 routing key 过 `order.*` 绑定；RocketMQ
-带订阅的首个 tag；Redis 队列直接压栈。四个 sink 一次循环打开、逆序关闭，任一打不开
+带订阅的首个 tag；Redis 队列直接压栈。五个 sink 一次循环打开、逆序关闭，任一打不开
 就拒绝启动——少一条腿的群发示例比没有示例更糟。
+
+## Kafka 手动提交
+
+`kafka_manual_order.go` 是 `order-kafka-consumer` 的手动提交对照订阅：独立 topic
+`demo.order.manual`、独立消费组 `demo-service-order-manual-consumer`，位点可以单独查看，
+不会混进默认订阅的组。`producer.go` 的第五个 sink 每 5 秒喂它一条正常的 `order.paid`。
+
+本地 Kafka 关了自动建 topic，第一次跑之前先建一次（1 个分区便于观察位点）：
+
+```bash
+docker exec dev-kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --create \
+  --topic demo.order.manual --partitions 1 --replication-factor 1
+```
+
+缺这个 topic 时生产者会报 `UNKNOWN_TOPIC_OR_PARTITION`，而注册与 `worker --list` 都不会
+提示——订阅只是代码里的声明，topic 是 broker 侧的资源。默认订阅用的 `demo.order.events`
+同理需要存在。
+
+**先澄清"手动"**：gofy 里不是让 handler 自己调 `CommitRecords`。`CommitMode: "manual"`
+让传输层给 franz-go 加 `DisableAutoCommit()`，然后在**每个分区的一批处理完后**，提交
+handler 接受的最后一条记录。handler 的返回值就是提交决策：
+
+| handler 返回 | 共用链路 | 位点 | 日志 |
+| --- | --- | --- | --- |
+| `nil` | `message consumed` | 提交 | `decision=commit this offset` |
+| 可重试错误 | `message handling failed, waiting for redelivery` | **不提交**；`Consume` 停止、worker 重启，失败记录及其后的记录重投 | `decision=hold offset, redeliver` |
+| `Permanent(err)` | 记为 dead 但仍确认 | 提交，毒消息不会永久卡住分区 | `decision=park as dead, commit anyway` |
+
+因此 handler **绝不能自己提交**：那会提交共用链路尚未处理完的位点，之后遇到
+`Permanent` 或 panic 就可能丢消息。`handleOrderKafkaManual` 只做两件事——调
+`applyOrderEvent`、把决策连同 `msg.Record` 的 `partition` / `offset` 打进一行日志——
+然后**原样返回 err**。吞掉错误等于把"保留位点"改成"提交位点"。
+
+配置上的几个刻意选择：
+
+- `Idempotency: true` + `MaxAttempts: 3`：Kafka 不报告投递次数，靠台账计次。第 3 次
+  认领会把消息记为 dead 并确认（`message skipped`），**分区得以继续**——否则一条坏消息
+  会无限重投。生产环境用默认 5 或更大。
+- `DiscardOnError: false`：打开它会把失败记录的位点也提交，正是本样例要对照的行为。
+- `BlockRebalanceOnPoll: true`：把"先 handler 后提交"这一批锁在一起，避免重平衡落在
+  两者之间导致提交失败、整批重放。
+
+看位点是否真的前进（本地容器）：
+
+```bash
+docker exec dev-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe --group demo-service-order-manual-consumer
+```
+
+想看"不提交 → 重投"，往这个 topic 发一条订单不存在的事件（`applyOrderEvent` 会返回
+可重试错误）。手工消息没有 `message_id` 头，去重键回退到 `topic/partition@offset`，
+重投时位点不变，仍能正确计次：
+
+```bash
+docker exec -i dev-kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic demo.order.manual <<'EOF'
+{"id":"manual-retry-1","type":"order.paid","occurred_at":"2026-11-15T12:00:00+08:00","payload":{"order_id":999999,"user_id":1,"reason":"manual commit demo"}}
+EOF
+```
+
+日志里同一个 `offset` 会出现三次 `decision=hold offset, redeliver`（`MaxAttempts: 3`），
+第四次变成 `message skipped`（attempts exhausted），随后位点提交、分区继续——这也说明
+为什么可重试失败必须配 `Idempotency`，否则 Kafka 没有投递次数概念，会无限重投。把 `type`
+改成 `order.unknown` 则走永久错误分支：`message discarded: permanent failure` +
+`decision=park as dead, commit anyway`，位点同样提交。
 
 ## 延迟队列
 
@@ -173,9 +242,9 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 每个订阅一个文件：配置、handler、没有别的：
 
 ```
-kafka_order.go / amqp_order.go / rocketmq_order.go / queues_order.go
-delay_queues_order.go / rocketmq_delay_order.go / delay_amqp_direct_order.go
-delay_amqp_topic_order.go
+kafka_order.go / kafka_manual_order.go / amqp_order.go / rocketmq_order.go
+queues_order.go / delay_queues_order.go / rocketmq_delay_order.go
+delay_amqp_direct_order.go / delay_amqp_topic_order.go
         一个订阅一个文件：Config + Handler
         ↓
 support/consumer Processor.Handle
@@ -280,36 +349,50 @@ $ go run . worker
 
 ```bash
 $ go run . worker --list
-┌────────┬─────────────────────────┬─────────────┐
-│ GROUP  │ WORKER                  │ CONCURRENCY │
-├────────┼─────────────────────────┼─────────────┤
-│ group1 │ order-scan              │ 2           │
-├────────┼─────────────────────────┼─────────────┤
-│ group1 │ order-kafka-consumer    │ 1           │
-├────────┼─────────────────────────┼─────────────┤
-│ group1 │ order-amqp-consumer     │ 1           │
-├────────┼─────────────────────────┼─────────────┤
-│ group1 │ order-rocketmq-consumer │ 1           │
-├────────┼─────────────────────────┼─────────────┤
-│ group1 │ order-queues-consumer   │ 2           │
-├────────┼─────────────────────────┼─────────────┤
-│ group1 │ order-heartbeat         │ 1           │
-├────────┼─────────────────────────┼─────────────┤
-│ group2 │ report-summary          │ 1           │
-└────────┴─────────────────────────┴─────────────┘
+┌────────┬─────────────────────────────────┬─────────────┐
+│ GROUP  │ WORKER                          │ CONCURRENCY │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-scan                      │ 2           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-event-producer            │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-delay-producer            │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-kafka-consumer            │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-kafka-manual-consumer     │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-amqp-consumer             │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-rocketmq-consumer         │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-queues-consumer           │ 2           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-delay-queues-consumer     │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-rocketmq-delay-consumer   │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-amqp-delay-consumer       │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-amqp-delay-topic-consumer │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-heartbeat                 │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group2 │ report-summary                  │ 1           │
+└────────┴─────────────────────────────────┴─────────────┘
 ```
 
 启动整组。前台运行，日志同时写 stdout 与文件：
 
 ```bash
 $ go run . worker --group=group1
-{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":6,"drain_timeout":20}
+{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":13,"drain_timeout":20}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#0","interval":5}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#1","interval":5}
 ```
 
-`workers:6` 是这个分组的成员数（扫描、四个消费者、心跳），不是实例数；`order-scan` 起了
-2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
+`workers:13` 是这个分组的成员数（扫描 1 + 两个生产者 + 九个消费者 + 心跳 1），不是实例数；
+`order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
 
 整组启动意味着四个 broker 都要在。本地只有数据库与 Redis 时，用 `--name` 挑一个跑：
 

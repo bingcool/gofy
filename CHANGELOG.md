@@ -669,6 +669,27 @@ All notable changes to this project are documented here. The format follows
   of letting the broker clamp it.
   Added a cross-language section to `support/amqp/README.md` and notes to the
   consumer and demo worker READMEs.
+- `examples/demo-service`: a Kafka manual-commit sample. `orderKafka` already
+  ran with `CommitMode: manual`, but its handler said nothing about what that
+  means, so a reader could not tell a commit from an acknowledgement.
+  `kafka_manual_order.go` adds `order-kafka-manual-consumer` on its own topic
+  and consumer group, with a handler that logs the partition and offset and the
+  decision the shared chain will make, then returns the error unchanged.
+  The point it teaches is that "manual" does not mean the handler calls
+  `CommitRecords`: the transport disables franz-go auto commit and commits the
+  last accepted record of a partition's batch, so `nil` commits, a retryable
+  error holds the offset and redelivers, and a `Permanent` error parks the
+  message but still commits so a poison record cannot stall the partition.
+  `producer.go` gains a fifth sink for that topic, with both Kafka sinks sharing
+  one publisher built from their own subscription config.
+  Verified on the local broker: six normal records left CURRENT-OFFSET 6 / LAG
+  0; an event for a missing order was redelivered at the same offset three
+  times before `MaxAttempts` parked it as dead and the partition moved on; an
+  unknown event type was discarded yet still committed. The ledger ended with
+  two dead rows (attempts exhausted / unsupported type) and every later record
+  done. The README now documents all three paths, the consumer-group query and
+  the need to create the topic first — the local broker has auto-create off, and
+  a missing topic only surfaces as `UNKNOWN_TOPIC_OR_PARTITION` at publish time.
 
 ### Changed
 
