@@ -12,11 +12,31 @@ import (
 // WorkerGroupAll 是选中全部已注册分组的 --group 取值。
 const WorkerGroupAll = "*"
 
+// WorkerGroupAllAlias is the quote-free spelling of the wildcard. A shell
+// expands an unquoted * before the process starts — zsh refuses to run the
+// command at all ("no matches found"), bash passes the word through only
+// because it found no match — so the wildcard needs an alias no shell reads as
+// a glob.
+// WorkerGroupAllAlias 是通配符的免引号写法。shell 在进程启动之前就会展开不加引号的
+// *：zsh 直接拒绝执行（no matches found），bash 只是恰好因为没有匹配项才原样传下来。
+// 因此通配符需要一个任何 shell 都不会当成 glob 的别名。
+const WorkerGroupAllAlias = "all"
+
 // WorkerAllPIDToken is the pid-file suffix that stands for "every group": the
 // wildcard run writes it, and `stop --worker=*` resolves it.
 // WorkerAllPIDToken 是代表"全部分组"的 pid 文件后缀：通配符启动时写它，
 // `stop --worker=*` 也解析它。
 const WorkerAllPIDToken = "all"
+
+// IsAllWorkerGroup reports whether group selects every worker process. The
+// wildcard and its alias mean the same thing everywhere: run every registered
+// group, or address every worker that left a pid file.
+// IsAllWorkerGroup 报告 group 是否选中所有 worker 进程。通配符与它的别名在任何地方
+// 含义相同：运行全部已注册分组，或指向所有留下 pid 文件的 worker。
+func IsAllWorkerGroup(group string) bool {
+	g := strings.TrimSpace(group)
+	return g == WorkerGroupAll || g == WorkerGroupAllAlias
+}
 
 // WorkerOptions are the flags of the worker command.
 // WorkerOptions 是 worker 命令的旗标。
@@ -60,7 +80,7 @@ func newWorkerCmd(d Deps) *cobra.Command {
 				return listWorkers(d)
 			}
 			if strings.TrimSpace(opts.Group) == "" {
-				return d.Usage(fmt.Errorf("worker: --group is required (see worker --list)"))
+				return d.Usage(fmt.Errorf("worker: --group is required (use --group=%s for every group, see worker --list)", WorkerGroupAllAlias))
 			}
 			if d.RunWorker == nil {
 				return fmt.Errorf("worker: no worker groups registered")
@@ -68,7 +88,11 @@ func newWorkerCmd(d Deps) *cobra.Command {
 			return d.RunWorker(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Group, "group", "", "worker group to run, or "+WorkerGroupAll+" for every registered group")
+	// --group is persistent so the selector keeps working from subcommands added
+	// later, in the same position as on the run form.
+	// --group 是持久旗标，后续加的子命令因此也能用同一个选择符，位置与启动形态一致。
+	cmd.PersistentFlags().StringVar(&opts.Group, "group", "",
+		"worker group to run, or --group="+WorkerGroupAllAlias+" ("+WorkerGroupAll+" when quoted) for every group")
 	cmd.Flags().StringSliceVar(&opts.Names, "name", nil, "run only the named workers (repeatable)")
 	cmd.Flags().IntVar(&opts.Concurrency, "concurrency", 0, "override the instance count of every worker (0 = config)")
 	cmd.Flags().BoolVar(&opts.List, "list", false, "list groups and workers, then exit")
@@ -91,6 +115,12 @@ func listWorkers(d Deps) error {
 			rows = append(rows, []string{g.Name, w.Name, fmt.Sprintf("%d", w.Concurrency)})
 		}
 	}
-	console.New(d.Out, d.ErrOut).Table(rows)
+	c := console.New(d.Out, d.ErrOut)
+	c.Table(rows)
+	// The wildcard is the one selector a shell can eat, so the table that lists
+	// the groups ends by naming the spelling that survives every shell.
+	// 通配符是唯一会被 shell 吃掉的选择符，因此列出分组的表在末尾给出任何 shell 都能
+	// 原样传下来的写法。
+	c.Note("run every group: worker --group=%s (an unquoted %s is expanded by the shell)", WorkerGroupAllAlias, WorkerGroupAll)
 	return nil
 }

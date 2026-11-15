@@ -214,3 +214,30 @@ func TestRestartRejectsArguments(t *testing.T) {
 		t.Fatal("restart accepted positional arguments")
 	}
 }
+
+func TestWorkerGroupSelectorSpellings(t *testing.T) {
+	for _, group := range []string{"*", "all", " all "} {
+		if !commandline.IsAllWorkerGroup(group) {
+			t.Fatalf("IsAllWorkerGroup(%q) = false, want true", group)
+		}
+	}
+	for _, group := range []string{"", "order", "all-orders", "*x"} {
+		if commandline.IsAllWorkerGroup(group) {
+			t.Fatalf("IsAllWorkerGroup(%q) = true, want false", group)
+		}
+	}
+}
+
+func TestWorkerRequiresGroupButSuggestsTheAlias(t *testing.T) {
+	d := commandline.Deps{
+		Name:      "app",
+		RunWorker: func(context.Context, commandline.WorkerOptions) error { return nil },
+		Usage:     func(err error) error { return err },
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--group=all") {
+		t.Fatalf("worker without --group = %v, want an error naming --group=all", err)
+	}
+}

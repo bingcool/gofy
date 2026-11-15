@@ -220,6 +220,17 @@ func TestSelectWorkerGroups(t *testing.T) {
 		t.Fatalf("registered groups = %d after selection, want 2", got)
 	}
 
+	// The alias exists because a shell expands an unquoted *, so it has to
+	// select exactly what the wildcard selects.
+	// 别名的存在是因为 shell 会展开不加引号的 *，因此它必须与通配符选中完全相同的东西。
+	alias, err := app.selectWorkerGroups(commandline.WorkerGroupAllAlias)
+	if err != nil {
+		t.Fatalf("selectWorkerGroups(all): %v", err)
+	}
+	if len(alias) != 2 || alias[0].Name() != "order" || alias[1].Name() != "report" {
+		t.Fatalf("selectWorkerGroups(all) = %v, want order and report in order", groupNames(alias))
+	}
+
 	one, err := app.selectWorkerGroups("report")
 	if err != nil {
 		t.Fatalf("selectWorkerGroups(report): %v", err)

@@ -256,14 +256,15 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 }
 
 // selectWorkerGroups resolves --group to the groups this process should run.
-// A single name returns that group; the wildcard returns every registered group,
+// A single name returns that group; the wildcard — in either spelling, since one
+// of them exists only because shells eat * — returns every registered group,
 // which is a local-development and smoke-test mode rather than a deployment
 // shape: pid file, probe and `stop` stay process-wide.
 // selectWorkerGroups 把 --group 解析成进程要运行的分组：单个名字返回该分组，通配符返回
-// 全部已注册分组。后者是本地开发与冒烟测试的用法，不是部署形态——pid 文件、探针与
-// `stop` 的粒度仍然是进程。
+// 全部已注册分组（两种写法等价，别名存在的唯一原因是 shell 会吃掉 *）。后者是本地开发
+// 与冒烟测试的用法，不是部署形态——pid 文件、探针与 `stop` 的粒度仍然是进程。
 func (a *App) selectWorkerGroups(name string) ([]*worker.Group, error) {
-	if strings.TrimSpace(name) == commandline.WorkerGroupAll {
+	if commandline.IsAllWorkerGroup(name) {
 		if len(a.opts.workerGroups) == 0 {
 			return nil, fmt.Errorf("%w: no worker groups registered", ErrWorkerGroupNotFound)
 		}
