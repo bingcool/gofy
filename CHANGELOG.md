@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/nacos`: `config_change_strategy` (application.yaml, or
+  `NACOS_CONFIG_CHANGE_STRATEGY`) selects what happens after a changed config
+  is written. `reload` (default) calls `WithOnChange` so an app can run
+  `App.Reload` in place; `restart` re-executes the binary with `syscall.Exec`
+  for hosts without a supervisor; `exit` sends SIGTERM and leaves the restart
+  to Kubernetes, a Docker restart policy or systemd. Strategy is the one key
+  where the environment overrides the file, so an image that says reload can
+  still be deployed as exit. Unknown values fail at Load rather than silently
+  falling back to reload. `WithRestartOnChange` stays as the compatibility
+  form of exit.
+- `examples/demo-service`: the Dockerfile now ships nacos.yaml and
+  application.yaml, gives the non-root user a writable /app (Sync replaces
+  config.yaml atomically and the pid file lives in app/), and defaults
+  `NACOS_CONFIG_CHANGE_STRATEGY=exit` so an orchestrator restarts the process
+  on a config change. The demo's application.yaml defaults to reload for
+  local development.
 - `examples/demo-service`: `uuidint.fallback_redis_instance_name` optionally
   names a backup Redis instance. `support/uuidint` already had
   `WithFallbackClients` / `WithFallbackInstances`; the demo now wires a second

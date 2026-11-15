@@ -19,8 +19,15 @@ type Watcher struct {
 	logger *zap.Logger
 
 	onChange       func(ctx context.Context, result Result) error
-	restart        bool
+	strategy       ChangeStrategy
 	restartPIDFile string
+
+	// execSelf and terminate are replaceable so a test can observe dispatch
+	// without re-executing the test binary or signalling the test process.
+	// execSelf 与 terminate 可替换，测试能观察分发而不必真的重执行测试二进制或
+	// 给测试进程发信号。
+	execSelf  func() error
+	terminate func(string) (int, error)
 }
 
 // WatchOption customizes a Watcher.
@@ -44,22 +51,25 @@ func WithOnChange(fn func(ctx context.Context, result Result) error) WatchOption
 	return func(w *Watcher) { w.onChange = fn }
 }
 
-// WithRestartOnChange terminates the process recorded in pidFile (empty: the
-// current process) after a config change. The watcher does not spawn a
-// replacement; a supervisor such as systemd, Kubernetes or a container
-// restart policy must restart the process, and the new process pulls the
-// config at startup.
+// WithRestartOnChange forces the exit strategy and terminates the process
+// recorded in pidFile (empty: the current process) after a config change. It
+// is the compatibility form of setting nacos.config_change_strategy: exit;
+// prefer configuring the strategy so the deployment owns the choice.
 //
-// Windows does not support the termination signal; the error is reported by
-// the watcher.
-// WithRestartOnChange 在配置变更后终止 pidFile 记录的进程（为空表示当前进程）。
+// The watcher does not spawn a replacement: a supervisor such as systemd,
+// Kubernetes or a container restart policy must restart the process, and the
+// new process pulls the config at startup. Windows does not support the
+// termination signal; the error is reported by the watcher.
+// WithRestartOnChange 强制使用 exit 策略，在配置变更后终止 pidFile 记录的进程
+// （为空表示当前进程）。它是 nacos.config_change_strategy: exit 的兼容写法；
+// 更推荐配置策略，让部署形态自己决定行为。
+//
 // watcher 不会拉起新进程，需要由 systemd、Kubernetes 或容器重启策略等外部
-// 监管者重启，新进程启动时会重新拉取配置。
-//
-// Windows 不支持该终止信号，错误由 watcher 上报。
+// 监管者重启，新进程启动时会重新拉取配置。Windows 不支持该终止信号，
+// 错误由 watcher 上报。
 func WithRestartOnChange(pidFile string) WatchOption {
 	return func(w *Watcher) {
-		w.restart = true
+		w.strategy = StrategyExit
 		w.restartPIDFile = pidFile
 	}
 }
@@ -71,7 +81,10 @@ func NewWatcher(cfg Config, opts ...WatchOption) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &Watcher{client: client, logger: zap.NewNop()}
+	w := &Watcher{
+		client: client, logger: zap.NewNop(), strategy: client.cfg.ChangeStrategy,
+		execSelf: selfRestart, terminate: restartProcess,
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(w)
@@ -108,6 +121,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		zap.String("data_id", cfg.DataID),
 		zap.String("group", cfg.Group),
 		zap.String("file", cfg.File),
+		zap.String("strategy", string(w.strategy)),
 	)
 
 	current, err := w.prime(ctx)
@@ -169,23 +183,38 @@ func (w *Watcher) prime(ctx context.Context) (string, error) {
 	return "", err
 }
 
+// apply dispatches a written change according to the deployment strategy:
+// reload hands the result to WithOnChange, restart replaces the process image,
+// and exit terminates it for an external supervisor. Only reload calls the
+// callback — the other two start the process from main again.
+// apply 按部署策略分发已落盘的变更：reload 交给 WithOnChange，restart 替换进程
+// 映像，exit 终止进程交由外部监管者。只有 reload 会调回调，另外两种会让进程
+// 从 main 重新运行。
 func (w *Watcher) apply(ctx context.Context, result Result) error {
-	var errs []error
-	if w.onChange != nil {
-		if err := w.onChange(ctx, result); err != nil {
-			errs = append(errs, fmt.Errorf("change handler: %w", err))
-		}
-	}
-	if w.restart {
-		pid, err := restartProcess(w.restartPIDFile)
+	switch w.strategy {
+	case StrategyRestart:
+		// exec skips defers, so flush buffered logs before the image is lost.
+		// exec 会跳过 defer，替换映像前先把缓冲日志刷出去。
+		w.logger.Info("nacos config changed, re-executing process", zap.String("file", result.File))
+		_ = w.logger.Sync()
+		return w.execSelf()
+	case StrategyExit:
+		pid, err := w.terminate(w.restartPIDFile)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("restart: %w", err))
-		} else {
-			w.logger.Info("nacos config applied, termination signal sent",
-				zap.Int("pid", pid), zap.String("file", result.File))
+			return fmt.Errorf("exit: %w", err)
 		}
+		w.logger.Info("nacos config changed, terminating process",
+			zap.Int("pid", pid), zap.String("file", result.File))
+		return nil
+	default:
+		var errs []error
+		if w.onChange != nil {
+			if err := w.onChange(ctx, result); err != nil {
+				errs = append(errs, fmt.Errorf("change handler: %w", err))
+			}
+		}
+		return errors.Join(errs...)
 	}
-	return errors.Join(errs...)
 }
 
 func restartProcess(pidFile string) (int, error) {

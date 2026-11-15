@@ -34,6 +34,13 @@ nacos:
 
   # 监控配置变化(main.go的enableNacosSyncConfig配置是总开关)
   enable_nacos_config_change_restart: true
+  # 配置变更后的处理策略，按部署形态选择：
+  #   reload  - 原地热更新，进程与 pid 不变（本地开发，默认）
+  #   restart - 重新执行当前进程，pid 不变，无需外部监管（物理机 / 云主机）
+  #   exit    - 退出进程，交给 k8s / docker restart policy / systemd 拉起新进程
+  # 容器与 k8s 可用 NACOS_CONFIG_CHANGE_STRATEGY 环境变量覆盖，不必改镜像内文件。
+  # 该键放在本地 application.yaml 而非远端 config.yaml：Sync 会覆盖后者。
+  config_change_strategy: reload
   monitor_config_change:
     listener_timeout_ms: 30000
     failed_wait_ms: 3000

@@ -101,6 +101,15 @@ type Config struct {
 	// application.yaml 的 nacos.enable_nacos_config_change_restart，默认开启。
 	Watch bool
 
+	// ChangeStrategy decides what happens after a changed config has been
+	// written: reload in place, re-exec the process, or exit for a supervisor
+	// to restart. It maps to application.yaml nacos.config_change_strategy and
+	// NACOS_CONFIG_CHANGE_STRATEGY, and defaults to reload.
+	// ChangeStrategy 决定变更后的配置落盘后怎么做：原地热更新、重新执行进程、或
+	// 退出交由监管者拉起。对应 application.yaml 的 nacos.config_change_strategy
+	// 与 NACOS_CONFIG_CHANGE_STRATEGY，默认 reload。
+	ChangeStrategy ChangeStrategy
+
 	// Timeout bounds a single config or auth request.
 	// Timeout 限制单次配置请求或鉴权请求的耗时。
 	Timeout time.Duration
@@ -220,14 +229,15 @@ func envSeconds(key string, fallback time.Duration) time.Duration {
 // 且该配置默认处于关闭状态。
 func DefaultConfig() Config {
 	return Config{
-		Host:        "127.0.0.1",
-		Port:        8848,
-		Group:       DefaultGroup,
-		File:        DefaultFile,
-		Watch:       true,
-		Timeout:     10 * time.Second,
-		PollTimeout: 30 * time.Second,
-		RetryDelay:  3 * time.Second,
+		Host:           "127.0.0.1",
+		Port:           8848,
+		Group:          DefaultGroup,
+		File:           DefaultFile,
+		Watch:          true,
+		ChangeStrategy: StrategyReload,
+		Timeout:        10 * time.Second,
+		PollTimeout:    30 * time.Second,
+		RetryDelay:     3 * time.Second,
 	}
 }
 
@@ -235,7 +245,7 @@ func DefaultConfig() Config {
 //
 //	NACOS_ENABLED, NACOS_ADDR, NACOS_HOST, NACOS_PORT,
 //	NACOS_USERNAME, NACOS_PASSWORD, NACOS_NAMESPACE,
-//	NACOS_DATA_ID, NACOS_GROUP, NACOS_FILE,
+//	NACOS_DATA_ID, NACOS_GROUP, NACOS_FILE, NACOS_CONFIG_CHANGE_STRATEGY,
 //	NACOS_TIMEOUT_MS, NACOS_LISTENER_TIMEOUT_MS, NACOS_LISTENER_FAILED_MS
 //
 // FromEnv 在默认配置基础上用环境变量覆盖后返回配置，可识别的变量见上方列表。
@@ -274,6 +284,9 @@ func FromEnv() Config {
 	if v, ok := lookupEnv("NACOS_FILE"); ok {
 		cfg.File = v
 	}
+	if v, ok := lookupEnv("NACOS_CONFIG_CHANGE_STRATEGY"); ok {
+		cfg.ChangeStrategy = ChangeStrategy(v)
+	}
 	cfg.Timeout = envDurationMS("NACOS_TIMEOUT_MS", cfg.Timeout)
 	cfg.PollTimeout = envDurationMS("NACOS_LISTENER_TIMEOUT_MS", cfg.PollTimeout)
 	cfg.RetryDelay = envDurationMS("NACOS_LISTENER_FAILED_MS", cfg.RetryDelay)
@@ -300,7 +313,11 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, err
 	}
 	applyNacosFile(&cfg, n)
-	return cfg.normalize(), nil
+	cfg = cfg.normalize()
+	if _, err := ParseChangeStrategy(string(cfg.ChangeStrategy)); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 // Load reads the swoolefy-style pair of files: nacosPath holds the server
@@ -310,6 +327,7 @@ func LoadConfig(path string) (Config, error) {
 //	nacos.yaml         nacos.host/port/username/password/namespace
 //	application.yaml   nacos.service_config.data_id/group/tenant
 //	                   nacos.enable_nacos_config_change_restart
+//	                   nacos.config_change_strategy
 //	                   nacos.monitor_config_change.listener_timeout_ms
 //	                   nacos.monitor_config_change.failed_wait_ms
 //
@@ -366,7 +384,15 @@ func Load(nacosPath, appPath string) (Config, error) {
 	if !explicitEnabled {
 		cfg.Enabled = true
 	}
-	return cfg.normalize(), nil
+	cfg = cfg.normalize()
+	// Reject an unknown strategy here too: a worker or script invocation never
+	// builds a Client, so validate() would not get a chance to report it.
+	// 这里也要拒绝未知策略：worker / script 子命令不会构造 Client，validate()
+	// 没有机会报错。
+	if _, err := ParseChangeStrategy(string(cfg.ChangeStrategy)); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 func readNacosFile(path string) (rawConfig, error) {
@@ -459,7 +485,8 @@ type rawApplication struct {
 			GroupName    string `yaml:"group_name"`
 			Clusters     string `yaml:"clusters"`
 		} `yaml:"discovery_service_client"`
-		EnableNacosConfigChangeRestart *bool `yaml:"enable_nacos_config_change_restart"`
+		EnableNacosConfigChangeRestart *bool  `yaml:"enable_nacos_config_change_restart"`
+		ConfigChangeStrategy           string `yaml:"config_change_strategy"`
 		MonitorConfigChange            struct {
 			ListenerTimeoutMS int `yaml:"listener_timeout_ms"`
 			FailedWaitMS      int `yaml:"failed_wait_ms"`
@@ -496,6 +523,16 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 		// 该键沿用 swoolefy 的命名；现在它只表示开启监听，变更后是热加载还是
 		// 重启由回调决定。
 		cfg.Watch = *app.Nacos.EnableNacosConfigChangeRestart
+	}
+	// The strategy belongs to the deployment rather than the image, so an
+	// environment override wins over the file: a k8s manifest or docker -e
+	// must be able to turn an image whose application.yaml says reload into
+	// exit. Every other key in this layout keeps file > environment > default.
+	// 策略属于部署形态而不是镜像内容，因此环境变量优先于文件：镜像里写着 reload，
+	// 也要允许 k8s 清单或 docker -e 把它切成 exit。本布局其余键仍保持
+	// 文件 > 环境变量 > 默认值。
+	if v := strings.TrimSpace(app.Nacos.ConfigChangeStrategy); v != "" && !envSet("NACOS_CONFIG_CHANGE_STRATEGY") {
+		cfg.ChangeStrategy = ChangeStrategy(v)
 	}
 	monitor := app.Nacos.MonitorConfigChange
 	if monitor.ListenerTimeoutMS > 0 {
@@ -611,6 +648,10 @@ func (c Config) normalize() Config {
 	if c.File == "" {
 		c.File = DefaultFile
 	}
+	c.ChangeStrategy = ChangeStrategy(strings.ToLower(strings.TrimSpace(string(c.ChangeStrategy))))
+	if c.ChangeStrategy == "" {
+		c.ChangeStrategy = StrategyReload
+	}
 	if c.Timeout <= 0 {
 		c.Timeout = 10 * time.Second
 	}
@@ -628,6 +669,13 @@ func (c Config) normalize() Config {
 func (c Config) validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	// An empty value means "not configured"; normalize() turns it into reload.
+	// 空值表示未配置，normalize() 会把它补成 reload。
+	if c.ChangeStrategy != "" {
+		if _, err := ParseChangeStrategy(string(c.ChangeStrategy)); err != nil {
+			return err
+		}
 	}
 	if c.DataID == "" {
 		return fmt.Errorf("nacos: data_id is required")

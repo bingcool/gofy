@@ -146,10 +146,8 @@ func (a *App) run(parent context.Context) error {
 	if err != nil {
 		return a.abort(err)
 	}
-	if pidPath != "" {
-		if existing, readErr := pidfile.Read(pidPath); readErr == nil && process.Alive(existing) {
-			return a.abort(fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath))
-		}
+	if existing, duplicate := duplicatePID(pidPath, os.Getpid()); duplicate {
+		return a.abort(fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath))
 	}
 
 	addr := net.JoinHostPort(a.opts.http.Host, strconv.Itoa(a.opts.http.Port))
@@ -624,6 +622,24 @@ func (a *App) newServer(handler http.Handler, lg *zap.Logger) *http.Server {
 		MaxHeaderBytes:    cfg.MaxHeaderBytes,
 		ErrorLog:          zap.NewStdLog(lg),
 	}
+}
+
+// duplicatePID reports a live pid recorded in pidPath that belongs to another
+// process. A pid equal to self means this process re-executed itself (the
+// restart strategy): the previous image is gone by definition, so the file is
+// simply refreshed rather than treated as a second instance.
+// duplicatePID 返回 pidPath 中记录的、属于其它进程且仍然存活的 pid。pid 等于 self
+// 表示本进程刚 re-exec 自重启（restart 策略）：旧映像按定义已不存在，只需刷新
+// 文件，不应判为第二个实例。
+func duplicatePID(pidPath string, self int) (int, bool) {
+	if pidPath == "" {
+		return 0, false
+	}
+	existing, err := pidfile.Read(pidPath)
+	if err != nil || existing == self {
+		return 0, false
+	}
+	return existing, process.Alive(existing)
 }
 
 func (a *App) resolvePIDPath() (string, error) {

@@ -621,6 +621,7 @@ nacos:
     group: GO_GROUP
     tenant: ''            # 仅当 nacos.yaml 未配置 namespace 时生效
   enable_nacos_config_change_restart: true
+  config_change_strategy: reload    # reload | restart | exit
   monitor_config_change:
     listener_timeout_ms: 30000
     failed_wait_ms: 3000
@@ -633,8 +634,12 @@ nacos:
   `nacos.enabled: false` 或 `NACOS_ENABLED=0` 可关闭；
 - 命名空间优先级：`nacos.yaml` 的 `namespace`（或 `NACOS_NAMESPACE`）→
   `service_config.tenant`（或 `NACOS_TENANT`）→ public；
-- `enable_nacos_config_change_restart` 对应 `Config.Watch`，控制启动后是否继续监听；
-  配置变更后由回调调用 `App.Reload` 做进程内热更新，不再重启进程（键名沿用 swoolefy）；
+- `enable_nacos_config_change_restart` 对应 `Config.Watch`，控制启动后是否继续监听
+  （键名沿用 swoolefy）；变更后的动作由 `config_change_strategy` 决定：`reload`
+  原地热更新（本地开发，默认）、`restart` 重新执行进程（物理机/云主机）、
+  `exit` 退出交给 k8s/docker 拉起，详见
+  [`support/nacos/README.md`](support/nacos/README.md#配置变更策略)；
+- `NACOS_CONFIG_CHANGE_STRATEGY` 环境变量优先于该文件中的策略，便于容器与 k8s 注入；
 - `monitor_config_change` 覆盖 `NACOS_LISTENER_TIMEOUT_MS` / `NACOS_LISTENER_FAILED_MS`；
 - `nacos.yaml` 不存在时 `Load` 返回的错误满足 `errors.Is(err, fs.ErrNotExist)`，
   可回退到 `nacos.FromEnv()`（示例见 `examples/demo-service/main.go`）。
