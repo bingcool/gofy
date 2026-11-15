@@ -17,7 +17,7 @@ nacos:
     service_name: demo-service
     heartbeat_interval: 10   # 心跳间隔（秒）
     namespace_id: dev
-    group_name: swoolefy-group
+    group_name: GO_GROUP
     weight: 1
     ephemeral: true
     metadata:
@@ -30,7 +30,7 @@ nacos:
     stale_ttl: 180
     healthy_only: true
     namespace_id: dev
-    group_name: swoolefy-group
+    group_name: GO_GROUP
 
   # 监控配置变化
   enable_nacos_config_change_restart: true
