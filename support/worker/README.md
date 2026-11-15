@@ -340,8 +340,14 @@ return worker.Ticker(ctx, 5000, func(ctx context.Context) error { // 5000 毫秒
 | --- | --- | --- |
 | `kafkaconsumer` | `*kafka.Consumer` | `New(name, consumer, Config{Handler, Options})` |
 | `amqpconsumer` | `*amqp.Queue` | 同上 |
-| `rocketmqconsumer` | `*rocketmq.Consumer` | 同上 |
+| `rocketmqconsumer` | `*rocketmq.Consumer` | `New(...)` 一次性；`NewFactory(name, factory, cfg)` 每次 Run 新建 |
 | `queuesconsumer` | `queues.Queue`（或实现 `Consume` 的等价类型） | 同上 |
+
+RocketMQ 的 Consumer 只能 `Consume` 一次再 `Close`，因此 `New` 接现成消费者时只能当
+一次性 Worker 用：Runner 在失败后重启它会从一个已经消费过的客户端继续拉取。放在
+Runner 后面必须用 `NewFactory` —— 它在每次 `Run` 开始时调用工厂建新消费者（失败重启
+因此是真的重连），退出时无条件 `Close`。高层 `support/consumer.NewRocketMQ()` 本来
+就在 `Run` 内建消费者，没有这个问题。
 
 ```go
 consumer, err := kafkaconsumer.New("order-consumer", client, kafkaconsumer.Config{

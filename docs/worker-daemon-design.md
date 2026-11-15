@@ -422,7 +422,7 @@ app, err := gofy.New(
 | --- | --- | --- | --- |
 | Kafka | `Consumer.Consume` | `kafkaconsumer.New(name, consumer, cfg)` | 停机时 `Close`；出错时不关，留给重启策略复用同一消费者 |
 | AMQP | `Queue.Consume` | `amqpconsumer.New(name, queue, cfg)` | `PrefetchCount` 决定在途上限；未 ack 的消息在断开后重投 |
-| RocketMQ | `Consumer.Consume` | `rocketmqconsumer.New(name, consumer, cfg)` | `Consumer` 一次性：`Consume` 一次后 `Close` |
+| RocketMQ | `Consumer.Consume` | `rocketmqconsumer.New(name, consumer, cfg)` / `NewFactory(name, factory, cfg)` | `Consumer` 一次性：`New` 只能当一次性 Worker；Runner 后面用 `NewFactory`，每次 `Run` 建新消费者 |
 | Redis 队列 | `queues.Consume` | `queuesconsumer.New(name, queue, cfg)` | 客户端归应用所有，适配器不负责关闭 |
 
 包路径：`support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`（子包，避免 `support/worker` 反向依赖三种 MQ 客户端，保持核心包零 MQ 依赖）。
