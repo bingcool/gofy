@@ -3,6 +3,7 @@ package commandline
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bingcool/gofy/internal/console"
 	"github.com/spf13/cobra"
@@ -30,19 +31,20 @@ const WorkerAllPIDToken = "all"
 
 // IsAllWorkerGroup reports whether group selects every worker process. The
 // wildcard and its alias mean the same thing everywhere: run every registered
-// group, or address every worker that left a pid file.
+// group, or stop every worker that left a pid file.
 // IsAllWorkerGroup 报告 group 是否选中所有 worker 进程。通配符与它的别名在任何地方
-// 含义相同：运行全部已注册分组，或指向所有留下 pid 文件的 worker。
+// 含义相同：运行全部已注册分组，或停止所有留下 pid 文件的 worker。
 func IsAllWorkerGroup(group string) bool {
 	g := strings.TrimSpace(group)
 	return g == WorkerGroupAll || g == WorkerGroupAllAlias
 }
 
-// WorkerOptions are the flags of the worker command.
-// WorkerOptions 是 worker 命令的旗标。
+// WorkerOptions are the flags of the worker command and its subcommands.
+// WorkerOptions 是 worker 命令及其子命令的旗标。
 type WorkerOptions struct {
-	// Group selects the group to run.
-	// Group 选择要运行的分组。
+	// Group selects the group to run. Empty means every group for stop and
+	// restart, and is rejected when running.
+	// Group 选择要运行的分组。stop / restart 时空值表示全部分组；运行分组时不允许为空。
 	Group string
 	// Names narrows the group to the listed workers; empty runs every member.
 	// Names 把分组缩小到列出的 worker；为空表示运行全部成员。
@@ -53,10 +55,19 @@ type WorkerOptions struct {
 	// List prints the registered groups and exits without starting anything.
 	// List 打印已注册的分组后退出，不启动任何 worker。
 	List bool
-	// Daemon detaches into the background and exits the parent process instead of
-	// holding the terminal that started it.
-	// Daemon 脱离到后台并让父进程退出，而不是占用启动它的终端。
+	// Daemon detaches into the background and exits the parent. `worker restart`
+	// defaults it to true: restarting a service that was running in the
+	// background must not silently leave it attached to the terminal.
+	// Daemon 脱离到后台并让父进程退出。`worker restart` 默认为 true：重启一个本来在
+	// 后台跑的服务，不能悄悄把它挂到当前终端上。
 	Daemon bool
+	// Force skips the confirmation and escalates to SIGKILL on timeout. Only
+	// stop and restart use it.
+	// Force 跳过确认，并在超时后升级为 SIGKILL。只有 stop 与 restart 使用它。
+	Force bool
+	// Timeout bounds how long stop waits for the process to exit.
+	// Timeout 限制 stop 等待进程退出的时长。
+	Timeout time.Duration
 }
 
 // WorkerInfo describes one worker for `worker --list`.
@@ -92,16 +103,97 @@ func newWorkerCmd(d Deps) *cobra.Command {
 			return d.RunWorker(cmd.Context(), opts)
 		},
 	}
-	// --group is persistent so the selector keeps working from subcommands added
-	// later, in the same position as on the run form.
-	// --group 是持久旗标，后续加的子命令因此也能用同一个选择符，位置与启动形态一致。
+	// --group is persistent, so `worker stop` and `worker restart` take the same
+	// selector in the same positions as the run form, including before the
+	// subcommand (`worker --group=order stop`).
+	// --group 是持久旗标，`worker stop` / `worker restart` 因此与启动形态共用同一个
+	// 选择符，位置也一致，包括写在子命令之前（`worker --group=order stop`）。
 	cmd.PersistentFlags().StringVar(&opts.Group, "group", "",
 		"worker group to run, or --group="+WorkerGroupAllAlias+" ("+WorkerGroupAll+" when quoted) for every group")
 	cmd.Flags().StringSliceVar(&opts.Names, "name", nil, "run only the named workers (repeatable)")
 	cmd.Flags().IntVar(&opts.Concurrency, "concurrency", 0, "override the instance count of every worker (0 = config)")
 	cmd.Flags().BoolVar(&opts.List, "list", false, "list groups and workers, then exit")
 	cmd.Flags().BoolVar(&opts.Daemon, "daemon", false, "detach into the background and exit the parent process")
+	cmd.AddCommand(newWorkerStopCmd(d, &opts.Group))
+	cmd.AddCommand(newWorkerRestartCmd(d, &opts.Group))
 	return cmd
+}
+
+// newWorkerStopCmd stops the worker processes recorded in their pid files. It is
+// a subcommand rather than `stop --worker=<g>` because the address of a worker
+// is the worker itself: `worker stop` reads as the counterpart of
+// `worker --group=<g>`, and --group keeps the meaning it has on the run form.
+// newWorkerStopCmd 按 pid 文件停止 worker 进程。它做成子命令而不是
+// `stop --worker=<g>`：worker 的地址就是 worker 本身，`worker stop` 读起来正是
+// `worker --group=<g>` 的逆操作，而 --group 的含义与启动形态一致。
+func newWorkerStopCmd(d Deps, group *string) *cobra.Command {
+	var force bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Stop worker processes using their pid files",
+		Args:  noArgs(d, "worker stop"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if d.StopWorker == nil {
+				return fmt.Errorf("worker: stopping a group is not available")
+			}
+			if !force {
+				ok, err := confirmAction(d, "停止", workerSelectorTarget(*group))
+				if err != nil || !ok {
+					return err
+				}
+			}
+			return d.StopWorker(cmd.Context(), WorkerOptions{Group: *group, Force: force, Timeout: timeout})
+		},
+	}
+	addWorkerStopFlags(d, cmd, &timeout, &force)
+	return cmd
+}
+
+// newWorkerRestartCmd stops the selected workers and starts them again. Daemon
+// defaults to true here: a restart is an operation on a service, and a service
+// that used to run detached has to come back detached.
+// newWorkerRestartCmd 停止选中的 worker 后重新启动。这里 Daemon 默认为 true：restart
+// 是针对服务的操作，原先脱离终端运行的服务必须以脱离态回来。
+func newWorkerRestartCmd(d Deps, group *string) *cobra.Command {
+	opts := WorkerOptions{Daemon: true}
+	cmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Stop worker processes, then start the group again",
+		Args:  noArgs(d, "worker restart"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if d.RestartWorker == nil {
+				return fmt.Errorf("worker: restarting a group is not available")
+			}
+			if !opts.Force {
+				ok, err := confirmAction(d, "重启", workerSelectorTarget(*group))
+				if err != nil || !ok {
+					return err
+				}
+			}
+			opts.Group = *group
+			return d.RestartWorker(cmd.Context(), opts)
+		},
+	}
+	addWorkerStopFlags(d, cmd, &opts.Timeout, &opts.Force)
+	cmd.Flags().BoolVar(&opts.Daemon, "daemon", opts.Daemon,
+		"restart in the background; --daemon=false stays in the foreground")
+	return cmd
+}
+
+func addWorkerStopFlags(d Deps, cmd *cobra.Command, timeout *time.Duration, force *bool) {
+	*timeout = d.DefaultStopTimeout
+	cmd.Flags().DurationVar(timeout, "timeout", *timeout, "how long to wait for the process to exit")
+	cmd.Flags().BoolVar(force, "force", false, "skip confirmation and send SIGKILL when the timeout expires")
+}
+
+// workerSelectorTarget names the target of a stop or restart for the prompt.
+// workerSelectorTarget 为确认提示描述 stop / restart 的目标。
+func workerSelectorTarget(group string) string {
+	if g := strings.TrimSpace(group); g != "" && !IsAllWorkerGroup(g) {
+		return fmt.Sprintf("worker 分组【%s】", g)
+	}
+	return "全部 worker 进程"
 }
 
 func listWorkers(d Deps) error {

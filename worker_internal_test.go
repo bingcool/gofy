@@ -152,20 +152,32 @@ func TestStopWorkerTargetsTheGroupPidFile(t *testing.T) {
 	}
 }
 
-// TestStopWorkerWildcardUsesTheAllPidFile pins the name the wildcard run writes:
-// `stop --worker=*` has to resolve `-worker-all.pid`, otherwise a process started
-// with `--group=*` could never be stopped by the flag that started it.
-// TestStopWorkerWildcardUsesTheAllPidFile 固定通配符启动写的文件名：
-// `stop --worker=*` 必须解析到 `-worker-all.pid`，否则用 `--group=*` 起
-// 来的进程没法用配套的旗标停掉。
-func TestStopWorkerWildcardUsesTheAllPidFile(t *testing.T) {
+// TestStopWorkerWildcardStopsEveryWorkerPIDFile pins what the wildcard means:
+// groups may have been started as separate processes, so `stop --worker=*` and
+// `worker stop` have to stop every pid file the workers left behind, not only
+// the one the wildcard run wrote.
+// TestStopWorkerWildcardStopsEveryWorkerPIDFile 固定通配符的语义：分组可能是分别启动的，
+// `stop --worker=*` 与 `worker stop` 必须停掉 worker 留下的每个 pid 文件，而不是只有
+// 通配符启动写的那个。
+func TestStopWorkerWildcardStopsEveryWorkerPIDFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("pid based stop is not supported on windows")
 	}
 	pidPath := filepath.Join(t.TempDir(), "demo.pid")
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
-		t.Fatalf("write pid file: %v", err)
+	write := func(path string, pid int) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
 	}
+	// The HTTP pid file holds this live test process and must survive.
+	write(pidPath, os.Getpid())
+	// The worker files hold pids that cannot be alive, so the stop reports them
+	// as not running without signalling anything real.
+	orderPID := workerPIDPath(pidPath, "order")
+	allPID := workerPIDPath(pidPath, commandline.WorkerAllPIDToken)
+	write(orderPID, 999999)
+	write(allPID, 999998)
 
 	app, err := New(
 		WithName("stop-worker-test"),
@@ -180,11 +192,104 @@ func TestStopWorkerWildcardUsesTheAllPidFile(t *testing.T) {
 	if !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("stop worker wildcard: got %v, want ErrNotRunning", err)
 	}
-	if !strings.Contains(err.Error(), "demo-worker-all.pid") {
-		t.Fatalf("error does not name the wildcard pid file: %v", err)
+	for _, pid := range []string{"999999", "999998"} {
+		if !strings.Contains(err.Error(), pid) {
+			t.Fatalf("error does not mention pid %s, so that file was skipped: %v", pid, err)
+		}
 	}
 	if _, statErr := os.Stat(pidPath); statErr != nil {
 		t.Fatalf("HTTP pid file was touched: %v", statErr)
+	}
+	// A pid that is gone leaves no pid file behind.
+	if _, statErr := os.Stat(orderPID); !os.IsNotExist(statErr) {
+		t.Fatalf("stale worker pid file survived the stop: %v", statErr)
+	}
+}
+
+// TestWorkerPIDFiles lists only the worker files derived from one pid path, and
+// recovers the group name the operator needs in the message.
+// TestWorkerPIDFiles 只列出由一个 pid 路径派生的 worker 文件，并还原消息里需要的分组名。
+func TestWorkerPIDFiles(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "demo.pid")
+	for _, name := range []string{"demo-worker-order.pid", "demo-worker-all.pid", "demo.pid", "other-worker-x.pid"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("1"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	files, err := workerPIDFiles(base)
+	if err != nil {
+		t.Fatalf("workerPIDFiles: %v", err)
+	}
+	if len(files) != 2 || filepath.Base(files[0]) != "demo-worker-all.pid" || filepath.Base(files[1]) != "demo-worker-order.pid" {
+		t.Fatalf("workerPIDFiles = %v, want the all and order files only, sorted", files)
+	}
+	if got := workerGroupFromPIDFile(base, files[0]); got != commandline.WorkerAllPIDToken {
+		t.Fatalf("workerGroupFromPIDFile(all) = %q", got)
+	}
+	if got := workerGroupFromPIDFile(base, files[1]); got != "order" {
+		t.Fatalf("workerGroupFromPIDFile(order) = %q", got)
+	}
+}
+
+// TestStopWorkersWithoutPIDFiles keeps the failure honest: "nothing to stop" has
+// to name the pattern that was searched, otherwise the operator cannot tell a
+// wrong workdir from a wrong group name.
+// TestStopWorkersWithoutPIDFiles 让失败保持可解释："没有可停的进程"必须指出搜索过的
+// 模式，否则运维分不清是工作目录不对还是分组名不对。
+func TestStopWorkersWithoutPIDFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pid based stop is not supported on windows")
+	}
+	pidPath := filepath.Join(t.TempDir(), "demo.pid")
+	app, err := New(
+		WithName("stop-worker-test"),
+		WithPIDFile(pidPath),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = app.stop(context.Background(), commandline.StopOptions{Worker: commandline.WorkerGroupAll})
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("stop worker wildcard: got %v, want ErrNotRunning", err)
+	}
+	if !strings.Contains(err.Error(), "demo-worker-*") {
+		t.Fatalf("error does not name the searched pattern: %v", err)
+	}
+}
+
+// TestDaemonWorkerRefusesWhenAlreadyRunning checks the pre-flight that the
+// daemon path needs: the child's stdio goes to /dev/null, so a duplicate has to
+// be refused while the parent can still print why.
+// TestDaemonWorkerRefusesWhenAlreadyRunning 校验 daemon 路径需要的前置检查：子进程的
+// stdio 指向 /dev/null，重复实例必须在父进程还能说明原因时就挡住。
+func TestDaemonWorkerRefusesWhenAlreadyRunning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("daemonizing a worker is not supported on windows")
+	}
+	order, err := worker.NewGroup("order", worker.Func("scan", 1, func(context.Context) error { return nil }))
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	pidPath := filepath.Join(t.TempDir(), "demo.pid")
+	if err := os.WriteFile(workerPIDPath(pidPath, "order"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	app, err := New(
+		WithName("daemon-worker-test"),
+		WithPIDFile(pidPath),
+		WithWorkerGroups(order),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = app.runWorker(context.Background(), commandline.WorkerOptions{Group: "order", Daemon: true})
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("runWorker daemon = %v, want ErrAlreadyRunning", err)
 	}
 }
 
@@ -360,38 +465,5 @@ func TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown(t *testing.T) {
 				t.Fatalf("order/scan concurrency = %d, want 3", w.Concurrency)
 			}
 		}
-	}
-}
-
-// TestDaemonWorkerRefusesWhenAlreadyRunning checks the pre-flight that the
-// daemon path needs: the child's stdio goes to /dev/null, so a duplicate has to
-// be refused while the parent can still print why.
-// TestDaemonWorkerRefusesWhenAlreadyRunning 校验 daemon 路径需要的前置检查：子进程的
-// stdio 指向 /dev/null，重复实例必须在父进程还能说明原因时就挡住。
-func TestDaemonWorkerRefusesWhenAlreadyRunning(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("daemonizing a worker is not supported on windows")
-	}
-	order, err := worker.NewGroup("order", worker.Func("scan", 1, func(context.Context) error { return nil }))
-	if err != nil {
-		t.Fatalf("NewGroup: %v", err)
-	}
-	pidPath := filepath.Join(t.TempDir(), "demo.pid")
-	if err := os.WriteFile(workerPIDPath(pidPath, "order"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
-		t.Fatalf("write pid file: %v", err)
-	}
-
-	app, err := New(
-		WithName("daemon-worker-test"),
-		WithPIDFile(pidPath),
-		WithWorkerGroups(order),
-		WithLogger(zap.NewNop()),
-	)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	err = app.runWorker(context.Background(), commandline.WorkerOptions{Group: "order", Daemon: true})
-	if !errors.Is(err, ErrAlreadyRunning) {
-		t.Fatalf("runWorker daemon = %v, want ErrAlreadyRunning", err)
 	}
 }

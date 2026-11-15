@@ -81,6 +81,8 @@ func (a *App) ExecuteArgs(ctx context.Context, args []string) error {
 		Restart:            a.restart,
 		RunScript:          a.runScript,
 		RunWorker:          a.runWorker,
+		StopWorker:         a.stopWorker,
+		RestartWorker:      a.restartWorker,
 		Version:            a.printVersion,
 		Scripts:            scripts,
 		Commands:           custom,

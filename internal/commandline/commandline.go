@@ -69,7 +69,14 @@ type Deps struct {
 	Restart   func(ctx context.Context, opts StopOptions) error
 	RunScript func(ctx context.Context, name string, args []string) error
 	RunWorker func(ctx context.Context, opts WorkerOptions) error
-	Version   func(ctx context.Context, jsonOutput bool) error
+	// StopWorker and RestartWorker back `worker stop` / `worker restart`. Their
+	// options carry the group selector, so an empty Group means every worker
+	// process on this host rather than the HTTP instance.
+	// StopWorker / RestartWorker 支撑 `worker stop` / `worker restart`。它们的选项
+	// 带着分组选择符，因此 Group 为空表示本机所有 worker 进程，而不是 HTTP 实例。
+	StopWorker    func(ctx context.Context, opts WorkerOptions) error
+	RestartWorker func(ctx context.Context, opts WorkerOptions) error
+	Version       func(ctx context.Context, jsonOutput bool) error
 
 	Scripts  []Script
 	Commands []Command
@@ -159,7 +166,7 @@ func newStopCmd(d Deps) *cobra.Command {
 		Args:  noArgs(d, "stop"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !opts.Force {
-				ok, err := confirmAction(d, "停止")
+				ok, err := confirmAction(d, "停止", fmt.Sprintf("应用【%s】", d.Name))
 				if err != nil || !ok {
 					return err
 				}
@@ -198,7 +205,7 @@ func newRestartCmd(d Deps) *cobra.Command {
 		Args:  noArgs(d, "restart"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !opts.Force {
-				ok, err := confirmAction(d, "重启")
+				ok, err := confirmAction(d, "重启", fmt.Sprintf("应用【%s】", d.Name))
 				if err != nil || !ok {
 					return err
 				}
@@ -210,16 +217,18 @@ func newRestartCmd(d Deps) *cobra.Command {
 	return cmd
 }
 
-// confirmAction asks for a yes/no confirmation. Anything but "yes" cancels.
-// confirmAction 请求 yes/no 确认，除 "yes" 之外的任何输入都视为取消，此时返回 false 且不执行操作。
-func confirmAction(d Deps, verb string) (bool, error) {
+// confirmAction asks for a yes/no confirmation of one action against one
+// target. Anything but "yes" cancels.
+// confirmAction 针对一个目标和一次操作请求 yes/no 确认，除 "yes" 之外的任何输入都视为
+// 取消，此时返回 false 且不执行操作。
+func confirmAction(d Deps, verb, target string) (bool, error) {
 	c := console.New(d.Out, d.ErrOut)
-	ok, err := c.Confirm(d.In, "你确定 [%s] 应用【%s】? (yes or no): ", verb, d.Name)
+	ok, err := c.Confirm(d.In, "你确定 [%s] %s? (yes or no): ", verb, target)
 	if err != nil {
 		return false, d.Usage(err)
 	}
 	if !ok {
-		c.Info("你已放弃%s应用【%s】，应用继续运行中", verb, d.Name)
+		c.Info("你已放弃%s%s，应用继续运行中", verb, target)
 	}
 	return ok, nil
 }

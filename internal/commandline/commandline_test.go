@@ -228,20 +228,6 @@ func TestWorkerGroupSelectorSpellings(t *testing.T) {
 	}
 }
 
-func TestWorkerRequiresGroupButSuggestsTheAlias(t *testing.T) {
-	d := commandline.Deps{
-		Name:      "app",
-		RunWorker: func(context.Context, commandline.WorkerOptions) error { return nil },
-		Usage:     func(err error) error { return err },
-	}
-	cmd := commandline.Build(d)
-	cmd.SetArgs([]string{"worker"})
-	err := cmd.ExecuteContext(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "--group=all") {
-		t.Fatalf("worker without --group = %v, want an error naming --group=all", err)
-	}
-}
-
 func TestWorkerDaemonFlag(t *testing.T) {
 	var got commandline.WorkerOptions
 	d := commandline.Deps{
@@ -258,5 +244,127 @@ func TestWorkerDaemonFlag(t *testing.T) {
 	}
 	if !got.Daemon || got.Group != "order" {
 		t.Fatalf("worker options = %+v", got)
+	}
+}
+
+func TestWorkerRequiresGroupButSuggestsTheAlias(t *testing.T) {
+	d := commandline.Deps{
+		Name:      "app",
+		RunWorker: func(context.Context, commandline.WorkerOptions) error { return nil },
+		Usage:     func(err error) error { return err },
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--group=all") {
+		t.Fatalf("worker without --group = %v, want an error naming --group=all", err)
+	}
+}
+
+func TestWorkerStopDispatchesEveryGroupByDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "no group", args: []string{"worker", "stop", "--force"}, want: ""},
+		{name: "wildcard", args: []string{"worker", "stop", "--group=*", "--force"}, want: "*"},
+		{name: "alias", args: []string{"worker", "stop", "--group=all", "--force"}, want: "all"},
+		{name: "named group before the subcommand", args: []string{"worker", "--group=order", "stop", "--force"}, want: "order"},
+		{name: "named group after the subcommand", args: []string{"worker", "stop", "--group=order", "--force"}, want: "order"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got commandline.WorkerOptions
+			called := false
+			d := commandline.Deps{
+				Name: "app",
+				StopWorker: func(_ context.Context, opts commandline.WorkerOptions) error {
+					called = true
+					got = opts
+					return nil
+				},
+			}
+			cmd := commandline.Build(d)
+			cmd.SetArgs(tc.args)
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("worker stop: %v", err)
+			}
+			if !called {
+				t.Fatal("worker stop did not reach the app")
+			}
+			if got.Group != tc.want || !got.Force {
+				t.Fatalf("worker stop options = %+v, want group %q and force", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkerStopAsksBeforeSignalling(t *testing.T) {
+	var out bytes.Buffer
+	called := false
+	d := commandline.Deps{
+		Name: "app",
+		In:   strings.NewReader("no\n"),
+		Out:  &out,
+		StopWorker: func(context.Context, commandline.WorkerOptions) error {
+			called = true
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker", "stop", "--group=order"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("worker stop: %v", err)
+	}
+	if called {
+		t.Fatal("worker stop ran without confirmation")
+	}
+	if !strings.Contains(out.String(), "你已放弃停止worker 分组【order】") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestWorkerRestartDefaultsToTheBackground(t *testing.T) {
+	var got commandline.WorkerOptions
+	d := commandline.Deps{
+		Name: "app",
+		RestartWorker: func(_ context.Context, opts commandline.WorkerOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker", "restart", "--group=order", "--force=1"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("worker restart: %v", err)
+	}
+	if !got.Daemon || got.Group != "order" || !got.Force {
+		t.Fatalf("worker restart options = %+v, want daemon with group order", got)
+	}
+
+	cmd = commandline.Build(d)
+	cmd.SetArgs([]string{"worker", "restart", "--group=order", "--force=1", "--daemon=false"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("worker restart --daemon=false: %v", err)
+	}
+	if got.Daemon {
+		t.Fatalf("worker restart --daemon=false options = %+v, want foreground", got)
+	}
+}
+
+func TestWorkerStopUsesTheDefaultTimeout(t *testing.T) {
+	var got commandline.WorkerOptions
+	d := commandline.Deps{
+		Name:               "app",
+		StopWorker:         func(_ context.Context, opts commandline.WorkerOptions) error { got = opts; return nil },
+		DefaultStopTimeout: 7 * time.Second,
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker", "stop", "--force=1", "--group=order", "--timeout=3s"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("worker stop: %v", err)
+	}
+	if got.Timeout != 3*time.Second {
+		t.Fatalf("timeout = %v, want 3s", got.Timeout)
 	}
 }

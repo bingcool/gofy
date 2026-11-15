@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/bingcool/gofy/core"
@@ -337,8 +338,51 @@ func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string) error {
 	// reach here — so naming demo-service would be a command that may not exist.
 	// 提示里不带二进制名：本进程无从知道自己是怎么被启动的（`go run .`、绝对路径、
 	// 裸命令名都会走到这里），写上 demo-service 反而可能是一条并不存在的命令。
-	c.Note("使用 stop --worker=%s 停止", label)
+	c.Note("使用 worker stop --group=%s 停止，worker restart --group=%s 重启", label, label)
 	return nil
+}
+
+// stopWorker stops the worker processes selected by --group. An empty group (or
+// the wildcard, in either spelling) stops every worker that left a pid file.
+// stopWorker 停止 --group 选中的 worker 进程。分组为空（或通配符的任一写法）时停止
+// 所有留下 pid 文件的 worker。
+func (a *App) stopWorker(ctx context.Context, opts commandline.WorkerOptions) error {
+	group := strings.TrimSpace(opts.Group)
+	if group == "" {
+		group = commandline.WorkerGroupAllAlias
+	}
+	return a.stop(ctx, commandline.StopOptions{
+		Worker:  group,
+		Force:   opts.Force,
+		Timeout: opts.Timeout,
+	})
+}
+
+// restartWorker stops the selected workers and starts them again in the same
+// call, so `worker restart` cannot leave the service down if the second half is
+// forgotten. Without --group it restarts the wildcard shape: one process hosting
+// every registered group.
+// restartWorker 在同一次调用里停止并重新启动选中的 worker，`worker restart` 因此不会
+// 停在"只停了没起"的中间态。不带 --group 时按通配符重启：一个进程托管全部已注册分组。
+func (a *App) restartWorker(ctx context.Context, opts commandline.WorkerOptions) error {
+	group := strings.TrimSpace(opts.Group)
+	if group == "" {
+		group = commandline.WorkerGroupAllAlias
+	}
+	c := a.con()
+	c.Info("正在重启 worker 分组【%s】", group)
+	if err := a.stop(ctx, commandline.StopOptions{
+		Worker:  group,
+		Force:   opts.Force,
+		Timeout: opts.Timeout,
+	}); err != nil {
+		if !isRestartIgnorableError(err) {
+			return err
+		}
+		c.Note("未发现运行中的 worker，直接启动")
+	}
+	opts.Group = group
+	return a.runWorker(ctx, opts)
 }
 
 // workerGroupLabel names the groups a daemonized process hosts, for messages.
@@ -348,6 +392,45 @@ func workerGroupLabel(groups []*worker.Group) string {
 		return groups[0].Name()
 	}
 	return commandline.WorkerAllPIDToken
+}
+
+// workerPIDGlob is the pattern matching every worker pid file derived from one
+// configured pid path: the same -worker-<group> infix workerPIDPath inserts.
+// workerPIDGlob 匹配由同一个 pid 路径派生出的全部 worker pid 文件，形态与
+// workerPIDPath 插入的 -worker-<group> 一致。
+func workerPIDGlob(base string) string {
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext) + "-worker-*" + ext
+}
+
+// workerPIDFiles lists the worker pid files that exist for base, sorted so the
+// output and the stop order are stable.
+// workerPIDFiles 列出 base 对应的、确实存在的 worker pid 文件，并排序，使输出与停止
+// 顺序稳定。
+func workerPIDFiles(base string) ([]string, error) {
+	pattern := workerPIDGlob(base)
+	if pattern == "" {
+		return nil, nil
+	}
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("gofy: list worker pid files: %w", err)
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
+// workerGroupFromPIDFile recovers the group name from a pid file path, so the
+// operator sees which group is being stopped.
+// workerGroupFromPIDFile 从 pid 文件路径反推分组名，运维因此能看到正在停止哪个分组。
+func workerGroupFromPIDFile(base, file string) string {
+	ext := filepath.Ext(base)
+	prefix := filepath.Base(strings.TrimSuffix(base, ext)) + "-worker-"
+	name := strings.TrimSuffix(filepath.Base(file), ext)
+	return strings.TrimPrefix(name, prefix)
 }
 
 // workerGroup looks up a registered group by name.
