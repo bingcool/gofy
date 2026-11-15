@@ -121,12 +121,17 @@ SELECT EXISTS (
 
 // UserOrderStat 是一个用户的订单汇总。
 //
+// MaxOrderID 刻意不叫 LastOrderID：它由 MAX(id) 得到，含义是"最大的主键"，而不是
+// "时间上最近的一笔订单"。自增主键在并发插入、导入历史数据或换成分布式 ID 之后都
+// 不再与创建时间同序，一个 last_ 前缀会让人读出错觉。需要时间语义时，按 created_at
+// 排序取那一行（配合 (user_id, created_at) 索引），不要用主键代替。
+//
 // UserOrderStat is the per-user order aggregate.
 type UserOrderStat struct {
 	UserID      uint64 `gorm:"column:user_id"`
 	OrderCount  int64  `gorm:"column:order_count"`
 	TotalAmount int64  `gorm:"column:total_amount"` // 分
-	LastOrderID uint64 `gorm:"column:last_order_id"`
+	MaxOrderID  uint64 `gorm:"column:max_order_id"`
 }
 
 // ListUserOrderStats 按用户汇总订单，只返回订单数不少于 minOrders 的用户，
@@ -150,7 +155,7 @@ SELECT
     user_id                  AS user_id,
     COUNT(*)                 AS order_count,
     COALESCE(SUM(amount), 0) AS total_amount,
-    MAX(id)                  AS last_order_id
+    MAX(id)                  AS max_order_id
 FROM orders
 GROUP BY user_id
 HAVING COUNT(*) >= ?
@@ -179,7 +184,7 @@ SELECT
     user_id                  AS user_id,
     COUNT(*)                 AS order_count,
     COALESCE(SUM(amount), 0) AS total_amount,
-    MAX(id)                  AS last_order_id
+    MAX(id)                  AS max_order_id
 FROM orders
 WHERE user_id = ?
 GROUP BY user_id`

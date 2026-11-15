@@ -197,7 +197,7 @@ func TestListUserOrderStats(t *testing.T) {
 		t.Fatalf("rows = %+v, want 2 users", rows)
 	}
 	// 累计金额降序：90001（23700 + 1500）排在 90002（5000）前面。
-	if rows[0].UserID != 90001 || rows[0].OrderCount != 2 || rows[0].TotalAmount != 25200 || rows[0].LastOrderID != 900002 {
+	if rows[0].UserID != 90001 || rows[0].OrderCount != 2 || rows[0].TotalAmount != 25200 || rows[0].MaxOrderID != 900002 {
 		t.Fatalf("first stat = %+v", rows[0])
 	}
 	if rows[1].UserID != 90002 || rows[1].OrderCount != 1 || rows[1].TotalAmount != 5000 {
@@ -220,7 +220,7 @@ func TestGetUserOrderStat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUserOrderStat: %v", err)
 	}
-	if stat.OrderCount != 2 || stat.TotalAmount != 25200 || stat.LastOrderID != 900002 {
+	if stat.OrderCount != 2 || stat.TotalAmount != 25200 || stat.MaxOrderID != 900002 {
 		t.Fatalf("stat = %+v", stat)
 	}
 
