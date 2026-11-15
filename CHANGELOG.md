@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `examples/demo-service`: new read-only `query` layer in the order module
+  (`app/module/order/query`) for raw SQL, joins and `EXISTS` / `NOT EXISTS`
+  reads. Each module can carry its own query package; it resolves its connection
+  through `appio.WithContext` + `gofydb.WithContext`, so a query shares the
+  caller's transaction and the request-pinned generation instead of opening a
+  second path to the database. Samples cover a three-table inner join, a
+  `NOT EXISTS` anti-join, an `EXISTS` probe and a grouped aggregate with
+  `HAVING`; `migrations/0004_order_items.sql` adds the backing table with demo
+  rows. The import and io-access guards cover the new layer.
 - `examples/demo-service`: `worker --group=<g>` now pulls the Nacos config once
   at startup but never watches it. A freshly launched worker starts on the
   current remote config rather than a possibly stale config.yaml baked into the

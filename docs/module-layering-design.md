@@ -70,7 +70,7 @@
 
 ## 3. 分层契约
 
-### 3.1 五包职责
+### 3.1 六包职责
 
 | 包 | 职责 | 输入类型 | 输出类型 | 禁止 |
 | --- | --- | --- | --- | --- |
@@ -78,6 +78,7 @@
 | `service` | 业务规则、用例编排、事务边界、日志；实现本模块 innerapi | 本模块 model + plain 入参 + 其他模块 innerapi | 本模块 innerapi 视图 | import HTTP 契约；import 其他模块 service / repository / model |
 | `innerapi` | **模块对外发布的内部 API 契约**：接口 + 只读视图 + 哨兵错误 | — | — | import 任何模块的 service / repository / model / controller、HTTP 契约、app/appio |
 | `repository` | 单聚合数据访问（GORM） | 本模块 model | 本模块 model | import service / innerapi / 契约 / 其他模块任何包 |
+| `query` | 只读查询：原生 SQL、跨表 JOIN、EXISTS、页面/报表读模型 | 查询参数 + 本模块 model | 本包 row 结构 | import service / controller / innerapi / repository / 其他模块任何包 / HTTP 契约 |
 | `model` | 表结构定义 | — | — | 任何业务依赖（仅 `time` / gorm tag） |
 
 `innerapi` 是**纯契约包**：只有接口、plain 视图和哨兵错误，不 import 本模块
@@ -93,6 +94,7 @@ service/repository/model，也不 import HTTP 契约。消费方 import 它时�
 | service | √ | √ | — | √（实现） | √（调用） | × | × | √（开事务） |
 | innerapi | × | × | × | — | × | × | × | × |
 | repository | √ | — | × | × | × | × | × | √（解析连接） |
+| query | √ | × | × | × | × | × | × | √（解析连接） |
 | model | — | × | × | × | × | × | × | × |
 
 关键变化：**跨模块只允许 `service → 其他模块 innerapi`**；service 不再 import 其他
@@ -116,6 +118,26 @@ SQLite 测试（沿用既有决策）。innerapi 不同：它是**模块间的�
 价值在于让消费方依赖稳定契约而非提供方实现、隔离提供方内部重构、并允许测试替换。
 这是接口真正赚取收益的地方，因此 innerapi 用接口，service 提供实现。
 
+### 3.5 模块内只读查询层 `query`
+
+每个模块可以有自己的 `query` 子包（如 `app/module/order/query`），只服务本模块
+的读取需求：原生 SQL、跨表 JOIN、`EXISTS` / `NOT EXISTS` 与聚合报表。
+
+- 只读：不提供 `Create` / `Update` / `Delete`，写路径仍归本模块 repository；
+- 返回本包定义的 row 结构，不复用持久化 model 做投影，也不参与迁移；
+- 连接解析与 repository 完全一致：`appio.WithContext(ctx).DBIO(...)` +
+  `gofydb.WithContext(ctx, db)`，因此与写操作共享同一个 ctx 事务，并在
+  Reload 边界固定在请求进入时的那一代；
+- 调用方向是 `service → query`，反向禁止：query 不依赖 service、controller、
+  innerapi 或 repository；
+- 只允许 import 本模块 model、`app/appio`、`support` 与第三方库。**其他模块的
+  表可以在 SQL 里直接写表名，但不 import 对方的 model/repository**：表结构是
+  数据库契约，跨模块的 Go 依赖才需要 innerapi。
+
+判据：单表、按主键/索引的读 → repository；跨表、聚合、为页面裁剪列 → 本模块
+query。跨模块取数仍优先走对方 innerapi；只有报表类需求确实需要 JOIN 时才在
+SQL 里读对方的表，并接受表结构耦合。
+
 ## 4. 目标目录
 
 ```text
@@ -133,6 +155,10 @@ examples/demo-service/app/
     │   ├── module.go               # 模块根：NewModule + Register（service 由容器注入）
     │   ├── controller/
     │   │   └── order_controller.go # 契约映射 + 错误→HTTP 码（唯一 import HTTP 契约的层）
+    │   ├── query/                  # 只读查询层：原生 SQL / JOIN / EXISTS / 读模型
+    │   │   ├── query.go            # Queries 入口 + 连接解析 + ErrNotFound
+    │   │   ├── order_queries.go    # 样例：三表 JOIN / NOT EXISTS / EXISTS / 聚合
+    │   │   └── README.md
     │   ├── service/
     │   │   ├── order_service.go    # 用例编排、事务、日志；跨模块调 product.innerapi
     │   │   ├── order_view.go       # 领域状态常量 + 订单域哨兵错误 + CreateItem 入参
@@ -562,15 +588,19 @@ HTTP POST /api/v1/order/orders
 5. `model`：禁止任何 `app/module` / 契约 / `app/appio` 依赖；
 6. 删除「一个包最多 import 一个其他模块 repository」旧规则，由规则 2 取代；
 7. 包依赖成环仍由 `go build` 兜底（innerapi 无回边，天然无环）；
-8. `service` 与 `repository` 只允许经 `appio.WithContext(ctx)` 取本代句柄：
+8. `service`、`repository` 与 `query` 只允许经 `appio.WithContext(ctx)` 取本代句柄：
    禁止调用 `appdb.Default` / `appredis.Cache` 等包级访问器，也禁止自行
-   `Publish`。HTTP、脚本、守护进程共用这两层代码，入口负责发布一代，这两层只
+   `Publish`。HTTP、脚本、守护进程共用这三层代码，入口负责发布一代，这三层只
    负责消费，否则同一份代码会出现第二种取法。发布与固定机制来自
    `support/generation`，`app/appio` 只是薄封装。
+9. `query`（模块内只读查询层）：只允许 import 本模块 `model`、`app/appio`、
+   `support`、框架与第三方库；禁止 import 本模块 `service` / `controller` /
+   `innerapi` / `repository`、其他模块任何包、HTTP 契约、`client` 与 `adapter`。
+   取句柄同样只走 `appio.WithContext(ctx)`，规则 8 一并适用。
 
-规则按 `app/module/<name>/<layer>/...` 匹配：模块根（`app/module/<name>`）只做路由
-绑定，`app/container` 只做装配，两者都不在分层检查范围内。容器是唯一允许同时
-import 多个模块的包，跨模块依赖只在它里面解析。
+规则按 `app/module/<name>/<layer>/...` 匹配（`layer` 含 `query`）：模块根
+（`app/module/<name>`）只做路由绑定，`app/container` 只做装配，两者都不在分层
+检查范围内。容器是唯一允许同时 import 多个模块的包，跨模块依赖只在它里面解析。
 
 根仓库 `make guards` 的「公开包不得写 `func init()`」只约束 gofy 框架包，demo
 `app/**` 不在范围内；本方案 demo 侧也不使用 `init()`。

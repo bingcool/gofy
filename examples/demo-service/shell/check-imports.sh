@@ -132,6 +132,20 @@ while IFS='|' read -r pkg imports; do
             ;;
         esac
         ;;
+      query)
+        # 只读查询层：允许本模块 model + app/appio + support；不碰 service/
+        # controller/innerapi/repository，也不碰其他模块、契约与 adapter。
+        case "$cat" in
+          module)
+            if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "model" ]; then
+              fail "$pkg must not import $imp: query depends on its own model only"
+            fi
+            ;;
+          contract)
+            fail "$pkg must not import $imp: query must not depend on HTTP contracts"
+            ;;
+        esac
+        ;;
     esac
   done
 done

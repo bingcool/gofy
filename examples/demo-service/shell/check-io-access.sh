@@ -8,14 +8,14 @@ fail() {
   exit 1
 }
 
-# service/repository 是三种入口（HTTP、脚本、守护进程）共用的同一份代码，句柄
+# service/repository/query 是三种入口（HTTP、脚本、守护进程）共用的同一份代码，句柄
 # 只能经 appio.WithContext(ctx) 取本代快照。直接读实例包的包级访问器，或自己
 # 发布快照，都会绕开入口固定的那一代，给共用代码开出第二种取法。只检查非测试
 # 文件：测试需要用 Publish / PublishDB 造快照。
 pattern='appdb\.(Default|NewIO)\(|appredis\.(Cache|Session|RateLimit|NewIO)\(|appamqp\.(Default|Get|NewIO)\(|appkafka\.(Default|Get|NewIO)\(|approcketmq\.(Default|Get|NewIO)\(|appuuidint\.Default\(|appio\.(Current|Publish|PublishDB)\('
 
-dirs="$(go list -f '{{.ImportPath}} {{.Dir}}' ./app/module/... | awk '$1 ~ /\/(service|repository)$/ {print $2}')"
-[ -n "$dirs" ] || fail "no service or repository packages found"
+dirs="$(go list -f '{{.ImportPath}} {{.Dir}}' ./app/module/... | awk '$1 ~ /\/(service|repository|query)$/ {print $2}')"
+[ -n "$dirs" ] || fail "no service, repository or query packages found"
 
 failed=0
 while IFS= read -r dir; do
@@ -29,6 +29,6 @@ done <<EOF
 $dirs
 EOF
 
-[ "$failed" -eq 0 ] || fail "service/repository must resolve handles through appio.WithContext(ctx), not package-level accessors or their own Publish"
+[ "$failed" -eq 0 ] || fail "service/repository/query must resolve handles through appio.WithContext(ctx), not package-level accessors or their own Publish"
 
 echo "demo io-access guard passed"
