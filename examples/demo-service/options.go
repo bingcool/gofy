@@ -42,8 +42,10 @@ func appOptions(cfg *config.Config, reload *reloader, nacosCfg nacos.Config, gro
 		// 把入口请求的白名单 Header 注入上下文，供 demoserviceclient 转发到下游；
 		// 身份头只有在 WithTrustedProxies 命中的代理转发时才采信。
 		gofy.WithHeaderPropagation(true),
-		// 请求进入时固定当前一代的 IO 快照，Repository 与 Service 用
-		// appio.WithContext(ctx) 取连接：一次请求不会横跨 Reload 换资源。
+		// 请求的 IO 快照由框架按代绑定：appio.Module 实现了
+		// support.RequestBinder，请求拿到哪一代的 lease，就固定哪一代的快照。
+		// 这里的中间件只是兜底：ctx 已经固定过时它不覆盖，因此不会把旧 handler
+		// 配上新快照。
 		gofy.WithMiddleware(appio.Middleware()),
 		// 应用层中间件（auth/audit/order-audit）在模块绑定路由之前注册。
 		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),

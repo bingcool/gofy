@@ -119,17 +119,39 @@ func (s *Set[T]) WithContext(ctx context.Context) *T {
 	panic(fmt.Sprintf("%s: no generation published; publish one at the entry (request middleware, script wrapper, or module Start) before using shared code", s.name))
 }
 
-// Middleware pins the current generation at request entry. A module that
-// reloads starts the successor before serving its handler; without pinning,
-// in-flight requests would read the successor's handles halfway through. When
-// nothing is published the middleware passes the request through untouched, so
-// WithContext can report the missing generation at first use.
+// Pinned returns the generation this context already carries, without falling
+// back to Current(). Entries use it to avoid replacing a pin that a framework
+// binder has already installed: overwriting it would hand the request a
+// successor generation while the handler still belongs to the previous one.
 //
-// Middleware 在请求入口固定当前一代。模块 Reload 时先启动下一代再对外服务；
-// 不固定的话，进行中的请求会在中途读到下一代的句柄。尚未发布时中间件原样
-// 放行，由 WithContext 在首次取用时报告缺失。
+// Pinned 返回 ctx 已经固定的一代，不回退到 Current()。入口用它避免覆盖框架
+// binder 已装好的固定值：覆盖会让请求拿到后继代，而它的 handler 仍属于上一代。
+func (s *Set[T]) Pinned(ctx context.Context) (*T, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	v, ok := ctx.Value(s).(*T)
+	if !ok || v == nil {
+		return nil, false
+	}
+	return v, true
+}
+
+// Middleware pins the current generation at request entry, unless the context
+// already carries one. A framework request binder pins the generation that owns
+// the handler; overwriting that pin here would pair handler N with generation
+// N+1. When nothing is published the middleware passes the request through
+// untouched, so WithContext can report the missing generation at first use.
+//
+// Middleware 在请求入口固定当前一代；ctx 已经固定过则不覆盖。框架的请求 binder
+// 固定的是 handler 所属的那一代，这里覆盖会让 handler N 配上 N+1。尚未发布时
+// 中间件原样放行，由 WithContext 在首次取用时报告缺失。
 func (s *Set[T]) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if _, ok := s.Pinned(c.Request.Context()); ok {
+			c.Next()
+			return
+		}
 		if v := s.Current(); v != nil {
 			c.Request = c.Request.WithContext(s.WithSnapshot(c.Request.Context(), v))
 		}

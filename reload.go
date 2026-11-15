@@ -294,6 +294,13 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 
 	newGen := newGeneration(oldGen.id+1, engine)
 	newGen.started = started
+	// The binder is composed from the modules of this generation, so the state
+	// a request reads is the state built by this reload — and a reload that
+	// failed above never reaches this line, leaving the serving generation's
+	// binder and state untouched.
+	// binder 由本代模块组合，请求读到的就是本次 Reload 构建的状态；上面任何一步
+	// 失败都到不了这里，正在服务那一代的 binder 与状态因此不受影响。
+	newGen.bind = composeRequestBinders(allStarted)
 	newGen.db, newGen.ownDB = db, ownDB
 	newGen.logger, newGen.systemLogger, newGen.accessLogger, newGen.ownLogger = lg, systemLogger, accessLogger, ownLogger
 	a.gen = newGen

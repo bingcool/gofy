@@ -5,13 +5,19 @@
 //
 // The publish/pin mechanics come from support/generation; this package only
 // assembles one generation of handles and declares the demo's entry points
-// (Middleware, WithContext, and the module lifecycle).
+// (the framework request binder, WithContext, and the module lifecycle).
 //
-// 业务代码通过 Snapshot 取连接：请求中间件在入口固定当前一代，Repository 与
-// Service 用 WithContext(ctx) 读取；没有请求上下文时回退到 Current()，两者都没
-// 有说明入口没有发布，直接 panic。发布与固定机制由 support/generation 提供，
-// 本包只负责组装一代句柄并声明 demo 的入口（Middleware、WithContext、模块
-// 生命周期）。
+// HTTP requests are pinned by the framework: the module implements
+// support.RequestBinder, so the snapshot is bound to a request only after that
+// request acquired the lease of the generation this module belongs to. Scripts
+// and other non-HTTP entries call Snapshot() and pin it themselves. Reading the
+// process-wide Current() is a fallback for code with no entry at all.
+//
+// 业务代码通过 Snapshot 取连接：本模块实现 support.RequestBinder，框架只在请求
+// 拿到"本模块所属那一代"的 lease 之后才把快照固定进 ctx，Repository 与 Service
+// 用 WithContext(ctx) 读取；脚本等非 HTTP 入口调用 Snapshot() 自行固定；完全没有
+// 入口的代码才回退到 Current()。发布与固定机制由 support/generation 提供，本包
+// 只负责组装一代句柄并声明 demo 的入口。
 package appio
 
 import (
@@ -165,12 +171,48 @@ func (m *Module) Start(ctx context.Context) error {
 	rocketmqSet.Install()
 	// uuidint 依赖 redis 的命名实例，放在 redis 安装之后发布。
 	uuidintSet.Install()
-	// The snapshot is published once every handle of this generation is ready;
-	// request middleware takes its connections from it.
-	// 快照在本代全部句柄就绪后一次发布；请求中间件从这里取连接。
+	// The snapshot is published once every handle of this generation is ready.
+	// Publishing it globally serves scripts, tests and code without an entry;
+	// HTTP requests do not depend on it — the framework pins this exact
+	// snapshot through RequestBinder when it publishes this generation.
+	// 快照在本代全部句柄就绪后一次发布。全局发布服务脚本、测试与没有入口的代码；
+	// HTTP 请求不依赖它 —— 框架发布本代时通过 RequestBinder 固定的就是这个快照。
 	m.snapshot = newSnapshot(dbSet, redisSet, amqpSet, kafkaSet, rocketmqSet, uuidintSet)
 	Publish(m.snapshot)
 	return nil
+}
+
+// Snapshot returns the generation this module assembled. Non-HTTP entries —
+// scripts, tests, ad-hoc tools — pin it explicitly with WithSnapshot instead of
+// reading the process-wide Current(), so they never observe a successor that
+// another entry published in the meantime.
+// Snapshot 返回本模块组装的那一代快照。非 HTTP 入口（脚本、测试、临时工具）用
+// WithSnapshot 显式固定它，而不是读进程级 Current()，因此不会读到别的入口中途
+// 发布的后继代。
+func (m *Module) Snapshot() *Snapshot { return m.snapshot }
+
+// RequestBinder pins this generation's snapshot into every request served by
+// this generation's handler. It is the fix for "handler N + snapshot N+1": the
+// framework calls it only for requests that acquired this generation's lease,
+// and Start has already produced the snapshot before the generation exists.
+//
+// The snapshot is captured now rather than read on every request: the module is
+// per generation, so the captured value is exactly the one this generation owns.
+// A module that was never started returns nil, which leaves the context alone.
+// RequestBinder 把本代快照固定进本代 handler 处理的每个请求，这正是
+// "handler N + 快照 N+1" 的解法：框架只对拿到本代 lease 的请求调用它，而快照在
+// generation 存在之前就已经由 Start 产出。
+//
+// 快照在这里一次性捕获，而不是每个请求再读一次：模块本就是"每代一个"，捕获到
+// 的值就是这一代拥有的那个。尚未启动的模块返回 nil，上下文保持原样。
+func (m *Module) RequestBinder() support.RequestBinderFunc {
+	snapshot := m.snapshot
+	if snapshot == nil {
+		return nil
+	}
+	return func(ctx context.Context) context.Context {
+		return WithSnapshot(ctx, snapshot)
+	}
 }
 
 // Stop closes this generation. A reload starts the replacement before stopping

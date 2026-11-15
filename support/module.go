@@ -55,3 +55,37 @@ type Starter interface {
 type Stopper interface {
 	Stop(ctx context.Context) error
 }
+
+// RequestBinderFunc pins generation-scoped state into a request context. It is
+// called once per request, after the generation lease is acquired and before
+// the handler runs.
+// RequestBinderFunc 把本代状态固定进请求上下文；每个请求调用一次，时机是拿到
+// generation lease 之后、进入 handler 之前。
+type RequestBinderFunc func(ctx context.Context) context.Context
+
+// RequestBinder is implemented by a module that owns state which must become
+// visible at exactly the same moment as the handler of its generation — the
+// demo's IO snapshot is the reference case.
+//
+// The framework composes the binders of every started module into the
+// generation it publishes, so the ordering is: module Start (build the state) →
+// generation publish (state and handler become visible together) → request
+// entry (binder pins the state). A reload that fails before publishing leaves
+// the serving generation's binder and state untouched, and an in-flight request
+// keeps the state it was pinned to even after a successor is published.
+//
+// Implementations must read only immutable state and must not open connections:
+// the binder runs on the request path. A nil return means "nothing to pin".
+// RequestBinder 由持有「必须与所属代 handler 同时可见」的状态的模块实现，demo 的
+// IO 快照就是典型例子。
+//
+// 框架把已启动模块的 binder 组合进它发布的那一代，顺序因此是：模块 Start
+// （构建状态）→ 发布 generation（状态与 handler 一起可见）→ 请求进入（binder
+// 固定状态）。发布前失败的 Reload 不会碰到正在服务那一代的 binder 与状态；在途
+// 请求即使后继代已发布，也继续使用自己被固定的那一代。
+//
+// 实现只能读取不可变状态，且不得打开连接：binder 运行在请求路径上。返回 nil
+// 表示没有需要固定的东西。
+type RequestBinder interface {
+	RequestBinder() RequestBinderFunc
+}

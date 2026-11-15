@@ -160,13 +160,15 @@ func WithContext(ctx context.Context) *Snapshot {
 	return currentSnapshot.WithContext(ctx)
 }
 
-// Middleware pins the generation that is current when a request enters. A
-// module that reloads starts the successor before serving its handler; without
-// this step, in-flight requests would read the successor's handles halfway
-// through.
+// Middleware pins the generation that is current when a request enters, unless
+// the request already carries one. HTTP requests are normally pinned by the
+// framework's generation binder (see Module.RequestBinder), which fixes the
+// generation that owns the handler; this middleware is the fallback for an
+// engine built outside the framework and never overwrites that pin.
 //
-// Middleware 把进入请求时的当前一代固定到上下文。模块在 Reload 时先启动下一代
-// 再发布 Handler，没有这一步，旧代请求会在中途读到下一代句柄。
+// Middleware 把进入请求时的当前一代固定到上下文；ctx 已经固定过则不覆盖。HTTP
+// 请求通常由框架的代际 binder（见 Module.RequestBinder）固定，它固定的是 handler
+// 所属的那一代；这里的中间件只服务框架之外自建的 engine，且绝不覆盖那个固定值。
 func Middleware() support.Middleware {
 	return currentSnapshot.Middleware()
 }

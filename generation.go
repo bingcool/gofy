@@ -31,6 +31,13 @@ type generation struct {
 	handler http.Handler
 	lease   *generationLease
 
+	// bind pins this generation's module state into the request context. It is
+	// composed from the request binders of the modules started for this
+	// generation, so the state becomes visible exactly when the handler does.
+	// bind 把本代模块状态固定进请求上下文。它由本代启动的模块 binder 组合而成，
+	// 因此状态的可见时刻与 handler 完全一致。
+	bind func(ctx context.Context) context.Context
+
 	// started holds the modules this generation started. Injected modules are
 	// owned by the App and survive reloads, so they are not listed here.
 	// started 记录本代启动的模块。注入的模块归 App 所有并跨 Reload 存活，所以
@@ -130,6 +137,42 @@ func (l *generationLease) wait(ctx context.Context, timeout time.Duration) bool 
 	}
 }
 
+// composeRequestBinders merges the binders of one generation's started modules
+// into a single function. Order follows module registration order, so a module
+// registered later sees the context its predecessor produced.
+//
+// It returns nil when no module participates, which keeps the request path free
+// of an extra context copy for applications that do not need the hook.
+// composeRequestBinders 把一代已启动模块的 binder 合并成一个函数，顺序沿用模块
+// 注册顺序，后注册的模块看到的是前一个模块产出的上下文。
+//
+// 没有任何模块参与时返回 nil，不需要这个钩子的应用因此不会在请求路径上多一次
+// context 复制。
+func composeRequestBinders(modules []support.Module) func(context.Context) context.Context {
+	var binders []support.RequestBinderFunc
+	for _, m := range modules {
+		binder, ok := m.(support.RequestBinder)
+		if !ok {
+			continue
+		}
+		if fn := binder.RequestBinder(); fn != nil {
+			binders = append(binders, fn)
+		}
+	}
+	if len(binders) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) context.Context {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		for _, fn := range binders {
+			ctx = fn(ctx)
+		}
+		return ctx
+	}
+}
+
 // handlerSwap lets Reload replace the generation while the process keeps its
 // listener.
 // handlerSwap 让 Reload 在进程保留 listener 的情况下替换 generation。
@@ -157,6 +200,10 @@ func (s *handlerSwap) Load() *generation { return s.inner.Load() }
 // gets 503 without entering a generation, while requests already inside one
 // keep their lease and finish. Closing the listener instead would make Serve
 // return and take the whole process out of the watcher's control.
+//
+// The generation's binder runs after the lease is held: a request enters the
+// generation whose lease it owns, and reads that generation's module state -
+// never the state a half-finished reload has already installed globally.
 // ServeHTTP 对它载入的 generation 获取 lease。若该代在载入与获取之间被退役，
 // 就改用当前代重试；尝试多次仍获取失败说明有 Reload 与本次请求竞争，此时返回
 // 503，而不是进入正在关闭的代。
@@ -164,6 +211,9 @@ func (s *handlerSwap) Load() *generation { return s.inner.Load() }
 // 摘流闸门检查放在最前面：StopAccepting 清零后，新请求不进入任何 generation，
 // 直接返回 503；已经进入 generation 的请求仍持有 lease，可以继续跑完。这里
 // 不关 listener —— 那会让 Serve 返回、整个进程脱离 watcher 的掌控。
+//
+// 本代的 binder 在持有 lease 之后执行：请求进入的是它持有 lease 的那一代，读到
+// 的也是那一代的模块状态，绝不会读到半途完成的 Reload 已经装到全局的新状态。
 func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.accepting != nil && !s.accepting.Load() {
 		w.Header().Set("Connection", "close")
@@ -177,6 +227,9 @@ func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if !gen.lease.acquire() {
 			continue
+		}
+		if gen.bind != nil {
+			r = r.WithContext(gen.bind(r.Context()))
 		}
 		gen.handler.ServeHTTP(w, r)
 		gen.lease.release()

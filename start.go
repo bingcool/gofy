@@ -174,6 +174,12 @@ func (a *App) run(parent context.Context) error {
 	// 第一代持有工厂构建的模块；注入的模块归 App 所有，跨 Reload 持续运行。
 	gen := newGeneration(1, engine)
 	gen.started = a.factoryStarted()
+	// Bind module-owned state to this generation only now, after every module
+	// Start has produced it: requests and the state they read become visible
+	// in the same step.
+	// 到这里才把模块状态绑进本代（各模块 Start 已完成）：请求与它读到的状态在同
+	// 一步变得可见。
+	gen.bind = composeRequestBinders(a.started)
 	gen.db, gen.ownDB = db, ownDB
 	gen.logger, gen.systemLogger, gen.accessLogger, gen.ownLogger = lg, system, access, own
 	// The server keeps this wrapper for its whole life; Reload only swaps the
