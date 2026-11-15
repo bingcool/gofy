@@ -291,10 +291,15 @@ handler_order.go
 
 | 台账状态 | 含义 | 下次投递 |
 | --- | --- | --- |
-| `processing` | 正在处理 | 重试（可能上次中途崩溃） |
+| `processing`，租约未过期 | 另一个实例正在处理 | **不确认**，`ErrInFlight`，等 broker 再投 |
+| `processing`，租约已过期 | 上次处理中途崩溃 | `attempts + 1` 接管 |
 | `done` | 已成功 | 跳过并确认 |
-| `failed` | 可重试失败 | 重试，直到 `max_attempts` |
+| `failed` | 可重试失败 | `attempts + 1` 重试，直到 `max_attempts` |
 | `dead` | 不再重试 | 跳过并确认 |
+
+"处理中"必须当"还有人持有"，不能当"可以重跑"：确认掉重投的副本，第一个 handler 崩溃时
+就没有备份了。租约默认 5 分钟，由 `ProcessorConfig.ProcessingLease` 配置，复用
+`updated_at` 做判断，不新增列。
 
 消息 ID 的来源按协议降级：
 
@@ -315,6 +320,10 @@ AMQP 的空兜底是刻意的：拿 `DeliveryTag` 当 ID 会把每次重投当�
 | `nil` | 台账置 `done`，确认 | 分区继续推进 |
 | `gofyconsumer.Permanent(err)` | 台账置 `dead`，确认 | 毒消息不再重投 |
 | 其它 `error` | 台账置 `failed`，不确认 | broker 重投，直到 `max_attempts` |
+| 另一实例仍在处理 | 台账不动，返回 `ErrInFlight` | broker 稍后重投，副本不丢 |
+
+所有写回都带本次 `attempts`：迟到的旧 handler 无法把新一轮认领标成完成，也无法把已
+`done` 的消息改回 `failed` / `dead`（返回 `ErrStaleClaim`，只留一条 warn 日志）。
 
 解不出信封、未知 `event.type`、`payload` 缺 `order_id` 都属于永久错误——重投多少次
 结果都一样，确认掉比占着分区更有信息量（`dead` 行本身就是待排查清单）。

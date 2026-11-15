@@ -169,10 +169,24 @@ handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕
 
 | 场景 | 结果 |
 | --- | --- |
-| 首次投递 | 插入成功，处理 |
-| 重投且已 `done` | 跳过，确认 |
-| 重投且曾失败 | `attempts + 1`；达到 `max_attempts` 记 `dead` 并跳过 |
+| 首次投递 | 插入 `processing`（attempts=1），处理 |
+| 重投且已 `done` / `dead` | 跳过，确认（终态不可重开） |
+| 重投且仍在处理中、租约有效 | **不确认**，返回 `ErrInFlight`，由 broker 稍后重投 |
+| 重投且 `processing` 租约已过期 | `attempts + 1` 接管，处理 |
+| 重投且曾 `failed` | `attempts + 1` 重试；达到 `max_attempts` 记 `dead` 并跳过 |
 | 数据库不可用 | 按可重试错误上报，让 broker 重投，不丢消息 |
+
+「处理中」不能当成「可以重跑」：第一个 handler 可能还活着，确认掉重投的副本就等于在它
+崩溃时丢掉唯一的备份。`ErrInFlight` 就是为此存在的可重试错误。
+
+`ProcessingLease`（默认 5 分钟，`ProcessorConfig.ProcessingLease`）决定一条 `processing`
+记录多久后允许接管。它复用 `updated_at` 作为隐式租约，不新增列；接管用
+`id + status + attempts` 做 CAS，两个并发重投只有一个能进入 handler。
+
+所有写回（`succeed` / `fail` / `park`）都带本次认领的 `attempts` 做围栏，且 `fail` /
+`park` 只接受 `processing` / `failed`：迟到的旧 handler 既不能把新一轮认领标成完成，
+也不能把已 `done` 的消息改回 `failed` / `dead`。冲突时返回 `ErrStaleClaim`，消息仍然确认
+（副作用已经发生），只在日志里留下一条 warn。
 
 表在消费者首次启动时创建（先 `HasTable` 再 `AutoMigrate`，避免多副本同时建表撞 1050）。
 schema 变更走发布流程的环境，用 `migrations/0003_worker_consumed_messages.sql` 里的同一份
@@ -182,9 +196,10 @@ DDL（`examples/demo-service` 提供）。
 
 | handler 返回 | 处理 | 效果 |
 | --- | --- | --- |
-| `nil` | 台账 `done`，确认 | 分区继续推进 |
+| `nil` | 台账 `done`（带 attempts 围栏），确认 | 分区继续推进 |
 | `consumer.Permanent(err)` | 台账 `dead`，确认 | 毒消息不再重投 |
 | 其它 `error` | 台账 `failed`，不确认 | broker 重投，直到 `max_attempts` |
+| 另一实例仍在处理 | 不改台账，返回 `ErrInFlight` | broker 稍后重投，副本不丢 |
 
 `Permanent(nil)` 返回 `nil`，可以直接写 `return consumer.Permanent(check())`。
 

@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `gofy`: a reload can no longer pair handler N with module state N+1. Modules
+  that own generation-scoped state implement `support.RequestBinder`; the
+  framework composes their binders into the generation it publishes and applies
+  them after the generation lease is acquired, right before the handler runs.
+  `examples/demo-service/app/appio` now binds its IO snapshot this way, script
+  entries pin the snapshot they started, and `generation.Set.Middleware` no
+  longer overwrites an existing pin. A reload that fails before publishing
+  leaves the serving generation's state untouched.
+- `support/claim`: `Succeed`, `Fail` and the dead transition now compare
+  `attempts` as well as `owner` and `status`. Owner alone could not fence a
+  re-claim by the same worker instance after a reap; the stale write now fails
+  with `ErrLeaseLost`, and a task built by hand fails with `ErrInvalidTask`.
+  `worker.Identity.Owner()` renders `group/name#index@host`, which is the value
+  to claim with — `String()` stays host-free for log and metric labels.
+- `support/consumer`: the idempotency ledger is a real state machine. A
+  redelivery that finds another instance still inside its processing lease is
+  answered with `ErrInFlight` (retryable, **not** acknowledged) instead of being
+  let into the handler; an expired lease or a recorded `failed` may be taken
+  over with a new attempt. `succeed` / `fail` / `park` are fenced by that
+  attempt and reject `done` / `dead`, so a late handler cannot rewrite a
+  finished message. `ProcessorConfig.ProcessingLease` (default
+  `DefaultProcessingLease`, 5 minutes) sizes the lease, which reuses
+  `updated_at` and adds no column.
+- `gofy` worker mode: `/healthz` now reports readiness only after every
+  instance of every group reported that it can accept work. The four message
+  consumers implement `worker.ReadyReporter` and call `worker.Ready(ctx)` once
+  the connection and subscription exist (Kafka pings the broker first); polling
+  workers do not participate and stay immediately ready. A start that fails
+  never closes `Runner.Ready()`. The probe also flips to 503 the moment the
+  drain starts instead of after the last runner returned.
+- `gofy-interface-api`: `WithQuery` no longer panics. `newCallOptions`
+  initializes `query`, so ordinary calls, repeated keys and the streaming
+  helpers all accept the option.
+
 ### Added
 
 - `examples/demo-service`: new read-only `query` layer in the order module

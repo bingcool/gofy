@@ -131,11 +131,17 @@ type Identity struct {
 	Host  string // hostname
 }
 
-func (i Identity) String() string // "order/order-scan#1"
+func (i Identity) String() string // "order/order-scan#1"，日志与指标标签
+func (i Identity) Owner() string  // "order/order-scan#1@pod-a"，claim 的 owner
 ```
 
-Runner 把身份注入 context，业务用 `worker.IdentityFrom(ctx)` 取。它同时是 claim 任务行
-`owner` 的天然取值：`owner = id.String()` 能把一行追溯回具体 Pod 的具体实例。
+Runner 把身份注入 context，业务用 `worker.IdentityFrom(ctx)` 取。认领任务行时用
+`id.Owner()`：它带上 hostname，两个 Pod 跑同名、同序号的实例也能区分开，一行因此
+能追溯回具体 Pod 的具体实例。`String()` 故意不含 host，保持日志与指标序列稳定。
+
+`Owner()` 只回答"哪个实例"，不回答"该实例的哪一次认领"：同一实例在租约过期、
+行被 Reap 之后重新认领同一行时，owner 字符串完全不变。所以 `claim` 的收尾语句还会
+比较 `task.Attempts`——每次认领必然自增的那个值，见 [`support/claim`](../claim/claim.go)。
 
 ### Policy
 
@@ -174,11 +180,25 @@ worker --group=order
 ├─ 建 logger / DB / telemetry / Runtime     与 HTTP 同源，不同实例
 ├─ 解析 --name / --concurrency
 ├─ 写 pid 文件（同组已有进程 → ErrAlreadyRunning）
-├─ 可选：启动 /healthz
+├─ 可选：启动 /healthz（先 503）
 └─ Runner.Run
    ├─ 每个 worker × concurrency 个 goroutine
+   ├─ 等所有"自行上报就绪"的实例上报 → /healthz 转 200
    └─ 阻塞，直到停机信号、致命错误或全部实例退出
 ```
+
+### 就绪上报
+
+`Run` 被启动不等于实例能接活：四个消息消费者在 `Run` 内部才建连、声明队列、加入消费组。
+这类 worker 实现 `worker.ReadyReporter`，并在连接与订阅就绪后调用 `worker.Ready(ctx)`；
+`Runner.Ready()` 在**每个分组、每个实例**都上报后才关闭，宿主据此才把 `/healthz` 置为 200。
+
+- 轮询任务（`Func`、`Ticker`）没有可等的东西，不实现该接口，`Run` 开始即就绪；
+- 启动失败的分组永不关闭 `Runner.Ready()`，等待它的调用方不会把"启动失败"当成"已就绪"；
+- 停机（含致命错误）一开始 `/healthz` 立即回到 503，而不是等 drain 结束。
+
+消费者侧的调用位置：Kafka 在 `Ping` 通过后上报（kgo 客户端是惰性的，不 Ping 就不知道
+broker 是否可达），AMQP / RocketMQ / Redis Queue 在建连与声明队列之后、进入消费循环之前上报。
 
 ### 失败与重启
 
@@ -362,7 +382,7 @@ if err != nil {
 | --- | --- | --- |
 | 消息 | `consumer/*` | 消费组把分区/队列分给成员 |
 | Redis 队列 | `support/queues` + `queuesconsumer` | 出队即删除，Lua 原子完成 |
-| 表里 `status=0` 的待办行 | `support/claim` | `FOR UPDATE SKIP LOCKED` 行级抢占 + owner CAS |
+| 表里 `status=0` 的待办行 | `support/claim` | `FOR UPDATE SKIP LOCKED` 行级抢占 + owner/attempts CAS |
 | 定时轮询（扫状态、汇总、巡检） | `worker.Ticker` | 单次失败只记日志，循环不退出 |
 | 绝不能执行两次（对账、日切） | `support/lease` | 选主 + fencing token，旧持有者写入被拒 |
 | 跟随本 HTTP 实例的循环 | `support.Starter` | 本来就该每个副本各跑一份 |
@@ -390,7 +410,7 @@ w := worker.Func("settle", 1, func(ctx context.Context) error {
 | `WithWorkerPolicy(policy)` | 覆盖默认重启策略 |
 | `WithWorkerConcurrency(map[string]int)` | 按 `group/worker` 覆盖 `Func` 声明的实例数；小于 1、或键对不上已注册的 worker 都让 `New` 失败 |
 | `WithWorkerDrainTimeout(d)` | 覆盖 20s 的 drain 预算，必须为正 |
-| `WithWorkerHealth(addr)` | 开启 worker 进程的 `/healthz`（就绪 200、drain 503） |
+| `WithWorkerHealth(addr)` | 开启 worker 进程的 `/healthz`：启动中 503、全部实例上报就绪后 200、drain 一开始立刻 503 |
 
 CLI：
 

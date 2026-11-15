@@ -25,7 +25,7 @@ demo-service stop --worker=order        → 只停 order 组，不碰 HTTP
 | --- | --- | --- |
 | 消息（Kafka / AMQP / RocketMQ） | `support/worker/consumer/*` | 消费组把分区/队列分给成员，同一分区只有一个消费者 |
 | Redis 队列 | `support/queues` + `queuesconsumer` | 出队即删除，Lua 原子完成 |
-| 表里 `status=0` 的待办行 | `support/claim` | `FOR UPDATE SKIP LOCKED` 行级抢占，配合 owner CAS |
+| 表里 `status=0` 的待办行 | `support/claim` | `FOR UPDATE SKIP LOCKED` 行级抢占，配合 owner + attempts CAS |
 | 绝不能执行两次（对账、日切、清理） | `support/lease` | 选主 + fencing token，只有持有者能写 |
 | 跟随本 HTTP 实例的循环（nacos watch、预热） | `support.Starter` | 本来就该每个副本各跑一份 |
 
@@ -181,7 +181,7 @@ func scanLoop(ctx context.Context, q *claim.Queue) error {
 	id, _ := worker.IdentityFrom(ctx)
 	return worker.Ticker(ctx, 2000, func(ctx context.Context) error {
 		drain := worker.DrainContext(ctx) // 停机后仍允许在途处理跑完
-		tasks, err := q.Claim(drain, id.String(), 0)
+		tasks, err := q.Claim(drain, id.Owner(), 0) // owner 带 host，可追溯到 Pod
 		if err != nil {
 			return err // Ticker 记一条 warn 后继续下一个 tick
 		}
@@ -190,7 +190,7 @@ func scanLoop(ctx context.Context, q *claim.Queue) error {
 				_ = q.Fail(drain, task, err) // 退避后重试，超限转死亡态
 				continue
 			}
-			_ = q.Succeed(drain, task) // owner CAS 失败返回 ErrLeaseLost
+			_ = q.Succeed(drain, task) // owner+attempts CAS 失败返回 ErrLeaseLost
 		}
 		return nil
 	})
@@ -316,7 +316,9 @@ spec:
             requests: { cpu: 100m, memory: 128Mi }
 ```
 
-- 就绪探针只在配了 `WithWorkerHealth` 时可用；启动前 503、drain 时 503。
+- 就绪探针只在配了 `WithWorkerHealth` 时可用；启动中 503、全部实例上报就绪后 200、drain
+  一开始立刻 503。消费者的就绪是"建连 + 订阅完成"，不是"goroutine 已启动"（见
+  `worker.ReadyReporter`）。
 - `maxUnavailable: 0` 让滚动更新先起新 Pod 再停旧 Pod，消费组不会出现空窗口。
 - 不要给 worker 配 liveness 探针：进程崩溃由 k8s 重启，业务卡住不该靠重启解决。
 
@@ -333,7 +335,7 @@ spec:
 | 两个 Pod 处理同一批行 | 没用 claim / 用了 `SELECT` 再 `UPDATE` | 换 `claim.Queue`，别自己写 SQL |
 | 同一个全局任务跑了两次 | 只加锁没带 fencing token | 业务表加 `fence` 列，写入带 `fence < :token` |
 | 每次发版都重复消费一批消息 | 停机时直接取消，没走 drain | 用 `consumer` 适配器，别自己写 `Consume` |
-| healthz 一直 503 | 分组还在启动，或已进入 drain | 看日志有没有 `worker group started` |
+| healthz 一直 503 | 分组还在启动（消费者未建连/订阅），或已进入 drain | 看日志有没有 `worker group ready`；只有 `worker group started` 说明还停在建连 |
 
 ## 7. 与 HTTP 进程的边界
 

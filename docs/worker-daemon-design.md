@@ -741,7 +741,7 @@ GOFY_MYSQL_DSN='user:pass@tcp(host:3306)/db?charset=utf8mb4&parseTime=True&loc=L
 | --- | --- | --- |
 | 同一行被两个实例同时扫到 | 只有一个 `Claim` 成功 | `FOR UPDATE SKIP LOCKED` |
 | 处理成功但 `Succeed` 前崩溃 | 行被 `reap` 回收，重新执行 | 业务幂等 |
-| 处理超时但仍在跑 | 另一个实例接管，两个都在写 | fencing：`Succeed` 带 owner CAS，旧实例写入被拒 |
+| 处理超时但仍在跑 | 另一个实例接管，两个都在写 | fencing：`Succeed` 带 owner + attempts CAS，旧实例写入被拒（`ErrLeaseLost`） |
 | `attempts` 超限 | 转 `3`，不再自动重试 | 人工介入 + 告警 |
 
 **幂等的落点**：`Succeed` 的 CAS 只保护"任务状态"，不保护业务副作用。业务写入必须自带幂等键（唯一索引 / 状态条件更新），这是使用 claim 的前提，写进使用文档。
