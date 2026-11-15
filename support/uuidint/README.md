@@ -62,6 +62,7 @@ Go 侧最终 ID：`id = prefixNumber + incrId`（19 位数字，`int64` 可容�
 | `WithInstance(name)` | 用 `support/redis` 命名实例作主连接；每次取号经包级 `redis.NewIO` 懒解析，跟随进程内最后安装的一代 Registry（单 App 兼容路径） | `default` |
 | `WithFallbackClients(...)` | 主连接重试耗尽后依次尝试的客户端 | 无 |
 | `WithFallbackInstances(...)` | 主连接重试耗尽后依次尝试的命名实例 | 无 |
+| `WithFallbackDelay(time.Duration)` | 尝试第一个备用前的停顿；无备用时不等待，ctx 取消立即中断 | `10ms` |
 | `WithTTL(time.Duration)` | 计数 key 的 TTL，至少 1s（Redis EXPIRE 只接受整秒） | `15s` |
 | `WithRetry(times, delay)` | 主连接尝试次数与间隔；同毫秒冲突也走重试 | `3` / `150ms` |
 | `WithErrorHandler(func(error))` | 主连接重试耗尽时回调一次，再尝试备用连接 | 无 |
@@ -112,11 +113,21 @@ ids, err := gen.GetBatch(ctx, 10)
 
 1. 主连接最多尝试 `retryTimes` 次（含第一次），失败间隔 `retryDelay`；
 2. 仍失败 → 调用 `WithErrorHandler`（若有）；
-3. 依次尝试每个备用客户端/实例各一次；
-4. 全部失败返回包裹 `ErrUnavailable` 的错误，可用 `errors.Is` 判断；
+3. 有备用时停顿 `WithFallbackDelay` 的时长（默认 10ms，可被 ctx 取消）；
+4. 依次尝试每个备用客户端/实例各一次；
+5. 全部失败返回包裹 `ErrUnavailable` 的错误，可用 `errors.Is` 判断；
    `ctx` 被取消时返回 `context.Canceled` / `context.DeadlineExceeded`。
 
 请保证 Redis 高可用，或配置可写的备用实例。
+
+备用可以是另一台独立 Redis。ID 由「Redis TIME 毫秒前缀 + 最多 `MaxIncr` 的段内序号」
+组成，序号不会进位到前缀，因此只有落在同一毫秒才可能重复。框架在主连接重试耗尽、
+告警之后、尝试备用之前默认停顿 10ms（`WithFallbackDelay` 可调，设为 0 关闭，没有
+备用时不等待），让切换进入新的毫秒，两边各自从 1 开始的计数器就不会撞。
+
+停顿不修正时钟偏差：若备用 Redis 的 `TIME` 比主慢超过这个时长，两边仍可能落在同一
+毫秒，跨机房部署时可适当调大。它也不保证趋势递增——独立计数器的序号会回退，但 ID
+本身仍然唯一。
 
 ## Redis Key
 

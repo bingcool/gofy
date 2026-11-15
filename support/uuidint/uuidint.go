@@ -28,6 +28,16 @@ import (
 // MaxIncr 是同一毫秒内允许的最大序号；超过后 Lua 会滚动 incrKey。
 const MaxIncr = 999990
 
+// defaultFallbackDelay keeps a handover off the primary's last millisecond.
+// IDs are a millisecond prefix plus at most MaxIncr, and the counter never
+// carries into the prefix, so two IDs can only collide inside one millisecond.
+// A fallback Redis owns another counter entirely; waiting past one boundary is
+// what separates it from the primary's last ID.
+// defaultFallbackDelay 让切换避开主实例最后一个毫秒。ID 由毫秒前缀加最多 MaxIncr
+// 的序号组成，序号不会进位到前缀，因此只有同一毫秒内才可能重复。备用 Redis 有自己
+// 独立的一套计数器，跨过一个毫秒边界就能把它与主的最后一个 ID 分开。
+const defaultFallbackDelay = 10 * time.Millisecond
+
 var (
 	// ErrKeyRequired is returned when the Redis key is empty.
 	// Redis key 为空时由 New 返回，可用 errors.Is 比较。
@@ -43,17 +53,18 @@ var (
 type Option func(*settings) error
 
 type settings struct {
-	client       *goredis.Client
-	clientSet    bool
-	instance     string
-	instanceSet  bool
-	fallbacks    []source
-	ttl          time.Duration
-	retryTimes   int
-	retryDelay   time.Duration
-	onError      func(error)
-	poolSize     int
-	poolInterval time.Duration
+	client        *goredis.Client
+	clientSet     bool
+	instance      string
+	instanceSet   bool
+	fallbacks     []source
+	ttl           time.Duration
+	retryTimes    int
+	retryDelay    time.Duration
+	fallbackDelay time.Duration
+	onError       func(error)
+	poolSize      int
+	poolInterval  time.Duration
 }
 
 // WithClient uses an explicit Redis client as the primary source. It cannot be
@@ -163,6 +174,32 @@ func WithRetry(times int, delay time.Duration) Option {
 	}
 }
 
+// WithFallbackDelay sets the pause after the primary fails all its retries and
+// before the first fallback is tried. It defaults to defaultFallbackDelay; zero
+// disables it. The pause is skipped when no fallback is configured, and a
+// cancelled ctx cuts it short instead of waiting out the timer.
+//
+// Two independent Redis instances keep separate counters, so the millisecond
+// prefix is the only thing that distinguishes their IDs. Waiting past one
+// boundary makes a handover land in a different millisecond from the primary's
+// last ID. It does not correct a clock offset: if the fallback's TIME lags the
+// primary's by more than this delay, the two can still share a millisecond.
+// WithFallbackDelay 设置主连接重试全部失败后、尝试第一个备用之前的停顿，默认
+// defaultFallbackDelay，设为 0 关闭。没有配置备用时不等待；ctx 取消会立即中断等待。
+//
+// 两个独立 Redis 各自维护计数器，ID 之间只靠毫秒前缀区分。跨过一个毫秒边界，切换
+// 就不会落在主实例最后一个 ID 的同一毫秒里。它不能修正时钟偏差：若备用 Redis 的
+// TIME 比主慢超过这个时长，两边仍可能落在同一毫秒。
+func WithFallbackDelay(delay time.Duration) Option {
+	return func(s *settings) error {
+		if delay < 0 {
+			return errors.New("uuidint: fallback delay must not be negative")
+		}
+		s.fallbackDelay = delay
+		return nil
+	}
+}
+
 // WithErrorHandler installs a callback invoked once when the primary source
 // fails all its retries, before the fallbacks are tried.
 // 主连接重试全部失败、尚未尝试备用连接时回调一次，用于告警；回调在取号路径上
@@ -221,14 +258,15 @@ func (s source) resolve(ctx context.Context) (*goredis.Client, error) {
 // Generator 从同一个 Redis 计数器 key 取号；Get、GetBatch 可并发调用，
 // 启动预取池后由内部定时器补充，StopPool 会停止该定时器。
 type Generator struct {
-	key        string
-	ttl        time.Duration
-	retryTimes int
-	retryDelay time.Duration
-	primary    source
-	fallbacks  []source
-	onError    func(error)
-	pool       *idPool
+	key           string
+	ttl           time.Duration
+	retryTimes    int
+	retryDelay    time.Duration
+	fallbackDelay time.Duration
+	primary       source
+	fallbacks     []source
+	onError       func(error)
+	pool          *idPool
 }
 
 // New builds a Generator for key. The primary source is WithClient, or
@@ -244,9 +282,10 @@ func New(key string, opts ...Option) (*Generator, error) {
 	}
 
 	s := settings{
-		ttl:        15 * time.Second,
-		retryTimes: 3,
-		retryDelay: 150 * time.Millisecond,
+		ttl:           15 * time.Second,
+		retryTimes:    3,
+		retryDelay:    150 * time.Millisecond,
+		fallbackDelay: defaultFallbackDelay,
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -261,12 +300,13 @@ func New(key string, opts ...Option) (*Generator, error) {
 	}
 
 	g := &Generator{
-		key:        key,
-		ttl:        s.ttl,
-		retryTimes: s.retryTimes,
-		retryDelay: s.retryDelay,
-		fallbacks:  s.fallbacks,
-		onError:    s.onError,
+		key:           key,
+		ttl:           s.ttl,
+		retryTimes:    s.retryTimes,
+		retryDelay:    s.retryDelay,
+		fallbackDelay: s.fallbackDelay,
+		fallbacks:     s.fallbacks,
+		onError:       s.onError,
 	}
 	switch {
 	case s.client != nil:
@@ -318,10 +358,10 @@ func (g *Generator) GetBatch(ctx context.Context, n int) ([]int64, error) {
 }
 
 // generate retries the primary source retryTimes times; if it still fails it
-// fires the error callback, then tries each fallback once, matching the PHP
-// version.
-// generate 先在主连接上重试 retryTimes 次；仍失败则回调告警，再依次尝试
-// 备用连接各一次（与 PHP 版一致）。
+// fires the error callback, waits out the fallback delay and then tries each
+// fallback once, matching the PHP version.
+// generate 先在主连接上重试 retryTimes 次；仍失败则回调告警、等待切换停顿，
+// 再依次尝试备用连接各一次（与 PHP 版一致）。
 func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
 	var errs []error
 	for attempt := 0; attempt < g.retryTimes; attempt++ {
@@ -341,6 +381,16 @@ func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
 	if g.onError != nil {
 		g.onError(lastErr)
 	}
+	// A fallback owns a different counter, so let the millisecond prefix move
+	// on before its first allocation. Without any fallback there is no handover
+	// and no reason to pay the delay.
+	// 备用用的是另一套计数器，先让毫秒前缀往前走一步再取号。没有备用就没有切换，
+	// 不必付这段延迟。
+	if len(g.fallbacks) > 0 {
+		if err := sleepCtx(ctx, g.fallbackDelay); err != nil {
+			return 0, err
+		}
+	}
 	for _, fallback := range g.fallbacks {
 		id, err := g.try(ctx, fallback, step)
 		if err == nil {
@@ -352,10 +402,17 @@ func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
 }
 
 func (g *Generator) wait(ctx context.Context) error {
-	if g.retryDelay <= 0 {
+	return sleepCtx(ctx, g.retryDelay)
+}
+
+// sleepCtx waits for d but returns as soon as ctx is cancelled; a non-positive
+// d is a no-op.
+// sleepCtx 等待 d，ctx 取消时立即返回；d 非正时不等待。
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(g.retryDelay)
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

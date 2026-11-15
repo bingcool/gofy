@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/uuidint`: `WithFallbackDelay` pauses after the primary exhausts its
+  retries and before the first fallback attempt (default 10ms, interruptible by
+  ctx, skipped when no fallback is configured). IDs combine a millisecond
+  prefix with a counter that never carries, so an independent Redis with its
+  own counter can only collide inside the primary's last millisecond; the pause
+  moves the handover past that boundary. It does not correct a clock offset
+  between the two servers, nor restore trend-increasing order across a handover.
 - `support/consumer`: a resident consumer is now "one subscription, one file".
   `NewKafka`, `NewAMQP`, `NewRocketMQ` and `NewQueues` take a config struct and
   a `Connections` table and return a value that satisfies `worker.Worker` and

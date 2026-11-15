@@ -271,3 +271,158 @@ func TestCancelledContext(t *testing.T) {
 		t.Fatalf("Get = %v, want context.Canceled", err)
 	}
 }
+
+// millisecondPrefix strips the six-digit counter from an ID. MaxIncr is below
+// one million, so the counter never carries into the prefix.
+// millisecondPrefix 去掉 ID 末尾六位序号；MaxIncr 小于一百万，序号不会进位到前缀。
+func millisecondPrefix(id int64) int64 { return id - id%1_000_000 }
+
+// TestFallbackDelaySeparatesMilliseconds checks the outcome the delay protects:
+// a handover must not reissue an ID the primary already handed out, and its
+// millisecond prefix must have moved on. It is a forward guarantee, not a proof
+// that removing the delay would collide — a broken connection can cross a
+// millisecond on its own. TestFallbackDelayWaitsBeforeFallback pins the pause.
+// TestFallbackDelaySeparatesMilliseconds 检查停顿要保护的结果：切换不得重发主实例
+// 已发过的 ID，且毫秒前缀必须往前走。这是正向保证，不用于证明"去掉停顿就会撞"——
+// 连接断开本身就可能跨毫秒；停顿的存在由 TestFallbackDelayWaitsBeforeFallback 固定。
+func TestFallbackDelaySeparatesMilliseconds(t *testing.T) {
+	primary := miniredis.RunT(t)
+	backup := miniredis.RunT(t)
+	gen, err := uuidint.New("uuid-key",
+		uuidint.WithClient(testClient(t, primary)),
+		uuidint.WithFallbackClients(testClient(t, backup)),
+		uuidint.WithRetry(1, 0),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	seen := make(map[int64]bool)
+	var lastPrimary int64
+	for i := 0; i < 8; i++ {
+		id, err := gen.Get(ctx)
+		if err != nil {
+			t.Fatalf("Get on primary: %v", err)
+		}
+		seen[id] = true
+		lastPrimary = id
+	}
+
+	primary.Close()
+	id, err := gen.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get with fallback: %v", err)
+	}
+	if seen[id] {
+		t.Fatalf("fallback reissued primary ID %d", id)
+	}
+	if millisecondPrefix(id) <= millisecondPrefix(lastPrimary) {
+		t.Fatalf("fallback prefix %d did not move past primary prefix %d",
+			millisecondPrefix(id), millisecondPrefix(lastPrimary))
+	}
+}
+
+// TestFallbackDelayWaitsBeforeFallback compares the same handover with and
+// without the option, so connection overhead cancels out and only the pause
+// remains. A single elapsed-time assertion is not enough: a refused connection
+// can take longer than the delay on its own.
+// TestFallbackDelayWaitsBeforeFallback 对比同一条切换链路在"有停顿 / 无停顿"下的耗时，
+// 连接开销被抵消，剩下的就是停顿。只断言总耗时不够——被拒绝的连接本身就可能更慢。
+func TestFallbackDelayWaitsBeforeFallback(t *testing.T) {
+	backup := miniredis.RunT(t)
+	const delay = 200 * time.Millisecond
+	fastDead := goredis.NewClient(&goredis.Options{
+		Addr:         "127.0.0.1:1",
+		MaxRetries:   -1,
+		DialTimeout:  time.Millisecond,
+		ReadTimeout:  time.Millisecond,
+		WriteTimeout: time.Millisecond,
+	})
+	t.Cleanup(func() { _ = fastDead.Close() })
+
+	measure := func(withDelay time.Duration) time.Duration {
+		gen, err := uuidint.New("uuid-key",
+			uuidint.WithClient(fastDead),
+			uuidint.WithFallbackClients(testClient(t, backup)),
+			uuidint.WithRetry(1, 0),
+			uuidint.WithFallbackDelay(withDelay),
+		)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		start := time.Now()
+		if _, err := gen.Get(context.Background()); err != nil {
+			t.Fatalf("Get with fallback: %v", err)
+		}
+		return time.Since(start)
+	}
+
+	without := measure(0)
+	with := measure(delay)
+	if with-without < delay-20*time.Millisecond {
+		t.Fatalf("fallback delay added only %s (with=%s without=%s), want about %s",
+			with-without, with, without, delay)
+	}
+}
+
+// TestNoFallbackSkipsDelay keeps the pause off the ordinary failure path: no
+// handover means there is no millisecond boundary to cross.
+// TestNoFallbackSkipsDelay 保证普通失败路径不付这段延迟：没有切换就不需要跨毫秒边界。
+func TestNoFallbackSkipsDelay(t *testing.T) {
+	gen, err := uuidint.New("uuid-key",
+		uuidint.WithClient(deadClient(t)),
+		uuidint.WithRetry(1, 0),
+		uuidint.WithFallbackDelay(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	start := time.Now()
+	_, err = gen.Get(context.Background())
+	if !errors.Is(err, uuidint.ErrUnavailable) {
+		t.Fatalf("Get error = %v, want ErrUnavailable", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Get waited %s with no fallback configured", elapsed)
+	}
+}
+
+// TestFallbackDelayRespectsContext proves a cancelled ctx cuts the pause short
+// instead of holding the caller for the whole delay.
+// TestFallbackDelayRespectsContext 确认 ctx 取消会立即中止停顿，不会让调用方干等。
+func TestFallbackDelayRespectsContext(t *testing.T) {
+	backup := miniredis.RunT(t)
+	gen, err := uuidint.New("uuid-key",
+		uuidint.WithClient(deadClient(t)),
+		uuidint.WithFallbackClients(testClient(t, backup)),
+		uuidint.WithRetry(1, 0),
+		uuidint.WithFallbackDelay(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, err = gen.Get(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Get error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Get waited %s for a cancelled context", elapsed)
+	}
+}
+
+// TestFallbackDelayOptionValidation covers the two boundaries of the option.
+// TestFallbackDelayOptionValidation 覆盖该 Option 的两个边界。
+func TestFallbackDelayOptionValidation(t *testing.T) {
+	if _, err := uuidint.New("k", uuidint.WithFallbackDelay(-time.Millisecond)); err == nil {
+		t.Fatal("New accepted a negative fallback delay")
+	}
+	if _, err := uuidint.New("k", uuidint.WithFallbackDelay(0)); err != nil {
+		t.Fatalf("New with zero delay: %v", err)
+	}
+}
