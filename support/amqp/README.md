@@ -309,6 +309,60 @@ err = queue.PublishJSON(ctx, event, amqp.PublishOptions{
 - 示例沿用推荐的零 TTL 模式：延迟由 `PublishOptions.Delay` 决定，队列不声明
   `x-message-ttl`。想改成固定延迟队列时同样要换队列名，避免参数冲突。
 
+### 接入其它语言声明的延迟队列
+
+暂存队列也可能由别的服务创建——例如 Java 侧声明了
+`x-message-ttl=60000`、`x-dead-letter-exchange`、`x-dead-letter-routing-key`。
+`Publish` 一定会走 `channel() → declare()`，普通 `QueueDeclare` 会**逐个比对
+arguments**：对方有 `x-message-ttl` 而本侧零 TTL 模式不写，就会在声明阶段报
+`PRECONDITION_FAILED`，消息根本没发出去。
+
+两半拓扑都设 `Passive: true` 即可。passive 声明只检查名字是否存在，不比对参数，
+也不创建任何东西：
+
+```go
+queue, err := amqp.NewQueue(client, amqp.QueueConfig{
+    Topology: amqp.Topology{
+        Exchange:   "orders.delay",
+        Queue:      "orders.delay.staging",
+        RoutingKey: "created",
+        BindingKey: "created",
+        Passive:    true, // 只检查存在，不重新声明
+    },
+    Delay: &amqp.DelayConfig{
+        // 填对方队列的 TTL 可换来发布前的上限校验；留零也能发布。
+        TTL: 60 * time.Second,
+        Target: amqp.Topology{
+            Exchange:   "orders",
+            Queue:      "order.created",
+            RoutingKey: "created",
+            BindingKey: "created",
+            Passive:    true,
+        },
+    },
+})
+
+// 60s 是队列上限，不是下限：min(60s, 10s) = 10s，消息约 10 秒后到达。
+err = queue.PublishJSON(ctx, event, amqp.PublishOptions{Delay: 10 * time.Second})
+```
+
+`support/consumer` 的模板同样支持：`DelayAMQPConfig{Passive: true}` 会把开关透传到
+`QueueConfig()` 的两半拓扑，消费端 `Run` 与生产端发布都不会重新声明。
+
+| 问题 | 结论 |
+| --- | --- |
+| 队列 TTL 60s，想延迟 10s | 可以。broker 取 `min(队列 TTL, 消息 expiration)`，10s 准时到达 |
+| 想延迟 90s | 会被对方队列截断成 60s；把 `TTL` 填成 60s 则 `Publish` 提前返回 `ErrInvalidDelay`，不会静默截断 |
+| `Passive` 下 `DelayConfig` 的死信参数生效吗 | 不生效。broker 用的是**它自己队列上已有的** `x-dead-letter-*`，本侧配置只用于发布前校验；两边必须对齐，否则消息会转发到意想不到的地方 |
+| exchange/queue 不存在 | `Passive` 返回 404，不会悄悄建一个参数不对的队列——跨语言拓扑本就该显式对齐 |
+| 名称、key、`TTL` 还要填吗 | 要。它们仍用于发布路由、绑定和发布前的延迟校验，必须与对方声明一致 |
+
+核对对方队列的实际参数：
+
+```bash
+rabbitmqctl list_queues name arguments --vhost my_vhost | grep delay
+```
+
 ## API 摘要
 
 | API | 说明 |

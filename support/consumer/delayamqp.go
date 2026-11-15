@@ -26,6 +26,9 @@ import (
 // classic fixed-delay queue, acting as both the default delay and an upper
 // bound. Keep one delay per staging queue: the broker only checks the head of
 // a queue for expiry, so mixing delays lets a long wait hold up shorter ones.
+// Set Passive when another process (for example a Java service) already owns
+// the declarations: both halves are then checked for existence instead of
+// redeclared, so their broker-side arguments cannot collide with ours.
 // DelayAMQPConfig 描述一个 RabbitMQ 延迟订阅。
 // 延迟队列有两套拓扑而不是一套。Delay* 字段是消息等待过期的暂存 exchange/queue；
 // Exchange、Queue 及其 key 是 broker 死信转发后的目标。消费者读的是目标队列，暂存
@@ -34,6 +37,8 @@ import (
 // amqp.PublishOptions.Delay 决定，该字段因此变成必填。TTL 为正时保留经典的固定延迟
 // 队列，既是默认延迟也是上限。一个暂存队列只放一种延迟：broker 只在队头判定过期，
 // 混用延迟会让前面的长等待挡住后面的短等待。
+// 若拓扑由其它进程（例如 Java 服务）声明，请设置 Passive：两半拓扑只做存在性检查，
+// 不重新声明，避免 broker 上已有的参数与本侧默认值冲突。
 type DelayAMQPConfig struct {
 	// Name is the worker name and the idempotency scope. Required.
 	// Name 是 worker 名与幂等作用域。必填。
@@ -89,6 +94,28 @@ type DelayAMQPConfig struct {
 	// 一个固定 key。目标是 topic exchange 时必须开启：绑定正是由 routing key 选中的，
 	// 固定值会让 topic 分发失效，甚至匹配不上绑定而丢消息。
 	PreserveRoutingKey bool
+	// Passive checks that both halves of the topology already exist instead of
+	// declaring them. Use it when another process (often written in another
+	// language) owns the declarations: a normal QueueDeclare compares every
+	// argument with the broker, so an x-message-ttl or dead-letter argument set
+	// on their side but absent here fails with PRECONDITION_FAILED.
+	//
+	// Only the existence check changes. The staging and target names, keys and
+	// TTL still drive publishing, binding and the pre-publish delay checks, so
+	// they must match what the other process declared. In particular the broker
+	// dead-letters with the arguments on its own queue, not with the
+	// DelayConfig built here; a Java-side x-message-ttl also caps the wait at
+	// its value. A missing exchange or queue fails with NOT_FOUND instead of
+	// being created, which is the point: a foreign topology should be explicit.
+	// Passive 让两半拓扑只做存在性检查，不再声明。当拓扑由其它进程（常是其它语言写的
+	// 服务）创建时使用：普通 QueueDeclare 会逐个比对参数，对方设过 x-message-ttl 或死信
+	// 参数而本侧没写，就会 PRECONDITION_FAILED。
+	//
+	// 变的只是检查方式。暂存/目标的名称、key 与 TTL 仍用于发布、绑定和发布前的延迟校验，
+	// 因此必须与对方声明的一致。尤其要注意：broker 死信时用的是它自己队列上的参数，
+	// 不是本侧构造的 DelayConfig；Java 侧若写了 x-message-ttl，等待时长也会被它截断。
+	// exchange/queue 缺失时返回 NOT_FOUND 而不是自动创建——跨语言拓扑本就该显式对齐。
+	Passive bool
 	// NonDurable declares transient queues instead of durable ones.
 	// NonDurable 声明临时队列而不是持久化队列。
 	NonDurable bool
@@ -155,9 +182,12 @@ func (c *DelayAMQPConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concu
 
 // QueueConfig builds the transport-level configuration for this subscription.
 // A producer should publish through it, so the staging and target topologies
-// cannot drift apart between the two sides of the loop.
+// cannot drift apart between the two sides of the loop. Passive is part of that
+// contract: when the declarations belong to another process, neither side may
+// quietly switch back to creating them.
 // QueueConfig 生成该订阅的传输层配置。生产端应通过它发布，这样闭环两侧的暂存拓扑与
-// 目标拓扑就不会各自演化而错位。
+// 目标拓扑就不会各自演化而错位。Passive 也属于这份契约：拓扑归其它进程时，两侧都不能
+// 悄悄变回自行声明。
 func (c DelayAMQPConfig) QueueConfig() gofyamqp.QueueConfig {
 	durable := !c.NonDurable
 	return gofyamqp.QueueConfig{
@@ -168,6 +198,7 @@ func (c DelayAMQPConfig) QueueConfig() gofyamqp.QueueConfig {
 			BindingKey:   c.DelayBindingKey,
 			RoutingKey:   c.DelayRoutingKey,
 			Durable:      durable,
+			Passive:      c.Passive,
 		},
 		Delay: &gofyamqp.DelayConfig{
 			TTL:                c.TTL,
@@ -179,14 +210,17 @@ func (c DelayAMQPConfig) QueueConfig() gofyamqp.QueueConfig {
 				BindingKey:   c.BindingKey,
 				RoutingKey:   c.RoutingKey,
 				Durable:      durable,
+				Passive:      c.Passive,
 			},
 		},
 	}
 }
 
-// Run connects, declares both halves of the topology, consumes the target
-// queue until ctx is cancelled and releases the connection on the way out.
-// Run 建连、声明两半拓扑、消费目标队列直到 ctx 取消，并在退出时释放连接。
+// Run connects, declares (or, with Passive, checks) both halves of the
+// topology, consumes the target queue until ctx is cancelled and releases the
+// connection on the way out.
+// Run 建连、声明（Passive 时只检查）两半拓扑、消费目标队列直到 ctx 取消，并在退出时
+// 释放连接。
 func (c *DelayAMQPConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
 	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)

@@ -132,6 +132,66 @@ func TestDelayAMQPQueueConfigDescribesBothHalves(t *testing.T) {
 	}
 }
 
+// TestDelayAMQPPassiveReachesBothHalves pins the flag a foreign topology needs.
+// A plain declare compares arguments with the broker, so a staging queue that
+// a Java service created with x-message-ttl would fail with
+// PRECONDITION_FAILED. Both halves must switch to passive together: leaving
+// the target on a normal declare would redeclare half the workflow.
+// TestDelayAMQPPassiveReachesBothHalves 固定跨语言拓扑必需的开关。普通 declare 会
+// 与 broker 比对参数，Java 服务建过带 x-message-ttl 的暂存队列时会
+// PRECONDITION_FAILED。两半必须一起切成 passive，否则目标那半仍会重新声明。
+func TestDelayAMQPPassiveReachesBothHalves(t *testing.T) {
+	cfg := delayAMQPSubscription()
+	if cfg.QueueConfig().Passive || cfg.QueueConfig().Delay.Target.Passive {
+		t.Fatal("passive must stay off by default")
+	}
+
+	cfg.Passive = true
+	consumer, err := NewDelayAMQP(amqpConns(), cfg)
+	if err != nil {
+		t.Fatalf("NewDelayAMQP with passive: %v", err)
+	}
+	got := consumer.cfg.QueueConfig()
+	if !got.Passive || !got.Delay.Target.Passive {
+		t.Fatalf("passive staging=%v target=%v, want true / true", got.Passive, got.Delay.Target.Passive)
+	}
+	// Passive changes how the declarations are checked, not what is published
+	// or consumed. Names and keys must still be the ones the other process used.
+	// Passive 只改变声明的检查方式，不改变发布与消费的地址；名称和 key 仍须与对方一致。
+	if got.Exchange != "demo.orders.delay" || got.Queue != "demo.order.delay.staging" ||
+		got.Delay.Target.Queue != "demo.order.delay.ready" || got.RoutingKey != "order.delayed" {
+		t.Fatalf("passive changed the topology: %+v", got)
+	}
+	if got.Delay.TTL != 0 {
+		t.Fatalf("ttl = %s, want 0 (publish-time-only)", got.Delay.TTL)
+	}
+}
+
+// TestDelayAMQPPassiveWorksWithTopicAndTransientQueues keeps the flag
+// independent of the other topology switches rather than a special case of
+// the direct subscription.
+// TestDelayAMQPPassiveWorksWithTopicAndTransientQueues 确认这个开关与 topic、临时队列等
+// 其它拓扑选项互不干扰，不是 direct 订阅的特例。
+func TestDelayAMQPPassiveWorksWithTopicAndTransientQueues(t *testing.T) {
+	cfg := delayAMQPTopicSubscription()
+	cfg.Passive = true
+	cfg.NonDurable = true
+	consumer, err := NewDelayAMQP(amqpConns(), cfg)
+	if err != nil {
+		t.Fatalf("NewDelayAMQP with passive + topic: %v", err)
+	}
+	got := consumer.cfg.QueueConfig()
+	if !got.Passive || !got.Delay.Target.Passive {
+		t.Fatal("passive must reach a topic topology as well")
+	}
+	if !got.Delay.PreserveRoutingKey || got.ExchangeType != "topic" {
+		t.Fatal("passive must not clear the topic routing-key flag or the exchange type")
+	}
+	if got.Durable || got.Delay.Target.Durable {
+		t.Fatal("NonDurable must still propagate to both halves")
+	}
+}
+
 // TestDelayAMQPFixedDelayModeStillWorks keeps the classic queue-level TTL
 // available for subscriptions already deployed with one. Zero is the default,
 // not the only mode.

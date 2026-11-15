@@ -123,6 +123,12 @@ RabbitMQ 这一路没有"DELAY 类型 topic"可切，延迟在拓扑里：消息
 `rabbitmqctl list_queues name arguments` 核对：新暂存队列没有 `x-message-ttl`。
 RabbitMQ 只在队头判定过期，所以一个暂存队列只放一种延迟。
 
+这里的拓扑由 gofy 自己声明。若暂存队列由别的服务（例如 Java）建好、且带了
+`x-message-ttl`，默认声明会因参数不一致直接 `PRECONDITION_FAILED`；给订阅配置加
+`Passive: true` 即可只检查存在、不重新声明（`QueueConfig()` 会同时透传到两半拓扑）。
+跨语言接入的完整说明见
+[support/amqp README](../../../support/amqp/README.md#接入其它语言声明的延迟队列)。
+
 `delay_amqp_topic_order.go` 是同一套死信流程的 topic 版本：两半都是 topic exchange，
 绑定 `order.*`，暂存拓扑只写 `BindingKey`（pattern），生产端逐条给 `RoutingKey:
 order.paid`（字面键）。关键是 `PreserveRoutingKey: true` —— 不开时 broker 会把死信

@@ -78,7 +78,7 @@ conns := gofyconsumer.Connections{
 | `MaxAttempts` | 5 | 5 | 5 | 5 | 5 | 5 |
 | 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit | `RedisInstance`=ratelimit | `Instance`=default |
 | 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） | `Key`（必填，延迟 ZSET） | 暂存 `DelayExchange`+`DelayQueue`、目标 `Exchange`+`Queue`（必填） |
-| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（可选，0=纯发布端）、`ExchangeType`=direct、`PreserveRoutingKey`=false、`PrefetchCount`=32、`NonDurable`=false |
+| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（可选，0=纯发布端）、`ExchangeType`=direct、`PreserveRoutingKey`=false、`Passive`=false、`PrefetchCount`=32、`NonDurable`=false |
 
 `DelayQueues` 由 `NewDelayQueues` 构造，订阅的是 Redis ZSET 里**已到期**的消息：生产端用
 `queues.DelayQueue.Add(ctx, payload, delay)`，消费端轮询 `Pop`，失败由 `Retry` 以新到期
@@ -95,6 +95,13 @@ conns := gofyconsumer.Connections{
 `amqp_delay`。它与 `AMQP` 共用 `amqpconsumer` 适配器——传输层的 `consumeQueue()` 在
 存在 `Delay` 时自动改读目标队列。注意 RabbitMQ 只在队头判定过期，一个暂存队列请只承载
 一种延迟；切换 TTL 模式要换队列名，已存在队列的参数不可改。
+
+`Passive` 用于拓扑由别的服务（例如 Java）声明的场景：开启后两半拓扑只做存在性检查，
+不再重新声明，因此不会因对方队列上的 `x-message-ttl` 等参数与本侧不一致而
+`PRECONDITION_FAILED`。`QueueConfig()` 会把开关同时透传给暂存与目标，生产端复用它发布
+就不会有一半被悄悄重建。名称、key、`TTL` 仍用于发布路由与发布前校验，必须与对方一致；
+broker 死信时用的是它自己队列上的参数，不是本侧构造的 `DelayConfig`。详见
+[support/amqp 的跨语言接入小节](../amqp/README.md#接入其它语言声明的延迟队列)。
 
 把 `ExchangeType` / `DelayExchangeType` 设为 `topic` 就是 topic 延迟队列，此时**必须**
 同时设 `PreserveRoutingKey: true`：默认的固定死信键会把每条消息的 routing key 覆盖成

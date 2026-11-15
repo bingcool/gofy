@@ -653,6 +653,22 @@ All notable changes to this project are documented here. The format follows
   all four delayed streams at ~5-6s, the topic leg still logged
   `routing_key=order.paid`, and `rabbitmqctl` showed no `x-message-ttl` on the
   new staging queues.
+- `support/consumer.DelayAMQPConfig` gains `Passive`, forwarded to both halves
+  of `QueueConfig()`: the staging topology and `Delay.Target`. Use it when
+  another process — often a Java service — owns the declarations. `Publish`
+  always goes through `channel() → declare()`, and a normal `QueueDeclare`
+  compares every argument, so a foreign staging queue carrying
+  `x-message-ttl=60000` answered `PRECONDITION_FAILED` before a message was
+  even sent. Passive declarations only check that the names exist. Names, keys
+  and `TTL` still drive publishing, binding and the pre-publish delay checks,
+  so they must match the other side; the broker dead-letters with the arguments
+  on its own queue, not with the `DelayConfig` built here. Verified against a
+  foreign topology with a 60s queue TTL: the default declaration failed with
+  406, while `Passive` published a 10s delay that arrived at ~10s; setting
+  `TTL: 60s` additionally rejected a 90s delay with `ErrInvalidDelay` instead
+  of letting the broker clamp it.
+  Added a cross-language section to `support/amqp/README.md` and notes to the
+  consumer and demo worker READMEs.
 
 ### Changed
 
