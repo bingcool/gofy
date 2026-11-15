@@ -275,8 +275,8 @@ func openAMQPDelaySink(ctx context.Context, conns gofyconsumer.Connections, cfg 
 	}
 	// The subscription is the single source of truth for both topologies. The
 	// producer only turns on confirms; a queue declared with different
-	// x-message-ttl / dead-letter arguments would fail with PRECONDITION_FAILED.
-	// 两套拓扑都来自订阅配置。生产端只额外打开发布确认：若声明队列时参数不同，
+	// dead-letter arguments would fail with PRECONDITION_FAILED.
+	// 两套拓扑都来自订阅配置。生产端只额外打开发布确认：若声明队列时死信参数不同，
 	// broker 会返回 PRECONDITION_FAILED。
 	queueCfg := orderAMQPDelay.QueueConfig()
 	queueCfg.Confirm = true
@@ -289,12 +289,11 @@ func openAMQPDelaySink(ctx context.Context, conns gofyconsumer.Connections, cfg 
 			transport: "amqp_delay",
 			reason:    "延迟投递，来自 rabbitmq 延迟队列",
 			send: func(ctx context.Context, event gofyconsumer.Envelope) error {
-				// Delay becomes the per-message TTL; the staging queue
-				// dead-letters the message to the target once it expires.
-				// It must stay within the subscription's TTL, which the
-				// transport verifies before publishing.
-				// Delay 会转成单条消息的 TTL；暂存队列在到期时把消息死信到目标队列。
-				// 它必须在订阅的 TTL 之内，传输层会在发布前校验。
+				// Delay is the only place this message's wait is decided. The
+				// subscription declares no queue TTL, so Publish requires it
+				// and no broker-side clamp can shorten it.
+				// Delay 是这条消息等待时长的唯一来源。订阅不声明队列 TTL，因此
+				// Publish 强制要求它，broker 也不会再截断它。
 				return queue.PublishJSON(ctx, event, gofyamqp.PublishOptions{
 					Delay:      delay,
 					Persistent: true,

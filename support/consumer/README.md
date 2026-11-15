@@ -78,7 +78,7 @@ conns := gofyconsumer.Connections{
 | `MaxAttempts` | 5 | 5 | 5 | 5 | 5 | 5 |
 | 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit | `RedisInstance`=ratelimit | `Instance`=default |
 | 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） | `Key`（必填，延迟 ZSET） | 暂存 `DelayExchange`+`DelayQueue`、目标 `Exchange`+`Queue`（必填） |
-| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（必填）、`ExchangeType`=direct、`PreserveRoutingKey`=false、`PrefetchCount`=32、`NonDurable`=false |
+| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（可选，0=纯发布端）、`ExchangeType`=direct、`PreserveRoutingKey`=false、`PrefetchCount`=32、`NonDurable`=false |
 
 `DelayQueues` 由 `NewDelayQueues` 构造，订阅的是 Redis ZSET 里**已到期**的消息：生产端用
 `queues.DelayQueue.Add(ctx, payload, delay)`，消费端轮询 `Pop`，失败由 `Retry` 以新到期
@@ -86,12 +86,15 @@ conns := gofyconsumer.Connections{
 共用同一个 worker 适配器（两者 `Consume` 签名相同），在途消息同样是"至多一次"。
 
 `DelayAMQP` 由 `NewDelayAMQP` 构造，消费的是 **TTL + 死信**流程里的目标队列：`Delay*`
-字段声明暂存 exchange/queue，普通字段声明消息过期后被转发到的目标。`TTL` 既是默认延迟
-也是生产端 `amqp.PublishOptions.Delay` 的上限（broker 取队列 TTL 与单条消息 TTL 的较小
-值），必须显式填写。`QueueConfig()` 把两半拓扑一次性导出，生产端用它发布就不会与消费端
-各自声明出不同的暂存队列。`source` 是 `amqp_delay`。它与 `AMQP` 共用 `amqpconsumer`
-适配器——传输层的 `consumeQueue()` 在存在 `Delay` 时自动改读目标队列。注意 RabbitMQ 只在
-队头判定过期，一个暂存队列请只承载一种延迟。
+字段声明暂存 exchange/queue，普通字段声明消息过期后被转发到的目标。**`TTL` 留零（默认、
+推荐）即纯发布端模式**：队列不声明 `x-message-ttl`，延迟完全由生产端的
+`amqp.PublishOptions.Delay` 决定，且该字段变成必填——漏写时 `Publish` 返回
+`ErrDelayRequired`，避免消息永不过期地卡在暂存队列里。给 `TTL` 正值则回到经典固定延迟
+队列，它既是默认延迟也是上限（broker 取两者较小值）。`QueueConfig()` 把两半拓扑一次性
+导出，生产端用它发布就不会与消费端各自声明出不同的暂存队列。`source` 是
+`amqp_delay`。它与 `AMQP` 共用 `amqpconsumer` 适配器——传输层的 `consumeQueue()` 在
+存在 `Delay` 时自动改读目标队列。注意 RabbitMQ 只在队头判定过期，一个暂存队列请只承载
+一种延迟；切换 TTL 模式要换队列名，已存在队列的参数不可改。
 
 把 `ExchangeType` / `DelayExchangeType` 设为 `topic` 就是 topic 延迟队列，此时**必须**
 同时设 `PreserveRoutingKey: true`：默认的固定死信键会把每条消息的 routing key 覆盖成

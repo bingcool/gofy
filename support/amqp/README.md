@@ -193,25 +193,28 @@ err = queue.Consume(ctx, func(ctx context.Context, msg amqp091.Delivery) error {
 
 ## 延迟队列（TTL + 死信）
 
-设置 `Delay` 后，`Queue` 的主拓扑是暂存队列，消息在里面等待 TTL 到期，再通过
+设置 `Delay` 后，`Queue` 的主拓扑是暂存队列，消息在里面等到单条消息过期，再通过
 死信交换机转发到 `Target`：
 
 ```text
-Publish ──> [Delay.Exchange] ──> [Delay.Queue] ── TTL 到期 ──> [Target.Exchange]
+Publish ──> [Delay.Exchange] ──> [Delay.Queue] ── 消息过期 ──> [Target.Exchange]
                                                                       │
 Consume <──────────────────────────── [Target.Queue] <───────────────┘
 ```
+
+**延迟由发布端决定（推荐）**：`DelayConfig.TTL` 留零，队列不声明 `x-message-ttl`，
+每条消息等多久来自 `PublishOptions.Delay`。延迟因此只有一种写法，与 RocketMQ、Redis
+的 sink 一致，也不会被 broker 截断：
 
 ```go
 queue, err := amqp.NewQueue(client, amqp.QueueConfig{
     Topology: amqp.Topology{
         Exchange:   "orders.delay",
-        Queue:      "orders.delay",
+        Queue:      "orders.delay.staging",
         RoutingKey: "created",
         Durable:    true,
     },
     Delay: &amqp.DelayConfig{
-        TTL: 30 * time.Second,
         Target: amqp.Topology{
             Exchange:   "orders",
             Queue:      "order.created",
@@ -221,30 +224,38 @@ queue, err := amqp.NewQueue(client, amqp.QueueConfig{
     },
     Confirm: true,
 })
+
+err = queue.PublishJSON(ctx, event, amqp.PublishOptions{Delay: 5 * time.Second})
 ```
 
-发布时用相对延迟，不必自己算绝对时刻：
+零 TTL 时 `Delay` **必填**：没有队列 TTL，未定延迟的消息永远不过期，会一直留在暂存
+队列里，所以 `Publish` 在调用点返回 `ErrDelayRequired`。这比"用队列 TTL 兜底"更
+安全——有队列 TTL 时漏写 `Delay` 并不报错，消息只是悄悄等满队列 TTL 后迟到，把
+bug 藏了起来。
+
+**经典固定延迟队列（兼容）**：给 `DelayConfig.TTL` 一个至少 `1ms` 的正值，队列会
+声明 `x-message-ttl`。此时 `Delay` 可选（不传就继承队列 TTL），且不得超过它——
+broker 取队列 TTL 与单条消息 TTL 中较小值，超出部分会被静默截断，框架因此提前报
+`ErrInvalidDelay`：
 
 ```go
-err := queue.PublishJSON(ctx, event, amqp.PublishOptions{Delay: 5 * time.Second})
+Delay: &amqp.DelayConfig{TTL: 30 * time.Second, Target: /* ... */}
 ```
 
-- 发布时先声明 `Target`，再声明带 `x-message-ttl`、`x-dead-letter-exchange` 的
-  暂存队列，目标拓扑缺失也不会丢消息。默认还会写 `x-dead-letter-routing-key`，
-  值为 `Target` 的 routing key；`PreserveRoutingKey` 开启时不写这个参数。
+- 发布时先声明 `Target`，再声明带 `x-dead-letter-exchange` 的暂存队列，目标拓扑
+  缺失也不会丢消息。默认还会写 `x-dead-letter-routing-key`，值为 `Target` 的
+  routing key；`PreserveRoutingKey` 开启时不写这个参数。
 - 消费读取的是 `Target.Queue`，暂存队列只负责等待。
-- TTL 是队列级参数，单位毫秒，最小 `1ms`。它既是**未指定延迟时的默认等待**，也是
-  `PublishOptions.Delay` 的**上限**——broker 取队列 TTL 与单条消息 TTL 中较小值。
-- `PublishOptions.Delay` 是相对延迟入口（"5 秒后投递"），内部转成单条消息 TTL；
-  与底层字段 `Expiration` 互斥。小于 `1ms`、超过 `Delay.TTL`、或用在没有 `Delay`
-  的普通队列上都会返回错误：前者会被 broker 静默截断，后者会让消息到期后没有死信
-  目的地而直接消失。不带 `Delay` 时 `Expiration` 的行为不变。
+- `PublishOptions.Delay` 是相对延迟入口（"5 秒后投递"），内部转成单条消息 TTL，
+  最小 `1ms`；与底层字段 `Expiration` 互斥。用在没有 `Delay` 的普通队列上会返回
+  `ErrDelayRequiresWorkflow`——消息到期后没有死信目的地，会直接消失。
 - **队头阻塞**：RabbitMQ 只在队头判定消息是否过期。同一个暂存队列混用不同延迟时，
-  前面的长等待会挡住后面的短等待。按延迟分档建多个暂存队列（每档一个固定 TTL），
-  或让一档队列只承载一种延迟。
-- 暂存队列的 `Topology.Arguments` 会被保留，但上述死信参数由 `Delay`
-  覆盖；不要在同一队列上手工设置同名参数。已存在队列的 `x-message-ttl` 不能修改，
-  调整 TTL 需要换队列名或先删除队列。
+  前面的长等待会挡住后面的短等待。按延迟分档建多个暂存队列，或让一档队列只承载
+  一种延迟。
+- 暂存队列的 `Topology.Arguments` 会被保留，但上述死信参数由 `Delay` 覆盖；不要
+  手工设置同名参数。零 TTL 模式下手工写入的 `x-message-ttl` 也会被删除，否则会
+  悄悄把队列级 TTL 带回来。已存在队列的参数不能修改，切换模式要换队列名或先删除
+  队列，否则 broker 返回 `PRECONDITION_FAILED`。
 
 ### topic 类型的延迟队列
 
@@ -256,7 +267,7 @@ topic exchange 靠 routing key 选绑定，所以**必须**开 `PreserveRoutingK
 
 ```text
 Publish(order.paid) ──> [topic: orders.delay] ── binding order.* ──> [暂存队列]
-                              │ TTL 到期，保留 order.paid
+                              │ 消息过期，保留 order.paid
                               v
                      [topic: orders.ready] ── binding order.* ──> [目标队列]
 ```
@@ -266,12 +277,11 @@ queue, err := amqp.NewQueue(client, amqp.QueueConfig{
     Topology: amqp.Topology{
         Exchange:     "orders.delay",
         ExchangeType: "topic",
-        Queue:        "orders.delay.5s",
+        Queue:        "orders.delay.staging",
         BindingKey:   "order.*", // 绑定 pattern，不是发布用的 key
         Durable:      true,
     },
     Delay: &amqp.DelayConfig{
-        TTL: 10 * time.Second,
         Target: amqp.Topology{
             Exchange:     "orders.ready",
             ExchangeType: "topic",
@@ -296,6 +306,8 @@ err = queue.PublishJSON(ctx, event, amqp.PublishOptions{
 - 开启 `PreserveRoutingKey` 时，即使 `Topology.Arguments` 里手工写了
   `x-dead-letter-routing-key` 也会被删除——只要该参数存在就会覆盖原始键。
 - direct exchange 保持默认行为即可：固定死信键本来就是它想要的。
+- 示例沿用推荐的零 TTL 模式：延迟由 `PublishOptions.Delay` 决定，队列不声明
+  `x-message-ttl`。想改成固定延迟队列时同样要换队列名，避免参数冲突。
 
 ## API 摘要
 

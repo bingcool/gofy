@@ -32,8 +32,8 @@ worker/
 │   ├── queues_order.go    # order-queues-consumer（Redis 队列）
 │   ├── delay_queues_order.go    # order-delay-queues-consumer（Redis ZSET）
 │   ├── rocketmq_delay_order.go  # order-rocketmq-delay-consumer（DELAY topic）
-│   ├── delay_amqp_direct_order.go # order-amqp-delay-consumer（TTL + 死信，direct）
-│   └── delay_amqp_topic_order.go  # order-amqp-delay-topic-consumer（TTL + 死信，topic）
+│   ├── delay_amqp_direct_order.go # order-amqp-delay-consumer（发布端定延迟 + 死信，direct）
+│   └── delay_amqp_topic_order.go  # order-amqp-delay-topic-consumer（同上，topic）
 └── group2/
     ├── abc_register.go    # group2 的 NewGroup
     └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
@@ -67,7 +67,7 @@ worker/
 | group1 | `order-queues-consumer` | 2 | 常驻 | Redis 队列，弹出即删除 |
 | group1 | `order-delay-queues-consumer` | 1 | 常驻 | Redis ZSET 到期消息，Lua 原子取出 |
 | group1 | `order-rocketmq-delay-consumer` | 1 | 常驻 | `test-demo-delay` / `tag=delay`，broker 定时投递 |
-| group1 | `order-amqp-delay-consumer` | 1 | 常驻 | RabbitMQ direct 延迟：TTL 暂存队列 → 死信到目标队列 |
+| group1 | `order-amqp-delay-consumer` | 1 | 常驻 | RabbitMQ direct 延迟：发布端给 `Delay` → 暂存队列 → 死信到目标队列 |
 | group1 | `order-amqp-delay-topic-consumer` | 1 | 常驻 | RabbitMQ topic 延迟：两半都是 `topic` + `order.*`，死信保留原 routing key |
 | group1 | `order-heartbeat` | 1 | 10s | 不依赖数据库，留一行可 grep 的存活日志 |
 | group2 | `report-summary` | 1 | 1h | 按状态聚合订单，多实例会重复写同一份报表 |
@@ -108,13 +108,20 @@ group1 四个消费者订阅的那四条流。payload 里的 `reason` 写明这�
 | RabbitMQ topic | `PublishJSON(..., PublishOptions{Delay: delay, RoutingKey: "order.paid"})` | 同上，但死信**保留原 routing key**，由 `order.*` 绑定选中目标队列 | `gofyconsumer.NewDelayAMQP` + `PreserveRoutingKey: true`，读 `demo.order.delay.topic.ready` |
 
 RabbitMQ 这一路没有"DELAY 类型 topic"可切，延迟在拓扑里：消息先发布到
-`demo.orders.delay` / `demo.order.delay.5s`，TTL 到期后 broker 把它死信到
-`demo.orders.delay.ready` / `demo.order.delay.ready`，消费者读的始终是后者。两个
-exchange 都与立即订阅的 `demo.orders` 分开，否则延迟事件也会投进 `demo.order.events`。
-生产端通过 `orderAMQPDelay.QueueConfig()` 拿两半拓扑，不自己拼参数——队列的
-`x-message-ttl` 与死信参数一旦不一致，broker 会直接 `PRECONDITION_FAILED`。
-订阅里的 `TTL: 10s` 是**上限**，实际等待由生产端的每消息 `Delay: 5s` 决定；broker
-取两者较小值。RabbitMQ 只在队头判定过期，所以一个暂存队列只放一种延迟。
+`demo.orders.delay` / `demo.order.delay.staging`，等发布时设定的消息过期后由 broker
+死信到 `demo.orders.delay.ready` / `demo.order.delay.ready`，消费者读的始终是后者。
+两个 exchange 都与立即订阅的 `demo.orders` 分开，否则延迟事件也会投进
+`demo.order.events`。生产端通过 `orderAMQPDelay.QueueConfig()` 拿两半拓扑，不自己
+拼参数——死信参数一旦不一致，broker 会直接 `PRECONDITION_FAILED`。
+
+**订阅里刻意不写 `TTL`**：留零即不声明 `x-message-ttl`，四条延迟流的等待时长统一
+由生产端的 `Delay: 5s` 决定，与 RocketMQ、Redis 写法一致。队列 TTL 是第二套延迟
+写法，broker 取两者较小值会静默截断更大的 `Delay`；漏写 `Delay` 时消息还会悄悄
+等满队列 TTL 后迟到而不报错。零 TTL 模式下 `Publish` 强制要求 `Delay`
+（`ErrDelayRequired`），错误在调用点就暴露。暂存队列因此叫 `staging` 而不叫 `5s`，
+改名也避开了"已带 x-message-ttl 的队列不能改成不带"的参数冲突。可用
+`rabbitmqctl list_queues name arguments` 核对：新暂存队列没有 `x-message-ttl`。
+RabbitMQ 只在队头判定过期，所以一个暂存队列只放一种延迟。
 
 `delay_amqp_topic_order.go` 是同一套死信流程的 topic 版本：两半都是 topic exchange，
 绑定 `order.*`，暂存拓扑只写 `BindingKey`（pattern），生产端逐条给 `RoutingKey:
@@ -123,7 +130,7 @@ routing key 固定成目标拓扑那一个值，`order.paid` 与 `order.cancelle
 字面的 `order.*` 甚至匹配不上具体绑定而丢消息。开启后 broker 转发原始键，handler
 把它打进 `routing_key` 字段，这就是延迟链路里唯一能直接观察路由语义的一行。可用
 `rabbitmqctl list_queues name arguments` 核对：topic 暂存队列没有
-`x-dead-letter-routing-key`，direct 暂存队列有。
+`x-dead-letter-routing-key`，direct 暂存队列有；两者都没有 `x-message-ttl`。
 
 Redis 侧的失败消息由 `DelayQueue.Retry` 以新的到期时间写回（受 `MaxRetries` 限制）；
 `Pop` 已经把条目删掉，所以与立即队列一样是**在途至多一次**——不能丢消息的场景请用 MQ。
@@ -144,11 +151,11 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 实跑一轮：
 
 ```
-10:26:56 delayed order event scheduled  delay=5s
-10:27:01 delayed order event arrived   source=delay_queues      waited≈6.1s
-10:27:01 delayed order event arrived   source=amqp_delay        waited≈6.0s
-10:27:01 delayed order event arrived   source=amqp_delay_topic  waited≈6.1s  routing_key=order.paid
-10:27:01 delayed order event arrived   source=rocketmq_delay    scheduled=5s waited≈5.1s
+11:12:30 delayed order event scheduled  delay=5s
+11:12:35 delayed order event arrived   source=delay_queues      waited≈6.0s
+11:12:35 delayed order event arrived   source=amqp_delay        waited≈6.0s
+11:12:35 delayed order event arrived   source=amqp_delay_topic  waited≈6.0s  routing_key=order.paid
+11:12:35 delayed order event arrived   source=rocketmq_delay    scheduled=5s waited≈5.1s
 ```
 
 同一个 `event_id` 四条到达，幂等台账里四个消费者各一行——延迟链路的四种实现

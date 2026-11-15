@@ -15,27 +15,24 @@ import (
 )
 
 // DelayAMQPConfig describes one RabbitMQ delayed subscription.
-//
 // A delayed Queue has two topologies instead of one. The Delay* fields name
-// the staging exchange/queue that holds a message while its TTL runs; Exchange,
+// the staging exchange/queue that holds a message until it expires; Exchange,
 // Queue and their keys name the target that receives it once the broker
 // dead-letters it. The consumer reads from the target — the staging queue has
 // no consumer at all.
-//
-// TTL is both the default delay and the upper bound for a producer's
-// PublishOptions.Delay, because RabbitMQ applies the smaller of the queue TTL
-// and the per-message TTL. Keep one delay per staging queue: the broker only
-// checks the head of a queue for expiry, so mixing delays lets a long wait
-// hold up shorter ones behind it.
-//
+// Leave TTL at zero for the recommended publish-time-only mode: no
+// x-message-ttl is declared and the producer decides every delay through
+// amqp.PublishOptions.Delay, which becomes mandatory. A positive TTL keeps the
+// classic fixed-delay queue, acting as both the default delay and an upper
+// bound. Keep one delay per staging queue: the broker only checks the head of
+// a queue for expiry, so mixing delays lets a long wait hold up shorter ones.
 // DelayAMQPConfig 描述一个 RabbitMQ 延迟订阅。
-//
-// 延迟队列有两套拓扑而不是一套。Delay* 字段是消息等待 TTL 的暂存 exchange/queue；
+// 延迟队列有两套拓扑而不是一套。Delay* 字段是消息等待过期的暂存 exchange/queue；
 // Exchange、Queue 及其 key 是 broker 死信转发后的目标。消费者读的是目标队列，暂存
 // 队列上完全没有消费者。
-//
-// TTL 既是默认延迟，也是生产端 PublishOptions.Delay 的上限——RabbitMQ 取队列 TTL
-// 与单条消息 TTL 中较小的那个。一个暂存队列只放一种延迟：broker 只在队头判定过期，
+// TTL 留零即推荐的纯发布端模式：不声明 x-message-ttl，每条消息等多久由生产端通过
+// amqp.PublishOptions.Delay 决定，该字段因此变成必填。TTL 为正时保留经典的固定延迟
+// 队列，既是默认延迟也是上限。一个暂存队列只放一种延迟：broker 只在队头判定过期，
 // 混用延迟会让前面的长等待挡住后面的短等待。
 type DelayAMQPConfig struct {
 	// Name is the worker name and the idempotency scope. Required.
@@ -75,8 +72,14 @@ type DelayAMQPConfig struct {
 	Queue        string
 	BindingKey   string
 	RoutingKey   string
-	// TTL is the queue-level TTL, at least 1ms. Required.
-	// TTL 是队列级 TTL，至少 1ms。必填。
+	// TTL is the optional queue-level TTL. Zero (the default) means the
+	// publish-time-only mode: no x-message-ttl is declared and the producer
+	// must set amqp.PublishOptions.Delay on every message. A positive value
+	// must be at least 1ms and becomes both the default delay and the upper
+	// bound for per-message ones.
+	// TTL 是可选的队列级 TTL。零值（默认）为纯发布端模式：不声明 x-message-ttl，
+	// 生产端必须给每条消息设置 amqp.PublishOptions.Delay。正值至少 1ms，既是默认
+	// 延迟，也是单条消息延迟的上限。
 	TTL time.Duration
 	// PreserveRoutingKey keeps each message's original routing key when the
 	// broker dead-letters it, instead of forcing one fixed key. Required for a
@@ -280,8 +283,8 @@ func (c DelayAMQPConfig) validate() error {
 	if err := validateConcurrency(c.Concurrency); err != nil {
 		return err
 	}
-	if c.TTL < time.Millisecond {
-		return errors.New("ttl must be at least 1ms")
+	if c.TTL < 0 || (c.TTL > 0 && c.TTL < time.Millisecond) {
+		return errors.New("ttl must be 0 or at least 1ms")
 	}
 	if c.PrefetchCount < 0 {
 		return errors.New("prefetch_count must not be negative")

@@ -29,6 +29,10 @@ var (
 	// ErrDelayRequiresWorkflow 防止消息在普通队列上到期：没有死信目的地时它会
 	// 直接消失。
 	ErrDelayRequiresWorkflow = errors.New("amqp: per-message delay requires QueueConfig.Delay")
+	// ErrDelayRequired keeps an undated message out of a delayed queue that has
+	// no queue-level TTL: nothing would ever expire it.
+	// ErrDelayRequired 防止未定延迟的消息进入没有队列级 TTL 的延迟队列：它永远不会过期。
+	ErrDelayRequired = errors.New("amqp: a delayed queue without a queue-level ttl requires a per-message delay")
 )
 
 // Queue declares one topology and publishes or consumes through it.
@@ -87,15 +91,18 @@ type PublishOptions struct {
 	// Delay is the relative form of Expiration for a delayed Queue: publish
 	// now, deliver after this long. It becomes the message TTL, and the staging
 	// queue dead-letters the message into DelayConfig.Target when it expires.
-	// It must be at least 1ms and must not exceed DelayConfig.TTL, which is the
-	// upper bound the broker would silently clamp to. Setting both Delay and
-	// Expiration is an error; on a Queue without Delay it is an error too,
-	// because an expiring message there has nowhere to go.
+	// It must be at least 1ms. When DelayConfig.TTL is zero — the recommended
+	// publish-time-only mode — Delay is mandatory, because an undated message
+	// would never expire; with a positive queue TTL it is optional and must not
+	// exceed that TTL, which the broker would otherwise silently clamp to.
+	// Setting both Delay and Expiration is an error; on a Queue without Delay it
+	// is an error too, because an expiring message there has nowhere to go.
 	// Delay 是 Expiration 在延迟队列上的相对写法：现在发布，经过这段时间后投递。
-	// 它会被转成消息 TTL，暂存队列在消息到期时把它死信到 DelayConfig.Target。
-	// 最小 1ms，且不能超过 DelayConfig.TTL（超过会被 broker 静默截断为 TTL）。
-	// Delay 与 Expiration 同时设置会报错；普通队列上设置同样报错——那条消息到期后
-	// 没有死信目的地，会直接消失。
+	// 它会被转成消息 TTL，暂存队列在消息到期时把它死信到 DelayConfig.Target，
+	// 最小 1ms。DelayConfig.TTL 为零（推荐的纯发布端模式）时 Delay 必填——未定
+	// 延迟的消息永不过期；队列 TTL 为正时它可选，且不得超过该 TTL，否则会被
+	// broker 静默截断。Delay 与 Expiration 同时设置会报错；普通队列上设置同样
+	// 报错——那条消息到期后没有死信目的地，会直接消失。
 	Delay         time.Duration
 	MessageID     string
 	CorrelationID string

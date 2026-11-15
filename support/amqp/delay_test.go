@@ -35,6 +35,7 @@ func delayQueueConfig(ttl time.Duration) QueueConfig {
 // 必须在调用点失败，而不是在 broker 上变成更短的等待或一条消失的消息。
 func TestMessageExpiration(t *testing.T) {
 	delayed := delayQueueConfig(5 * time.Second)
+	publishOnly := delayQueueConfig(0)
 	plain := delayQueueConfig(5 * time.Second)
 	plain.Delay = nil
 
@@ -99,6 +100,24 @@ func TestMessageExpiration(t *testing.T) {
 			opts: PublishOptions{Delay: time.Second},
 			err:  ErrDelayRequiresWorkflow,
 		},
+		{
+			name: "publish-time-only mode has no upper bound",
+			cfg:  publishOnly,
+			opts: PublishOptions{Delay: time.Hour},
+			want: time.Hour,
+		},
+		{
+			name: "publish-time-only mode rejects an undated message",
+			cfg:  publishOnly,
+			opts: PublishOptions{},
+			err:  ErrDelayRequired,
+		},
+		{
+			name: "publish-time-only mode accepts a raw expiration",
+			cfg:  publishOnly,
+			opts: PublishOptions{Expiration: 2 * time.Second},
+			want: 2 * time.Second,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,6 +154,65 @@ func TestPublishRejectsInvalidDelayBeforeConnecting(t *testing.T) {
 	err = q.Publish(context.Background(), []byte("later"), PublishOptions{Delay: 10 * time.Second})
 	if !errors.Is(err, ErrInvalidDelay) {
 		t.Fatalf("Publish error = %v, want ErrInvalidDelay", err)
+	}
+
+	// The same guard must reject an undated message in publish-time-only mode
+	// before any channel is opened; otherwise it would sit in the staging queue
+	// forever with no TTL to expire it.
+	// 同样的校验必须在碰 channel 之前拒绝纯发布端模式下的未定延迟消息，否则它会因为
+	// 没有 TTL 永远留在暂存队列里。
+	publishOnly, err := NewQueue(&Client{}, delayQueueConfig(0))
+	if err != nil {
+		t.Fatalf("NewQueue with zero ttl: %v", err)
+	}
+	err = publishOnly.Publish(context.Background(), []byte("undated"), PublishOptions{})
+	if !errors.Is(err, ErrDelayRequired) {
+		t.Fatalf("Publish error = %v, want ErrDelayRequired", err)
+	}
+}
+
+// TestDelaySourceArgsOmitsQueueTTL pins the publish-time-only mode: no
+// x-message-ttl may reach QueueDeclare, including one the caller wrote into
+// Arguments, or the producer's per-message delay would be silently clamped.
+// TestDelaySourceArgsOmitsQueueTTL 固定纯发布端模式：QueueDeclare 不能收到
+// x-message-ttl，连调用方手工写进 Arguments 的也不能留，否则生产端的每消息延迟
+// 会被静默截断。
+func TestDelaySourceArgsOmitsQueueTTL(t *testing.T) {
+	cfg := delayQueueConfig(0)
+	args := delaySourceArgs(cfg)
+	if _, ok := args["x-message-ttl"]; ok {
+		t.Fatalf("zero ttl still declared a queue ttl: %v", args)
+	}
+	if args["x-dead-letter-exchange"] != "orders" {
+		t.Fatalf("dead-letter exchange = %v, want orders", args["x-dead-letter-exchange"])
+	}
+
+	cfg.Topology.Arguments = amqp091.Table{"x-message-ttl": int64(9999)}
+	if _, ok := delaySourceArgs(cfg)["x-message-ttl"]; ok {
+		t.Fatal("a manual queue ttl survived the publish-time-only mode")
+	}
+
+	fixed := delayQueueConfig(5 * time.Second)
+	if delaySourceArgs(fixed)["x-message-ttl"] != int64(5000) {
+		t.Fatal("the classic fixed-delay mode must still declare its queue ttl")
+	}
+}
+
+// TestDelayConfigAcceptsZeroTTL keeps the zero value meaningful: a queue TTL
+// may be absent, but a negative or sub-millisecond one would round to zero on
+// the wire and must fail validation instead.
+// TestDelayConfigAcceptsZeroTTL 让零值有明确语义：队列 TTL 可以不设，但负数或不足
+// 1ms 的值在线路上会被取整成 0，必须在校验阶段失败。
+func TestDelayConfigAcceptsZeroTTL(t *testing.T) {
+	for _, ttl := range []time.Duration{0, time.Millisecond, 5 * time.Second} {
+		if err := delayQueueConfig(ttl).validate(); err != nil {
+			t.Fatalf("validate(ttl=%s): %v", ttl, err)
+		}
+	}
+	for _, ttl := range []time.Duration{-time.Second, time.Microsecond} {
+		if err := delayQueueConfig(ttl).validate(); err == nil {
+			t.Fatalf("validate(ttl=%s) accepted an invalid ttl", ttl)
+		}
 	}
 }
 

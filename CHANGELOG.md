@@ -632,6 +632,27 @@ All notable changes to this project are documented here. The format follows
   at ~5-6s, the topic leg logged `routing_key=order.paid`, and `rabbitmqctl`
   showed `x-dead-letter-routing-key` present on the direct staging queue but
   absent on the topic one.
+- AMQP delayed queues now take the delay only at publish time.
+  `DelayConfig.TTL` is optional: zero (the default) declares no
+  `x-message-ttl`, so the producer's `PublishOptions.Delay` is the sole source
+  of the wait and becomes mandatory — `Publish` answers `ErrDelayRequired`
+  rather than letting an undated message sit in the staging queue forever. A
+  positive TTL still gives the classic fixed-delay queue, acting as the default
+  delay and the upper bound, so existing subscriptions keep working.
+  This removes a second way to set the delay from the template, matching the
+  RocketMQ and Redis sinks, and fixes two traps of the queue TTL: it silently
+  clamped a larger per-message delay, and a forgotten `Delay` made a message
+  quietly arrive late instead of failing at the call site. `delaySourceArgs`
+  now omits `x-message-ttl` (and deletes a hand-written one),
+  `messageExpiration` only enforces the upper bound when a queue TTL exists,
+  and both validation paths accept zero.
+  The demo's two AMQP delayed subscriptions drop `TTL` and rename their staging
+  queues to `*.staging`: the old names implied a fixed 5s delay, and a queue
+  already declared with `x-message-ttl` cannot be redeclared without it
+  (`PRECONDITION_FAILED`). Verified on the local broker: three events arrived on
+  all four delayed streams at ~5-6s, the topic leg still logged
+  `routing_key=order.paid`, and `rabbitmqctl` showed no `x-message-ttl` on the
+  new staging queues.
 
 ### Changed
 

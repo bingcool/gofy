@@ -14,9 +14,8 @@ func delayAMQPSubscription() DelayAMQPConfig {
 	return DelayAMQPConfig{
 		Name:            "order-amqp-delay-consumer",
 		Instance:        "default",
-		TTL:             5 * time.Second,
 		DelayExchange:   "demo.orders.delay",
-		DelayQueue:      "demo.order.delay.5s",
+		DelayQueue:      "demo.order.delay.staging",
 		DelayBindingKey: "order.delayed",
 		DelayRoutingKey: "order.delayed",
 		Exchange:        "demo.orders.delay.ready",
@@ -69,7 +68,7 @@ func TestNewDelayAMQPRejectsInvalidConfig(t *testing.T) {
 		{"invalid name", func(c *DelayAMQPConfig) { c.Name = "not a name" }},
 		{"missing handler", func(c *DelayAMQPConfig) { c.Handler = nil }},
 		{"invalid concurrency", func(c *DelayAMQPConfig) { c.Concurrency = -1 }},
-		{"missing ttl", func(c *DelayAMQPConfig) { c.TTL = 0 }},
+		{"negative ttl", func(c *DelayAMQPConfig) { c.TTL = -time.Second }},
 		{"sub-millisecond ttl", func(c *DelayAMQPConfig) { c.TTL = time.Microsecond }},
 		{"negative prefetch", func(c *DelayAMQPConfig) { c.PrefetchCount = -1 }},
 		{"missing delay exchange", func(c *DelayAMQPConfig) { c.DelayExchange = "" }},
@@ -110,15 +109,18 @@ func TestDelayAMQPQueueConfigDescribesBothHalves(t *testing.T) {
 	if cfg.Delay == nil {
 		t.Fatal("QueueConfig has no Delay workflow")
 	}
-	if cfg.Exchange != "demo.orders.delay" || cfg.Queue != "demo.order.delay.5s" {
+	if cfg.Exchange != "demo.orders.delay" || cfg.Queue != "demo.order.delay.staging" {
 		t.Fatalf("staging topology = %s / %s", cfg.Exchange, cfg.Queue)
 	}
 	if cfg.Delay.Target.Exchange != "demo.orders.delay.ready" ||
 		cfg.Delay.Target.Queue != "demo.order.delay.ready" {
 		t.Fatalf("target topology = %s / %s", cfg.Delay.Target.Exchange, cfg.Delay.Target.Queue)
 	}
-	if cfg.Delay.TTL != 5*time.Second {
-		t.Fatalf("ttl = %s, want 5s", cfg.Delay.TTL)
+	// The default is the publish-time-only mode: the subscription owns the
+	// topology, the producer owns the delay, and no queue TTL is declared.
+	// 默认是纯发布端模式：订阅只拥有拓扑，延迟归生产端，队列不声明 TTL。
+	if cfg.Delay.TTL != 0 {
+		t.Fatalf("ttl = %s, want 0 (publish-time-only)", cfg.Delay.TTL)
 	}
 	if !cfg.Durable || !cfg.Delay.Target.Durable {
 		t.Fatal("both queues must be durable by default")
@@ -130,13 +132,30 @@ func TestDelayAMQPQueueConfigDescribesBothHalves(t *testing.T) {
 	}
 }
 
+// TestDelayAMQPFixedDelayModeStillWorks keeps the classic queue-level TTL
+// available for subscriptions already deployed with one. Zero is the default,
+// not the only mode.
+// TestDelayAMQPFixedDelayModeStillWorks 保留经典队列级 TTL，给已经带 TTL 部署的
+// 订阅留一条路。零值是默认，不是唯一模式。
+func TestDelayAMQPFixedDelayModeStillWorks(t *testing.T) {
+	cfg := delayAMQPSubscription()
+	cfg.TTL = 10 * time.Second
+	consumer, err := NewDelayAMQP(amqpConns(), cfg)
+	if err != nil {
+		t.Fatalf("NewDelayAMQP with a queue ttl: %v", err)
+	}
+	if got := consumer.cfg.QueueConfig().Delay.TTL; got != 10*time.Second {
+		t.Fatalf("ttl = %s, want 10s", got)
+	}
+}
+
 func delayAMQPTopicSubscription() DelayAMQPConfig {
 	cfg := delayAMQPSubscription()
 	cfg.Name = "order-amqp-delay-topic-consumer"
 	cfg.PreserveRoutingKey = true
 	cfg.DelayExchange = "demo.orders.delay.topic"
 	cfg.DelayExchangeType = "topic"
-	cfg.DelayQueue = "demo.order.delay.topic.5s"
+	cfg.DelayQueue = "demo.order.delay.topic.staging"
 	cfg.DelayBindingKey = "order.*"
 	cfg.DelayRoutingKey = ""
 	cfg.Exchange = "demo.orders.delay.topic.ready"
