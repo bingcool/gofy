@@ -86,6 +86,14 @@ func (c RunConfig) instances(w Worker) int {
 type Runner struct {
 	group *Group
 	cfg   RunConfig
+
+	// ready closes once every instance of every worker that reports readiness
+	// has done so. A group whose workers never report is ready as soon as Run
+	// starts, which is the old behaviour for polling loops.
+	// ready 在所有"自行上报就绪"的 worker 的每个实例都上报后关闭。全部 worker 都不
+	// 上报的分组在 Run 开始时即就绪，轮询任务因此保持原有行为。
+	ready    chan struct{}
+	readyOne sync.Once
 }
 
 // NewRunner validates the group and its concurrency map.
@@ -99,12 +107,35 @@ func NewRunner(group *Group, cfg RunConfig) (*Runner, error) {
 			return nil, fmt.Errorf("%w: %s=%d", ErrInvalidConcurrency, name, n)
 		}
 	}
-	return &Runner{group: group, cfg: cfg.withDefaults()}, nil
+	return &Runner{
+		group: group,
+		cfg:   cfg.withDefaults(),
+		ready: make(chan struct{}),
+	}, nil
 }
 
 // Group returns the group being run.
 // Group 返回当前运行的分组。
 func (r *Runner) Group() *Group { return r.group }
+
+// Ready returns a channel closed once the group can accept work: every worker
+// that implements ReadyReporter has reported, and no worker failed before it
+// could. The channel is never closed for a group whose startup failed, so a
+// caller waiting with a ctx never mistakes a dead start for readiness.
+//
+// Workers that do not implement ReadyReporter do not delay it.
+// Ready 返回在分组可以接活时关闭的通道：所有实现 ReadyReporter 的 worker 都已上报，
+// 且没有 worker 在就绪前失败。启动失败的分组永不关闭该通道，等待它的调用方因此不会
+// 把"启动失败"误判为"已就绪"。
+//
+// 不实现 ReadyReporter 的 worker 不会拖慢它。
+func (r *Runner) Ready() <-chan struct{} { return r.ready }
+
+// markReady closes the ready channel exactly once.
+// markReady 只关闭一次就绪通道。
+func (r *Runner) markReady() {
+	r.readyOne.Do(func() { close(r.ready) })
+}
 
 // Run blocks until the context is cancelled, a worker fails fatally, or every
 // instance exits on its own (which is a contract violation and reported as an
@@ -145,6 +176,31 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	host := cfg.hostname()
+	// The gate counts instances, not workers: with concurrency 3 a consumer
+	// must have all three connections up before the group is ready.
+	// 闸门按实例计数而不是按 worker：并发为 3 的消费者必须三条连接都就绪，分组才算
+	// 就绪。
+	gate := newReadyGate()
+	reporters := 0
+	for _, w := range r.group.Workers() {
+		if _, ok := w.(ReadyReporter); ok {
+			reporters += cfg.instances(w)
+		}
+	}
+	gate.add(reporters)
+	go func() {
+		select {
+		case <-gate.wait():
+			r.markReady()
+		case <-runCtx.Done():
+			// Shutting down (or failing) before every instance reported: ready
+			// stays unclosed on purpose, so a caller waiting for it with a ctx
+			// never sees a dead start as readiness.
+			// 在所有实例上报之前就停机（或失败）：ready 故意保持未关闭，带着 ctx
+			// 等待它的调用方因此不会把"启动失败"当成"已就绪"。
+		}
+	}()
+
 	for _, w := range r.group.Workers() {
 		total := cfg.instances(w)
 		for index := 0; index < total; index++ {
@@ -158,7 +214,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			wg.Add(1)
 			go func(w Worker, id Identity) {
 				defer wg.Done()
-				r.supervise(runCtx, drainCtx, w, id, fail)
+				r.supervise(runCtx, drainCtx, w, id, gate, fail)
 			}(w, id)
 		}
 	}
@@ -206,16 +262,18 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // supervise runs one instance, restarting it according to the policy.
 // supervise 运行单个实例，并按策略重启。
-func (r *Runner) supervise(ctx, drain context.Context, w Worker, id Identity, fail func(error)) {
+func (r *Runner) supervise(ctx, drain context.Context, w Worker, id Identity, gate *readyGate, fail func(error)) {
 	policy := r.cfg.Policy
 	restarts := 0
 	for {
 		// Identity and the drain context travel together so a consumer adapter
 		// can keep handling in-flight messages after the run context is
-		// cancelled.
+		// cancelled. The ready gate rides along too, so Run can report that its
+		// connection is up without the worker holding a reference to the runner.
 		// 身份与 drain context 一起下发，消费者适配器因此能在 run context 取消
-		// 后继续处理在途消息。
-		runCtx := WithDrainContext(WithIdentity(ctx, id), drain)
+		// 后继续处理在途消息。就绪闸门也一起下发，Run 因此能在建连完成后上报，而不必
+		// 让 worker 持有 runner 的引用。
+		runCtx := withReadyGate(WithDrainContext(WithIdentity(ctx, id), drain), gate)
 		err := w.Run(runCtx)
 		if ctx.Err() != nil {
 			return

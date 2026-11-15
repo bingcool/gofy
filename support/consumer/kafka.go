@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	gofykafka "github.com/bingcool/gofy/support/kafka"
+	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/kafkaconsumer"
 )
 
@@ -182,6 +183,13 @@ func NewKafka(conns Connections, cfg KafkaConfig) (*KafkaConsumer, error) {
 // Name 返回 worker 名。
 func (c *KafkaConsumer) Name() string { return c.cfg.Name }
 
+// ReportsReady tells the runner that Run reports readiness itself: this
+// consumer connects and subscribes inside Run, so "Run was entered" is not the
+// same as "the process can accept work".
+// ReportsReady 告诉 runner：Run 自行上报就绪。该消费者在 Run 内建连并订阅，因此
+// "Run 已进入"并不等于"进程可以接活"。
+func (c KafkaConsumer) ReportsReady() {}
+
 // Concurrency returns how many instances the worker should run.
 // Concurrency 返回 worker 应当运行的实例数。
 func (c *KafkaConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurrency) }
@@ -236,6 +244,16 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// The client is lazy: New does not dial, and the consume loop only fails
+	// once it polls. A broker that cannot be reached is exactly the state the
+	// probe must not call ready, so verify the connection first.
+	// 客户端是惰性的：New 不拨号，消费循环要等到 poll 才会暴露失败。broker 不可达
+	// 正是探针不能报就绪的状态，因此先确认一次连接。
+	if err := client.Ping(ctx); err != nil {
+		return fmt.Errorf("%s: ping broker: %w", name, err)
+	}
+	gofyworker.Ready(ctx)
 
 	lg.Info("kafka consumer started",
 		zap.String("topic", c.cfg.Topic),

@@ -159,40 +159,82 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		defer health.stop()
 	}
 
-	a.markReady()
-	if health != nil {
-		health.setReady()
-	}
-
 	// Workers reach the logger, database and tracer through the runtime, the
 	// same way a script receives it as an argument.
 	// worker 通过 Runtime 访问 logger、数据库与 tracer，方式与脚本接收 Runtime
 	// 参数一致。
 	runCtx, cancelRunners := context.WithCancelCause(ctx)
 	defer cancelRunners(nil)
+	// The probe flips to 503 the moment the shutdown begins, not after the last
+	// runner returned: the whole drain window accepts no new work, and a
+	// scheduler that keeps sending traffic until the process exits would turn a
+	// graceful stop into a burst of failed requests.
+	// 停机一开始探针就转 503，而不是等最后一个 runner 返回：整个 drain 窗口都不接
+	// 新任务，否则调度器会一直往正在退出的进程打流量，把优雅停机变成一批失败请求。
+	if health != nil {
+		go func() {
+			<-runCtx.Done()
+			health.setStopping()
+		}()
+	}
+
 	errCh := make(chan error, len(runners))
 	for _, runner := range runners {
 		go func(r *worker.Runner) {
 			errCh <- r.Run(worker.WithRuntime(runCtx, rt))
 		}(runner)
 	}
-	// One group failing takes the process down: a process that keeps half of its
-	// groups alive would report ready while silently skipping work, and the
-	// wildcard exists for local runs where "all or nothing" is the useful answer.
+
+	// Ready is a claim about work being accepted, not about goroutines having
+	// been started: a consumer connects and subscribes inside Run, so the probe
+	// stays 503 until every instance of every group reported readiness.
+	// 就绪说的是"能接活"，不是"goroutine 已启动"：消费者在 Run 内部建连并订阅，
+	// 因此探针会一直 503，直到每个分组的每个实例都上报就绪。
+	readyAll := make(chan bool, 1)
+	go func() {
+		for _, runner := range runners {
+			select {
+			case <-runner.Ready():
+			case <-runCtx.Done():
+				readyAll <- false
+				return
+			}
+		}
+		readyAll <- true
+	}()
+
+	var runErr error
+	remaining := len(runners)
+	ready := false
+	// One group failing takes the process down: a process that keeps half of
+	// its groups alive would report ready while silently skipping work, and the
+	// wildcard exists for local runs where "all or nothing" is the useful
+	// answer.
 	// 一个分组失败就带走整个进程：只留一半分组活着的进程会一边报就绪一边漏活；
 	// 通配符本来就是给本地运行用的，"全有或全无"才是想要的答案。
-	var runErr error
-	for range runners {
-		if err := <-errCh; err != nil {
-			runErr = errors.Join(runErr, err)
-			cancelRunners(err)
+	for remaining > 0 {
+		select {
+		case allReady := <-readyAll:
+			// A nil channel blocks forever, which is what "the answer already
+			// arrived" means for the rest of this loop.
+			// nil 通道会永久阻塞，这正是"答案已经拿到"在本次循环剩余部分里的含义。
+			readyAll = nil
+			if !allReady || ready {
+				continue
+			}
+			ready = true
+			a.markReady()
+			if health != nil {
+				health.setReady()
+			}
+			lg.Info("worker group ready", startedFields...)
+		case err := <-errCh:
+			remaining--
+			if err != nil {
+				runErr = errors.Join(runErr, err)
+				cancelRunners(err)
+			}
 		}
-	}
-	if health != nil {
-		// Keep reporting 503 while the group drains: the process is still alive
-		// but it no longer accepts new work.
-		// drain 期间继续返回 503：进程还活着，但已经不再接新任务。
-		health.setStopping()
 	}
 	if cerr := a.cleanup(); cerr != nil {
 		runErr = errors.Join(runErr, cerr)

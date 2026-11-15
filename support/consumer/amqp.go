@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
+	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/amqpconsumer"
 )
 
@@ -142,6 +143,13 @@ func NewAMQP(conns Connections, cfg AMQPConfig) (*AMQPConsumer, error) {
 // Name 返回 worker 名。
 func (c *AMQPConsumer) Name() string { return c.cfg.Name }
 
+// ReportsReady tells the runner that Run reports readiness itself: this
+// consumer connects and subscribes inside Run, so "Run was entered" is not the
+// same as "the process can accept work".
+// ReportsReady 告诉 runner：Run 自行上报就绪。该消费者在 Run 内建连并订阅，因此
+// "Run 已进入"并不等于"进程可以接活"。
+func (c AMQPConsumer) ReportsReady() {}
+
 // Concurrency returns how many instances the worker should run.
 // Concurrency 返回 worker 应当运行的实例数。
 func (c *AMQPConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurrency) }
@@ -205,6 +213,13 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 		zap.Bool("idempotency", c.cfg.Idempotency),
 	)
 	defer lg.Info("amqp consumer stopped", zap.String("queue", c.cfg.Queue))
+
+	// Every connection and declaration above succeeded, so this instance can
+	// accept work. Reporting after the log line keeps the ordering in the log
+	// the same as the ordering of events.
+	// 上面所有连接与声明都已成功，本实例可以接活。放在日志之后上报，日志顺序因此与
+	// 事件顺序一致。
+	gofyworker.Ready(ctx)
 
 	return w.Run(ctx)
 }
