@@ -32,7 +32,7 @@ nacos:
     namespace_id: dev
     group_name: GO_GROUP
 
-  # 监控配置变化
+  # 监控配置变化(main.go的enableNacosSyncConfig配置是总开关)
   enable_nacos_config_change_restart: true
   monitor_config_change:
     listener_timeout_ms: 30000
