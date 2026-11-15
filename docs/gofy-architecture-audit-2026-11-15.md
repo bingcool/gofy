@@ -4,6 +4,11 @@
 > 审计范围：`bingcool/gofy`、`bingcool/gofy-interface-api`、`bingcool/gofy-adapter`，以及 Gofy 仓库中的 `examples/demo-service` 与 `examples/interface-service`  
 > 主要审计基线：Gofy `main` 最新提交 `0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf`  
 > 方式：按源码与调用链进行静态审查；没有在目标仓库环境中执行完整 `make check-all`、`go test -race`、真实 MySQL / Redis / MQ / Kubernetes 集成测试。
+>
+> 2026-11-15 修订：按 [`gofy-architecture-audit-2026-11-15-review.md`](gofy-architecture-audit-2026-11-15-review.md)
+> 的逐条代码复核合并修正——P1-02（Lease）降级为 P2-10，原 P1-03～P1-06 上移一位，
+> 新增 P2-11（restart/exit 失败后永久摘流），修正 P1-01 / P1-02 / P1-03 的修复方案，
+> 并订正 `--group=all` 等事实错误。
 
 ---
 
@@ -21,14 +26,18 @@
 6. `claim` 与 `lease` 分别承担数据库任务行认领和分布式互斥协调，不把两种机制混成一个抽象。
 7. `gofy-interface-api` 作为中立契约 / Client / OpenAPI 基础库，`gofy-adapter` 承接 Gofy/Gin 和 Nacos 等框架适配。
 
-但当前仍有几项**需要优先修正的正确性问题**。最重要的是：
+但当前仍有需要修正的正确性问题，其中 5 项为 P1：
 
 - Reload 时 HTTP Handler 与业务 IO Snapshot 仍不是一次原子发布，旧 Handler 存在使用新 IO 的窗口，失败回滚也可能撤掉旧请求所需的 Snapshot。
 - 数据库 Claim 使用的 owner 不是每次认领唯一的 fencing token；旧执行者可能在租约过期并被重新认领后，仍以相同 owner 写回任务结果。
 - 消费幂等台账将 `processing` 记录再次认领时，没有阻止并发处理中消息的第二个执行者；完成、失败、dead 写回也没有绑定某一次 claim 的 attempt/token。
 - Worker `/healthz` 在 Runner 真正启动前就置为 Ready，可能把尚未建立 broker 订阅的进程报告为可用。
-- HTTP Generation Lease 的释放没有用 `defer`；未被 Recovery 捕获的 panic 会遗留 active 计数。
 - `gofy-interface-api/client.WithQuery()` 当前仍会因为 nil map 触发 panic。
+
+另有 2 项 P2 与上述问题相邻，建议一并排期：
+
+- HTTP Generation Lease 的释放没有用 `defer`，摘流闸门与 Acquire 之间也有竞争窗口；默认 Recovery 会挡住多数 panic，影响是 drain 超时而非永久泄漏（P2-10）。
+- Nacos `restart` / `exit` 的进程动作失败后，摘流闸门不会恢复，进程会永久保持 503 且已从 Nacos 注销（P2-11）。
 
 这些问题都可以在现有架构内小步解决，不需要新增一个大型框架子系统。
 
@@ -36,9 +45,19 @@
 
 | 级别 | 含义 | 本轮数量 | 建议 |
 |---|---|---:|---|
-| P1 | 可能破坏资源代际一致性、任务互斥或消息可靠性，或导致运行时明确 panic / 健康状态误报 | 6 | 先处理，再扩大 Worker / MQ 上线范围 |
-| P2 | 可用性、契约一致性、资源增长或运维文档风险 | 6 | 按影响逐项修正 |
+| P1 | 可能破坏资源代际一致性、任务互斥或消息可靠性，或导致运行时明确 panic / 健康状态误报 | 5 | 先处理，再扩大 Worker / MQ 上线范围 |
+| P2 | 可用性、契约一致性、资源增长或运维文档风险 | 11 | 按影响逐项修正 |
 | 保留 | 当前实现合理，或是明确且可接受的能力边界 | 多项 | 不要为“看起来完整”而扩功能 |
+
+### P1 修复状态
+
+| 编号 | 状态 | 落地内容 |
+| --- | --- | --- |
+| P1-01 | ✅ 已修复 | 框架新增 `support.RequestBinder`：`generation` 持有本代 binder，`handlerSwap` 在拿到 lease 后、进入 handler 前执行；`start` / `Reload` 从本代已启动模块组合。demo `appio.Module` 实现该接口绑定本代快照，脚本入口显式固定自己启动的那一代，`generation.Set.Middleware` 不再覆盖已有固定值。 |
+| P1-02 | ✅ 已修复 | `Succeed` / `Fail` / dead 的 UPDATE 增加 `attempts = ?`，旧执行者一律 `ErrLeaseLost`，手工 task 直接 `ErrInvalidTask`；新增 `worker.Identity.Owner()`（带 host）并在文档中作为 claim owner 的推荐值。 |
+| P1-03 | ✅ 已修复 | 台账按状态机推进：`processing` 且租约有效返回 `ErrInFlight`（可重试、不 ACK），租约过期或 `failed` 才允许带新 attempts 接管；`succeed` / `fail` / `park` 以 attempts + status 做 CAS，`done` / `dead` 不可重开；租约复用 `updated_at`，由 `ProcessorConfig.ProcessingLease` 配置。 |
+| P1-04 | ✅ 已修复 | 新增 `worker.ReadyReporter` + `worker.Ready(ctx)`，四个消费者在建连/订阅后上报，`Runner.Ready()` 汇总；宿主等全部实例上报后才置 `/healthz` 为 200，启动失败永不就绪；drain 一开始立即回到 503。 |
+| P1-05 | ✅ 已修复 | `gofy-interface-api` 的 `newCallOptions` 初始化 `query`，普通调用、重复 key 与流式调用均不再 panic。 |
 
 ---
 
@@ -203,7 +222,7 @@ main
 
 Worker 与 HTTP 使用同一个 Runtime 组件构建逻辑，但启动路径相互隔离：Worker 不注册 HTTP 路由、不监听业务 HTTP 端口、不向 Nacos 注册业务服务。这是合理的进程职责切分。
 
-部署上，一个进程运行一个 Worker Group 是清晰的边界；`--group=all` 适合本地开发和冒烟测试，不适合作为正常生产部署形态。这样业务变更只需滚动重启对应 Worker Group 的 Deployment。
+部署上，一个进程运行一个 Worker Group 是清晰的边界；`--group='*'` 适合本地开发和冒烟测试，不适合作为正常生产部署形态（`all` 只是该进程 pid 文件的后缀，不是 `--group` 的取值）。这样业务变更只需滚动重启对应 Worker Group 的 Deployment。
 
 ### 3.5 消息消费者链路
 
@@ -309,24 +328,25 @@ Processor.Handle
 
 **建议修正**
 
-不要让业务 IO Module 自己决定进程级 Snapshot 的发布时刻。将 Snapshot 作为 `generation` 的字段，由 App 在所有新资源和 Handler 都 Ready 后，以同一个原子指针发布完整对象：
+不要让业务 IO Module 自己决定进程级 Snapshot 的发布时刻，也不要让框架反向依赖业务包：`generation` 属于 `gofy` 包，`appio` 属于 demo，直接写 `snapshot *appio.Snapshot` 无法编译，也违反三仓依赖方向。两种可行方案：
+
+**方案 A（业务侧，零框架改动）**：把快照挂到“每代一个”的 `Container`。demo 的 `reloader.factories()` 每次 Reload 都新建容器，让该代中间件读本代容器的快照，而不是读进程级 `currentSnapshot`；全局 `Publish` 只保留给脚本、Worker 与测试。Reload 失败时旧容器仍持有旧快照，不需要恢复逻辑。
+
+**方案 B（框架侧，通用扩展点）**：框架只提供 binder 钩子，不持有业务类型：
 
 ```go
-type generation struct {
-    id       uint64
-    handler  http.Handler
-    snapshot *appio.Snapshot
-    lease    *generationLease
-    // generation-owned modules and resources
-}
+type RequestBinder func(ctx context.Context) context.Context
+// handlerSwap.ServeHTTP: acquire 成功后 ctx = binder(ctx) 再进入 handler
 ```
 
-`handlerSwap.ServeHTTP()` 成功 Acquire 某一代后，应该把同一代的 Snapshot 注入 Request.Context，再进入该代 Handler。新代发布失败时，旧 `generation` 指针从未被覆盖，因此不需要额外恢复 Snapshot。
+app 在构造每代模块时把该代快照闭包进 binder。两条方案都满足“新代发布失败时旧代从未被覆盖”。
+
+`handlerSwap.ServeHTTP()` 成功 Acquire 某一代后，应把同一代的快照注入 Request.Context，再进入该代 Handler。
 
 **重要约束**
 
 - `Start()` 只构建和预热资源，不发布进程级当前代；
-- App 统一提交完整 Generation；
+- Handler 与 Snapshot 在同一代内成对可见：方案 A 由中间件绑定本代容器，方案 B 由 App 统一发布完整 Generation；
 - 旧 Generation 完成 drain 后才 Stop 模块和关闭资源；
 - 脚本 / CLI / Worker 等非 HTTP 入口，使用显式的独立 Snapshot 生命周期，不应复用 HTTP 的进程级 Current 状态。
 
@@ -337,41 +357,7 @@ type generation struct {
 3. 两个并发 Reload 与请求入口交错时，不允许出现 Handler N + Snapshot N+1。
 4. Reload 成功后，旧资源只在旧 Generation 最后一个 Lease 释放后关闭。
 
-### P1-02：HTTP Generation Lease 缺少 `defer`，并且与摘流闸门存在竞争窗口
-
-**涉及文件**：[`generation.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/generation.go)
-
-当前 `ServeHTTP()` 执行顺序：
-
-```go
-if !gen.lease.acquire() { ... }
-gen.handler.ServeHTTP(w, r)
-gen.lease.release()
-```
-
-这里的 `release()` 没有 defer。如果 Handler 有一个逃逸到 `ServeHTTP` 外层的 panic，例如关闭 Recovery 时业务 panic，或 `http.ErrAbortHandler`，这次 active 计数不会释放。之后 Reload 会认为旧 Generation 仍有请求，等待到 drain timeout 后才关闭资源。
-
-此外，摘流闸门当前在 Acquire 之前只检查一次：
-
-1. 请求读到 `accepting == true`；
-2. `StopAccepting()` 将 accepting 改成 false；
-3. 请求随后仍 Acquire 成功并进入 Handler。
-
-这使“摘流完成后不再接受新请求”的保证存在一个竞态窗口。
-
-**建议修正**
-
-- Acquire 成功后立刻 `defer gen.lease.release()`；
-- 摘流状态应与 generation.Acquire 协调，至少在 Acquire 后重新检查 accepting；更稳妥的是把 accepting 与 active/retired 状态收敛到一个可同步的 admission gate；
-- 在网关或 server 连接层开始关闭之前，明确已进入的请求仍允许持有 Lease 跑完。
-
-**验收测试**
-
-- Recovery 关闭时 Handler panic，Lease active 最终必须回到 0；
-- `http.ErrAbortHandler` 不应泄漏 Lease；
-- 并发 StopAccepting 与请求进入循环至少数十万次，不允许闸门关闭后新增请求进入 Handler。
-
-### P1-03：Claim 的 owner 不是每次认领唯一 token，旧执行者可以写回已被重新认领的任务
+### P1-02：Claim 的 owner 不是每次认领唯一 token，旧执行者可以写回已被重新认领的任务
 
 **涉及文件**
 
@@ -414,16 +400,18 @@ Worker A 或同名实例再次 Claim → owner=A, attempts=2
 
 **建议修正**
 
-每次 Claim 应产生一个唯一 `claim_token`（随机 ID 或递增 attempt + nonce），持久化到任务表，并回传给 `Task`。收尾 SQL 必须同时比较：
+首选不新增列的方案：`Task` 已经带回 `Attempts`，`Claim()` 每次认领必然自增，收尾 SQL 增加 `AND attempts = ?` 就能让上一次认领的写回全部失败：
 
 - `id`；
 - `status = CLAIMED`；
-- `claim_token = task.ClaimToken`（或严格的 `attempts = task.Attempts`，推荐 token）；
+- `attempts = task.Attempts`；
 - 必要时再校验 `lease_until > NOW(3)`。
+
+更强的语义可以再引入 `claim_token` 列，但表由应用维护（框架只提供 DDL），新增列意味着所有使用方都要迁移，建议作为第二步而不是第一版。
 
 `owner` 保留为可观测性字段，记录 Pod / Worker 身份；它不应充当每次认领的唯一 fencing token。
 
-此外，应把 `Identity.String()` 是否包含 Host 与 `claim_token` 明确分开：Host 解决“哪个实例”，claim token 解决“该实例哪一次认领”。
+此外，应把 `Identity.String()` 是否包含 Host 与 claim token 明确分开：Host 解决“哪个实例”，attempts/token 解决“该实例哪一次认领”。当前 `String()` 只输出 `group/name#index`，与 `support/worker/README.md` 里“能追溯到具体 Pod”的描述不一致，建议把 Host 补进去或改用专门的 owner 构造函数，但这不能替代 fencing。
 
 **验收测试**
 
@@ -432,7 +420,7 @@ Worker A 或同名实例再次 Claim → owner=A, attempts=2
 - Reap → Reclaim 后，之前的 Task 一律不能 Succeed / Fail / Dead；
 - 任务已超时但尚未 Reap 时，旧 Task 也不能越过明确的 lease 有效期继续写回（若设计选择允许到 Reap 前完成，应在契约中明确，并在 SQL 中保持一致）。
 
-### P1-04：消息幂等台账不能保证同一消息只有一个处理中执行者
+### P1-03：消息幂等台账不能保证同一消息只有一个处理中执行者
 
 **涉及文件**：[`support/consumer/consume.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/support/consumer/consume.go)
 
@@ -457,6 +445,7 @@ Updates(map[string]any{
 另外：
 
 - `succeed()`、`fail()`、`park()` 只按 `(consumer, message_id)` 写回，不与某一次 claim 的 attempts/token 绑定；
+- `fail()` / `park()` 没有 status 条件，旧 Handler 可以把已经是 `done` 的行改成 `failed` / `dead`，导致已完成消息被重新处理；
 - `dead` 没有在 `claim()` 中被优先识别；如果 attempts 尚未到上限，dead 记录再次投递仍可能被重置成 processing；
 - 对同一消息并发执行时，旧 Handler 的 `succeed()` 可能覆盖新 Handler 的结果状态。
 
@@ -469,25 +458,29 @@ Updates(map[string]any{
 把消息台账的状态机明确为：
 
 ```text
-不存在 → processing(token, lease_until)
-processing 且 lease 有效 → Duplicate / Skip
-processing 且 lease 过期 → 使用新 token 接管
-failed → 使用新 token 重试（attempts + 1）
+不存在 → processing(attempts, lease_until)
+processing 且 lease 有效 → 不 ACK，延迟重投
+processing 且 lease 过期 → 使用新 attempts/token 接管
+failed → 使用新 attempts/token 重试（attempts + 1）
 done → Skip / ACK
 dead → Skip / ACK
 ```
 
-所有 `succeed / fail / park` 都必须带本次 claim token，并以 token + status 做 CAS。是否需要 `processing` Lease 可以依赖业务最大处理时长和 MQ 可见性时长，但必须有清晰且可检验的接管条件，不能把“看到 processing”直接等价于“可以重新执行”。
+这里有一条容易踩空的语义：`Handle` 在 deduper 返回 `false` 时是 `return nil`，也就是 **ACK**。`processing` 未过期时如果直接 Skip + ACK，而第一个 Handler 随后崩溃，备份副本已经被确认，消息就永久丢失。因此“已有一个处理中执行者”必须返回可重试错误或以延迟方式重新入队，不能 ACK。
+
+所有 `succeed / fail / park` 都必须带本次 claim 的 attempts 或 token，并以 status 做 CAS；`fail` / `park` 还要拒绝把 `done` 改回 `failed` / `dead`。
+
+`processing` 的 lease 可以依赖业务最大处理时长和 MQ 可见性时长。不想新增列时，可以复用 `updated_at` 作为隐式 lease：读出后与当前时间比较，再用 `updated_at` 做 CAS，这样 SQLite 测试也能覆盖。
 
 **验收测试**
 
 1. 同一 message ID 并发 20 次 `Handle()`，只允许一个 Handler 进入业务代码。
 2. 第一个 Handler 阻塞，第二次重投不应同时进入业务 Handler。
-3. processing 超时后允许新 token 接管；旧 token 的 succeed/fail/park 必须被拒绝。
+3. processing 超时后允许新 attempts/token 接管；旧 attempts/token 的 succeed/fail/park 必须被拒绝。
 4. dead 状态重投必须直接跳过，不能重新变成 processing。
 5. attempts 上限只能被一个竞争者推进，不能因并发读取造成多次越界。
 
-### P1-05：Worker 健康探针过早进入 Ready
+### P1-04：Worker 健康探针过早进入 Ready
 
 **涉及文件**：[`worker_host.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/worker_host.go)、[`worker_health.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/worker_health.go)
 
@@ -517,13 +510,15 @@ Kubernetes / 调度系统可能在消费者实际上尚未准备好接收消息�
 
 不要简单地在 `Runner.Run()` 一进入就标 Ready，因为 `Run()` 本身可能还处于 broker connect / queue declare 阶段。
 
+另外，当前 `health.setStopping()` 要等所有 Runner 都退出后才调用，SIGTERM 之后、drain 进行中的整段时间 `/healthz` 仍是 200，与“进入 drain 立刻 503”的预期不符。应把 `setStopping()` 移到收到停止信号、`cancelRunners` 之后立即执行，再等待 `errCh` 收完。
+
 **验收测试**
 
 - 延迟 broker 建连时，探针一直 503，直到订阅真正建立；
 - 任一 Worker startup 返回错误，Ready 不得曾经变成 200；
 - 所有 worker Ready 后，探针 200；进入 drain 后立刻回到 503。
 
-### P1-06：`WithQuery()` 对 nil `url.Values` 调用 Add，触发 panic
+### P1-05：`WithQuery()` 对 nil `url.Values` 调用 Add，触发 panic
 
 **涉及文件**
 
@@ -556,11 +551,13 @@ func WithQuery(key, value string) CallOption {
 
 ### P2-01：`Identity.String()` 未包含 Host，与文档所述 owner 唯一性不一致
 
+本项与 P1-02 是同一问题的两面：即使补上 Host，也只能解决“哪个实例”，解决不了“该实例哪一次认领”，修复时应与 P1-02 一并处理。
+
 **涉及文件**：[`support/worker/identity.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/support/worker/identity.go)、[`support/worker/README.md`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/support/worker/README.md)
 
 Runner 创建 Identity 时确实填了 `Host`，但 `Identity.String()` 只输出 `group/name#index`。README 又把 `id.String()` 作为 Claim owner 的推荐值，并描述它能识别到 Pod 的具体实例。这两者不一致。
 
-建议将 `String()` 改为稳定、可读且包含 Host 的观测身份；但再次强调：**Host 不能代替 P1-03 的每次 claim token**。一个 Pod 里的同一 Worker 可能在租约过期后重新 Claim，仍需用 claim token 防止旧执行者写回。
+建议将 `String()` 改为稳定、可读且包含 Host 的观测身份；但再次强调：**Host 不能代替 P1-02 的每次认领 fencing**。一个 Pod 里的同一 Worker 可能在租约过期后重新 Claim，仍需用 `attempts`（或 token）防止旧执行者写回。
 
 ### P2-02：SSE 重连沿用初次解析到的 BaseURL
 
@@ -606,7 +603,7 @@ Client 使用 `sync.Map` 按每个 distinct `connectTimeout` 缓存派生 `*http
 
 低层 `rocketmqconsumer.New(name, consumer, ...)` 接收一个已经创建好的 Consumer，文档说明 Consumer 只能 Consume 一次然后 Close。Runner 的 `supervise()` 在错误后会再次调用同一个 Worker 的 `Run()`。
 
-这意味着直接使用低层 Adapter 时，第一次 Run 失败后第二次 Run 仍可能复用已关闭 / 已启动过的 Consumer，从而无法真正重连。
+这意味着直接使用低层 Adapter 时，如果第一次 `Run` 是因 context 仍存活时的错误返回，consumer 不会被 `Close`（`Close` 只在 `ctx.Err() != nil` 时调用），Runner 重试会复用一个已经 `Consume` 过的实例；如果是 ctx 取消导致的退出，`supervise` 直接返回、不再重试。两条路径都得不到“真正重连”的效果。
 
 这不影响当前 `support/consumer.NewRocketMQ()` 的主要路径：它在每次 Run 内重新 `NewConsumer()`，适合 Runner 重启。建议：
 
@@ -643,6 +640,40 @@ Client 使用 `sync.Map` 按每个 distinct `connectTimeout` 缓存派生 `*http
 ### P2-09：`gofy-adapter` README 尚未同步新增 Kubernetes Lease Adapter
 
 当前 README 解释了 `adapter/gofy` 和 `client/nacos`，但没有把 `adapter/lease/k8slease` 加入仓库结构和依赖图说明。该 Adapter 的核心设计（使用 typed coordination client，减少 client-go 包面）值得记录，并补上 RBAC 最小权限、Lease object 命名、Identity 唯一性和 fencing token 删除约束。
+
+### P2-10（原 P1-02，已降级）：HTTP Generation Lease 缺少 `defer`，摘流闸门存在竞争窗口
+
+**涉及文件**：[`generation.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/generation.go)、[`option.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/option.go)、[`start.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/start.go)
+
+当前 `ServeHTTP()` 是 `acquire → handler.ServeHTTP → release`，`release()` 没有 `defer`。以下两点使影响低于 P1：
+
+- 默认 `recovery: true`（`option.go`），`engine.Use(recovery)` 已安装，普通业务 panic 会被捕获，release 正常执行；真实触发面只剩 `http.ErrAbortHandler`、Recovery 被显式关闭、或 panic 发生在 Recovery 自身；
+- `retireGeneration` 在 drain 超时后仍会继续停模块、关资源，只记 warning。active 计数不释放的后果是**每次 Reload 多等一个 drain 超时（默认 10s）**，不是资源永久泄漏。
+
+摘流闸门确实只在 Acquire 前检查一次，存在“读到 `accepting == true` 之后被置 false”的窗口；这类请求本来就与 `StopAccepting` 并发进入，且 restart/exit 后面还有固定 grace period，影响有限。
+
+**建议修正**（不因降级而取消）：
+
+- Acquire 成功后立刻 `defer gen.lease.release()`；
+- Acquire 之后二次检查 accepting，或把 accepting 与 active/retired 收敛到同一个可同步的 admission gate；
+- 已进入的请求仍允许持有 Lease 跑完，再关闭 server 连接。
+
+**验收测试**
+
+- `http.ErrAbortHandler` 不应泄漏 Lease；Recovery 关闭时 Handler panic，active 最终回到 0；
+- 并发 `StopAccepting` 与请求进入，闸门关闭后不再新增请求进入 Handler。
+
+### P2-11：restart / exit 动作失败后，进程永久停在“已摘流、已注销”
+
+**涉及文件**：[`support/nacos/watch.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/support/nacos/watch.go)、[`start.go`](https://github.com/bingcool/gofy/blob/0859044f6e9890fb8d0bf5e0ff48bea9fb6988cf/start.go)
+
+`prepare()` 先调 `WithDrain` → `App.StopAccepting()`：`accepting` 置 false，并把 `a.registrar` 取走、置 nil。随后 `syscall.Exec` 或发信号失败时，`apply` 的错误只记日志，watcher 继续轮询；全仓库没有把 `accepting` 改回 true 的路径（只有 App 初始化时写过一次 true）。
+
+结果是：进程还活着、已从 Nacos 注销、所有请求 503。若 k8s 的 liveness 探测走 `/healthz`（同一个 gin 引擎），最终会被重启；如果 liveness 是 TCP 检查或没有 liveness，就是一个长期占着资源的僵尸进程。
+
+建议：动作失败时恢复闸门（新增显式的 resume 语义），或把失败当作致命错误退出交给监管者；至少要有 error 级别日志和指标。
+
+**验收测试**：让 exec / terminate 返回错误，进程要么恢复接客，要么退出；不允许停在“活着但永久 503”。
 
 ---
 
@@ -684,41 +715,43 @@ Claim 是一张任务表上的可恢复工作认领；Lease 是通用资源互�
 
 ## 8. 建议修复顺序
 
-### 阶段 A：先修代际原子性与请求 Lease
+### 阶段 A：先修代际原子性
 
-1. P1-01：将 Snapshot 纳入 generation，由 App 统一 publish。
-2. P1-02：Lease release 改为 defer，并收敛 admission gate 与 Acquire 的竞态。
-3. 补 Reload 成功、失败、并发、panic、摘流压力测试。
+1. P1-01：把快照纳入代际发布——按 §5 P1-01 的方案 A（业务侧 Container 作用域，零框架改动）或方案 B（框架 binder 钩子），不要引入框架到 `appio` 的依赖。
+2. 补 Reload 成功、失败、并发、panic、摘流压力测试。
 
 这是整个 HTTP 运行时正确性的基础，先修这里。
 
 ### 阶段 B：补齐多副本任务 Claim 的 fencing
 
-1. P1-03：引入 per-claim token；Owner 只用于实例标识和日志。
-2. Claim / Reap / Reclaim / Succeed / Fail / Dead 全链路都比较同一个 claim token。
-3. 增加过期执行者晚到写回测试。
+1. P1-02：收尾 SQL 增加 `attempts = ?`；Owner 只用于实例标识和日志。
+2. Claim / Reap / Reclaim / Succeed / Fail / Dead 全链路都比较同一次认领。
+3. 把 Host 补进 `Identity.String()`，或另提供带 Host 的 owner 构造函数。
+4. 增加过期执行者晚到写回测试。
 
 ### 阶段 C：修复消息幂等台账状态机
 
-1. P1-04：`processing` 有有效 lease 时拒绝第二次执行；只有明确过期 / failed 才允许重试。
-2. 每个 claim 生成新的 token，所有状态写回做 CAS。
+1. P1-03：`processing` 有有效 lease 时不得 ACK，也不得第二次进入执行；只有明确过期 / failed 才允许接管。
+2. 每次认领生成新的 attempts/token，所有状态写回做 CAS；`fail` / `park` 拒绝覆盖 `done`。
 3. `dead` 和 `done` 永远视为终态。
 4. 增加多副本并发、重投、重平衡、ack 丢失、旧 Handler 晚到等测试。
 
 ### 阶段 D：完善 Worker readiness 和 API 小缺陷
 
-1. P1-05：Runner startup readiness barrier。
-2. P1-06：初始化 `url.Values`，补 WithQuery 测试。
+1. P1-04：Runner startup readiness barrier；`setStopping()` 提前到 drain 开始。
+2. P1-05：初始化 `url.Values`，补 WithQuery 测试。
 3. P2-02：SSE reconnect 每次重新 Resolve。
 4. P2-03：限制或回收连接超时派生 Transport。
 
 ### 阶段 E：补充 Adapter / 运维契约与门禁
 
-1. 明确低层 RocketMQ Adapter 一次性生命周期；生产推荐 `support/consumer` 高层构造器。
-2. 文档化 Kubernetes Lease 同 Identity join 行为和调用方单飞要求。
-3. 完善 Nacos drain / grace period / restart 的部署预算文档。
-4. `gofy-adapter` README 加入 K8s Lease。
-5. 对三个仓库统一启用 GitHub Actions 或等效 CI，且保护主分支必须通过 `make check`。
+1. P2-11：restart / exit 动作失败后恢复闸门或退出，不允许停在永久 503。
+2. P2-10：Lease release 加 `defer`、Acquire 后二次检查 accepting。
+3. P2-05：明确低层 RocketMQ Adapter 一次性生命周期；生产推荐 `support/consumer` 高层构造器。
+4. P2-04：文档化 Kubernetes Lease 同 Identity join 行为和调用方单飞要求。
+5. P2-07：完善 Nacos drain / grace period / restart 的部署预算文档。
+6. P2-09：`gofy-adapter` README 加入 K8s Lease。
+7. 对三个仓库统一启用 GitHub Actions 或等效 CI，且保护主分支必须通过 `make check`。
 
 ---
 
@@ -731,12 +764,15 @@ Claim 是一张任务表上的可恢复工作认领；Lease 是通用资源互�
 | Generation Lease | Handler panic / ErrAbortHandler | active 计数必定归零 |
 | Admission Gate | StopAccepting 与并发请求交错 | 闸门关闭后没有新 Handler 进入 |
 | Claim | 同 Owner 任务租约过期并被重领 | 旧 Task 收尾失败，返回 LeaseLost |
-| Claim | 两个 Pod 同 group/name/index | owner 可区分实例，token 可区分单次 claim |
+| Claim | 两个 Pod 同 group/name/index | owner 可区分实例，attempts/token 可区分单次 claim |
 | Consumer Ledger | 同一消息同时到达两个消费者 | 只允许一个 Handler 进入业务逻辑 |
+| Consumer Ledger | processing 未过期时再次投递 | 第二次不进入 Handler，且不得 ACK |
 | Consumer Ledger | processing lease 过期后新 token 接管 | 老 token 不可更新状态 |
 | Consumer Ledger | dead / done 再次投递 | 直接跳过并 ACK |
 | Worker | broker 建连慢 / subscribe 失败 | Ready 只在所有必需订阅成功后变 200 |
 | Worker | SIGTERM 时有在途消息 | 先停拉取，再按 drain budget 完成在途处理 |
+| Worker | SIGTERM 后 drain 进行中 | `/healthz` 立即变为 503，而不是等 Runner 退出 |
+| Nacos | restart / exit 动作失败 | 进程恢复接客或退出，不允许永久 503 |
 | Client | WithQuery 单值 / 同名多值 | 无 panic，query 编码与文档一致 |
 | Client SSE | 实例 A 断开、Resolver 选到 B | 重连重新 Resolve 并传 Last-Event-ID |
 | Client Transport | 多组连接超时值 / Close | 连接池数量可控，关闭后无 idle pool 泄漏 |
@@ -787,11 +823,11 @@ GitHub 对本次检查的最新 commit status / pull-request workflow-run 查询
 下一阶段不应继续以增加支持组件数量为目标，而应将可靠性语义做实：
 
 1. HTTP Handler 和 IO Snapshot 真正成为同一代对象；
-2. 每次任务认领具备独立 fencing token；
-3. 消息处理中状态具备并发互斥和过期接管语义；
-4. Worker Ready 真正表示所选工作负载已完成启动；
+2. 每次任务认领具备独立的 fencing 条件（`attempts` 起步，必要时升级为 token）；
+3. 消息处理中状态具备并发互斥和过期接管语义，且接管前不得 ACK 掉备份副本；
+4. Worker Ready 真正表示所选工作负载已完成启动，drain 开始即退出 Ready；
 5. 公共 Client 选项不 panic，流式重连具备与普通请求相同的发现语义。
 
-这五个方向闭环后，再扩大多副本任务、消息消费和 K8s Lease 的生产使用范围，会更稳妥。
+这五个方向闭环后，再扩大多副本任务、消息消费和 K8s Lease 的生产使用范围，会更稳妥。另外，`restart` / `exit` 的动作失败必须让进程「恢复接客」或「退出」，不能停在永久 503。
 
 **最终建议：以 P1-01 为第一项，按阶段 A → B → C → D 修复。不要新增更复杂的调度、工作流或资源管理抽象；先把现有 Generation、Claim、Consumer Ledger 的并发和生命周期语义闭合。**
