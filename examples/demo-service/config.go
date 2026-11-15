@@ -49,19 +49,24 @@ func isStartInvocation(args []string) bool {
 
 // isWorkerStartInvocation reports whether args start a resident worker group.
 // Query forms (--list, --help) are excluded so they keep working when the
-// config server is down; every other subcommand is excluded too.
+// config server is down; the control subcommands (stop, restart) are excluded
+// too — they send signals to a pid, and must work while Nacos is unreachable.
 // isWorkerStartInvocation 判断参数是否要真正启动常驻 worker 分组。查询形态
-// （--list、--help）与其它子命令都排除在外：配置中心不可用时它们仍要可用。
+// （--list、--help）排除在外；控制子命令（stop、restart）同样排除——它们只按 pid
+// 发信号，Nacos 不可达时也必须能用。
 func isWorkerStartInvocation(args []string) bool {
-	command := ""
-	for _, arg := range args {
+	index := -1
+	for i, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
-		command = arg
+		if arg != "worker" {
+			return false
+		}
+		index = i
 		break
 	}
-	if command != "worker" {
+	if index < 0 {
 		return false
 	}
 	for _, arg := range args {
@@ -70,7 +75,37 @@ func isWorkerStartInvocation(args []string) bool {
 			return false
 		}
 	}
+	switch workerSubcommand(args[index+1:]) {
+	case "stop", "restart":
+		return false
+	}
 	return true
+}
+
+// workerSubcommand returns the first token after `worker` that is not a flag
+// value, which is where cobra looks for a subcommand. Skipping the values of
+// value-taking flags keeps `worker --group stop` a start of the group named
+// "stop" instead of a stop of every group.
+// workerSubcommand 返回 `worker` 之后第一个不是旗标取值的 token，也就是 cobra 找子命令
+// 的位置。跳过取值的旗标，`worker --group stop` 因此仍然是启动名为 stop 的分组，而不是
+// 停止全部分组。
+func workerSubcommand(args []string) string {
+	valueFlags := map[string]struct{}{
+		"--group":       {},
+		"--name":        {},
+		"--concurrency": {},
+		"--timeout":     {},
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
+		if _, ok := valueFlags[arg]; ok {
+			i++
+		}
+	}
+	return ""
 }
 
 // configInvocation classifies the command line into startup config needs.
