@@ -675,6 +675,22 @@ Client 使用 `sync.Map` 按每个 distinct `connectTimeout` 缓存派生 `*http
 
 **验收测试**：让 exec / terminate 返回错误，进程要么恢复接客，要么退出；不允许停在“活着但永久 503”。
 
+### P2 修复状态
+
+| 编号 | 状态 | 落地内容 |
+| --- | --- | --- |
+| P2-01 | ✅ 已随 P1-02 修复 | 新增 `worker.Identity.Owner()`（`group/name#index@host`）作为 claim owner；`String()` 保持无 host 供日志与指标使用。文档明确 host 只解决"哪个实例"，不替代 `attempts`。 |
+| P2-02 | ✅ 已修复 | `StreamSSE` 每次重连重新调用 `c.base(ctx)`，Resolver 因此能切到别的实例；固定 `BaseURL` 仍返回同一地址。测试覆盖 A 断开 → Resolver 返回 B → 重连带 `Last-Event-ID`，并用变异测试确认去掉重解析会失败。 |
+| P2-03 | ✅ 已修复 | `WithConnectTimeout` 的派生缓存改为 `map` + 互斥锁，上限 `maxDerivedClients`（32）；超出后调用照常可用但不保留连接池。新增 `Client.Close()` 释放派生池，`Config.HTTPClient` 传入的 client 不动。 |
+| P2-04 | ✅ 已修复 | `k8slease.Locker` 增加进程内单飞表：同一 `(identity,key)` 已有活跃获取时第二次 `Acquire` 返回 `ErrHeld`，`Release` / `Renew` 丢失后释放占用。同名 Pod 重启（新 Locker）仍沿用原 token。 |
+| P2-05 | ✅ 已修复 | 低层 `rocketmqconsumer` 新增 `NewFactory`：每次 `Run` 建新消费者、退出时无条件 `Close`，Runner 重启因此是真重连；`New` 保留一次性语义并在注释与 README 中说明。 |
+| P2-06 | ✅ 已修复 | `UserOrderStat.LastOrderID` 改名 `MaxOrderID`（`max_order_id`），注释说明它只是最大主键、不是"最近一笔订单"，需要时间语义时按 `created_at` 排序。 |
+| P2-07 | ✅ 已补文档 | `support/nacos/README.md` 新增「部署预算」：明确 grace period 是固定等待、不是 Join，列出 grace ≥ handler p99、`terminationGracePeriodSeconds` ≥ grace + 清理预算、摘流先于动作、不可中断任务需幂等四条约束。 |
+| P2-08 | ✅ 已修复 | `startNacosRegistration` 在注册完成后复查闸门：启动期 watcher 已摘流时立即注销，撤销失败视为启动失败，不再出现"已摘流但仍注册"。 |
+| P2-09 | ✅ 已补文档 | `gofy-adapter` README 增加 Kubernetes Lease 章节：仓库结构、依赖图、最小权限 RBAC、Lease 命名规则、Identity 唯一性、不删对象（fencing token 归零）与进程内单飞；`check-imports.sh` 新增「k8slease 不得 import gin / gofy 根包」规则。 |
+| P2-10 | ✅ 已修复 | 新增 `admissionGate`（`RWMutex`），把闸门检查与 `lease.acquire` 放进同一临界区，闸门关闭后严格不再有新请求进入 handler；`ServeHTTP` 改为 `defer release`，`http.ErrAbortHandler` 与业务 panic 都不泄漏 lease。 |
+| P2-11 | ✅ 已修复 | `StopAccepting` 保留 registrar 引用；新增 `App.ResumeAccepting` 与 `nacos.WithResume`：动作失败时重新打开闸门并重新注册，resume 也失败则再请求终止。 |
+
 ---
 
 ## 7. 当前合理且应避免过度改造的部分
