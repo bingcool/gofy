@@ -60,20 +60,21 @@ var delayEventProducerDefaults = DelayEventProducerConfig{
 	EventType:   "order.paid",
 }
 
-// newDelayEventProducer schedules the same order event through all three
-// delayed transports: a Redis ZSET (support/queues.DelayQueue), a RocketMQ
-// DELAY topic, and a RabbitMQ TTL + dead-letter workflow. Its three siblings in
-// delay_queues_order.go, rocketmq_delay_order.go and delay_amqp_order.go
-// consume them, so group1 demonstrates delayed produce → consume without a
-// second terminal.
+// newDelayEventProducer schedules the same order event through four delayed
+// streams over three transports: a Redis ZSET, a RocketMQ DELAY topic, and two
+// RabbitMQ TTL + dead-letter workflows (direct and topic). Its four siblings in
+// delay_queues_order.go, rocketmq_delay_order.go, delay_amqp_order.go and
+// delay_amqp_topic_order.go consume them, so group1 demonstrates delayed
+// produce → consume without a second terminal.
 //
 // The subscriptions own the addresses again: keys, topic, tag, staging/target
 // topology and instance are read from the consumer configs, so this producer
 // cannot drift away from the consumers it feeds.
-// newDelayEventProducer 把同一个订单事件调度到三种延迟传输：Redis ZSET、RocketMQ
-// DELAY topic 与 RabbitMQ 的 TTL + 死信流程。delay_queues_order.go、
-// rocketmq_delay_order.go 与 delay_amqp_order.go 里的三个消费者负责消费，因此
-// group1 单进程即可演示延迟的 生产 → 消费 闭环。
+// newDelayEventProducer 把同一个订单事件调度到三条传输上的四条延迟流：Redis ZSET、
+// RocketMQ DELAY topic，以及 RabbitMQ 的 direct / topic 两套 TTL + 死信流程。
+// delay_queues_order.go、rocketmq_delay_order.go、delay_amqp_order.go 与
+// delay_amqp_topic_order.go 里的四个消费者负责消费，因此 group1 单进程即可演示
+// 延迟的 生产 → 消费 闭环。
 //
 // 地址同样归订阅所有：键、topic、tag、暂存/目标拓扑与实例名都从消费者配置读取，
 // 生产端不会与它所喂的消费者走偏。
@@ -165,9 +166,9 @@ func publishDelayEvent(ctx context.Context, sinks []eventSink, cfg DelayEventPro
 	return errors.Join(errs...)
 }
 
-// openDelayEventSinks connects the three delayed transports, closing them in
+// openDelayEventSinks connects the four delayed streams, closing them in
 // reverse order if any opener fails.
-// openDelayEventSinks 连接三个延迟传输层；任一打开失败时按逆序关闭已打开的部分。
+// openDelayEventSinks 连接四条延迟流；任一打开失败时按逆序关闭已打开的部分。
 func openDelayEventSinks(ctx context.Context, conns gofyconsumer.Connections, cfg DelayEventProducerConfig, delay time.Duration) ([]eventSink, func(), error) {
 	var closers []func()
 	closeAll := func() {
@@ -179,6 +180,7 @@ func openDelayEventSinks(ctx context.Context, conns gofyconsumer.Connections, cf
 		openDelayQueuesSink,
 		openRocketMQDelaySink,
 		openAMQPDelaySink,
+		openAMQPDelayTopicSink,
 	}
 	sinks := make([]eventSink, 0, len(open))
 	for _, openSink := range open {
@@ -294,6 +296,48 @@ func openAMQPDelaySink(ctx context.Context, conns gofyconsumer.Connections, cfg 
 				// Delay 会转成单条消息的 TTL；暂存队列在到期时把消息死信到目标队列。
 				// 它必须在订阅的 TTL 之内，传输层会在发布前校验。
 				return queue.PublishJSON(ctx, event, gofyamqp.PublishOptions{
+					Delay:      delay,
+					Persistent: true,
+					MessageID:  event.ID,
+					Timestamp:  event.OccurredAt,
+				})
+			},
+		},
+		func() {
+			_ = queue.Close()
+			_ = client.Close()
+		},
+		nil
+}
+
+func openAMQPDelayTopicSink(ctx context.Context, conns gofyconsumer.Connections, cfg DelayEventProducerConfig, delay time.Duration) (eventSink, func(), error) {
+	name := orderAMQPDelayTopic.Instance
+	conn, ok := conns.AMQP[name]
+	if !ok {
+		return eventSink{}, nil, fmt.Errorf("amqp instance %q is not configured", name)
+	}
+	client, err := gofyamqp.New(ctx, conn)
+	if err != nil {
+		return eventSink{}, nil, fmt.Errorf("amqp instance %q: %w", name, err)
+	}
+	queueCfg := orderAMQPDelayTopic.QueueConfig()
+	queueCfg.Confirm = true
+	queue, err := gofyamqp.NewQueue(client, queueCfg)
+	if err != nil {
+		_ = client.Close()
+		return eventSink{}, nil, fmt.Errorf("amqp topic delay queue %q: %w", orderAMQPDelayTopic.DelayQueue, err)
+	}
+	return eventSink{
+			transport: "amqp_delay_topic",
+			reason:    "延迟投递，来自 rabbitmq topic 延迟队列",
+			send: func(ctx context.Context, event gofyconsumer.Envelope) error {
+				// A topic exchange routes on a concrete key, not the binding
+				// pattern. PreserveRoutingKey keeps this key through the
+				// dead-letter hop, so the target's order.* binding can match.
+				// topic exchange 按具体键路由，而不是按绑定 pattern。
+				// PreserveRoutingKey 让这个键穿过死信这一跳，目标 order.* 绑定才能匹配。
+				return queue.PublishJSON(ctx, event, gofyamqp.PublishOptions{
+					RoutingKey: cfg.EventType,
 					Delay:      delay,
 					Persistent: true,
 					MessageID:  event.ID,

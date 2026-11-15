@@ -130,6 +130,66 @@ func TestDelayAMQPQueueConfigDescribesBothHalves(t *testing.T) {
 	}
 }
 
+func delayAMQPTopicSubscription() DelayAMQPConfig {
+	cfg := delayAMQPSubscription()
+	cfg.Name = "order-amqp-delay-topic-consumer"
+	cfg.PreserveRoutingKey = true
+	cfg.DelayExchange = "demo.orders.delay.topic"
+	cfg.DelayExchangeType = "topic"
+	cfg.DelayQueue = "demo.order.delay.topic.5s"
+	cfg.DelayBindingKey = "order.*"
+	cfg.DelayRoutingKey = ""
+	cfg.Exchange = "demo.orders.delay.topic.ready"
+	cfg.ExchangeType = "topic"
+	cfg.Queue = "demo.order.delay.topic.ready"
+	cfg.BindingKey = "order.*"
+	cfg.RoutingKey = ""
+	return cfg
+}
+
+// TestDelayAMQPTopicPreservesRoutingKey pins the option a topic target needs.
+// Without it the broker would dead-letter every message under one fixed key
+// and the topic binding would no longer select anything.
+// TestDelayAMQPTopicPreservesRoutingKey 固定 topic 目标必需的开关。不开时 broker 会把
+// 每条消息都用同一个固定 key 死信，topic 绑定也就失去了筛选作用。
+func TestDelayAMQPTopicPreservesRoutingKey(t *testing.T) {
+	consumer, err := NewDelayAMQP(amqpConns(), delayAMQPTopicSubscription())
+	if err != nil {
+		t.Fatalf("NewDelayAMQP with a topic topology: %v", err)
+	}
+	cfg := consumer.cfg.QueueConfig()
+	if cfg.Delay == nil || !cfg.Delay.PreserveRoutingKey {
+		t.Fatal("the topic subscription must preserve the original routing key")
+	}
+	if cfg.ExchangeType != "topic" || cfg.Delay.Target.ExchangeType != "topic" {
+		t.Fatalf("exchange types = %q / %q, want topic / topic", cfg.ExchangeType, cfg.Delay.Target.ExchangeType)
+	}
+	if cfg.BindingKey != "order.*" || cfg.Delay.Target.BindingKey != "order.*" {
+		t.Fatalf("bindings = %q / %q, want order.*", cfg.BindingKey, cfg.Delay.Target.BindingKey)
+	}
+	if delayAMQPSubscription().QueueConfig().Delay.PreserveRoutingKey {
+		t.Fatal("the default must stay false for existing direct subscriptions")
+	}
+}
+
+// TestNewDelayAMQPRejectsTopicWithoutKey guards against a topic binding that
+// matches nothing: an empty key would leave the queue permanently idle.
+// TestNewDelayAMQPRejectsTopicWithoutKey 防止空 binding key 让 topic 队列永远收不到消息。
+func TestNewDelayAMQPRejectsTopicWithoutKey(t *testing.T) {
+	for name, mutate := range map[string]func(*DelayAMQPConfig){
+		"staging": func(c *DelayAMQPConfig) { c.DelayBindingKey = "" },
+		"target":  func(c *DelayAMQPConfig) { c.BindingKey = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := delayAMQPTopicSubscription()
+			mutate(&cfg)
+			if _, err := NewDelayAMQP(amqpConns(), cfg); err == nil {
+				t.Fatal("NewDelayAMQP accepted a topic topology without a binding key")
+			}
+		})
+	}
+}
+
 // TestDelayAMQPMessageHasItsOwnSource keeps delayed deliveries out of the
 // immediate subscription's log and trace bucket.
 // TestDelayAMQPMessageHasItsOwnSource 让延迟投递不会混进立即订阅的日志与 trace 分类。

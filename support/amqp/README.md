@@ -229,8 +229,9 @@ queue, err := amqp.NewQueue(client, amqp.QueueConfig{
 err := queue.PublishJSON(ctx, event, amqp.PublishOptions{Delay: 5 * time.Second})
 ```
 
-- 发布时先声明 `Target`，再声明带 `x-message-ttl`、`x-dead-letter-exchange`、
-  `x-dead-letter-routing-key` 的暂存队列，目标拓扑缺失也不会丢消息。
+- 发布时先声明 `Target`，再声明带 `x-message-ttl`、`x-dead-letter-exchange` 的
+  暂存队列，目标拓扑缺失也不会丢消息。默认还会写 `x-dead-letter-routing-key`，
+  值为 `Target` 的 routing key；`PreserveRoutingKey` 开启时不写这个参数。
 - 消费读取的是 `Target.Queue`，暂存队列只负责等待。
 - TTL 是队列级参数，单位毫秒，最小 `1ms`。它既是**未指定延迟时的默认等待**，也是
   `PublishOptions.Delay` 的**上限**——broker 取队列 TTL 与单条消息 TTL 中较小值。
@@ -241,9 +242,60 @@ err := queue.PublishJSON(ctx, event, amqp.PublishOptions{Delay: 5 * time.Second}
 - **队头阻塞**：RabbitMQ 只在队头判定消息是否过期。同一个暂存队列混用不同延迟时，
   前面的长等待会挡住后面的短等待。按延迟分档建多个暂存队列（每档一个固定 TTL），
   或让一档队列只承载一种延迟。
-- 暂存队列的 `Topology.Arguments` 会被保留，但上述三个死信参数由 `Delay`
+- 暂存队列的 `Topology.Arguments` 会被保留，但上述死信参数由 `Delay`
   覆盖；不要在同一队列上手工设置同名参数。已存在队列的 `x-message-ttl` 不能修改，
   调整 TTL 需要换队列名或先删除队列。
+
+### topic 类型的延迟队列
+
+topic exchange 靠 routing key 选绑定，所以**必须**开 `PreserveRoutingKey`。
+默认行为会把死信 routing key 固定成 `Target` 的那一个值：所有过期消息都被改成同一个
+键，`order.paid` 与 `order.cancelled` 再也分不开；若目标绑定写的是具体键，字面的
+`order.*` 甚至匹配不上，消息直接丢失。开启后队列不设置
+`x-dead-letter-routing-key`，RabbitMQ 死信时沿用消息原始的 routing key：
+
+```text
+Publish(order.paid) ──> [topic: orders.delay] ── binding order.* ──> [暂存队列]
+                              │ TTL 到期，保留 order.paid
+                              v
+                     [topic: orders.ready] ── binding order.* ──> [目标队列]
+```
+
+```go
+queue, err := amqp.NewQueue(client, amqp.QueueConfig{
+    Topology: amqp.Topology{
+        Exchange:     "orders.delay",
+        ExchangeType: "topic",
+        Queue:        "orders.delay.5s",
+        BindingKey:   "order.*", // 绑定 pattern，不是发布用的 key
+        Durable:      true,
+    },
+    Delay: &amqp.DelayConfig{
+        TTL: 10 * time.Second,
+        Target: amqp.Topology{
+            Exchange:     "orders.ready",
+            ExchangeType: "topic",
+            Queue:        "orders.ready",
+            BindingKey:   "order.*",
+            Durable:      true,
+        },
+        PreserveRoutingKey: true,
+    },
+})
+
+// 每条消息给出具体键；它会一路带到目标 exchange。
+err = queue.PublishJSON(ctx, event, amqp.PublishOptions{
+    RoutingKey: "order.paid",
+    Delay:      5 * time.Second,
+})
+```
+
+- `BindingKey` 是匹配用的 pattern，`RoutingKey` 是发布用的字面键，**不要混用**：
+  暂存拓扑只写 `BindingKey`，具体键由 `PublishOptions.RoutingKey` 逐条给出。
+- topic 拓扑必须至少有一个 key。空 binding key 只匹配空 routing key，队列会一直空闲。
+- 开启 `PreserveRoutingKey` 时，即使 `Topology.Arguments` 里手工写了
+  `x-dead-letter-routing-key` 也会被删除——只要该参数存在就会覆盖原始键。
+- direct exchange 保持默认行为即可：固定死信键本来就是它想要的。
 
 ## API 摘要
 

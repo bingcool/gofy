@@ -78,6 +78,14 @@ type DelayAMQPConfig struct {
 	// TTL is the queue-level TTL, at least 1ms. Required.
 	// TTL 是队列级 TTL，至少 1ms。必填。
 	TTL time.Duration
+	// PreserveRoutingKey keeps each message's original routing key when the
+	// broker dead-letters it, instead of forcing one fixed key. Required for a
+	// topic target: the routing key is what selects the binding, and a fixed
+	// value collapses topic routing (or misses the binding and drops the message).
+	// PreserveRoutingKey 让 broker 死信时保留每条消息原始的 routing key，而不是强制改成
+	// 一个固定 key。目标是 topic exchange 时必须开启：绑定正是由 routing key 选中的，
+	// 固定值会让 topic 分发失效，甚至匹配不上绑定而丢消息。
+	PreserveRoutingKey bool
 	// NonDurable declares transient queues instead of durable ones.
 	// NonDurable 声明临时队列而不是持久化队列。
 	NonDurable bool
@@ -159,7 +167,8 @@ func (c DelayAMQPConfig) QueueConfig() gofyamqp.QueueConfig {
 			Durable:      durable,
 		},
 		Delay: &gofyamqp.DelayConfig{
-			TTL: c.TTL,
+			TTL:                c.TTL,
+			PreserveRoutingKey: c.PreserveRoutingKey,
 			Target: gofyamqp.Topology{
 				Exchange:     c.Exchange,
 				ExchangeType: c.ExchangeType,
@@ -322,6 +331,14 @@ func validateDelayAMQPTopology(label string, t gofyamqp.Topology) error {
 		if routingKey != "" && bindingKey != "" && routingKey != bindingKey {
 			return fmt.Errorf("%s direct exchange requires routing_key == binding_key", label)
 		}
+	}
+	// A topic exchange with an empty binding key only matches an empty routing
+	// key, so the queue would sit there forever and never receive a message.
+	// topic exchange 的 binding key 为空时只会匹配空 routing key，队列会一直空着，
+	// 一条消息也收不到。
+	if kind == gofyamqp.ExchangeTopic &&
+		strings.TrimSpace(t.RoutingKey) == "" && strings.TrimSpace(t.BindingKey) == "" {
+		return fmt.Errorf("%s topic exchange requires routing_key or binding_key", label)
 	}
 	return nil
 }

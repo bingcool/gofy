@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
 func delayQueueConfig(ttl time.Duration) QueueConfig {
@@ -133,5 +135,61 @@ func TestPublishRejectsInvalidDelayBeforeConnecting(t *testing.T) {
 	err = q.Publish(context.Background(), []byte("later"), PublishOptions{Delay: 10 * time.Second})
 	if !errors.Is(err, ErrInvalidDelay) {
 		t.Fatalf("Publish error = %v, want ErrInvalidDelay", err)
+	}
+}
+
+// TestDelaySourceArgsPreservesRoutingKey pins the topic path. With a topic
+// target the broker must dead-letter with the message's own routing key, so no
+// x-dead-letter-routing-key may reach QueueDeclare at all — including one the
+// caller put in Arguments by hand.
+// TestDelaySourceArgsPreservesRoutingKey 固定 topic 路径。目标是 topic exchange 时，
+// broker 必须按消息原始的 routing key 死信，因此 QueueDeclare 不能收到
+// x-dead-letter-routing-key —— 连调用方手工写进 Arguments 的那一个也不能留。
+func TestDelaySourceArgsPreservesRoutingKey(t *testing.T) {
+	cfg := delayQueueConfig(5 * time.Second)
+	args := delaySourceArgs(cfg)
+	if args["x-dead-letter-exchange"] != "orders" {
+		t.Fatalf("dead-letter exchange = %v, want orders", args["x-dead-letter-exchange"])
+	}
+	if args["x-dead-letter-routing-key"] != "delayed" {
+		t.Fatalf("default dead-letter key = %v, want delayed", args["x-dead-letter-routing-key"])
+	}
+	if args["x-message-ttl"] != int64(5000) {
+		t.Fatalf("ttl = %v, want 5000ms", args["x-message-ttl"])
+	}
+
+	cfg.Delay.PreserveRoutingKey = true
+	args = delaySourceArgs(cfg)
+	if _, ok := args["x-dead-letter-routing-key"]; ok {
+		t.Fatalf("preserved key still declares a dead-letter routing key: %v", args)
+	}
+	if args["x-dead-letter-exchange"] != "orders" || args["x-message-ttl"] != int64(5000) {
+		t.Fatalf("preserving the key dropped the other delay arguments: %v", args)
+	}
+
+	// A caller-supplied value must not sneak the override back in.
+	cfg.Topology.Arguments = amqp091.Table{
+		"x-dead-letter-routing-key": "manual",
+		"x-max-length":              int64(100),
+	}
+	args = delaySourceArgs(cfg)
+	if _, ok := args["x-dead-letter-routing-key"]; ok {
+		t.Fatalf("a manual dead-letter routing key survived: %v", args)
+	}
+	if args["x-max-length"] != int64(100) {
+		t.Fatalf("unrelated arguments were dropped: %v", args)
+	}
+
+	// Without the flag the generated key still wins over a manual one.
+	cfg.Delay.PreserveRoutingKey = false
+	args = delaySourceArgs(cfg)
+	if args["x-dead-letter-routing-key"] != "delayed" {
+		t.Fatalf("generated dead-letter key = %v, want delayed", args["x-dead-letter-routing-key"])
+	}
+
+	plain := delayQueueConfig(5 * time.Second)
+	plain.Delay = nil
+	if _, ok := delaySourceArgs(plain)["x-message-ttl"]; ok {
+		t.Fatal("a queue without a delay workflow must not declare a TTL")
 	}
 }

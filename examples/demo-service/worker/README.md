@@ -20,7 +20,7 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、两个生产者、七个消费者与心跳
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、两个生产者、八个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
@@ -32,7 +32,8 @@ worker/
 │   ├── queues_order.go    # order-queues-consumer（Redis 队列）
 │   ├── delay_queues_order.go    # order-delay-queues-consumer（Redis ZSET）
 │   ├── rocketmq_delay_order.go  # order-rocketmq-delay-consumer（DELAY topic）
-│   └── delay_amqp_order.go      # order-amqp-delay-consumer（TTL + 死信）
+│   ├── delay_amqp_order.go      # order-amqp-delay-consumer（TTL + 死信，direct）
+│   └── delay_amqp_topic_order.go # order-amqp-delay-topic-consumer（TTL + 死信，topic）
 └── group2/
     ├── abc_register.go    # group2 的 NewGroup
     └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
@@ -59,21 +60,22 @@ worker/
 | --- | --- | --- | --- | --- |
 | group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
 | group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到四个队列，闭环演示生产 → 消费 |
-| group1 | `order-delay-producer` | 1 | 10s | 每 10s 调度一条 5s 后到期的事件到 Redis ZSET、RocketMQ DELAY topic 与 RabbitMQ 延迟队列 |
+| group1 | `order-delay-producer` | 1 | 10s | 每 10s 调度一条 5s 后到期的事件到 Redis ZSET、RocketMQ DELAY topic 与 RabbitMQ direct / topic 延迟队列 |
 | group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅，手动提交位点 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
 | group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `test-demo` / `tag=demo`，SDK 侧拉取 |
 | group1 | `order-queues-consumer` | 2 | 常驻 | Redis 队列，弹出即删除 |
 | group1 | `order-delay-queues-consumer` | 1 | 常驻 | Redis ZSET 到期消息，Lua 原子取出 |
 | group1 | `order-rocketmq-delay-consumer` | 1 | 常驻 | `test-demo-delay` / `tag=delay`，broker 定时投递 |
-| group1 | `order-amqp-delay-consumer` | 1 | 常驻 | RabbitMQ TTL 暂存队列 → 死信到目标队列，读的是目标队列 |
+| group1 | `order-amqp-delay-consumer` | 1 | 常驻 | RabbitMQ direct 延迟：TTL 暂存队列 → 死信到目标队列 |
+| group1 | `order-amqp-delay-topic-consumer` | 1 | 常驻 | RabbitMQ topic 延迟：两半都是 `topic` + `order.*`，死信保留原 routing key |
 | group1 | `order-heartbeat` | 1 | 10s | 不依赖数据库，留一行可 grep 的存活日志 |
 | group2 | `report-summary` | 1 | 1h | 按状态聚合订单，多实例会重复写同一份报表 |
 
 拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
-七个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
+八个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
 实际跑哪些用 `--name` 选；注册不建连，所以 `--list` 和被过滤掉的消费者都不产生成本。
 实例数写在各自的配置文件里，`--concurrency` 仍可覆盖。
 
@@ -94,15 +96,16 @@ group1 四个消费者订阅的那四条流。payload 里的 `reason` 写明这�
 
 ## 延迟队列
 
-`delay_producer.go` 是立即链路的镜像：每 10 秒生成一条 `order.paid`，但三条流都要
-等 5 秒才可见。payload 的 `reason` 写明来源，三个 handler 各打一行
+`delay_producer.go` 是立即链路的镜像：每 10 秒生成一条 `order.paid`，但四条流都要
+等 5 秒才可见。payload 的 `reason` 写明来源，四个 handler 各打一行
 `delayed order event arrived`，带上实测等待时间，因此一行日志就能验证延迟是否生效。
 
 | 传输 | 生产端 | 到期机制 | 消费端 |
 | --- | --- | --- | --- |
 | Redis ZSET | `queues.DelayQueue.Add(ctx, event, delay)` | score 是到期时间，`Pop` 用 Lua 一次「取到期 + 删除」，多实例不重复 | `gofyconsumer.NewDelayQueues`，键 `demo:order:delay` |
 | RocketMQ | `PublishJSON(..., PublishOptions{Delay: delay})` | SDK 转成绝对投递时间，broker 保管到点才投放 | `gofyconsumer.NewRocketMQ`，`test-demo-delay` / `tag=delay` |
-| RabbitMQ | `PublishJSON(..., PublishOptions{Delay: delay})` | `Delay` 转成单条消息 TTL，暂存队列到期后由 broker 死信转发到目标队列 | `gofyconsumer.NewDelayAMQP`，读 `demo.order.delay.ready` |
+| RabbitMQ direct | `PublishJSON(..., PublishOptions{Delay: delay})` | `Delay` 转成单条消息 TTL，暂存队列到期后由 broker 死信转发到目标队列 | `gofyconsumer.NewDelayAMQP`，读 `demo.order.delay.ready` |
+| RabbitMQ topic | `PublishJSON(..., PublishOptions{Delay: delay, RoutingKey: "order.paid"})` | 同上，但死信**保留原 routing key**，由 `order.*` 绑定选中目标队列 | `gofyconsumer.NewDelayAMQP` + `PreserveRoutingKey: true`，读 `demo.order.delay.topic.ready` |
 
 RabbitMQ 这一路没有"DELAY 类型 topic"可切，延迟在拓扑里：消息先发布到
 `demo.orders.delay` / `demo.order.delay.5s`，TTL 到期后 broker 把它死信到
@@ -112,6 +115,15 @@ exchange 都与立即订阅的 `demo.orders` 分开，否则延迟事件也会�
 `x-message-ttl` 与死信参数一旦不一致，broker 会直接 `PRECONDITION_FAILED`。
 订阅里的 `TTL: 10s` 是**上限**，实际等待由生产端的每消息 `Delay: 5s` 决定；broker
 取两者较小值。RabbitMQ 只在队头判定过期，所以一个暂存队列只放一种延迟。
+
+`delay_amqp_topic_order.go` 是同一套死信流程的 topic 版本：两半都是 topic exchange，
+绑定 `order.*`，暂存拓扑只写 `BindingKey`（pattern），生产端逐条给 `RoutingKey:
+order.paid`（字面键）。关键是 `PreserveRoutingKey: true` —— 不开时 broker 会把死信
+routing key 固定成目标拓扑那一个值，`order.paid` 与 `order.cancelled` 再也分不开，
+字面的 `order.*` 甚至匹配不上具体绑定而丢消息。开启后 broker 转发原始键，handler
+把它打进 `routing_key` 字段，这就是延迟链路里唯一能直接观察路由语义的一行。可用
+`rabbitmqctl list_queues name arguments` 核对：topic 暂存队列没有
+`x-dead-letter-routing-key`，direct 暂存队列有。
 
 Redis 侧的失败消息由 `DelayQueue.Retry` 以新的到期时间写回（受 `MaxRetries` 限制）；
 `Pop` 已经把条目删掉，所以与立即队列一样是**在途至多一次**——不能丢消息的场景请用 MQ。
@@ -132,14 +144,16 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 实跑一轮：
 
 ```
-01:48:06  delayed order event scheduled  delay=5s  due_at=...01:48:11
-01:48:11  delayed order event arrived   source=delay_queues     waited≈5.4s
-01:48:11  delayed order event arrived   source=amqp_delay       waited≈5.4s
-01:48:12  delayed order event arrived   source=rocketmq_delay   scheduled=5s waited≈5.7s
+10:26:56 delayed order event scheduled  delay=5s
+10:27:01 delayed order event arrived   source=delay_queues      waited≈6.1s
+10:27:01 delayed order event arrived   source=amqp_delay        waited≈6.0s
+10:27:01 delayed order event arrived   source=amqp_delay_topic  waited≈6.1s  routing_key=order.paid
+10:27:01 delayed order event arrived   source=rocketmq_delay    scheduled=5s waited≈5.1s
 ```
 
-同一个 `event_id` 三条到达，幂等台账里三个消费者各一行——延迟链路的三种实现
-（客户端轮询 / broker 定时投递 / TTL 死信）用同一套信封、handler 与错误分类。
+同一个 `event_id` 四条到达，幂等台账里四个消费者各一行——延迟链路的四种实现
+（客户端轮询 / broker 定时投递 / direct 死信 / topic 死信）用同一套信封、handler 与
+错误分类。
 
 ## 消费者怎么接入
 
@@ -148,6 +162,7 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 ```
 kafka_order.go / amqp_order.go / rocketmq_order.go / queues_order.go
 delay_queues_order.go / rocketmq_delay_order.go / delay_amqp_order.go
+delay_amqp_topic_order.go
         一个订阅一个文件：Config + Handler
         ↓
 support/consumer Processor.Handle

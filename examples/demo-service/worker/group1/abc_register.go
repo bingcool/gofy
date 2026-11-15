@@ -9,8 +9,8 @@
 // support/consumer. The producer fans the same order event out to those four
 // transports on a timer, closing the immediate loop inside one process. The
 // delayed half mirrors it: a scheduler writes due-dated events to a Redis ZSET,
-// a RocketMQ DELAY topic and a RabbitMQ TTL + dead-letter workflow, and three
-// more subscriptions consume them.
+// a RocketMQ DELAY topic and two RabbitMQ TTL + dead-letter workflows (direct
+// and topic), and four more subscriptions consume them.
 //
 // The package boundary is the deployment boundary: group1 is started by
 // `demo-service worker --group=group1` and owns its own settings, so a change
@@ -29,7 +29,8 @@
 // 里面只有它自己的设置与 handler，没有别的——它们背后的信封、幂等台账、trace 与错误
 // 分类都在 support/consumer。生产者按定时器把同一个订单事件群发到这四个传输层，让立即
 // 链路的闭环跑在一个进程里。延迟链路是它的镜像：调度器把带到期时间的事件写进 Redis ZSET、
-// RocketMQ DELAY topic 与 RabbitMQ 的 TTL + 死信队列，另外三个订阅负责消费。
+// RocketMQ DELAY topic 与 RabbitMQ 的 direct / topic 两套 TTL + 死信队列，另外四个订阅
+// 负责消费。
 //
 // 包边界就是部署边界：group1 由 `demo-service worker --group=group1` 启动，参数也归
 // 它自己，因此改动这里不会波及 group2。
@@ -102,10 +103,14 @@ func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
 	if err != nil {
 		return nil, fmt.Errorf("group1: %w", err)
 	}
+	amqpDelayTopic, err := gofyconsumer.NewDelayAMQP(conns, orderAMQPDelayTopic)
+	if err != nil {
+		return nil, fmt.Errorf("group1: %w", err)
+	}
 
 	workers = append(workers,
 		kafka, amqp, rocketmq, queues,
-		delayQueues, rocketmqDelay, amqpDelay,
+		delayQueues, rocketmqDelay, amqpDelay, amqpDelayTopic,
 		newHeartbeatWorker(),
 	)
 	return gofyworker.NewGroup("group1", workers...)

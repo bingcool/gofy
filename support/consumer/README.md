@@ -78,7 +78,7 @@ conns := gofyconsumer.Connections{
 | `MaxAttempts` | 5 | 5 | 5 | 5 | 5 | 5 |
 | 连接实例 | `Instance`=default | `Instance`=default | `Instance`=default | `RedisInstance`=ratelimit | `RedisInstance`=ratelimit | `Instance`=default |
 | 订阅目标 | `Topic`+`Group`（必填） | `Exchange`+`Queue`（必填） | `Topic`+`Group`（必填） | `Key`（必填） | `Key`（必填，延迟 ZSET） | 暂存 `DelayExchange`+`DelayQueue`、目标 `Exchange`+`Queue`（必填） |
-| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（必填）、`ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false |
+| 协议特有 | `CommitMode`=manual、`AutoOffsetReset`=earliest、`AutoCommitInterval`=200ms、`SessionTimeout`=45s、`BlockRebalanceOnPoll`=false | `ExchangeType`=direct、`PrefetchCount`=32、`NonDurable`=false | `Tags`、`PullWorkers`=1、`BatchSize`=16、`AwaitDuration`=5s | `MaxRetries`=3、`IdleDelay`=200ms、`RetryDelay`=3s | `MaxRetries`=3、`PopLimit`=10、`IdleDelay`=200ms、`RetryDelay`=3s | `TTL`（必填）、`ExchangeType`=direct、`PreserveRoutingKey`=false、`PrefetchCount`=32、`NonDurable`=false |
 
 `DelayQueues` 由 `NewDelayQueues` 构造，订阅的是 Redis ZSET 里**已到期**的消息：生产端用
 `queues.DelayQueue.Add(ctx, payload, delay)`，消费端轮询 `Pop`，失败由 `Retry` 以新到期
@@ -92,6 +92,13 @@ conns := gofyconsumer.Connections{
 各自声明出不同的暂存队列。`source` 是 `amqp_delay`。它与 `AMQP` 共用 `amqpconsumer`
 适配器——传输层的 `consumeQueue()` 在存在 `Delay` 时自动改读目标队列。注意 RabbitMQ 只在
 队头判定过期，一个暂存队列请只承载一种延迟。
+
+把 `ExchangeType` / `DelayExchangeType` 设为 `topic` 就是 topic 延迟队列，此时**必须**
+同时设 `PreserveRoutingKey: true`：默认的固定死信键会把每条消息的 routing key 覆盖成
+同一个值，topic 绑定既分不出 `order.paid` 与 `order.cancelled`，也可能因字面 pattern
+匹配不上而丢消息。开启后 broker 沿用原始键；生产端用 `PublishOptions.RoutingKey` 逐条
+给出具体键，订阅只写 `BindingKey`（如 `order.*`）。topic 拓扑的 key 不能为空，注册阶段
+会拒绝空 binding——那种队列永远收不到消息。direct 订阅保持默认即可。
 
 `Idempotency` 需要数据库，因此默认关闭：打开它就从"handler 必须幂等"变成"重投是空操作"。
 `MaxAttempts` 只在开启幂等时生效——没有台账就没有地方记尝试次数。

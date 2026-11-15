@@ -612,6 +612,26 @@ All notable changes to this project are documented here. The format follows
   a queue for expiry, so the docs call for one delay per staging queue.
   Verified against the local broker: four events, each arriving on all three
   delayed transports at ~5.3-5.8s, one idempotency row per consumer per event.
+- AMQP delayed queues now work with topic exchanges. c9aba06 always declared
+  `x-dead-letter-routing-key` with the target's fixed key; on a topic target
+  that overwrites every message's routing key, so `order.paid` and
+  `order.cancelled` become indistinguishable and a literal `order.*` can miss a
+  concrete binding altogether, dropping the message.
+  `DelayConfig.PreserveRoutingKey` omits the argument so RabbitMQ dead-letters
+  with the original key, and removes a hand-written value from
+  `Topology.Arguments` too — the mere presence of the argument overrides the
+  key. The staging arguments now come from a pure function, so the tests cover
+  both paths without a broker.
+  `support/consumer.DelayAMQPConfig` forwards the flag through `QueueConfig()`
+  and rejects topic topologies with no key, since an empty topic binding matches
+  nothing and leaves the queue permanently idle. The demo adds
+  `delay_amqp_topic_order.go` and a fourth sink: both halves are topic exchanges
+  bound to `order.*`, the producer supplies `order.paid` as the concrete routing
+  key, and the handler logs the key the broker forwarded.
+  Verified on the local broker: four events arrived on all four delayed streams
+  at ~5-6s, the topic leg logged `routing_key=order.paid`, and `rabbitmqctl`
+  showed `x-dead-letter-routing-key` present on the direct staging queue but
+  absent on the topic one.
 
 ### Changed
 

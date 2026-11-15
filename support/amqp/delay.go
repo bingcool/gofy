@@ -28,6 +28,14 @@ type DelayConfig struct {
 	// Target is where expired messages are routed.
 	// Target 是过期消息被路由到的目的地。
 	Target Topology
+	// PreserveRoutingKey leaves x-dead-letter-routing-key unset, so the broker
+	// dead-letters with the message's original routing key. A topic target
+	// needs this: a fixed key overwrites order.paid with one literal value,
+	// collapsing topic routing and possibly missing the target binding.
+	// PreserveRoutingKey 让队列不设置 x-dead-letter-routing-key，broker 死信时沿用
+	// 消息原始的 routing key。目标是 topic exchange 时必须开启：固定 key 会把
+	// order.paid 覆盖成同一个字面值，topic 分发失效，甚至匹配不上绑定而丢消息。
+	PreserveRoutingKey bool
 }
 
 func (d DelayConfig) validate() error {
@@ -35,6 +43,33 @@ func (d DelayConfig) validate() error {
 		return errors.New("amqp: delay ttl must be at least 1ms")
 	}
 	return d.Target.validate(true)
+}
+
+// delaySourceArgs builds the staging queue arguments. Keeping it a pure
+// function lets the topic path — where a fixed dead-letter routing key would
+// be wrong — be tested without a broker.
+// delaySourceArgs 生成暂存队列参数。抽成纯函数后，topic 这条路径（固定死信 routing key
+// 会出错）无需 broker 就能测试。
+func delaySourceArgs(cfg QueueConfig) amqp091.Table {
+	delay := cfg.Delay
+	if delay == nil {
+		return mergeArgs(cfg.Topology.Arguments, nil)
+	}
+	args := mergeArgs(cfg.Topology.Arguments, amqp091.Table{
+		"x-dead-letter-exchange":    delay.Target.Exchange,
+		"x-dead-letter-routing-key": delay.Target.routingKey(),
+		// RabbitMQ expects milliseconds for queue-level TTL.
+		// RabbitMQ 的队列级 TTL 以毫秒为单位。
+		"x-message-ttl": delay.TTL.Milliseconds(),
+	})
+	if delay.PreserveRoutingKey {
+		// Removing even a caller-supplied value is deliberate: setting the key
+		// at all would override the original routing key on the way out.
+		// 连调用方手工设置的值也一并删掉是刻意的：只要该参数存在，就会在死信时覆盖
+		// 消息原始的 routing key。
+		delete(args, "x-dead-letter-routing-key")
+	}
+	return args
 }
 
 // messageExpiration resolves the effective per-message TTL.
@@ -80,14 +115,7 @@ func (d DelayConfig) declareTarget(ch *amqp091.Channel) error {
 // declareDelaySource 声明暂存 exchange，以及一个通过参数把过期消息转发到
 // Target 的队列。
 func (c QueueConfig) declareDelaySource(ch *amqp091.Channel) error {
-	delay := c.Delay
-	args := mergeArgs(c.Topology.Arguments, amqp091.Table{
-		"x-dead-letter-exchange":    delay.Target.Exchange,
-		"x-dead-letter-routing-key": delay.Target.routingKey(),
-		// RabbitMQ expects milliseconds for queue-level TTL.
-		// RabbitMQ 的队列级 TTL 以毫秒为单位。
-		"x-message-ttl": delay.TTL.Milliseconds(),
-	})
+	args := delaySourceArgs(c)
 	if err := c.Topology.declareExchange(ch); err != nil {
 		return err
 	}
