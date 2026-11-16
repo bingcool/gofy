@@ -108,3 +108,74 @@ func TestResolve(t *testing.T) {
 		t.Fatalf("Resolve(relative) = %q, want %q", got, want)
 	}
 }
+
+// TestWriteRecordCarriesIdentity pins the upgrade: the file is no longer a bare
+// number, and the record it holds can be verified against its own process.
+// TestWriteRecordCarriesIdentity 固定这次升级：文件不再是裸数字，它保存的记录能被它自己
+// 的进程验证为匹配。
+func TestWriteRecordCarriesIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.pid")
+	if err := pidfile.WriteRecord(path, pidfile.NewRecord(os.Getpid()), 0o644); err != nil {
+		t.Fatalf("WriteRecord: %v", err)
+	}
+
+	record, err := pidfile.ReadRecord(path)
+	if err != nil {
+		t.Fatalf("ReadRecord: %v", err)
+	}
+	if record.PID != os.Getpid() {
+		t.Fatalf("pid = %d, want %d", record.PID, os.Getpid())
+	}
+	if record.Executable == "" {
+		t.Fatal("record has no executable; a reader cannot tell what wrote it")
+	}
+	if record.ClaimedAt == "" {
+		t.Fatal("record has no claimed_at; an operator cannot tell how old the claim is")
+	}
+	if record.Token == "" {
+		t.Skip("platform provides no process token; identity is unknown by design")
+	}
+	if got := record.Verify(); got != pidfile.IdentityMatch {
+		t.Fatalf("Verify = %v, want IdentityMatch for the writing process", got)
+	}
+}
+
+// TestReadRecordAcceptsLegacyInteger keeps rolling upgrades working: a pid file
+// written by an older build is a bare number and must still be readable.
+// TestReadRecordAcceptsLegacyInteger 让滚动升级可用：旧版本写下的 pid 文件是裸数字，
+// 必须仍能读出。
+func TestReadRecordAcceptsLegacyInteger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.pid")
+	if err := os.WriteFile(path, []byte("1234\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	record, err := pidfile.ReadRecord(path)
+	if err != nil {
+		t.Fatalf("ReadRecord: %v", err)
+	}
+	if record.PID != 1234 {
+		t.Fatalf("pid = %d, want 1234", record.PID)
+	}
+	if record.Token != "" {
+		t.Fatalf("legacy record invented a token %q", record.Token)
+	}
+	if got := record.Verify(); got != pidfile.IdentityUnknown {
+		t.Fatalf("Verify = %v, want IdentityUnknown for a legacy record", got)
+	}
+}
+
+// TestVerifyDetectsRecycledPID is the reason the format changed: the pid still
+// exists but the process behind it is not the one that wrote the file, so stop
+// must refuse to signal it.
+// TestVerifyDetectsRecycledPID 是改变格式的理由：pid 仍然存在，但背后的进程已不是写下
+// 文件的那个，因此 stop 必须拒绝向它发信号。
+func TestVerifyDetectsRecycledPID(t *testing.T) {
+	record := pidfile.NewRecord(os.Getpid())
+	if record.Token == "" {
+		t.Skip("platform provides no process token; the case cannot be constructed")
+	}
+	record.Token = "different-process"
+	if got := record.Verify(); got != pidfile.IdentityMismatch {
+		t.Fatalf("Verify = %v, want IdentityMismatch for a token that cannot be the current process", got)
+	}
+}

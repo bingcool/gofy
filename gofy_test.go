@@ -20,6 +20,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/apperr"
 	"github.com/bingcool/gofy/gofytest"
+	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/logger"
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
@@ -865,12 +866,12 @@ func TestPIDFileLifecycle(t *testing.T) {
 	go func() { errCh <- app.Run(context.Background()) }()
 	waitForServer(t, port)
 
-	data, err := os.ReadFile(pidPath)
+	pid, err := pidfile.Read(pidPath)
 	if err != nil {
 		t.Fatalf("read pid file: %v", err)
 	}
-	if got, want := string(data), strconv.Itoa(os.Getpid()); got != want {
-		t.Fatalf("pid file = %q, want %q", got, want)
+	if pid != os.Getpid() {
+		t.Fatalf("pid file = %d, want %d", pid, os.Getpid())
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -907,12 +908,12 @@ func TestStalePIDFileIsOverwritten(t *testing.T) {
 	go func() { errCh <- app.Run(context.Background()) }()
 	waitForServer(t, port)
 
-	data, err := os.ReadFile(pidPath)
+	pid, err := pidfile.Read(pidPath)
 	if err != nil {
 		t.Fatalf("read pid file: %v", err)
 	}
-	if got, want := string(data), strconv.Itoa(os.Getpid()); got != want {
-		t.Fatalf("pid file = %q, want %q", got, want)
+	if pid != os.Getpid() {
+		t.Fatalf("pid file = %d, want %d", pid, os.Getpid())
 	}
 
 	if err := app.Shutdown(context.Background()); err != nil {

@@ -158,7 +158,7 @@ func (a *App) run(parent context.Context) error {
 	a.listener = listener
 
 	if pidPath != "" {
-		if err := pidfile.Write(pidPath, os.Getpid(), a.opts.pidPerm); err != nil {
+		if err := pidfile.WriteRecord(pidPath, pidfile.NewRecord(os.Getpid()), a.opts.pidPerm); err != nil {
 			return a.abort(err)
 		}
 		a.pidPath = pidPath
@@ -650,19 +650,24 @@ func (a *App) newServer(handler http.Handler, lg *zap.Logger) *http.Server {
 // duplicatePID reports a live pid recorded in pidPath that belongs to another
 // process. A pid equal to self means this process re-executed itself (the
 // restart strategy): the previous image is gone by definition, so the file is
-// simply refreshed rather than treated as a second instance.
+// simply refreshed rather than treated as a second instance. A record whose
+// identity no longer matches its pid is a recycled number and does not count as
+// a duplicate either.
 // duplicatePID 返回 pidPath 中记录的、属于其它进程且仍然存活的 pid。pid 等于 self
 // 表示本进程刚 re-exec 自重启（restart 策略）：旧映像按定义已不存在，只需刷新
-// 文件，不应判为第二个实例。
+// 文件，不应判为第二个实例。身份与 pid 已不匹配的记录同样不算重复——那是被复用的号。
 func duplicatePID(pidPath string, self int) (int, bool) {
 	if pidPath == "" {
 		return 0, false
 	}
-	existing, err := pidfile.Read(pidPath)
-	if err != nil || existing == self {
+	record, err := pidfile.ReadRecord(pidPath)
+	if err != nil || record.PID == self {
 		return 0, false
 	}
-	return existing, process.Alive(existing)
+	if record.Verify() == pidfile.IdentityMismatch {
+		return 0, false
+	}
+	return record.PID, process.Alive(record.PID)
 }
 
 func (a *App) resolvePIDPath() (string, error) {
@@ -691,13 +696,17 @@ func (a *App) startPIDRefresh(lg *zap.Logger) {
 	a.pidTickerDone = done
 	path := a.pidPath
 	perm := a.opts.pidPerm
+	// One record, refreshed as-is: rebuilding it each tick would keep resetting
+	// claimed_at and make the file look freshly claimed forever.
+	// 一份记录原样重写：每个 tick 重建会把 claimed_at 一直刷新，文件看起来永远是刚声明的。
+	record := pidfile.NewRecord(os.Getpid())
 	go func() {
 		for {
 			select {
 			case <-done:
 				return
 			case <-ticker.C:
-				if err := pidfile.Write(path, os.Getpid(), perm); err != nil {
+				if err := pidfile.WriteRecord(path, record, perm); err != nil {
 					lg.Warn("refresh pid file failed", zap.String("path", path), zap.Error(err))
 				}
 			}

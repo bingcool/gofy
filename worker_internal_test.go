@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/pidfile"
+	"github.com/bingcool/gofy/internal/process"
 	"github.com/bingcool/gofy/support/worker"
 	"go.uber.org/zap"
 )
@@ -594,5 +596,59 @@ func TestClaimWorkerPIDOverwritesAStaleFile(t *testing.T) {
 	}
 	if written != os.Getpid() {
 		t.Fatalf("pid file = %d, want %d", written, os.Getpid())
+	}
+}
+
+// TestStopRefusesARecycledPid pins P2-03: a pid file outlives a crash, and the
+// kernel recycles pids, so liveness alone must not authorize a signal. The file
+// here names a live child but carries a token that cannot be its own — exactly
+// what a recycled pid looks like — and stop must leave that child alone.
+// TestStopRefusesARecycledPid 固定 P2-03：pid 文件会比崩溃的进程活得久，而内核会回收
+// pid，因此仅凭"存活"不能授权发信号。这里的文件指向一个活着的子进程，但携带的 token 不可能
+// 属于它——这正是 pid 被复用时的样子——stop 必须放过这个子进程。
+func TestStopRefusesARecycledPid(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pid based stop is not supported on windows")
+	}
+	cmd := exec.Command("/bin/sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("spawn helper: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+	if process.Token(cmd.Process.Pid) == "" {
+		t.Skip("platform provides no process token; the case cannot be constructed")
+	}
+
+	pidPath := filepath.Join(t.TempDir(), "demo.pid")
+	record := pidfile.Record{
+		PID:        cmd.Process.Pid,
+		Executable: "/gone/demo-service",
+		Token:      "0.000000:0.000000",
+	}
+	if err := pidfile.WriteRecord(pidPath, record, 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	app, err := New(
+		WithName("stop-recycled-test"),
+		WithPIDFile(pidPath),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = app.stop(context.Background(), commandline.StopOptions{})
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("stop: got %v, want ErrNotRunning for a recycled pid", err)
+	}
+	if !process.Alive(cmd.Process.Pid) {
+		t.Fatal("stop signalled a pid that no longer belongs to this application")
+	}
+	if _, statErr := os.Stat(pidPath); !os.IsNotExist(statErr) {
+		t.Fatalf("stale pid file was not removed: %v", statErr)
 	}
 }

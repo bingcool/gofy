@@ -194,6 +194,12 @@ worker --group=order
 描述，进程退出（含 SIGKILL）时自动释放。pid 文件继续作为 `worker stop` 的地址，但"先检查
 再写入"之所以安全，靠的是这把锁——两个启动不会都读到"没有活着的 pid"然后都写。
 
+pid 文件本身也从裸 pid 升级成了一条 JSON 记录（pid / executable / claimed_at / token）：
+pid 会被内核回收，崩溃后留下的文件可能指向一个无关进程，只凭"存活"发信号就会误杀。token 由
+进程启动时刻派生（Linux 用 boot id + `/proc/<pid>/stat` 的 starttime，macOS 用 `kern.proc.pid`，
+Windows 用创建时间），被复用的 pid 无法复制它。`stop` 在发信号前校验，不匹配就当作"未运行"
+并删掉陈旧文件；旧格式（纯数字）仍然可读，但只能退回存活检查，并在日志里记一条警告。
+
 范围限定：锁在本地文件系统上，**只挡同一主机上的两个进程**。Kubernetes 里同一分组的两个
 Pod 各有文件系统，这把锁对它们无效；那种重复要靠副本数约束或 `support/lease` 之类的跨进程
 选举。HTTP 的 `start` 不需要它：端口绑定本身已经是互斥的。

@@ -81,16 +81,39 @@ func (a *App) stopAllWorkers(ctx context.Context, base string, force bool, timeo
 // stopPIDFile 终止 fullPath 记录的进程并等待它退出，force 为真时升级到 SIGKILL。
 // worker 只用于日志与控制台输出中的目标名称，为空表示 HTTP 实例。
 func (a *App) stopPIDFile(ctx context.Context, fullPath, worker string, force bool, timeout time.Duration) error {
-	pid, err := pidfile.Read(fullPath)
+	record, err := pidfile.ReadRecord(fullPath)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrNotRunning, fullPath)
 	}
+	pid := record.PID
 	if !process.Alive(pid) {
 		_ = os.Remove(fullPath)
 		return fmt.Errorf("%w: pid %d", ErrNotRunning, pid)
 	}
+	// A pid file outlives a crash, and the kernel recycles pid numbers. Signalling
+	// on liveness alone can hit an unrelated process, so the identity check comes
+	// before the signal: a mismatch means this file describes a process that is
+	// gone, and the stale file is removed instead of acted upon.
+	// pid 文件会比崩溃的进程活得更久，而内核会回收 pid。只看存活就发信号可能打到无关进程，
+	// 因此身份校验放在信号之前：不匹配说明这份文件描述的进程已经消失，此时删掉陈旧文件而不是
+	// 照着它动手。
+	verdict := record.Verify()
+	if verdict == pidfile.IdentityMismatch {
+		_ = os.Remove(fullPath)
+		return fmt.Errorf("%w: pid %d (%s) now belongs to another process", ErrNotRunning, pid, fullPath)
+	}
 
 	logger := a.Logger()
+	if verdict == pidfile.IdentityUnknown {
+		// Legacy files and uninspectable processes land here: the check cannot
+		// prove anything, so say so and keep the old behaviour.
+		// 旧格式文件与无法读取的进程会走到这里：校验证明不了什么，因此明确记录下来，并保留
+		// 原有行为。
+		logger.Warn("pid file has no process identity; stopping on liveness only",
+			zap.Int("pid", pid),
+			zap.String("pid_file", fullPath),
+		)
+	}
 	logger.Info("stopping application", zap.Int("pid", pid), zap.String("pid_file", fullPath), zap.String("worker", worker))
 	c := a.con()
 	target := fmt.Sprintf("应用【%s】", a.opts.name)

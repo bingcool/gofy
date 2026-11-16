@@ -122,6 +122,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `internal/pidfile`: the pid file is now a one-line JSON record — pid,
+  executable, claim time and a process identity token — instead of a bare
+  integer. A pid alone cannot be trusted after a crash because the kernel
+  recycles numbers: `worker stop` would signal whatever process inherited it.
+  The token is derived from the process start time (boot id + `/proc` starttime
+  on Linux, `kern.proc.pid` on macOS, creation FILETIME on Windows), so a reused
+  pid can never reproduce it. Stop verifies the token before signalling and
+  treats a mismatch as "not running", removing the stale file; legacy files with
+  no token are still accepted and fall back to the liveness check with a logged
+  warning.
 - `examples/demo-service`: the order module's `auth_required` now comes from the
   `order:` section of `config.yaml` instead of a constant in the service. The
   section travels as a constructor argument (`config.OrderConfig`), so the
