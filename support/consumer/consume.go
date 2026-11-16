@@ -446,15 +446,21 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 
 	env, err := DecodeEnvelope(msg)
 	if err != nil {
-		p.park(ctx, msg.ID, attempt, err)
+		// The dead state has to be durable before the broker drops the message:
+		// an ACK without a ledger row leaves no trace of a message that never
+		// succeeded. A failed write is therefore retryable, not a log line.
+		// dead 状态必须先落库，broker 才能丢掉消息：没有台账行的 ACK 会让一条从未成功
+		// 的消息不留任何痕迹。因此写失败是可重试错误，而不是一行日志。
+		parkErr := p.park(ctx, msg.ID, attempt, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "decode")
 		lg.Error("message discarded: undecodable envelope",
 			zap.Error(err),
 			zap.ByteString("body", truncateBytes(msg.Body, 256)),
+			zap.NamedError("park_error", parkErr),
 			zap.Duration("duration", time.Since(start)),
 		)
-		return nil
+		return parkErr
 	}
 
 	err = p.handler(ctx, msg, env)
@@ -478,16 +484,17 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		)
 		return nil
 	case IsPermanent(err):
-		p.park(ctx, msg.ID, attempt, err)
+		parkErr := p.park(ctx, msg.ID, attempt, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "permanent")
 		lg.Error("message discarded: permanent failure",
 			zap.String("event_id", env.ID),
 			zap.String("event_type", env.Type),
 			zap.Error(err),
+			zap.NamedError("park_error", parkErr),
 			zap.Duration("duration", time.Since(start)),
 		)
-		return nil
+		return parkErr
 	default:
 		if p.deduper != nil {
 			if markErr := p.deduper.fail(ctx, msg.ID, attempt, err); markErr != nil {
@@ -531,20 +538,23 @@ func consumerTracer(rt *core.Runtime) trace.Tracer {
 
 // park marks a message as dead so a later redelivery is skipped instead of
 // repeating a failure that cannot succeed.
+//
+// The error is returned rather than logged away: the caller may only
+// acknowledge the message once the dead state is durable. ACKing after a failed
+// write would delete the broker's copy of a message that never succeeded and
+// leave nothing to investigate.
 // park 把消息标记为 dead，使后续重投被跳过，而不是重复一次不可能成功的失败。
-func (p *Processor) park(ctx context.Context, messageID string, attempt int, cause error) {
+//
+// 错误要返回而不是只记日志：只有 dead 状态落库后，调用方才可以确认消息。写失败仍然 ACK
+// 会删掉这条从未成功的消息在 broker 上的副本，也没留下任何可排查的痕迹。
+func (p *Processor) park(ctx context.Context, messageID string, attempt int, cause error) error {
 	if p.deduper == nil {
-		return
+		return nil
 	}
 	if err := p.deduper.park(ctx, messageID, attempt, cause); err != nil {
-		// Failing to record the dead state must not hide the original error.
-		// 记录 dead 失败不应该盖掉原始错误。
-		p.logger.Warn("consume mark dead failed",
-			zap.String("consumer", p.consumer),
-			zap.String("message_id", messageID),
-			zap.Error(err),
-		)
+		return fmt.Errorf("consumer %s: record dead %s: %w", p.consumer, messageID, err)
 	}
+	return nil
 }
 
 // Outcome values stored in worker_consumed_messages.status.

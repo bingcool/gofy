@@ -376,3 +376,77 @@ func TestLedgerRecordsRetryableFailure(t *testing.T) {
 		t.Fatalf("last_error = %q", row.LastError)
 	}
 }
+
+// failPark installs a trigger that rejects every UPDATE on the ledger, which is
+// how these tests simulate "the claim succeeded, then the store went away".
+// Nothing else in the chain writes with UPDATE before the outcome, so the
+// trigger isolates the park path.
+// failPark 装一个拒绝台账 UPDATE 的触发器，用来模拟"认领成功、随后存储不可用"。
+// 链路在写结果之前没有别的 UPDATE，因此触发器正好隔离出 park 这条路径。
+func failPark(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Exec(`CREATE TRIGGER ledger_down BEFORE UPDATE ON worker_consumed_messages
+BEGIN
+  SELECT RAISE(ABORT, 'ledger unavailable');
+END`).Error; err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+}
+
+// TestLedgerRetriesWhenParkFails covers P1-03: a permanent failure whose dead
+// state cannot be written must not be acknowledged. Returning nil here would
+// delete the broker's copy of a message that never succeeded and leave no row
+// to investigate.
+// TestLedgerRetriesWhenParkFails 覆盖 P1-03：永久失败的 dead 状态写不进去时不得确认。
+// 这里返回 nil 会删掉一条从未成功的消息在 broker 上的副本，台账里也没有可排查的行。
+func TestLedgerRetriesWhenParkFails(t *testing.T) {
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		return Permanent(errors.New("unsupported event type"))
+	}, 5, time.Minute)
+	failPark(t, db)
+
+	err := proc.Handle(context.Background(), ledgerMessage("m-park-fail"))
+	if err == nil {
+		t.Fatal("Handle acknowledged a permanent failure whose dead state was never recorded")
+	}
+	if IsPermanent(err) {
+		t.Fatalf("error = %v, want a retryable error; a permanent one would let an adapter discard it", err)
+	}
+}
+
+// TestLedgerRetriesUndecodableMessageWhenParkFails is the same rule on the
+// decode path: a body that cannot be decoded is only safe to acknowledge once
+// its dead state is durable.
+// TestLedgerRetriesUndecodableMessageWhenParkFails 是同一条规则在解码路径上的体现：
+// 只有 dead 状态落库后，无法解码的消息才可以确认。
+func TestLedgerRetriesUndecodableMessageWhenParkFails(t *testing.T) {
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		t.Fatal("handler must not run for an undecodable envelope")
+		return nil
+	}, 5, time.Minute)
+	failPark(t, db)
+
+	msg := ledgerMessage("m-decode-fail")
+	msg.Body = []byte("not-json")
+	if err := proc.Handle(context.Background(), msg); err == nil {
+		t.Fatal("Handle acknowledged an undecodable message whose dead state was never recorded")
+	}
+}
+
+// TestLedgerAcknowledgesPermanentFailureWhenParkSucceeds keeps the other half
+// of the contract pinned: once the dead state is durable the message is
+// acknowledged, so a poison message does not come back forever.
+// TestLedgerAcknowledgesPermanentFailureWhenParkSucceeds 固定契约的另一半：dead 状态
+// 落库后消息就被确认，毒消息因此不会无限重投。
+func TestLedgerAcknowledgesPermanentFailureWhenParkSucceeds(t *testing.T) {
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		return Permanent(errors.New("unsupported event type"))
+	}, 5, time.Minute)
+
+	if err := proc.Handle(context.Background(), ledgerMessage("m-park-ok")); err != nil {
+		t.Fatalf("Handle = %v, want nil after the dead state was recorded", err)
+	}
+	if row := ledgerRow(t, db, "m-park-ok"); row.Status != consumedStatusDead {
+		t.Fatalf("status = %s, want dead", row.Status)
+	}
+}

@@ -123,7 +123,8 @@ Kafka 没有 `max.poll.interval.ms` 可调：franz-go 的心跳在独立 gorouti
 `CommitMode: manual`（默认）下 handler **不自己提交位点**：传输层给 franz-go 加
 `DisableAutoCommit()`，在每个分区的一批处理完后提交 handler 接受的最后一条记录。
 因此 handler 的返回值就是提交决策——`nil` 确认、可重试错误不提交并整批重投、
-`Permanent` 记为 dead 但仍确认（避免毒消息卡住分区）。逐条决策日志与三条路径的
+`Permanent` 记为 dead 但仍确认（避免毒消息卡住分区）——**前提是 dead 已落库**，写不进去
+时按可重试错误处理，绝不确认。逐条决策日志与三条路径的
 实跑样例见 [demo worker README](../../examples/demo-service/worker/README.md#kafka-手动提交)。
 
 RocketMQ 的 `Tags` 是"或"列表：SDK 用 `||` 把元素拼成一个订阅表达式，因此元素在构造时
@@ -197,7 +198,7 @@ DDL（`examples/demo-service` 提供）。
 | handler 返回 | 处理 | 效果 |
 | --- | --- | --- |
 | `nil` | 台账 `done`（带 attempts 围栏），确认 | 分区继续推进 |
-| `consumer.Permanent(err)` | 台账 `dead`，确认 | 毒消息不再重投 |
+| `consumer.Permanent(err)` | 台账 `dead`，确认 | 毒消息不再重投；dead 写失败则按可重试错误处理，不确认 |
 | 其它 `error` | 台账 `failed`，不确认 | broker 重投，直到 `max_attempts` |
 | 另一实例仍在处理 | 不改台账，返回 `ErrInFlight` | broker 稍后重投，副本不丢 |
 

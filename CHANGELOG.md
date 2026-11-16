@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/consumer`: a failed dead-state write no longer lets the broker
+  acknowledge the message. `park` used to log the failure and return nil, so a
+  permanent failure whose ledger row could not be written was ACKed anyway —
+  the broker deleted its only copy and nothing was left to investigate. The
+  dead state must now be durable before the message is acknowledged; a write
+  failure comes back as a retryable error and each transport holds the message
+  (Kafka does not commit, AMQP nack-requeues, RocketMQ does not ack, the Redis
+  queue re-queues).
 - `gofy` worker mode: `worker restart` no longer re-runs itself in the daemon
   child. The detached process used to inherit `os.Args`, so it executed
   `worker restart` again, stopped nothing, and returned at the confirmation
