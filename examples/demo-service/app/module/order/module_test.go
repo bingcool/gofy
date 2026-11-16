@@ -21,6 +21,7 @@ import (
 	"github.com/bingcool/gofy/support/sqlite"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/yourorg/demo-service/app/appio"
+	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/container"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
@@ -103,6 +104,13 @@ func (p panicPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, e
 // app/appio 句柄取连接，测试把内存库发布成当前句柄，结束后恢复。
 func newTestServices(t *testing.T) (*service.OrderService, *service.OrderConfigService) {
 	t.Helper()
+	return newTestServicesWithConfig(t, nil)
+}
+
+// newTestServicesWithConfig 与 newTestServices 相同，但把业务配置交给装配根，
+// 用来验证 config → container → service 这条链。
+func newTestServicesWithConfig(t *testing.T, cfg *config.Config) (*service.OrderService, *service.OrderConfigService) {
+	t.Helper()
 	conn := newTestDB(t)
 	// GORM 执行 SQL 用的是 Statement.ConnPool（Open 时从 Config 复制一份），
 	// 只改 Config.ConnPool 不会生效，两处都要替换。
@@ -112,7 +120,7 @@ func newTestServices(t *testing.T) (*service.OrderService, *service.OrderConfigS
 	prev := appio.Current()
 	appio.PublishDB(conn)
 	t.Cleanup(func() { appio.Publish(prev) })
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(cfg)
 	ctr.Init(zap.NewNop())
 	return ctr.OrderService(), ctr.OrderConfigService()
 }
@@ -143,6 +151,19 @@ func newTestAppWithConfig(t *testing.T, jwtCfg middleware.JWTConfig) *gofytest.A
 func newTestAppWithBindOptions(t *testing.T, bindOptions gofyadapter.BindOptions) *gofytest.App {
 	t.Helper()
 	return newTestAppWith(t, middleware.JWTConfig{}, bindOptions)
+}
+
+// newTestAppWithOrderConfig 用注入的订单配置启动测试 App，供配置链路的
+// 端到端用例使用；其余装配与 newTestAppWith 相同。
+func newTestAppWithOrderConfig(t *testing.T, orderCfg config.OrderConfig) *gofytest.App {
+	t.Helper()
+	orderService, orderConfigService := newTestServicesWithConfig(t, &config.Config{Order: orderCfg})
+	module := order.NewModule(orderService, orderConfigService, zap.NewNop(), gofyadapter.BindOptions{})
+	return gofytest.New(t,
+		gofy.WithName("demo-service-test"),
+		gofy.WithMiddlewareRegistrar(testRegistrar(zap.NewNop(), middleware.JWTConfig{})),
+		gofy.WithModules(module),
+	)
 }
 
 func newTestAppWith(t *testing.T, jwtCfg middleware.JWTConfig, bindOptions gofyadapter.BindOptions) *gofytest.App {
@@ -205,6 +226,19 @@ func TestGetOrderContract(t *testing.T) {
 	if resp.Order.ID.Uint64() != 1 || resp.Order.UserID.Uint64() != 100 ||
 		resp.Order.Amount != 9900 || resp.Order.Status != orderenum.OrderStatusPaid {
 		t.Fatalf("order = %+v", resp.Order)
+	}
+}
+
+// 配置从装配根一路走到 HTTP：order.auth_required 为 true 时，契约响应的
+// auth_required 也必须是 true。中间没有任何 service 读文件或 import app/config。
+func TestGetConfigUsesInjectedConfig(t *testing.T) {
+	app := newTestAppWithOrderConfig(t, config.OrderConfig{AuthRequired: true})
+	rr := app.GET("/api/v1/order/config")
+	gofytest.Status(t, rr, http.StatusOK)
+
+	resp := gofytest.JSON[orderresponse.GetConfigResponse](t, rr)
+	if !resp.AuthRequired {
+		t.Fatalf("config = %+v, want AuthRequired=true", resp)
 	}
 }
 

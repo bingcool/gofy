@@ -1,9 +1,11 @@
 package container_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bingcool/gofy"
+	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/container"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -14,10 +16,22 @@ func testRuntime() *gofy.Runtime {
 }
 
 func TestAccessorsReturnServices(t *testing.T) {
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(nil)
 	ctr.Init(zap.NewNop())
 	if ctr.ProductService() == nil || ctr.OrderConfigService() == nil || ctr.OrderService() == nil {
 		t.Fatal("container returned a nil service")
+	}
+}
+
+// 业务配置由装配根翻译后注入 service：容器拿到 config.yaml 的 order 段，service
+// 只看到自己的 Settings。service 包因此不 import app/config，测试也不需要整份配置。
+func TestOrderConfigReachesTheService(t *testing.T) {
+	ctr := container.NewContainer(&config.Config{
+		Order: config.OrderConfig{AuthRequired: true},
+	})
+	ctr.Init(zap.NewNop())
+	if got := ctr.OrderConfigService().GetConfig(context.Background()); !got.AuthRequired {
+		t.Fatal("order config did not reach the service")
 	}
 }
 
@@ -25,7 +39,7 @@ func TestAccessorsReturnServices(t *testing.T) {
 // same instance.
 // 每个构造槽只生效一次：重复取用返回同一实例。
 func TestAccessorsAreIdempotent(t *testing.T) {
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(nil)
 	ctr.Init(zap.NewNop())
 	first := ctr.OrderService()
 	ctr.Init(zap.NewNop())
@@ -35,7 +49,7 @@ func TestAccessorsAreIdempotent(t *testing.T) {
 }
 
 func TestModuleFactoriesRequireDatabase(t *testing.T) {
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(nil)
 	for _, factory := range ctr.ModuleFactories() {
 		if _, err := factory(&gofy.Runtime{Logger: zap.NewNop()}); err == nil {
 			t.Fatal("module factory should fail without database")
@@ -45,7 +59,7 @@ func TestModuleFactoriesRequireDatabase(t *testing.T) {
 
 // 订单 service 取用时先构造产品 service，因此订单工厂单独执行也不依赖工厂次序。
 func TestOrderFactoryDoesNotDependOnProductFactoryOrder(t *testing.T) {
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(nil)
 	module, err := ctr.OrderModuleFactory()(testRuntime())
 	if err != nil {
 		t.Fatalf("order factory: %v", err)
@@ -58,8 +72,8 @@ func TestOrderFactoryDoesNotDependOnProductFactoryOrder(t *testing.T) {
 // 每个装配代用独立容器：两次装配得到不同的 service。
 func TestGenerationsUseIndependentContainers(t *testing.T) {
 	rt := testRuntime()
-	first := container.NewContainer()
-	second := container.NewContainer()
+	first := container.NewContainer(nil)
+	second := container.NewContainer(nil)
 	for i, ctr := range []*container.Container{first, second} {
 		for _, factory := range ctr.ModuleFactories() {
 			if _, err := factory(rt); err != nil {

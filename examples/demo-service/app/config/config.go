@@ -35,6 +35,7 @@ type Config struct {
 	RocketMQ approcketmq.Config             `yaml:"rocketmq"`
 	UUIDInt  appuuidint.Config              `yaml:"uuidint"`
 	Lock     gofylock.Config                `yaml:"lock"`
+	Order    OrderConfig                    `yaml:"order"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
 	JWT      middleware.JWTConfig           `yaml:"jwt"`

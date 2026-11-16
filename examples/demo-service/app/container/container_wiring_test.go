@@ -12,7 +12,7 @@ import (
 
 // 产品访问器只构建产品 service：未挂载的订单能力保持未构建。
 func TestProductAccessBuildsOnlyProduct(t *testing.T) {
-	c := NewContainer()
+	c := NewContainer(nil)
 	c.Init(zap.NewNop())
 	if c.ProductService() == nil {
 		t.Fatal("nil product service")
@@ -24,7 +24,7 @@ func TestProductAccessBuildsOnlyProduct(t *testing.T) {
 
 // 订单访问器只按依赖链解析产品 service；配置 service 由模块工厂单独取用。
 func TestOrderAccessBuildsProductDependency(t *testing.T) {
-	c := NewContainer()
+	c := NewContainer(nil)
 	c.Init(zap.NewNop())
 	if c.OrderService() == nil {
 		t.Fatal("nil order service")
@@ -40,7 +40,7 @@ func TestOrderAccessBuildsProductDependency(t *testing.T) {
 // 装配根给出按契约生成限流中间件的回调：契约声明了 RateLimit 的路由拿到实例，
 // 没有声明的路由（如 GetConfig）不挂限流。
 func TestBindOptionsRateLimitFollowsContract(t *testing.T) {
-	opts := NewContainer().BindOptions()
+	opts := NewContainer(nil).BindOptions()
 	if opts.RateLimit == nil {
 		t.Fatal("BindOptions returned no rate limit callback")
 	}
@@ -60,7 +60,7 @@ func TestBindOptionsRateLimitFollowsContract(t *testing.T) {
 // 装配根同时给出认证声明校验：Required 认 "auth"，Optional 认独立的
 // "optional-auth"，AuthNone 不参与校验。
 func TestBindOptionsValidatesAuthDeclarations(t *testing.T) {
-	opts := NewContainer().BindOptions()
+	opts := NewContainer(nil).BindOptions()
 	if opts.AuthValidator == nil {
 		t.Fatal("BindOptions returned no auth validator")
 	}

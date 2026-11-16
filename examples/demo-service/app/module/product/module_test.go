@@ -52,7 +52,7 @@ func newTestApp(t *testing.T) *gofytest.App {
 	appio.PublishDB(conn)
 	t.Cleanup(func() { appio.Publish(prev) })
 
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(nil)
 	ctr.Init(zap.NewNop())
 	module := product.NewModule(ctr.ProductService(), zap.NewNop(), gofyadapter.BindOptions{})
 	return gofytest.New(t,

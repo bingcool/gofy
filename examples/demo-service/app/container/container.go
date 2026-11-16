@@ -7,18 +7,21 @@ package container
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
 	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 
+	"github.com/yourorg/demo-service/app/config"
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
 )
 
-// Container 持有本次服务的仓库、service 构造槽与 logger。它不是包级全局：装配方每代
-// 新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
+// Container 持有本次服务的仓库、service 构造槽、业务配置与 logger。它不是包级全局：
+// 装配方每代新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
 type Container struct {
+	cfg      *config.Config
 	repos    RepositoryDeclare
 	services ServiceDeclare
 
@@ -26,17 +29,34 @@ type Container struct {
 	zapLogger *zap.Logger
 }
 
-// NewContainer 创建一个尚未构建任何 service 的容器。
+// NewContainer 创建一个尚未构建任何 service 的容器。cfg 是本次装配加载的配置，
+// 业务配置由访问器翻译成 service 自己的值对象注入；传 nil 表示只验证接线，
+// 此时各业务配置段按零值处理（生产路径 reload.factories 一定传入完整配置）。
 //
-// 启动和重启（热更新）都会重新走一遍装配：启动时 appOptions 调
-// reload.factories(cfg)，热更新时 app.Reload 再用 reloader.factories(cfg)；
-// 两者都新建容器，并把本次服务的 ModuleFactories() 与 middlewareRegistrar 注册到
-// 当次 App。因此每代各有一套仓库与构造槽，旧代实例只服务在途请求。
-func NewContainer() *Container {
+// 启动和热更新各走一次装配：启动时 appOptions 调 reload.factories(cfg)，热更新时
+// app.Reload 再用 reloader.factories(cfg)；两者都新建容器并注册本次的
+// ModuleFactories 与中间件注册表。因此每代各有一套仓库、构造槽与业务配置，旧代实例
+// 只服务在途请求。
+func NewContainer(cfg *config.Config) *Container {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	return &Container{
+		cfg:      cfg,
 		repos:    NewRepositoryDeclare(),
 		services: NewServiceDeclare(),
 	}
+}
+
+// orderConfig 返回本次装配的订单配置。
+//
+// 它是 service 与 config.yaml 之间唯一的桥：模块工厂、service 都不 import
+// app/config，只有装配根知道字段从哪来、要翻译成什么值对象。
+func (c *Container) orderConfig() config.OrderConfig {
+	if c == nil || c.cfg == nil {
+		return config.OrderConfig{}
+	}
+	return c.cfg.Order
 }
 
 // BindOptions 返回契约路由的绑定选项，与具体模块无关，所有模块共用。
@@ -70,10 +90,8 @@ func authValidator(spec endpoint.Spec, declared []string) error {
 	if spec.Auth == endpoint.AuthOptional {
 		want = appmiddleware.NameOptionalAuth
 	}
-	for _, name := range declared {
-		if name == want {
-			return nil
-		}
+	if slices.Contains(declared, want) {
+		return nil
 	}
 	return fmt.Errorf("auth %q requires middleware %q in the group or route declaration", spec.Auth, want)
 }

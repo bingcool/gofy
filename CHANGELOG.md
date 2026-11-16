@@ -80,6 +80,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: the order module's `auth_required` now comes from the
+  `order:` section of `config.yaml` instead of a constant in the service. The
+  assembly root translates it into `orderservice.Settings`, so a service
+  receives only the fields it uses; `check-imports.sh` rejects any
+  `app/module/*` import of `app/config`. Adding a field is three edits (config
+  type, settings type, container mapping) and does not touch unrelated modules.
 - `gofy` worker mode: `--group=all` selects every registered group. The wildcard
   `*` still works but a shell expands it before the process starts — zsh refuses
   to run the command at all (`no matches found`), bash only passes it through

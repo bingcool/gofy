@@ -43,6 +43,43 @@ db:
 	}
 }
 
+// 订单模块的业务配置来自 order 段。Load 走 strict 模式，所以这个用例同时证明
+// 该段已经映射到结构体字段，而不是被静默忽略。
+func TestLoadOrderSection(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+order:
+  auth_required: true
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Order.AuthRequired {
+		t.Fatal("order.auth_required = false, want true")
+	}
+}
+
+// 没有 order 段时按 default tag 处理：业务配置可选，不会因为缺段而启动失败。
+func TestLoadOrderSectionDefaultsToFalse(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Order.AuthRequired {
+		t.Fatal("missing order section should default to false")
+	}
+}
+
 func TestLoadRedisInstancesByInstanceName(t *testing.T) {
 	path := writeConfig(t, `
 db:

@@ -59,7 +59,7 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	// 每个装配代新建一个容器：启动和每次 Reload 各得到一套仓库与 service，
 	// 旧的模块实例继续服务在途请求。容器内部固定按 产品 → 订单 构建，模块
 	// 工厂的排列顺序不再承载依赖顺序。
-	ctr := container.NewContainer()
+	ctr := container.NewContainer(cfg)
 	factories := []gofy.ModuleFactory{
 		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock),
 	}

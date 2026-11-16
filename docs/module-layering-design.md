@@ -88,14 +88,14 @@ service/repository/model，也不 import HTTP 契约。消费方 import 它时�
 
 ### 3.2 import 矩阵（√ 允许，× 禁止）
 
-| 调用方 \ 被调方 | 本模块 model | 本模块 repository | 本模块 service | 本模块 innerapi | 其他模块 innerapi | 其他模块 service/repository/model | HTTP 契约 | app/appio 句柄 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| controller | × | × | √ | × | × | × | √ | × |
-| service | √ | √ | — | √（实现） | √（调用） | × | × | √（开事务） |
-| innerapi | × | × | × | — | × | × | × | × |
-| repository | √ | — | × | × | × | × | × | √（解析连接） |
-| query | √ | × | × | × | × | × | × | √（解析连接） |
-| model | — | × | × | × | × | × | × | × |
+| 调用方 \ 被调方 | 本模块 model | 本模块 repository | 本模块 service | 本模块 innerapi | 其他模块 innerapi | 其他模块 service/repository/model | HTTP 契约 | app/appio 句柄 | app/config |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| controller | × | × | √ | × | × | × | √ | × | × |
+| service | √ | √ | — | √（实现） | √（调用） | × | × | √（开事务） | × |
+| innerapi | × | × | × | — | × | × | × | × | × |
+| repository | √ | — | × | × | × | × | × | √（解析连接） | × |
+| query | √ | × | × | × | × | × | × | √（解析连接） | × |
+| model | — | × | × | × | × | × | × | × | × |
 
 关键变化：**跨模块只允许 `service → 其他模块 innerapi`**；service 不再 import 其他
 模块 service/repository/model，也不再 import HTTP 契约。依赖图无环由 `go build` 兜底
@@ -597,6 +597,12 @@ HTTP POST /api/v1/order/orders
    `support`、框架与第三方库；禁止 import 本模块 `service` / `controller` /
    `innerapi` / `repository`、其他模块任何包、HTTP 契约、`client` 与 `adapter`。
    取句柄同样只走 `appio.WithContext(ctx)`，规则 8 一并适用。
+10. `app/module/*` 的任何层都禁止 import `app/config`：业务配置由
+    `app/container` 从 `config.yaml` 翻译成 service 自己的值对象（如
+    `orderservice.Settings`），经构造参数注入。service 只依赖它真正用到的字段，
+    新增无关配置段不会牵动业务包；热更新时新配置随新容器进入新代，在途请求继续
+    使用旧代的值。`app/config` 只有装配根（`main`、`reload.go`、`app/container`）
+    可以 import。
 
 规则按 `app/module/<name>/<layer>/...` 匹配（`layer` 含 `query`）：模块根
 （`app/module/<name>`）只做路由绑定，`app/container` 只做装配，两者都不在分层

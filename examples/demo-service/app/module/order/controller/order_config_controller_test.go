@@ -9,7 +9,7 @@ import (
 )
 
 func TestGetConfigOutput(t *testing.T) {
-	c := NewOrderConfigController(service.NewOrderConfigService(nil))
+	c := NewOrderConfigController(service.NewOrderConfigService(service.Settings{}, nil))
 
 	got, err := c.GetConfig(context.Background(), &orderrequest.GetConfigRequest{})
 	if err != nil {

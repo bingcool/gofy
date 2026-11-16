@@ -240,4 +240,11 @@ pid_file: app/demo-service.pid
 #   audience: demoservice
 #   require_expiry: true
 
-#ddd1
+
+# 业务配置：订单模块自己的一段配置。装配根 app/container 把它翻译成
+# orderservice.Settings 后注入，service 不 import app/config，也不读文件；
+# 因此加字段只改这里、app/config 与装配根，不牵动其它模块。
+# auth_required 决定 GET /api/v1/order/config 的响应，默认 false 与旧样例一致。
+# 改这一段需要重启或触发热更新（配置变更按整代重建，在途请求继续用旧值）。
+order:
+  auth_required: false

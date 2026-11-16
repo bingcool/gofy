@@ -170,6 +170,21 @@ jwt:
 `options.go` 的 `middlewareRegistrar(cfg)` 闭包在 App 启动时注册 `auth` 别名；
 手工构造不带 `JWT.Secret` 的配置时，`auth` 是放行中间件。
 
+### 模块配置（`order` 段）
+
+订单模块自己的配置来自 `config.yaml` 顶层的 `order` 段，由 `app/container` 翻译成
+`service.Settings` 后注入。service 不 import `app/config`、也不读文件：
+
+| YAML 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `order.auth_required` | bool | `false` | `GET /api/v1/order/config` 返回的 `auth_required` |
+
+新增一个业务配置字段只有三处改动：`config.OrderConfig` 加字段（带 `default` /
+`validate` tag）→ `service.Settings` 加字段 → 容器的 `OrderConfigService()` 做映射。
+`app/module/*` 的任何一层 import `app/config` 都会被 `shell/check-imports.sh` 拒绝，
+所以 service 只能看到自己用到的值，新增无关配置段也不会牵动订单模块。热更新后新代
+拿到新值，在途请求继续用旧代的值——与 `app/appio` 快照同一个模型。
+
 ## 装配
 
 组合根是 `app/container`。`reload.go` 的 `factories(cfg)` 在启动和每次热更新时
