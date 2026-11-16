@@ -131,6 +131,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: the command line is classified before any file is
+  opened, so a command only reads what it needs. `version` and `--help` read
+  nothing, `stop` / `worker stop` read `config.yaml` for the pid path but never
+  `nacos.yaml`, `worker --list` reads the config but skips Nacos, and only the
+  commands that start a process pull the remote config. `worker restart` counts
+  as a start: it pulls and validates the config **before** the old process is
+  stopped, so a failed pull leaves the running instance alone instead of
+  replacing it with one on stale settings. Control commands also build a minimal
+  App — no database, modules, middleware, telemetry or log files — because
+  sending a signal must not depend on any of them.
 - `internal/pidfile`: the pid file is now a one-line JSON record — pid,
   executable, claim time and a process identity token — instead of a bare
   integer. A pid alone cannot be trusted after a crash because the kernel

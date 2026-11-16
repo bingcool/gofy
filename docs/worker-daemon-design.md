@@ -145,6 +145,11 @@ demo-service worker restart --group=order   # 默认仍后台（--daemon=false �
 | `--daemon` | false（`restart` 为 true） | 脱离到独立会话后由父进程退出；`restart` 默认仍后台 |
 | `--startup-timeout` | 30s | 后台父进程等待子进程就绪上报的预算；子进程未上报则父命令失败，但子进程继续运行 |
 
+`worker restart` 与 `worker stop` 的配置语义不同：stop 只按 pid 发信号，永不访问配置中心；
+restart 会启动下一个进程，因此**先拉取并校验配置，再停旧实例**——拉取失败时旧实例继续运行，
+不会留下空窗。这条语义在 `main` 的命令分类里表达（见 `docs/worker-guide.md` §7.1），不藏在子命令的
+字符串判断中。
+
 `--group=all` 是通配符的免引号写法：`*` 会被 shell 先展开，zsh 直接报
 `no matches found` 并拒绝执行。两者在解析、pid 文件（`-worker-all.pid`）与 `stop` 上完全
 等价。`worker stop` 不带 `--group` 时扫 `<pid_file>` 旁边的 `-worker-*.pid`，因为分组可能

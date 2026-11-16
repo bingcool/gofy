@@ -30,56 +30,153 @@ func loadNacosConfig() (nacos.Config, error) {
 	return cfg, err
 }
 
-// isStartInvocation reports whether args select the foreground start (or no
-// subcommand at all).
-// isStartInvocation 判断参数是否指向前台 start 子命令，或干脆没有子命令；
-// 只有这种情况才需要拉取 Nacos 配置。
-func isStartInvocation(args []string) bool {
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			if arg == "-h" || arg == "--help" {
-				return false
-			}
-			continue
-		}
-		return arg == "start"
-	}
-	return true
+// commandPlan is what one command line needs before the App exists. The ordering
+// matters more than the fields: reading nacos.yaml or config.yaml can fail, and a
+// failure there must not block a command that never needed the file.
+// commandPlan 是一条命令行在 App 存在之前需要什么。比起字段，顺序更要紧：读 nacos.yaml
+// 或 config.yaml 都可能失败，而这个失败不应该挡住一个根本不需要该文件的命令。
+type commandPlan struct {
+	// Kind names the command, for tests and for the startup log.
+	// Kind 是命令名称，供测试与启动日志使用。
+	Kind string
+	// LoadNacos reads nacos.yaml / application.yaml. Only commands that may
+	// pull or register need it; a corrupted Nacos file must not stop a running
+	// service.
+	// LoadNacos 表示读取 nacos.yaml / application.yaml。只有可能拉取或注册的命令需要它；
+	// 损坏的 Nacos 文件不该阻止停止一个正在运行的服务。
+	LoadNacos bool
+	// Sync pulls the remote config once before anything else happens. It is true
+	// for every command that starts a process, including restart: a restart that
+	// skipped the pull would start the new process on the old local file.
+	// Sync 表示在做任何事之前先拉一次远端配置。所有会启动进程的命令都为真，包括 restart：
+	// 跳过拉取的 restart 会用旧的本地文件启动新进程。
+	Sync bool
+	// Watch hosts the config watcher. HTTP only: workers are immutable at runtime
+	// and pick changes up through a rolling restart.
+	// Watch 表示挂配置监听。只属于 HTTP 进程：worker 运行期不变，配置变更靠滚动重启生效。
+	Watch bool
+	// LoadConfig reads config.yaml. Only print commands (version, help) skip it.
+	// LoadConfig 表示读取 config.yaml。只有打印类命令（version、help）跳过它。
+	LoadConfig bool
+	// RegisterGroups builds the worker groups from config, which `worker --list`
+	// needs and a signal-only command does not.
+	// RegisterGroups 表示按配置构建 worker 分组：`worker --list` 需要它，纯发信号的命令不需要。
+	RegisterGroups bool
+	// BuildServices wires HTTP, database, modules, middleware and telemetry.
+	// Control commands leave all of it out, so a broken database does not block
+	// `stop`.
+	// BuildServices 表示装配 HTTP、数据库、模块、中间件与 telemetry。控制类命令全部跳过，
+	// 数据库不可用因此不会挡住 `stop`。
+	BuildServices bool
 }
 
-// isWorkerStartInvocation reports whether args start a resident worker group.
-// Query forms (--list, --help) are excluded so they keep working when the
-// config server is down; the control subcommands (stop, restart) are excluded
-// too — they send signals to a pid, and must work while Nacos is unreachable.
-// isWorkerStartInvocation 判断参数是否要真正启动常驻 worker 分组。查询形态
-// （--list、--help）排除在外；控制子命令（stop、restart）同样排除——它们只按 pid
-// 发信号，Nacos 不可达时也必须能用。
-func isWorkerStartInvocation(args []string) bool {
+// planCommand classifies the command line. It runs before any file is opened,
+// which is the whole point: a command that only sends signals must survive a
+// broken nacos.yaml, and `version` must survive a broken config.yaml.
+// planCommand 对命令行分类。它在打开任何文件之前运行，这正是重点：只发信号的命令必须在
+// nacos.yaml 损坏时仍可用，`version` 必须在 config.yaml 损坏时仍可用。
+func planCommand(args []string) commandPlan {
+	if hasHelpFlag(args) {
+		return commandPlan{Kind: "help"}
+	}
+	command := firstCommand(args)
+	switch command {
+	case "":
+		return httpStartPlan("http-start")
+	case "start":
+		return httpStartPlan("http-start")
+	case "stop":
+		// Signals only: the pid path comes from config.yaml, nothing else is
+		// read.
+		// 只发信号：pid 路径来自 config.yaml，其余文件一概不读。
+		return commandPlan{Kind: "stop", LoadConfig: true}
+	case "restart":
+		return commandPlan{Kind: "http-restart", LoadNacos: true, Sync: true, LoadConfig: true, BuildServices: true}
+	case "script":
+		return commandPlan{Kind: "script", LoadConfig: true, BuildServices: true}
+	case "version", "help":
+		return commandPlan{Kind: "print"}
+	case "worker":
+		return planWorker(args)
+	default:
+		// An unknown command is reported by the CLI; loading the config first
+		// keeps the behaviour identical to a valid command.
+		// 未知命令由 CLI 报错；先加载配置让行为与合法命令一致。
+		return commandPlan{Kind: "command", LoadConfig: true, BuildServices: true}
+	}
+}
+
+func httpStartPlan(kind string) commandPlan {
+	return commandPlan{
+		Kind:           kind,
+		LoadNacos:      true,
+		Sync:           true,
+		Watch:          true,
+		LoadConfig:     true,
+		RegisterGroups: true,
+		BuildServices:  true,
+	}
+}
+
+// planWorker classifies the worker subcommands. stop only needs the pid path;
+// --list needs the groups but no broker and no Nacos; everything else starts a
+// process and therefore pulls the config first.
+// planWorker 对 worker 子命令分类。stop 只需要 pid 路径；--list 需要分组但不需要 broker
+// 与 Nacos；其余形态都会启动进程，因此先拉配置。
+func planWorker(args []string) commandPlan {
+	for _, arg := range args {
+		if arg == "--list" || strings.HasPrefix(arg, "--list=") {
+			return commandPlan{Kind: "worker-list", LoadConfig: true, RegisterGroups: true}
+		}
+	}
 	index := -1
 	for i, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
-		if arg != "worker" {
-			return false
+		if arg == "worker" {
+			index = i
 		}
-		index = i
 		break
 	}
 	if index < 0 {
-		return false
-	}
-	for _, arg := range args {
-		if arg == "--list" || strings.HasPrefix(arg, "--list=") ||
-			arg == "--help" || arg == "-h" {
-			return false
-		}
+		return commandPlan{Kind: "worker-run", LoadConfig: true, RegisterGroups: true, BuildServices: true}
 	}
 	switch workerSubcommand(args[index+1:]) {
-	case "stop", "restart":
-		return false
+	case "stop":
+		return commandPlan{Kind: "worker-stop", LoadConfig: true}
+	case "restart":
+		return commandPlan{Kind: "worker-restart", LoadNacos: true, Sync: true, LoadConfig: true, RegisterGroups: true, BuildServices: true}
+	default:
+		return commandPlan{Kind: "worker-run", LoadNacos: true, Sync: true, LoadConfig: true, RegisterGroups: true, BuildServices: true}
 	}
-	return true
+}
+
+// firstCommand returns the first token that is not a flag, or "" when the whole
+// line is flags (the bare `app` form starts HTTP).
+// firstCommand 返回第一个非旗标 token；整行都是旗标时返回空串（裸 `app` 形态启动 HTTP）。
+func firstCommand(args []string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+// hasHelpFlag reports whether the line asks for help, wherever the flag sits.
+// Help never needs a config file: printing usage must work while the operator is
+// fixing the very file that is broken.
+// hasHelpFlag 判断命令行是否在求助，无论旗标出现在哪里。帮助永远不需要配置文件：运维正在
+// 修的就是那个坏文件时，打印用法必须可用。
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 // workerSubcommand returns the first token after `worker` that is not a flag
@@ -91,10 +188,11 @@ func isWorkerStartInvocation(args []string) bool {
 // 停止全部分组。
 func workerSubcommand(args []string) string {
 	valueFlags := map[string]struct{}{
-		"--group":       {},
-		"--name":        {},
-		"--concurrency": {},
-		"--timeout":     {},
+		"--group":           {},
+		"--name":            {},
+		"--concurrency":     {},
+		"--timeout":         {},
+		"--startup-timeout": {},
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -106,23 +204,4 @@ func workerSubcommand(args []string) string {
 		}
 	}
 	return ""
-}
-
-// configInvocation classifies the command line into startup config needs.
-// sync pulls the current remote config once, so a freshly launched process
-// never runs on a stale local config.yaml. watch hosts the watcher and applies
-// the change strategy; it belongs to the HTTP process only, because a worker
-// stays immutable at runtime and picks up changes through a rolling restart
-// by the deployment layer.
-// configInvocation 把命令行归类成启动期配置需求。sync 表示启动时拉一次远端配置，
-// 避免新进程拿陈旧的本地 config.yaml 启动；watch 表示运行期挂监听并应用变更策略，
-// 只属于 HTTP 进程——worker 运行期保持不变，配置变更由部署层滚动重启生效。
-func configInvocation(args []string) (sync, watch bool) {
-	if isStartInvocation(args) {
-		return true, true
-	}
-	if isWorkerStartInvocation(args) {
-		return true, false
-	}
-	return false, false
 }
