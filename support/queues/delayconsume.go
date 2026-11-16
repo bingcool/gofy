@@ -3,6 +3,7 @@ package queues
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // Consume handles due delayed messages until ctx is cancelled. It has the same
@@ -34,6 +35,14 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 		limit = defaultPopLimit
 	}
 
+	var ready sync.Once
+	reportReady := func() {
+		if opts.OnReady == nil {
+			return
+		}
+		ready.Do(opts.OnReady)
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -52,6 +61,11 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 			}
 			continue
 		}
+		// Same rule as Queue.Consume: one successful range query is the whole
+		// readiness story of a polled queue, empty result included.
+		// 与 Queue.Consume 同一规则：一次成功的范围查询就是轮询队列的全部就绪依据，空结果
+		// 也算。
+		reportReady()
 		if len(messages) == 0 {
 			if !wait(ctx, opts.IdleDelay) {
 				return nil

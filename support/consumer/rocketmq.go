@@ -176,6 +176,10 @@ func (c *RocketMQConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("rocketmq consume error", zap.Error(err))
 			},
+			// Ready comes from the adapter after the SDK consumer started and
+			// registered the subscription with the broker.
+			// 就绪由适配器在 SDK 消费者启动、订阅注册到 broker 之后上报。
+			OnReady: func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {
@@ -189,13 +193,6 @@ func (c *RocketMQConsumer) Run(ctx context.Context) error {
 		zap.Bool("idempotency", c.cfg.Idempotency),
 	)
 	defer lg.Info("rocketmq consumer stopped", zap.String("topic", c.cfg.Topic))
-
-	// Every connection and declaration above succeeded, so this instance can
-	// accept work. Reporting after the log line keeps the ordering in the log
-	// the same as the ordering of events.
-	// 上面所有连接与声明都已成功，本实例可以接活。放在日志之后上报，日志顺序因此与
-	// 事件顺序一致。
-	gofyworker.Ready(ctx)
 
 	return w.Run(ctx)
 }

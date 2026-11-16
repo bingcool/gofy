@@ -239,6 +239,12 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("kafka consume error", zap.Error(err))
 			},
+			// Ready is reported by the first successful poll, not here: only
+			// that proves the group session exists. The ping below stays as a
+			// fast failure for an unreachable broker, not as a readiness claim.
+			// 就绪由第一次成功拉取上报，而不是这里：只有它能证明消费组会话已经成立。下面的
+			// ping 仍然保留，用于快速暴露 broker 不可达，但它不是就绪声明。
+			OnReady: func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {
@@ -246,14 +252,13 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 	}
 
 	// The client is lazy: New does not dial, and the consume loop only fails
-	// once it polls. A broker that cannot be reached is exactly the state the
-	// probe must not call ready, so verify the connection first.
-	// 客户端是惰性的：New 不拨号，消费循环要等到 poll 才会暴露失败。broker 不可达
-	// 正是探针不能报就绪的状态，因此先确认一次连接。
+	// once it polls. Ping fails that path fast instead of letting Run block on
+	// a broker that is not there.
+	// 客户端是惰性的：New 不拨号，消费循环要等到 poll 才会暴露失败。Ping 让这条路径
+	// 快速失败，而不是让 Run 卡在一个不存在的 broker 上。
 	if err := client.Ping(ctx); err != nil {
 		return fmt.Errorf("%s: ping broker: %w", name, err)
 	}
-	gofyworker.Ready(ctx)
 
 	lg.Info("kafka consumer started",
 		zap.String("topic", c.cfg.Topic),

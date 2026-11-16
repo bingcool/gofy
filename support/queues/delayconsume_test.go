@@ -134,3 +134,46 @@ func TestDelayConsumeRetriesFailedMessage(t *testing.T) {
 		t.Fatalf("Len = %d, want 0 after the retry succeeded", length)
 	}
 }
+
+// TestDelayConsumeReportsReadyOnceAfterFirstPop is the delayed-queue twin: the
+// first range query that returns defines readiness, and a handled batch must not
+// repeat it.
+// TestDelayConsumeReportsReadyOnceAfterFirstPop 是延迟队列的同款用例：第一次成功的
+// 范围查询就确定就绪，处理完一批也不能重复上报。
+func TestDelayConsumeReportsReadyOnceAfterFirstPop(t *testing.T) {
+	q, _ := newDelayQueue(t, queues.Config{Key: "orders:delay-ready"})
+	ready := make(chan struct{}, 4)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- q.Consume(ctx, func(context.Context, *queues.Message) error { return nil },
+			queues.ConsumeOptions{OnReady: func() { ready <- struct{}{} }})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Consume returned %v, want nil", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Consume did not stop after cancellation")
+		}
+	})
+
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnReady did not fire after the first pop")
+	}
+	if err := q.Add(context.Background(), map[string]string{"id": "a"}, 0); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-ready:
+		t.Fatal("OnReady fired again after a due message")
+	default:
+	}
+}

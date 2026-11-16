@@ -251,3 +251,37 @@ func TestQueueConsumeStopsWhenIdle(t *testing.T) {
 		t.Fatalf("idle Consume did not stop on cancellation")
 	}
 }
+
+// TestConsumeReportsReadyOnceAfterFirstPop pins the queue's readiness rule: a
+// polled queue has no subscription to wait for, so the first successful pop is
+// the whole signal — and it must not repeat for every message.
+// TestConsumeReportsReadyOnceAfterFirstPop 固定队列的就绪规则：轮询队列没有订阅可
+// 等，第一次成功弹出本身就是全部信号，而且不能每处理一条消息就重复一次。
+func TestConsumeReportsReadyOnceAfterFirstPop(t *testing.T) {
+	q, _ := newQueue(t, queues.Config{Key: "ready"})
+	ready := make(chan struct{}, 4)
+	handled := make(chan struct{}, 1)
+	startConsume(t, q, func(context.Context, *queues.Message) error {
+		handled <- struct{}{}
+		return nil
+	}, queues.ConsumeOptions{OnReady: func() { ready <- struct{}{} }})
+
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnReady did not fire after the first pop")
+	}
+	if _, err := q.Push(context.Background(), map[string]string{"id": "a"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("message was not handled")
+	}
+	select {
+	case <-ready:
+		t.Fatal("OnReady fired again after a message; it must run once per Consume")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

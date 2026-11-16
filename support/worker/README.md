@@ -189,16 +189,25 @@ worker --group=order
 
 ### 就绪上报
 
-`Run` 被启动不等于实例能接活：四个消息消费者在 `Run` 内部才建连、声明队列、加入消费组。
-这类 worker 实现 `worker.ReadyReporter`，并在连接与订阅就绪后调用 `worker.Ready(ctx)`；
+`Run` 被启动不等于实例能接活：消息消费者在 `Run` 内部才建连、声明队列、加入消费组。
+这类 worker 实现 `worker.ReadyReporter`，并在**订阅真正建立之后**调用 `worker.Ready(ctx)`；
 `Runner.Ready()` 在**每个分组、每个实例**都上报后才关闭，宿主据此才把 `/healthz` 置为 200。
+闸门按实例身份记账，同一实例重复上报（重连或重启）不会替其他实例扣数。
 
 - 轮询任务（`Func`、`Ticker`）没有可等的东西，不实现该接口，`Run` 开始即就绪；
 - 启动失败的分组永不关闭 `Runner.Ready()`，等待它的调用方不会把"启动失败"当成"已就绪"；
 - 停机（含致命错误）一开始 `/healthz` 立即回到 503，而不是等 drain 结束。
 
-消费者侧的调用位置：Kafka 在 `Ping` 通过后上报（kgo 客户端是惰性的，不 Ping 就不知道
-broker 是否可达），AMQP / RocketMQ / Redis Queue 在建连与声明队列之后、进入消费循环之前上报。
+消费者侧的上报时点由各传输层的 `ConsumeOptions.OnReady` 决定，都是"订阅可用"的那一刻：
+
+| 传输 | 上报时点 |
+| --- | --- |
+| Kafka | 第一次无致命错误的 `PollRecords` 之后：此时消费组已加入、分区已分配 |
+| AMQP（含延迟） | channel 打开、拓扑声明完成、`ConsumeWithContext` 返回投递流之后 |
+| RocketMQ（含延迟） | SDK `Start` 成功之后：路由已解析、订阅已注册 |
+| Redis 队列 / 延迟队列 | 第一次成功 `Pop` / `Pop` 到期集合之后（空结果也算） |
+
+Kafka 仍会在进入消费循环前 `Ping` 一次 broker，但那只是让不可达快速失败，不是就绪声明。
 
 ### 失败与重启
 

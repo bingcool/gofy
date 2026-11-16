@@ -239,6 +239,14 @@ type ConsumeOptions struct {
 	// OnError 接收 handler 失败、ack/nack 失败与重连错误。回调在消费者
 	// goroutine 中执行，不应阻塞。
 	OnError func(error)
+	// OnReady runs once, after the channel is open, the topology is declared and
+	// ConsumeWithContext returned a delivery stream. Before that the broker has
+	// not registered this consumer, and a declare failure would never reach the
+	// probe. It runs on the consumer goroutine and must not block.
+	// OnReady 在 channel 打开、拓扑声明完成、ConsumeWithContext 返回投递流之后执行一次。
+	// 在此之前 broker 还没有登记这个消费者，声明失败也不会反映到探针上。回调在消费者
+	// goroutine 中执行，不得阻塞。
+	OnReady func()
 }
 
 // Consume declares the topology and processes deliveries until ctx is
@@ -264,6 +272,15 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 		ctx = context.Background()
 	}
 	opts = opts.withDefaults()
+	// Ready belongs to the first successful subscription, not to every
+	// reconnect: the gate is keyed per instance, so a second signal would be
+	// ignored anyway, but wrapping here keeps the contract obvious.
+	// 就绪属于第一次订阅成功，而不是每次重连：闸门按实例记账，第二个信号本来就会被忽略，
+	// 但在这里包一层能让契约更直观。
+	if onReady := opts.OnReady; onReady != nil {
+		var once sync.Once
+		opts.OnReady = func() { once.Do(onReady) }
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -327,6 +344,13 @@ func (q *Queue) consumeOnce(ctx context.Context, handler HandlerFunc, opts Consu
 	deliveries, err := ch.ConsumeWithContext(ctx, queueName, opts.ConsumerTag, opts.AutoAck, opts.Exclusive, opts.NoLocal, opts.NoWait, opts.Arguments)
 	if err != nil {
 		return fmt.Errorf("amqp: consume %q: %w", queueName, err)
+	}
+	// The broker has accepted the consumer and will deliver to it: from here on
+	// a message can arrive, which is exactly what "ready" must mean.
+	// broker 已接受这个消费者并会向它投递：从这里开始消息可能到达，这正是"就绪"该有的
+	// 含义。
+	if opts.OnReady != nil {
+		opts.OnReady()
 	}
 
 	for {

@@ -216,6 +216,17 @@ type ConsumeOptions struct {
 	// OnError 接收 handler、panic、拉取与 ack 错误，回调在拉取 worker 的
 	// goroutine 中执行，不应阻塞。
 	OnError func(error)
+	// OnReady runs once, after the SDK consumer started: the client is up, the
+	// topic route resolved and the subscription registered with the broker.
+	// Constructing the consumer only validates configuration, so this is the
+	// first point at which the process can actually receive messages.
+	//
+	// It runs on the Consume goroutine, before the pull workers start.
+	// OnReady 在 SDK 消费者启动成功后执行一次：客户端已启动、topic 路由已解析、订阅已
+	// 注册到 broker。构造消费者只校验配置，因此这一刻才是进程真正能收消息的起点。
+	//
+	// 回调在 Consume 的 goroutine 中执行，早于拉取 worker 启动。
+	OnReady func()
 }
 
 // Consumer reads one topic as part of a consumer group. RocketMQ consumers
@@ -361,6 +372,14 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 
 	if err := c.start(); err != nil {
 		return fmt.Errorf("rocketmq: start consumer %q: %w", c.cfg.Group, err)
+	}
+	// Start is the subscription: the SDK resolved the topic route and registered
+	// the consumer group. Reporting readiness here — instead of before Consume —
+	// is what keeps a broker that rejects the subscription from looking healthy.
+	// Start 就是订阅本身：SDK 解析了 topic 路由并注册了消费组。就绪在这里上报，而不是在
+	// Consume 之前，订阅被 broker 拒绝时才不会看起来健康。
+	if opts.OnReady != nil {
+		opts.OnReady()
 	}
 
 	consumeCtx, cancel := context.WithCancel(ctx)

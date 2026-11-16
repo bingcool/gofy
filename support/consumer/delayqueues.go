@@ -11,6 +11,7 @@ import (
 
 	"github.com/bingcool/gofy/support/queues"
 	gofyredis "github.com/bingcool/gofy/support/redis"
+	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/queuesconsumer"
 )
 
@@ -112,6 +113,12 @@ func (c *DelayQueuesConsumer) Name() string { return c.cfg.Name }
 
 func (c *DelayQueuesConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurrency) }
 
+// ReportsReady tells the runner that Run reports readiness itself: the queue is
+// polled inside Run, so "Run was entered" is not "the delayed queue is usable".
+// ReportsReady 告诉 runner：Run 自行上报就绪。队列在 Run 内轮询，因此"Run 已进入"
+// 不等于"延迟队列可用"。
+func (c DelayQueuesConsumer) ReportsReady() {}
+
 // Run owns the subscription: it connects, polls the delayed ZSET until ctx is
 // cancelled and releases the client on the way out.
 // Run 拥有订阅：建连、轮询延迟 ZSET 到 ctx 取消，并在退出时释放客户端。
@@ -152,6 +159,7 @@ func (c *DelayQueuesConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("delay queues consume error", zap.Error(err))
 			},
+			OnReady: func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {

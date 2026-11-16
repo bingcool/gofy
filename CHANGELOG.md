@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/kafka`, `support/amqp`, `support/rocketmq`, `support/queues`: each
+  `ConsumeOptions` gains `OnReady`, fired once when the subscription is really
+  usable — the first clean poll (Kafka), after the topology is declared and the
+  delivery stream exists (AMQP), after the SDK consumer started (RocketMQ), and
+  after the first successful pop (Redis queues). `support/consumer` reports
+  worker readiness from there instead of before it starts the consume loop, so
+  a queue that cannot be declared, a topic the group may not read, or a broker
+  that refuses the subscription leaves `/healthz` at 503 instead of green.
+  Delayed consumers now implement `worker.ReadyReporter` too; they had been
+  reporting ready merely by entering `Run`.
 - `support/worker`: readiness is counted per instance, not per signal. The gate
   kept a single counter, so an instance that reported twice — an adapter
   reconnecting inside one Run, or the runner restarting it after an error —

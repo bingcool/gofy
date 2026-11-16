@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
+	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/bingcool/gofy/support/worker/consumer/amqpconsumer"
 )
 
@@ -180,6 +181,13 @@ func (c *DelayAMQPConsumer) Name() string { return c.cfg.Name }
 
 func (c *DelayAMQPConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurrency) }
 
+// ReportsReady tells the runner that Run reports readiness itself: both halves
+// of the delayed topology are declared inside Run, so entering Run proves
+// nothing about whether the subscription exists.
+// ReportsReady 告诉 runner：Run 自行上报就绪。延迟拓扑的两半都在 Run 内声明，进入 Run
+// 并不能证明订阅已经存在。
+func (c DelayAMQPConsumer) ReportsReady() {}
+
 // QueueConfig builds the transport-level configuration for this subscription.
 // A producer should publish through it, so the staging and target topologies
 // cannot drift apart between the two sides of the loop. Passive is part of that
@@ -252,6 +260,11 @@ func (c *DelayAMQPConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("delay amqp consume error", zap.Error(err))
 			},
+			// Both halves of the delayed topology must exist and the target
+			// consumer must be registered before this subscription can accept
+			// work.
+			// 延迟拓扑的两半都必须已声明、目标队列的消费者已注册，这个订阅才能接活。
+			OnReady: func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {

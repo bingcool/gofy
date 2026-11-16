@@ -327,7 +327,8 @@ spec:
 ```
 
 - 就绪探针只在配了 `WithWorkerHealth` 时可用；启动中 503、全部实例上报就绪后 200、drain
-  一开始立刻 503。消费者的就绪是"建连 + 订阅完成"，不是"goroutine 已启动"（见
+  一开始立刻 503。消费者的就绪是"订阅已建立"（Kafka 首次 poll、AMQP 投递流建立、
+  RocketMQ Start 成功、Redis 队列首次 pop），不是"goroutine 已启动"（见
   `worker.ReadyReporter`）。
 - `maxUnavailable: 0` 让滚动更新先起新 Pod 再停旧 Pod，消费组不会出现空窗口。
 - 不要给 worker 配 liveness 探针：进程崩溃由 k8s 重启，业务卡住不该靠重启解决。

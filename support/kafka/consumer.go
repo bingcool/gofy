@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -228,6 +229,19 @@ type ConsumeOptions struct {
 	// OnError 接收拉取、handler、提交与 panic 错误，回调在 Consume 的
 	// goroutine 中执行，不应阻塞。
 	OnError func(error)
+	// OnReady runs once, after the first poll that completed without a fatal
+	// error. That is the first moment the consumer group session is live: the
+	// client has joined, been assigned partitions and taken a fetch response.
+	// Ping and client construction are deliberately not enough — neither proves
+	// the group membership this consumer needs to receive work.
+	//
+	// It runs on the Consume goroutine and must not block.
+	// OnReady 在第一次无致命错误的拉取之后执行一次。那一刻消费组会话才真正成立：客户端
+	// 已入组、分到分区并收到一次拉取响应。Ping 与客户端构造刻意不算数——两者都不能证明
+	// 这个消费者已经具备接收消息所需的组成员身份。
+	//
+	// 回调在 Consume 的 goroutine 中执行，不得阻塞。
+	OnReady func()
 }
 
 func (o ConsumeOptions) withDefaults() ConsumeOptions {
@@ -316,6 +330,14 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 	}
 	opts = opts.withDefaults()
 
+	var ready sync.Once
+	reportReady := func() {
+		if opts.OnReady == nil {
+			return
+		}
+		ready.Do(opts.OnReady)
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -340,6 +362,13 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 			}
 			continue
 		}
+		// A poll that came back without a fatal error means the session exists:
+		// the group was joined and partitions were assigned. Reporting ready
+		// here — not before Consume — is what keeps the probe from going green
+		// for a consumer that has not reached the broker yet.
+		// 一次没有致命错误的拉取说明会话已经成立：已入组并分到分区。就绪在这里上报而不是
+		// 在 Consume 之前，探针才不会为一个还没连上 broker 的消费者变绿。
+		reportReady()
 		// Release the gate after the batch is handled and its offsets are
 		// committed, never before: that ordering is the whole point of
 		// BlockRebalanceOnPoll.

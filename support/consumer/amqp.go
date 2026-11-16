@@ -200,6 +200,10 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("amqp consume error", zap.Error(err))
 			},
+			// Ready comes from the adapter once the channel is open, the
+			// topology is declared and the delivery stream exists.
+			// 就绪由适配器在 channel 打开、拓扑声明完成、投递流建立之后上报。
+			OnReady: func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {
@@ -213,13 +217,6 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 		zap.Bool("idempotency", c.cfg.Idempotency),
 	)
 	defer lg.Info("amqp consumer stopped", zap.String("queue", c.cfg.Queue))
-
-	// Every connection and declaration above succeeded, so this instance can
-	// accept work. Reporting after the log line keeps the ordering in the log
-	// the same as the ordering of events.
-	// 上面所有连接与声明都已成功，本实例可以接活。放在日志之后上报，日志顺序因此与
-	// 事件顺序一致。
-	gofyworker.Ready(ctx)
 
 	return w.Run(ctx)
 }

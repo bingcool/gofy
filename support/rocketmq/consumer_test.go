@@ -589,3 +589,59 @@ func TestConsumerCloseUnblocksConsume(t *testing.T) {
 		t.Fatalf("Consume after Close = %v, want ErrClientClosed", err)
 	}
 }
+
+// TestConsumerReportsReadyAfterStart pins the readiness point: the SDK start
+// step is the subscription, so the signal must come from there — not from
+// building the consumer, which only validates configuration.
+// TestConsumerReportsReadyAfterStart 固定就绪时点：SDK 的 start 就是订阅本身，信号
+// 必须来自那里，而不是来自构造消费者——构造只校验配置。
+func TestConsumerReportsReadyAfterStart(t *testing.T) {
+	fake := &fakeConsumer{}
+	c := newPullConsumer(ConsumerConfig{Topic: "orders", Group: "g"}, fake)
+
+	ready := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Consume(ctx, func(context.Context, *Message) error { return nil },
+			ConsumeOptions{OnReady: func() { ready <- struct{}{} }})
+	}()
+
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("OnReady did not fire after the consumer started")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	select {
+	case <-ready:
+		t.Fatal("OnReady fired twice")
+	default:
+	}
+}
+
+// TestConsumerDoesNotReportReadyWhenStartFails keeps a rejected startup from
+// looking healthy: the probe must stay 503 if the broker refuses the
+// subscription.
+// TestConsumerDoesNotReportReadyWhenStartFails 让启动失败不看起来健康：broker 拒绝
+// 订阅时探针必须保持 503。
+func TestConsumerDoesNotReportReadyWhenStartFails(t *testing.T) {
+	fake := &fakeConsumer{startErr: errors.New("subscription rejected")}
+	c := newPullConsumer(ConsumerConfig{Topic: "orders", Group: "g"}, fake)
+
+	ready := make(chan struct{}, 1)
+	err := c.Consume(context.Background(), func(context.Context, *Message) error { return nil },
+		ConsumeOptions{OnReady: func() { ready <- struct{}{} }})
+	if err == nil {
+		t.Fatal("Consume succeeded although Start failed")
+	}
+	select {
+	case <-ready:
+		t.Fatal("OnReady fired although the consumer failed to start")
+	default:
+	}
+}

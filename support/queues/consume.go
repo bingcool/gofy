@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -66,6 +67,12 @@ type ConsumeOptions struct {
 	// OnError 接收 handler 失败、重试安排失败与被丢弃的消息，在 Consume 的
 	// goroutine 中调用，不得阻塞。
 	OnError func(error)
+	// OnReady runs once, after the first successful pop. An empty result counts:
+	// it proves the connection and the command path work, which is all this
+	// queue can promise — there is no subscription to wait for.
+	// OnReady 在第一次成功弹出之后执行一次。空结果也算：它证明连接与命令通道可用，而
+	// 这已经是这个队列能承诺的全部——没有订阅可等。
+	OnReady func()
 }
 
 func (o ConsumeOptions) withDefaults() ConsumeOptions {
@@ -99,6 +106,14 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 	ctx = contextOrBackground(ctx)
 	opts = opts.withDefaults()
 
+	var ready sync.Once
+	reportReady := func() {
+		if opts.OnReady == nil {
+			return
+		}
+		ready.Do(opts.OnReady)
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -117,6 +132,10 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 			}
 			continue
 		}
+		// One successful pop — even of nothing — proves the connection and the
+		// command path; there is no subscription to wait for beyond this.
+		// 一次成功的弹出——即使是空的——就证明了连接与命令通道；除此之外没有订阅可等。
+		reportReady()
 		if !ok {
 			if !wait(ctx, opts.IdleDelay) {
 				return nil

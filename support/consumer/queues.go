@@ -167,6 +167,10 @@ func (c *QueuesConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("queues consume error", zap.Error(err))
 			},
+			// Ready comes from the first successful pop: a lazy Redis client
+			// proves nothing until a command round-trips.
+			// 就绪来自第一次成功弹出：惰性 Redis 客户端在一条命令往返之前什么都证明不了。
+			OnReady: func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {
@@ -179,13 +183,6 @@ func (c *QueuesConsumer) Run(ctx context.Context) error {
 		zap.Bool("idempotency", c.cfg.Idempotency),
 	)
 	defer lg.Info("queues consumer stopped", zap.String("queue", c.cfg.Key))
-
-	// Every connection and declaration above succeeded, so this instance can
-	// accept work. Reporting after the log line keeps the ordering in the log
-	// the same as the ordering of events.
-	// 上面所有连接与声明都已成功，本实例可以接活。放在日志之后上报，日志顺序因此与
-	// 事件顺序一致。
-	gofyworker.Ready(ctx)
 
 	return w.Run(ctx)
 }
