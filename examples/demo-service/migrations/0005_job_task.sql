@@ -5,8 +5,11 @@
 -- idx_claim 不能省：认领语句是 FOR UPDATE SKIP LOCKED + ORDER BY next_run_at, id，
 -- 没有这个索引会退化成全表扫描并持有大量行锁。
 -- 时间列用普通 DATETIME（秒精度）：短于一秒的租约或退避会被取整，claim 的 NOW(3)
--- 与两种精度都能正确比较。created_by / deleted_at 由应用维护，claim 从不读写它们，
--- deleted_at 非空也不会让行从 Claim 里消失。fail_resion 由 Fail 写入、Succeed 清空，
+-- 与两种精度都能正确比较。start_handle_time / finish_handle_time 分别记录行最近一次进入
+-- status 1/2 的墙钟时间（Claim、Succeed 写）；fail_handle_time 记录最近一次失败时间，每次
+-- Fail 都写（含退避重试回 pending），Reap 判定 dead 也写。created_by / deleted_at 由应用维护，
+-- claim 从不读写它们，
+-- deleted_at 非空也不会让行从 Claim 里消失。fail_reason 由 Fail 写入、Succeed 清空，
 -- 因此 dead 行本身就带着失败原因。
 CREATE TABLE IF NOT EXISTS job_task (
     id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -17,7 +20,10 @@ CREATE TABLE IF NOT EXISTS job_task (
     attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
     next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
     payload     JSON         NULL COMMENT '任务载荷',
-    fail_resion TEXT         NULL DEFAULT NULL COMMENT '失败原因',
+    fail_reason TEXT         NULL DEFAULT NULL COMMENT '失败原因',
+    start_handle_time  DATETIME NULL DEFAULT NULL COMMENT '状态改为1(已认领进行中)的时间',
+    finish_handle_time DATETIME NULL DEFAULT NULL COMMENT '状态改为2(已完成)的时间',
+    fail_handle_time   DATETIME NULL DEFAULT NULL COMMENT '最近一次失败时间',
     created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人',
     created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',

@@ -276,6 +276,7 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
 	// 也同样适用。
 	q.updateSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = ?, attempts = attempts + 1,
+       start_handle_time = CURRENT_TIMESTAMP,
        lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
  WHERE id IN (?)`, table, StatusClaimed)
 	// Every completion statement is fenced by owner, status and attempts.
@@ -307,21 +308,24 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
 	// Succeed 会清掉上一次的失败原因：否则已完成的行还带着旧的失败原因，后来查表的人会
 	// 以为它失败了。
 	q.succeedSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL, fail_resion = NULL
+   SET status = %d, owner = '', lease_until = NULL, fail_reason = NULL,
+       finish_handle_time = CURRENT_TIMESTAMP
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDone, StatusClaimed)
 	q.failSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL, fail_resion = ?,
+   SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
+       fail_handle_time = CURRENT_TIMESTAMP,
        next_run_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusPending, StatusClaimed)
 	q.deadSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL, fail_resion = ?
+   SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
+       fail_handle_time = CURRENT_TIMESTAMP
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDead, StatusClaimed)
 	q.reapSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
  WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
    AND attempts < ?`, table, StatusPending, StatusClaimed)
 	q.reapDeadSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL
+   SET status = %d, owner = '', lease_until = NULL, fail_handle_time = CURRENT_TIMESTAMP
  WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
    AND attempts >= ?`, table, StatusDead, StatusClaimed)
 	return q, nil
@@ -544,15 +548,21 @@ func (q *Queue) leaseLostHook() {
 // which compares correctly against both precisions. created_by and deleted_at
 // are application columns: claim never reads or writes them, so a table without
 // them still works. A non-NULL deleted_at does not hide a row from Claim.
-// fail_resion is different: Fail writes the bounded cause there and Succeed
-// clears it, so a dead row carries its own explanation.
+// fail_reason is different: Fail writes the bounded cause there and Succeed
+// clears it, so a dead row carries its own explanation. start_handle_time and
+// finish_handle_time stamp the transition into status 1 and 2. fail_handle_time
+// stamps every failure, including a retryable one that returns the row to
+// pending (status 0) — it is the last time the row failed, not a status marker.
 // DDL 返回查询所依赖的表结构，包含防止 SKIP LOCKED 退化为全表扫描的索引。表名与
 // New 走同一套标识符校验。
 //
 // 时间列用普通 DATETIME，因此短于一秒的租约或退避会被 MySQL 取整到秒。claim 的 SQL 仍用
-// NOW(3)，它与两种精度都能正确比较。created_by 与 deleted_at 是应用侧字段：claim 从不读写，
-// 没有这两列的表照样能用；deleted_at 非空也不会让 Claim 跳过该行。fail_resion 不同：Fail
-// 会写入有界的错误原因，Succeed 会清空，因此 dead 行本身就带着失败原因。
+// NOW(3)，它与两种精度都能正确比较。start_handle_time / finish_handle_time 记录行最近一次
+// 进入 status 1 / 2 的墙钟时间；fail_handle_time 记录最近一次失败时间，包括退避重试回到
+// pending（status 0）的情况——它是"上一次失败"的时刻，不是状态标记。created_by 与
+// deleted_at 是应用侧字段：claim 从不读写，没有这两列的表照样能用；deleted_at 非空也不会让
+// Claim 跳过该行。fail_reason 不同：Fail 会写入有界的错误原因，Succeed 会清空，因此 dead 行
+// 本身就带着失败原因。
 func DDL(table string) (string, error) {
 	quoted, err := quoteTable(strings.TrimSpace(table))
 	if err != nil {
@@ -567,7 +577,10 @@ func DDL(table string) (string, error) {
   attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
   next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
   payload     JSON         NULL COMMENT '任务载荷',
-  fail_resion TEXT         NULL DEFAULT NULL COMMENT '失败原因',
+  fail_reason TEXT         NULL DEFAULT NULL COMMENT '失败原因',
+  start_handle_time  DATETIME NULL DEFAULT NULL COMMENT '状态改为1(已认领进行中)的时间',
+  finish_handle_time DATETIME NULL DEFAULT NULL COMMENT '状态改为2(已完成)的时间',
+  fail_handle_time   DATETIME NULL DEFAULT NULL COMMENT '最近一次失败时间',
   created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人',
   created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '创建时间',
   updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',

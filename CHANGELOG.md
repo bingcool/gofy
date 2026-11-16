@@ -140,12 +140,26 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - `support/claim`: the task column `job` is now `job_type` (the Go option stays
-  `Job`, so callers are unaffected), and a `fail_resion` TEXT column records the
+  `Job`, so callers are unaffected), and a `fail_reason` TEXT column records the
   bounded cause on `Fail` and is cleared on `Succeed` — a dead row now explains
-  itself. Lease and retry deadlines are rounded up to whole seconds in Go before
-  reaching the plain DATETIME columns; without that, MySQL could round a
-  sub-second backoff down to zero and retry immediately. Both the DDL string and
-  the demo migration carry the same shape.
+  itself. Three `DATETIME` columns now record the last relevant event:
+  `start_handle_time` on Claim (status 1), `finish_handle_time` on Succeed (2),
+  and `fail_handle_time` on every failure — a retryable Fail returning the row
+  to pending (0), Fail at the attempt cap, and Reap on an expired lease all stamp
+  it. Lease and retry deadlines
+  are rounded up to whole seconds in Go before reaching the plain DATETIME
+  columns; without that, MySQL could round a sub-second backoff down to zero and
+  retry immediately. Both the DDL string and the demo migration carry the same
+  shape.
+- `support/claim`: new `Runner` layer wraps the whole poll round (Reap → Claim →
+  Handler → Succeed/Fail → hooks) so a worker supplies only a `RunnerConfig`, one
+  `Handler func(ctx, data []byte) (taskID uint64, err error)` and optional
+  `OnSuccess`/`OnFailure` hooks carrying the full `Result` (task/row id, attempts,
+  elapsed, err, dead, leaseLost). `err == nil` closes the row via Succeed;
+  `err != nil` records the reason and schedules a retry or parks as dead. An idle
+  round calls the Handler once with `data == nil` (return values ignored). Two
+  nil hooks are normalized to no-ops. `claim.sql` is a copy-paste migration for
+  `claim_job_task`, kept byte-identical to `DDL` by a guard test.
 - `support/claim` DDL and the demo's `job_task` migration: every column now has
   a COMMENT, `created_by` and `deleted_at` were added as application-owned
   columns, and the time columns are plain `DATETIME` rather than `DATETIME(3)`.

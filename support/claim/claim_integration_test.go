@@ -2,6 +2,7 @@ package claim
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -161,6 +162,15 @@ func TestIntegrationSucceedCAS(t *testing.T) {
 	if got := q.statusOf(t, task.ID); got != StatusDone {
 		t.Fatalf("status = %d, want %d", got, StatusDone)
 	}
+	if !q.timeOf(t, task.ID, "start_handle_time").Valid {
+		t.Fatal("start_handle_time not stamped on Claim")
+	}
+	if !q.timeOf(t, task.ID, "finish_handle_time").Valid {
+		t.Fatal("finish_handle_time not stamped on Succeed")
+	}
+	if q.timeOf(t, task.ID, "fail_handle_time").Valid {
+		t.Fatal("fail_handle_time must stay NULL for a done row")
+	}
 }
 
 func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
@@ -180,7 +190,10 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 		t.Fatalf("Fail: %v", err)
 	}
 	if got := q.reasonOf(t, tasks[0].ID); got != "boom" {
-		t.Fatalf("fail_resion after retry = %q, want %q", got, "boom")
+		t.Fatalf("fail_reason after retry = %q, want %q", got, "boom")
+	}
+	if !q.timeOf(t, tasks[0].ID, "fail_handle_time").Valid {
+		t.Fatal("fail_handle_time not stamped on a retryable failure")
 	}
 
 	// The retry delay has not elapsed, so the row must stay invisible.
@@ -209,7 +222,10 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 		t.Fatalf("status = %d, want %d (dead)", got, StatusDead)
 	}
 	if got := q.reasonOf(t, tasks[0].ID); got != "boom again" {
-		t.Fatalf("fail_resion after dead = %q, want %q", got, "boom again")
+		t.Fatalf("fail_reason after dead = %q, want %q", got, "boom again")
+	}
+	if !q.timeOf(t, tasks[0].ID, "fail_handle_time").Valid {
+		t.Fatal("fail_handle_time not stamped when Fail moves the row to dead")
 	}
 
 	reaped, dead, err := q.Reap(context.Background())
@@ -238,7 +254,7 @@ func TestIntegrationSucceedClearsFailureReason(t *testing.T) {
 		t.Fatalf("Fail: %v", err)
 	}
 	if got := q.reasonOf(t, tasks[0].ID); got != "transient" {
-		t.Fatalf("fail_resion after Fail = %q, want transient", got)
+		t.Fatalf("fail_reason after Fail = %q, want transient", got)
 	}
 
 	// A sub-second backoff is rounded up to one whole second by ceilSeconds,
@@ -254,7 +270,7 @@ func TestIntegrationSucceedClearsFailureReason(t *testing.T) {
 		t.Fatalf("Succeed: %v", err)
 	}
 	if got := q.reasonOf(t, tasks[0].ID); got != "" {
-		t.Fatalf("fail_resion after Succeed = %q, want empty", got)
+		t.Fatalf("fail_reason after Succeed = %q, want empty", got)
 	}
 }
 
@@ -289,6 +305,42 @@ func TestIntegrationReapReturnsExpiredLease(t *testing.T) {
 	}
 	if again[0].Attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", again[0].Attempts)
+	}
+}
+
+func TestIntegrationReapDeadStampsFailTime(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:         "orders",
+		Lease:       time.Minute,
+		MaxAttempts: 1,
+	})
+	seed(t, db, q.tableName(), "orders", 1)
+
+	tasks, err := q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("Claim = %v, %v", tasks, err)
+	}
+	if !q.timeOf(t, tasks[0].ID, "start_handle_time").Valid {
+		t.Fatal("start_handle_time not stamped on Claim")
+	}
+	// Expire the lease: with attempts already at the cap, Reap decides dead.
+	// 让租约过期：attempts 已到上限，Reap 会判定 dead。
+	if err := db.Exec("UPDATE `"+q.tableName()+
+		"` SET lease_until = DATE_SUB(NOW(3), INTERVAL 1 SECOND) WHERE id = ?", tasks[0].ID).Error; err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	reaped, dead, err := q.Reap(context.Background())
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if reaped != 0 || dead != 1 {
+		t.Fatalf("Reap = %d/%d, want 0/1", reaped, dead)
+	}
+	if got := q.statusOf(t, tasks[0].ID); got != StatusDead {
+		t.Fatalf("status = %d, want %d (dead)", got, StatusDead)
+	}
+	if !q.timeOf(t, tasks[0].ID, "fail_handle_time").Valid {
+		t.Fatal("fail_handle_time not stamped when Reap moves the row to dead")
 	}
 }
 
@@ -386,10 +438,24 @@ func (q *Queue) statusOf(t *testing.T, id uint64) int8 {
 func (q *Queue) reasonOf(t *testing.T, id uint64) string {
 	t.Helper()
 	var reason string
-	if err := q.db.Raw("SELECT COALESCE(fail_resion, '') FROM "+q.table+" WHERE id = ?", id).Scan(&reason).Error; err != nil {
-		t.Fatalf("fail_resion query: %v", err)
+	if err := q.db.Raw("SELECT COALESCE(fail_reason, '') FROM "+q.table+" WHERE id = ?", id).Scan(&reason).Error; err != nil {
+		t.Fatalf("fail_reason query: %v", err)
 	}
 	return reason
+}
+
+// timeOf reads one of the three handle-time columns. NULL (no such event yet)
+// comes back as invalid — e.g. a row that succeeded without ever failing has no
+// fail_handle_time, while every failure, retryable or dead, stamps it.
+// timeOf 读取三个处理时间列之一。还没发生过对应事件时是 NULL（sql.NullTime.Valid=false）——
+// 例如从未失败就成功的行没有 fail_handle_time；而每次失败，无论重试还是死亡，都会写它。
+func (q *Queue) timeOf(t *testing.T, id uint64, column string) sql.NullTime {
+	t.Helper()
+	var got sql.NullTime
+	if err := q.db.Raw("SELECT "+column+" FROM "+q.table+" WHERE id = ?", id).Scan(&got).Error; err != nil {
+		t.Fatalf("%s query: %v", column, err)
+	}
+	return got
 }
 
 func trimQuotes(quoted string) string {

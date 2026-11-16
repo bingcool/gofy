@@ -3,6 +3,7 @@ package claim
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -83,7 +84,10 @@ func TestDDLQuotesTableAndAddsClaimIndex(t *testing.T) {
 		"idx_claim (job_type, status, next_run_at, id)",
 		"ENGINE=InnoDB",
 		"job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型'",
-		"fail_resion TEXT         NULL DEFAULT NULL COMMENT '失败原因'",
+		"fail_reason TEXT         NULL DEFAULT NULL COMMENT '失败原因'",
+		"start_handle_time  DATETIME NULL DEFAULT NULL COMMENT '状态改为1(已认领进行中)的时间'",
+		"finish_handle_time DATETIME NULL DEFAULT NULL COMMENT '状态改为2(已完成)的时间'",
+		"fail_handle_time   DATETIME NULL DEFAULT NULL COMMENT '最近一次失败时间'",
 		"created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人'",
 		"deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间'",
 		"updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'",
@@ -106,6 +110,40 @@ func TestDDLQuotesTableAndAddsClaimIndex(t *testing.T) {
 
 	if _, err := DDL("drop table x"); !errors.Is(err, ErrInvalidTable) {
 		t.Fatalf("DDL error = %v, want ErrInvalidTable", err)
+	}
+}
+
+// TestClaimSQLMatchesDDL keeps the copy-paste migration in sync with the DDL the
+// package actually expects. Without this guard a column added to DDL (or to the
+// SQL) silently leaves the other behind, and a business that copies claim.sql
+// builds a table the queries cannot use.
+// TestClaimSQLMatchesDDL 让可直接复制的建表 SQL 与包实际依赖的 DDL 保持一致。没有这道守卫，
+// 任何一边加列都会悄悄让另一边落后，业务复制 claim.sql 建出的表就跑不通查询。
+func TestClaimSQLMatchesDDL(t *testing.T) {
+	raw, err := os.ReadFile("claim.sql")
+	if err != nil {
+		t.Fatalf("read claim.sql: %v", err)
+	}
+	// Keep only the CREATE statement: drop comment lines and the trailing semicolon.
+	var body strings.Builder
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	got := strings.TrimSpace(body.String())
+	got = strings.TrimSuffix(got, ";")
+	got = strings.TrimSpace(got)
+
+	want, err := DDL("claim_job_task")
+	if err != nil {
+		t.Fatalf("DDL: %v", err)
+	}
+	if got != want {
+		t.Fatalf("claim.sql drifted from DDL(\"claim_job_task\"):\n--- claim.sql ---\n%s\n--- DDL ---\n%s", got, want)
 	}
 }
 
@@ -153,6 +191,25 @@ func TestSQLUsesSkipLockedAndGuards(t *testing.T) {
 	}
 	if !strings.Contains(q.reapSQL, "lease_until < NOW(3)") || !strings.Contains(q.reapSQL, "attempts < ?") {
 		t.Fatalf("reapSQL lacks the expiry or attempt guard: %s", q.reapSQL)
+	}
+	// Time columns: claim -> start, succeed -> finish, and every failure stamps
+	// fail_handle_time — both a retryable Fail (back to pending) and the two dead
+	// paths. Reap on an expired lease is not a handler failure and stamps none.
+	// 时间列：认领写 start、完成写 finish，每次失败都写 fail_handle_time——包括可重试的 Fail
+	// （回到 pending）和两条 dead 路径。Reap 回收过期租约不是 handler 失败，不打时间列。
+	for name, tc := range map[string]struct{ sql, stamp string }{
+		"claim":     {q.updateSQL, "start_handle_time = CURRENT_TIMESTAMP"},
+		"succeed":   {q.succeedSQL, "finish_handle_time = CURRENT_TIMESTAMP"},
+		"fail":      {q.failSQL, "fail_handle_time = CURRENT_TIMESTAMP"},
+		"dead":      {q.deadSQL, "fail_handle_time = CURRENT_TIMESTAMP"},
+		"reap dead": {q.reapDeadSQL, "fail_handle_time = CURRENT_TIMESTAMP"},
+	} {
+		if !strings.Contains(tc.sql, tc.stamp) {
+			t.Fatalf("%sSQL does not stamp %q: %s", name, tc.stamp, tc.sql)
+		}
+	}
+	if strings.Contains(q.reapSQL, "_handle_time") {
+		t.Fatalf("reapSQL must not stamp a handle-time column: %s", q.reapSQL)
 	}
 }
 

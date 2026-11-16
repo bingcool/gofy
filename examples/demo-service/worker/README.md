@@ -329,8 +329,11 @@ mysql -h <host> -u <user> -p <database> < migrations/0005_job_task.sql
 
 列的含义：`job_type` 标记任务类型（Go 侧选项仍叫 `Job`）；`status` 0/1/2/3 是
 pending/claimed/done/dead；`owner` 与 `attempts` 是收尾时的围栏；`lease_until` 是租约；
-`next_run_at` 是到期时间（NULL 表示立刻可认领）；`fail_resion` 由 `Fail` 写入有界的错误原因、
-`Succeed` 清空，所以 dead 行自己就说明失败原因。`idx_claim` 不能省——认领语句按
+`next_run_at` 是到期时间（NULL 表示立刻可认领）；`fail_reason` 由 `Fail` 写入有界的错误原因、
+`Succeed` 清空，所以 dead 行自己就说明失败原因。三个处理时间列：`start_handle_time` 由 `Claim`
+写（进入 status 1）、`finish_handle_time` 由 `Succeed` 写（进入 status 2）、`fail_handle_time`
+在**每次失败**时写——包括退避重试回到 pending（status 0），以及 `Fail` 走到 dead 或 `Reap`
+判定 dead；它是"最近一次失败时间"而非状态标记，下次失败会覆盖。`idx_claim` 不能省——认领语句按
 `(job_type, status, next_run_at, id)` 排队，没有它会退化成全表扫描并持有大量行锁。每个字段
 都有 `COMMENT`，`SHOW FULL COLUMNS FROM job_task` 可以直接看。
 
@@ -338,6 +341,34 @@ pending/claimed/done/dead；`owner` 与 `attempts` 是收尾时的围栏；`leas
 一秒的配置不会在 MySQL 写入舍入后变成立刻到期；过期比较仍用数据库时钟。`created_by` 与
 `deleted_at` 是应用侧字段，`claim` 从不读写：`deleted_at` 非空也不会让行从 `Claim` 里消失，
 要软删除语义得自己给所有查询加 `deleted_at IS NULL`。
+
+业务接入用 `claim.Runner`（见 `support/claim/runner.go`），worker 侧只需注入参数、一个回调和
+可选钩子。整轮循环都由 Runner 完成，每 tick 调一次 `Run` 即可：
+
+```go
+runner, _ := claim.NewRunner(db, claim.RunnerConfig{
+    Config:         claim.Config{Table: "job_task", Job: "order.settle", /* batch / lease / backoff ... */},
+    HandlerTimeout: 5 * time.Second,
+    // 唯一的业务回调：data 是一行的 payload，nil 表示本轮没有到期任务。
+    // 返回业务 taskID 和 err；err=nil 由 Runner 调 Succeed（写成功时间），
+    // err!=nil 调 Fail（写失败原因与时间，或置 dead）。
+    Handler: func(ctx context.Context, data []byte) (uint64, error) {
+        if data == nil { return 0, nil } // 空闲轮
+        return doWork(ctx, data)
+    },
+    // 可选的结果钩子，拿到完整上下文（taskID / rowID / attempts / elapsed / err / dead / leaseLost）。
+    OnSuccess: func(r claim.Result) { /* 记日志或指标 */ },
+    OnFailure: func(r claim.Result) { /* r.Dead、r.LeaseLost 区分终态与接管 */ },
+})
+// 在 worker 的 ticker 里：
+return runner.Run(worker.DrainContext(ctx), id.Owner())
+```
+
+`Run` 内部依次做 `Reap` → `Claim` → 逐行调 `Handler` → 按 `err` 调 `Succeed`/`Fail` → 触发
+钩子。空闲轮会用 `data=nil` 调一次 `Handler`（返回值被忽略，不写库），方便在同一个回调里打
+心跳。收尾写失败只影响该行、不拖累同批其余任务；租约丢失不上抛（副作用可能已发生），而是通过
+`Result.LeaseLost` 通知 `OnFailure`。`Runner` 持有本代连接池，要在 worker 的 `Run` 内构建，
+热更新后用新一代重建。也可直接复制 `support/claim/claim.sql` 建表（表名 `claim_job_task`）。
 
 `enqueue` 是普通 `INSERT`，没有队列 API：一行 `status=0` 且 `next_run_at` 到期的记录就是
 全部入队动作。真实服务里这条 INSERT 属于创建工作的那个业务事务（建订单与建任务同一个提交），
@@ -348,8 +379,9 @@ $ go run . worker --group=group1 --name=order-settle-producer --name=order-settl
 {"msg":"claim jobs enqueued","count":6}
 {"msg":"claim batch","worker":"group1/order-settle-consumer#0","claimed":3,"batch":3}
 {"msg":"claim batch","worker":"group1/order-settle-consumer#1","claimed":2,"batch":3}
-{"msg":"claim job settled","task_id":1,"attempt":1,"orders":1,"amount":100}
-{"msg":"claim job failed; retry scheduled","task_id":10,"attempt":1}
+{"msg":"order settlement computed","user_id":1,"orders":1,"amount":100}
+{"msg":"claim job settled","task_id":1,"row_id":8,"attempt":1}
+{"msg":"claim job failed; retry scheduled","task_id":10,"row_id":15,"attempt":1}
 {"msg":"claim job failed; retry scheduled","task_id":10,"attempt":2}
 {"msg":"claim job exhausted its attempts; parked as dead","task_id":10,"attempts":3}
 ```

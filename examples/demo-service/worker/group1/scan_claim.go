@@ -307,25 +307,87 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 			return fmt.Errorf("order-settle-consumer: %w", err)
 		}
 
-		// The queue is built inside Run, not in NewGroup: it holds this
-		// generation's pool, and the runner restarts Run with a fresh one after
-		// a reload.
-		// 队列在 Run 内构建，而不是在 NewGroup：它持有这一代的连接池，热更新后 runner 会用
-		// 新一代重新进入 Run。
-		queue, err := gofyclaim.New(rt.DB, gofyclaim.Config{
-			Table:       cfg.Table,
-			Job:         cfg.Job,
-			Batch:       cfg.Batch,
-			Lease:       cfg.Lease,
-			MaxAttempts: cfg.MaxAttempts,
-			Backoff:     cfg.Backoff,
-			// Hooks run on the goroutine that lost the lease, which is where the
-			// log line belongs.
-			// Hooks 在丢失租约的那个 goroutine 上执行，日志正好该写在那里。
-			Hooks: gofyclaim.Hooks{
-				OnLeaseLost: func(job string) {
-					lg.Warn("claim lease lost", zap.String("job", job))
+		// The Runner is built inside Run, not in NewGroup: it holds this
+		// generation's pool, and the runner restarts Run with a fresh one after a
+		// reload. Everything between "a row was claimed" and "its outcome is
+		// durable" now lives in claim.Runner — this worker only supplies its
+		// knobs, one Handler and two outcome hooks.
+		// Runner 在 Run 内构建，而不是在 NewGroup：它持有这一代的连接池，热更新后 runner 会用
+		// 新一代重新进入 Run。从"行被认领"到"结果落库"之间的事现在都在 claim.Runner 里——
+		// 这个 worker 只提供参数、一个 Handler 和两个结果钩子。
+		runner, err := gofyclaim.NewRunner(rt.DB, gofyclaim.RunnerConfig{
+			Config: gofyclaim.Config{
+				Table:       cfg.Table,
+				Job:         cfg.Job,
+				Batch:       cfg.Batch,
+				Lease:       cfg.Lease,
+				MaxAttempts: cfg.MaxAttempts,
+				Backoff:     cfg.Backoff,
+				// Queue-level hooks run on the goroutine that observed the event.
+				// 队列级钩子在观察到事件的那个 goroutine 上执行。
+				Hooks: gofyclaim.Hooks{
+					OnClaim: func(_ string, claimed int) {
+						if claimed > 0 {
+							lg.Info("claim batch", zap.Int("claimed", claimed), zap.Int("batch", cfg.Batch))
+						}
+					},
+					OnReap: func(_ string, reaped, dead int64) {
+						if reaped+dead > 0 {
+							lg.Warn("claim reaped expired leases",
+								zap.Int64("requeued", reaped), zap.Int64("dead", dead))
+						}
+					},
+					OnLeaseLost: func(job string) {
+						lg.Warn("claim lease lost", zap.String("job", job))
+					},
 				},
+			},
+			HandlerTimeout: cfg.HandlerTimeout,
+			// The one callback: decode the payload and do the business work.
+			// Runner calls it with nil data on an idle tick, which is a no-op here.
+			// It returns the business task id (the user id) and the error that
+			// Runner turns into Succeed / Fail bookkeeping.
+			// 唯一的回调：解 payload、干业务活。空闲轮 Runner 会用 nil data 调它，这里直接跳过。
+			// 它返回业务 task id（这里用 user id）和错误，Runner 据此做 Succeed / Fail 收尾。
+			Handler: func(ctx context.Context, data []byte) (uint64, error) {
+				if data == nil {
+					return 0, nil
+				}
+				return settleOrderJob(ctx, rt.DB, data)
+			},
+			// Worker-side outcome hooks: logging only. Runner has already made
+			// the outcome durable (finish_handle_time / fail_reason + time), and
+			// passes the full context so a dead row and a lease loss read clearly.
+			// worker 侧结果钩子：只记日志。Runner 已经把结果落库（finish_handle_time /
+			// fail_reason + 时间），钩子拿到完整上下文，dead 行与租约丢失都能一眼看懂。
+			OnSuccess: func(res gofyclaim.Result) {
+				lg.Info("claim job settled",
+					zap.Uint64("task_id", res.TaskID),
+					zap.Uint64("row_id", res.RowID),
+					zap.Int("attempt", res.Attempts),
+					zap.Duration("duration", res.Elapsed),
+				)
+			},
+			OnFailure: func(res gofyclaim.Result) {
+				switch {
+				case res.LeaseLost:
+					// The row was taken over while the handler ran; its side
+					// effects may already have run elsewhere, so nothing is retried.
+					// 这一行在 handler 执行期间被接管，副作用可能已在别处发生，因此不重试。
+					lg.Warn("claim job lost its lease; not retrying",
+						zap.Uint64("task_id", res.TaskID), zap.Uint64("row_id", res.RowID),
+						zap.Int("attempt", res.Attempts), zap.Duration("duration", res.Elapsed))
+				case res.Dead:
+					lg.Error("claim job exhausted its attempts; parked as dead",
+						zap.Uint64("task_id", res.TaskID), zap.Uint64("row_id", res.RowID),
+						zap.Int("attempts", res.Attempts), zap.Duration("duration", res.Elapsed),
+						zap.Error(res.Err))
+				default:
+					lg.Warn("claim job failed; retry scheduled",
+						zap.Uint64("task_id", res.TaskID), zap.Uint64("row_id", res.RowID),
+						zap.Int("attempt", res.Attempts), zap.Duration("duration", res.Elapsed),
+						zap.Error(res.Err))
+				}
 			},
 		})
 		if err != nil {
@@ -350,165 +412,32 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 		defer lg.Info("claim consumer stopped")
 
 		return gofyworker.Ticker(ctx, cfg.IntervalMS, func(ctx context.Context) error {
-			drain := gofyworker.DrainContext(ctx)
-
-			// Reap before claiming. A row left behind by a crashed instance is
-			// invisible to Claim until its lease expires and somebody collects
-			// it; doing it here means every replica repairs the queue and no
-			// separate janitor job is needed. The statement only touches rows
-			// whose lease really expired, so two instances reaping at once is
-			// harmless.
-			// 先 Reap 再认领。崩溃实例留下的行在租约过期并被回收之前对 Claim 不可见；放在这里
-			// 意味着每个副本都在修队列，不需要单独的清理任务。语句只碰租约确已过期的行，因此
-			// 两个实例同时回收也无害。
-			reaped, dead, reapErr := queue.Reap(drain)
-			if reapErr != nil {
-				lg.Warn("claim reap failed", zap.Error(reapErr))
-			} else if reaped+dead > 0 {
-				lg.Warn("claim reaped expired leases",
-					zap.Int64("requeued", reaped),
-					zap.Int64("dead", dead),
-				)
-			}
-
-			// n = 0 means "use Config.Batch". An empty result is normal: the
-			// loop is a poll, not a subscription, so the next tick simply tries
-			// again — there is nothing to back off from.
-			// n = 0 表示用 Config.Batch。空结果是常态：这个循环是轮询而不是订阅，下一个 tick
-			// 再试即可，没有什么需要退避。
-			tasks, err := queue.Claim(drain, owner, 0)
-			if err != nil {
-				return err
-			}
-			if len(tasks) == 0 {
-				return nil
-			}
-			lg.Info("claim batch", zap.Int("claimed", len(tasks)), zap.Int("batch", cfg.Batch))
-
-			// Every task in the batch is attempted even if one of them fails to
-			// write its outcome: a failed bookkeeping write only costs this row a
-			// lease expiry, and Reap will requeue it. The errors are joined so the
-			// tick still reports them.
-			// 即使某一条的结果写不进去，批次里其余任务照常处理：收尾写失败只让这一行多等一个
-			// 租约周期，Reap 会把它放回待处理。错误合并上抛，这个 tick 仍然会报告。
-			var errs []error
-			for _, task := range tasks {
-				if err := settleClaimedTask(drain, rt.DB, lg, queue, cfg, task); err != nil {
-					errs = append(errs, err)
-				}
-			}
-			return errors.Join(errs...)
+			// DrainContext keeps an in-flight DB write alive during shutdown;
+			// Runner uses the caller's context for Succeed/Fail, so the outcome
+			// of a handler that already ran still gets recorded.
+			// DrainContext 让在途的 DB 写能在停机时完成；Runner 用调用方 context 做 Succeed/Fail，
+			// 因此已经跑完的 handler 结果仍能落库。
+			return runner.Run(gofyworker.DrainContext(ctx), owner)
 		})
 	})
 }
 
-// settleClaimedTask runs one handler and records its outcome: Succeed on
-// success, Fail on failure — the latter also moves the row to dead once the
-// attempt cap is reached, which is why the sample never calls a "dead" method
-// itself.
-// settleClaimedTask 执行一个 handler 并记录结果：成功用 Succeed，失败用 Fail——后者在尝试
-// 次数用尽时还会把行置为死亡态，因此样例自己从不调用"置死"方法。
-func settleClaimedTask(
-	ctx context.Context,
-	db *gorm.DB,
-	lg *zap.Logger,
-	queue *gofyclaim.Queue,
-	cfg ClaimScanConfig,
-	task gofyclaim.Task,
-) error {
-	started := time.Now()
-	handleCtx, cancel := context.WithTimeout(ctx, cfg.HandlerTimeout)
-	summary, handleErr := settleOrderJob(handleCtx, db, task)
-	cancel()
-	elapsed := time.Since(started)
-
-	if handleErr != nil {
-		failErr := queue.Fail(ctx, task, handleErr)
-		if errors.Is(failErr, gofyclaim.ErrLeaseLost) {
-			// The row was taken over while this handler ran — its lease expired
-			// and another instance claimed it. Whatever this handler did may have
-			// happened twice already, so nothing is retried here.
-			// 这一行在本 handler 执行期间被接管了——租约过期，别的实例认领了它。这个 handler
-			// 做过的事可能已经发生了两遍，因此这里什么都不重试。
-			lg.Warn("claim job lost its lease; not retrying",
-				zap.Uint64("task_id", task.ID),
-				zap.Int("attempt", task.Attempts),
-				zap.Duration("duration", elapsed),
-			)
-			return nil
-		}
-		if failErr != nil {
-			return failErr
-		}
-		if task.Attempts >= cfg.MaxAttempts {
-			lg.Error("claim job exhausted its attempts; parked as dead",
-				zap.Uint64("task_id", task.ID),
-				zap.Int("attempts", task.Attempts),
-				zap.Duration("duration", elapsed),
-				zap.Error(handleErr),
-			)
-			return nil
-		}
-		lg.Warn("claim job failed; retry scheduled",
-			zap.Uint64("task_id", task.ID),
-			zap.Int("attempt", task.Attempts),
-			zap.Duration("duration", elapsed),
-			zap.Error(handleErr),
-		)
-		return nil
-	}
-
-	if err := queue.Succeed(ctx, task); err != nil {
-		if errors.Is(err, gofyclaim.ErrLeaseLost) {
-			lg.Warn("claim job lost its lease before completion",
-				zap.Uint64("task_id", task.ID),
-				zap.Int("attempt", task.Attempts),
-			)
-			return nil
-		}
-		// The work is done but the row still says claimed. Returning the error
-		// leaves the repair to Reap: the lease expires, the row goes back to
-		// pending, and the handler runs again — which is exactly why a handler
-		// has to be idempotent.
-		// 活干完了，但这一行还写着 claimed。把错误上抛，修复交给 Reap：租约过期、行回到
-		// pending、handler 再跑一遍——这正是 handler 必须幂等的原因。
-		return err
-	}
-	lg.Info("claim job settled",
-		zap.Uint64("task_id", task.ID),
-		zap.Int("attempt", task.Attempts),
-		zap.Int64("orders", summary.Orders),
-		zap.Int64("amount", summary.Amount),
-		zap.Duration("duration", elapsed),
-	)
-	return nil
-}
-
-// orderSettlement is the business result of one task: a user's orders rolled up.
-// A real handler would write this somewhere, and that write would have to be
-// idempotent — the same task runs again whenever its lease expires mid-flight.
-// orderSettlement 是一个任务的业务结果：某个用户订单的汇总。真实的 handler 会把它写到某个
-// 地方，而那次写必须幂等——租约在执行中过期时，同一个任务会再跑一遍。
-type orderSettlement struct {
-	Orders int64
-	Amount int64
-}
-
-// settleOrderJob is the business half: it reads the payload, does the work and
-// reports the outcome. It never touches the queue — Succeed and Fail belong to
-// the caller, which is what keeps the fencing pair out of business code.
-// settleOrderJob 是业务的一半：读 payload、干活、报告结果。它从不碰队列——Succeed 与 Fail
-// 归调用方，围栏字段因此不会流进业务代码。
-func settleOrderJob(ctx context.Context, db *gorm.DB, task gofyclaim.Task) (orderSettlement, error) {
+// settleOrderJob is the one business callback handed to claim.Runner. It decodes
+// the payload, does the work and returns the business task id plus an error;
+// Runner turns that into Succeed / Fail bookkeeping. It never touches the queue,
+// so the fencing pair stays out of business code.
+// settleOrderJob 是交给 claim.Runner 的唯一业务回调：解 payload、干活，返回业务 task id 与错误；
+// Runner 据此做 Succeed / Fail 收尾。它从不碰队列，围栏字段因此不会流进业务代码。
+func settleOrderJob(ctx context.Context, db *gorm.DB, data []byte) (uint64, error) {
 	var payload claimJobPayload
-	if err := json.Unmarshal(task.Payload, &payload); err != nil {
+	if err := json.Unmarshal(data, &payload); err != nil {
 		// A payload that cannot be decoded never becomes decodable: let it burn
 		// its attempts and land in dead, which is where a human looks.
 		// 解不开的 payload 不会自己变好：让它耗完重试落进死信，那才是有人会去看的地方。
-		return orderSettlement{}, fmt.Errorf("decode payload of task %d: %w", task.ID, err)
+		return 0, fmt.Errorf("decode payload: %w", err)
 	}
 	if payload.Fail {
-		return orderSettlement{}, fmt.Errorf("simulated settlement failure (task %d, %q)", task.ID, payload.Note)
+		return payload.UserID, fmt.Errorf("simulated settlement failure (user %d, %q)", payload.UserID, payload.Note)
 	}
 
 	// The work itself: aggregate the user's orders. It is a read, so it is
@@ -516,14 +445,35 @@ func settleOrderJob(ctx context.Context, db *gorm.DB, task gofyclaim.Task) (orde
 	// the same property.
 	// 活本身：汇总该用户的订单。因为是读，它天然幂等；写操作要靠 upsert 或唯一键才能拿到
 	// 同样的性质。
-	var summary orderSettlement
+	var summary struct {
+		Orders int64
+		Amount int64
+	}
 	if err := db.WithContext(ctx).Table("orders").
 		Select("COUNT(*) AS orders, COALESCE(SUM(amount), 0) AS amount").
 		Where("user_id = ?", payload.UserID).
 		Scan(&summary).Error; err != nil {
-		return orderSettlement{}, fmt.Errorf("summarise orders of user %d: %w", payload.UserID, err)
+		return payload.UserID, fmt.Errorf("summarise orders of user %d: %w", payload.UserID, err)
 	}
-	return summary, nil
+	// Business detail the generic outcome hooks do not know about. Log it here,
+	// where the numbers exist; the hooks already recorded the durable outcome.
+	// 通用结果钩子不知道的业务细节，在有数字的地方就地记日志；落库由钩子之上的 Runner 完成。
+	loggerFromContext(ctx).Info("order settlement computed",
+		zap.Uint64("user_id", payload.UserID),
+		zap.Int64("orders", summary.Orders),
+		zap.Int64("amount", summary.Amount),
+	)
+	return payload.UserID, nil
+}
+
+// loggerFromContext pulls the worker logger when present and stays a no-op
+// otherwise, so the business callback cannot panic over a missing logger.
+// loggerFromContext 在有时取 worker 的 logger，没有时保持 no-op，业务回调不会因为缺 logger 而 panic。
+func loggerFromContext(ctx context.Context) *zap.Logger {
+	if rt, ok := gofyworker.RuntimeFrom(ctx); ok && rt.Logger != nil {
+		return rt.Logger
+	}
+	return zap.NewNop()
 }
 
 // ensureClaimTable turns "the migration did not run" into a startup error the
