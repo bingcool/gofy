@@ -989,6 +989,8 @@ P2
 
 逐条在 HEAD 上重读代码的结果。行号为复核时的事实位置，后续改动可能使其漂移。
 
+复核之后，P1 的五条已按顺序修复（见 §9）；表中仍保留原始结论，便于对照"当时为什么成立"。
+
 | 编号 | 结论 | 证据（HEAD） | 说明 |
 |---|---|---|---|
 | P1-01 | 成立 | `internal/commandline/worker.go:158-181`（restart 默认 `Daemon: true`，无 `--force` 时确认）；`worker_host.go:328`（子进程 argv 仍是 `worker restart`）；`internal/process/detach_unix.go:28-31`（stdio 指向 `/dev/null`）；`internal/console/console.go:99-105`（EOF → `false, nil`） | 默认 restart 会停掉旧进程、起一个立刻退出的子进程，父进程已打印成功 |
@@ -1008,3 +1010,21 @@ P2
 计数（重启复用 gate）都可由代码路径直接推出，不需要真实进程；其余各项是单点事实。
 
 复核**没有**发现报告之外的 P1 级问题；也没有发现报告中"已修复"清单里与代码不符的条目。
+
+---
+
+## 9. P1 修复记录（2026-11-16 下午）
+
+五条 P1 按依赖顺序修复，每条一个提交、都带回归测试；`make check` 全绿。
+
+| 编号 | 提交 | 修法 | 回归测试 |
+|---|---|---|---|
+| P1-01 | `5b938ff` | daemon 子进程的 argv 由 `commandline.WorkerStartArgs` 从解析后的选项重建为 `worker --group=... [--name=...] --daemon=false`，不再复制 `os.Args`，也不再携带 `--force` / `--timeout` | `TestWorkerStartArgs`（含"argv 里不能出现 restart/force/timeout"）、`TestDaemonizeWorkerStartsTheWorkerCommand`（注入 detach 钩子断言 argv） |
+| P1-03 | `a8b07e5` | `Processor.park` 返回错误并由 `Handle` 传播；dead 状态未落库时不得 ACK。`claim` 的 attempts 预算仍然兜底 | `TestLedgerRetriesWhenParkFails`、`TestLedgerRetriesUndecodableMessageWhenParkFails`（SQLite 触发器让 UPDATE 失败）、`TestLedgerAcknowledgesPermanentFailureWhenParkSucceeds` |
+| P1-05 | `5cffc5d` | 闸门改为 `map[Identity]struct{}`，`Ready(ctx)` 从 runner 注入的身份取键，重复信号不再消耗兄弟实例名额；登记集合与 goroutine 用同一份实例列表 | `TestReadyGateIgnoresASecondSignalFromTheSameInstance`、`TestReadyIsNotClosedByARepeatedSignal` |
+| P1-04 | `74db36a` | 四个传输层的 `ConsumeOptions` 新增 `OnReady`：Kafka 首次无致命错误 poll 之后、AMQP 拓扑声明 + `ConsumeWithContext` 之后、RocketMQ `Start` 之后、Redis 队列首次 pop 之后；`support/consumer` 改由它上报就绪。延迟订阅也补 `ReadyReporter` | `TestConsumerReportsReadyAfterStart` / `...WhenStartFails`（RocketMQ 假消费者）、`TestConsumeReportsReadyOnceAfterFirstPop`、`TestDelayConsumeReportsReadyOnceAfterFirstPop`；本地 RabbitMQ 实跑确认 ready 在订阅之后 |
+| P1-02 | `7df9820` | 新增 `internal/proclock`（`flock` / `LockFileEx`），`claimWorkerPID` 先抢 `<pid>.lock` 再检查并写 pid；锁随进程退出释放 | `TestAcquireIsExclusive`、`TestAcquireAfterReleaseSucceeds`、`TestClaimWorkerPIDIsExclusive`、`TestClaimWorkerPIDOverwritesAStaleFile`；`/tmp/demo-svc` 起两个进程，第二个 `ErrAlreadyRunning`，前一个退出后第三个能启动 |
+
+仍未处理：P2-01（daemon 父子 Ready 握手）、P2-02（restart 的 Nacos 语义）、P2-03（PID 复用
+校验）、P2-04（CLI 按命令延迟加载配置）、P2-05（租约用数据库时钟）、P2-07（订单状态迁移）。
+其中 P2-01 与 P1-01 同属启动报告链路，建议接着做。
