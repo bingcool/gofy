@@ -30,8 +30,8 @@ type Container struct {
 }
 
 // NewContainer 创建一个尚未构建任何 service 的容器。cfg 是本次装配加载的配置，
-// 业务配置由访问器翻译成 service 自己的值对象注入；传 nil 表示只验证接线，
-// 此时各业务配置段按零值处理（生产路径 reload.factories 一定传入完整配置）。
+// 业务配置由访问器按段交给 service 作为构造参数；传 nil 表示只验证接线，此时各业务
+// 配置段按零值处理（生产路径 reload.factories 一定传入完整配置）。
 //
 // 启动和热更新各走一次装配：启动时 appOptions 调 reload.factories(cfg)，热更新时
 // app.Reload 再用 reloader.factories(cfg)；两者都新建容器并注册本次的
@@ -50,8 +50,9 @@ func NewContainer(cfg *config.Config) *Container {
 
 // orderConfig 返回本次装配的订单配置。
 //
-// 它是 service 与 config.yaml 之间唯一的桥：模块工厂、service 都不 import
-// app/config，只有装配根知道字段从哪来、要翻译成什么值对象。
+// 容器是唯一持有整份 config.Config 的地方；各模块只经这类访问器拿到自己那一段，
+// 因此业务包看不到 db、kafka、nacos 这些段，也无法在请求期重新读文件。返回的是值
+// 拷贝，调用方改它不会影响本代快照。
 func (c *Container) orderConfig() config.OrderConfig {
 	if c == nil || c.cfg == nil {
 		return config.OrderConfig{}

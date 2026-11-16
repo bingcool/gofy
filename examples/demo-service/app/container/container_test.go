@@ -23,8 +23,8 @@ func TestAccessorsReturnServices(t *testing.T) {
 	}
 }
 
-// 业务配置由装配根翻译后注入 service：容器拿到 config.yaml 的 order 段，service
-// 只看到自己的 Settings。service 包因此不 import app/config，测试也不需要整份配置。
+// 业务配置由装配根按段交给 service：容器拿到 config.yaml 的 order 段，原样作为构造
+// 参数传下去，因此改这一段的类型或值只需动容器这一处，中间没有同形状的复制品。
 func TestOrderConfigReachesTheService(t *testing.T) {
 	ctr := container.NewContainer(&config.Config{
 		Order: config.OrderConfig{AuthRequired: true},

@@ -172,18 +172,20 @@ jwt:
 
 ### 模块配置（`order` 段）
 
-订单模块自己的配置来自 `config.yaml` 顶层的 `order` 段，由 `app/container` 翻译成
-`service.Settings` 后注入。service 不 import `app/config`、也不读文件：
+订单模块自己的配置来自 `config.yaml` 顶层的 `order` 段，由 `app/container` 原样作为
+构造参数交给 `NewOrderConfigService`。service 收的是 `config.OrderConfig` 这一段，
+不是整份 `config.Config`，也不读文件：
 
 | YAML 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `order.auth_required` | bool | `false` | `GET /api/v1/order/config` 返回的 `auth_required` |
 
-新增一个业务配置字段只有三处改动：`config.OrderConfig` 加字段（带 `default` /
-`validate` tag）→ `service.Settings` 加字段 → 容器的 `OrderConfigService()` 做映射。
-`app/module/*` 的任何一层 import `app/config` 都会被 `shell/check-imports.sh` 拒绝，
-所以 service 只能看到自己用到的值，新增无关配置段也不会牵动订单模块。热更新后新代
-拿到新值，在途请求继续用旧代的值——与 `app/appio` 快照同一个模型。
+新增一个业务配置字段只有两处改动：`config.OrderConfig` 加字段（带 `default` /
+`validate` tag）→ service 里读它。容器的 `OrderConfigService()` 不用动，因为它传的
+就是整个段。`shell/check-imports.sh` 只允许 `service` 层 import `app/config`；
+`controller` / `repository` / `query` / `model` / `innerapi` 仍被拒绝，所以 HTTP 契约
+与持久化层不会顺手读到 `cfg.DB`、`cfg.Nacos` 这类段。热更新后新代拿到新值，在途请求
+继续用旧代的值——与 `app/appio` 快照同一个模型。
 
 ## 装配
 
@@ -191,14 +193,14 @@ jwt:
 各新建一个容器，把仓库与 service 的构造收敛到一处：
 
 ```go
-ctr := container.NewContainer()
+ctr := container.NewContainer(cfg)
 factories := []gofy.ModuleFactory{
     appio.NewModuleFactory(cfg.DB, cfg.Redis, ...),
 }
 factories = append(factories, ctr.ModuleFactories()...)
 ```
 
-`container.NewContainer()` 零值构造本次服务的全部仓库（`RepositoryDeclare`），service
+`container.NewContainer(cfg)` 记下本次装配的配置并构造全部仓库（`RepositoryDeclare`），service
 则在模块工厂首次取用时按依赖链惰性构造；每个服务一个构造槽，只构建自己需要的
 子树：
 
@@ -345,7 +347,7 @@ type OrderService struct {
   查找其他 service；代际切换由新建容器完成；
 - 必填依赖（`Orders`、`Products`）由容器保证非 nil；`Logger` 允许为 nil；
 - 测试用纯 Go 内存 SQLite 跑真实仓库（零值构造，内存库发布成 `app/appio` 快照），
-  通过 `container.NewContainer()` + `Init` 按需装配 service，不连外部 MySQL
+  通过 `container.NewContainer(nil)` + `Init` 按需装配 service，不连外部 MySQL
   （见 `module_test.go` 与 `app/container/*_test.go`）。
 
 ## 产品模块装配与 innerapi
@@ -457,7 +459,7 @@ repository 不持有 logger：它只包装并返回错误，日志由调用它�
 用 `rt.Logger` 记录一次，避免同一失败重复落日志。
 
 ```go
-ctr := container.NewContainer()
+ctr := container.NewContainer(nil)
 ctr.Init(rt.Logger)
 h := controller.NewOrderController(ctr.OrderService(), rt.Logger)
 ```
@@ -619,7 +621,7 @@ go test ./app/module/order/...
 测试不需要外部数据库：repository 不声明接口，`module_test.go` 用纯 Go 的内存
 SQLite（`support/sqlite`，`DSN: ":memory:"`）建订单表和产品表并塞入固定数据
 （订单 1、产品 90001 上架 / 90002 下架），把内存库发布成 `app/appio` 快照（测试
-结束恢复）。`newTestServices` 通过 `container.NewContainer()` + `Init` 按需构造
+结束恢复）。`newTestServices` 通过 `container.NewContainer(nil)` + `Init` 按需构造
 产品、订单与配置 service，再用 `gofytest.New` 启动一个只挂载 order 模块的测试应用。
 panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id = 9999`
 的查询抛出，验证 Recovery 不泄漏内部信息；`panicPool` 还补了 `BeginTx` 委托给

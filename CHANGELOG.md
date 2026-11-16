@@ -82,10 +82,11 @@ All notable changes to this project are documented here. The format follows
 
 - `examples/demo-service`: the order module's `auth_required` now comes from the
   `order:` section of `config.yaml` instead of a constant in the service. The
-  assembly root translates it into `orderservice.Settings`, so a service
-  receives only the fields it uses; `check-imports.sh` rejects any
-  `app/module/*` import of `app/config`. Adding a field is three edits (config
-  type, settings type, container mapping) and does not touch unrelated modules.
+  section travels as a constructor argument (`config.OrderConfig`), so the
+  service sees its own section and never the whole application config;
+  `check-imports.sh` allows that import from `service` only and keeps rejecting
+  it for controller, repository, query, model and innerapi. Adding a field is two
+  edits (config type, service body) and does not touch unrelated modules.
 - `gofy` worker mode: `--group=all` selects every registered group. The wildcard
   `*` still works but a shell expands it before the process starts — zsh refuses
   to run the command at all (`no matches found`), bash only passes it through

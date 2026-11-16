@@ -48,11 +48,14 @@ while IFS='|' read -r pkg imports; do
   [ -n "$layer" ] || continue
 
   for imp in $imports; do
-    # 业务配置由装配根翻译成 service 自己的值对象注入；app/module 下任何一层
-    # import app/config 都会把业务包钉死在整份应用配置上，也绕开了这个注入点。
+    # 业务配置只能以「本模块那一段」的构造参数形式进入 service：其它层 import
+    # app/config 会顺手拿到整份文件，接着就会有人从 repository 里读 cfg.DB、
+    # 从 controller 里读 cfg.Nacos。service 是唯一允许的入口，且只收自己那段。
     case "$imp" in
       "$module/app/config" | "$module/app/config/"*)
-        fail "$pkg must not import $imp: business config is injected as a value object by app/container"
+        if [ "$layer" != "service" ]; then
+          fail "$pkg must not import $imp: only service takes its own config section as a constructor argument"
+        fi
         ;;
     esac
 

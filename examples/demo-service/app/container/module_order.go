@@ -7,14 +7,11 @@ import (
 // OrderConfigService 返回本次服务的订单配置 service。它只依赖本次装配的订单配置与
 // logger，由订单模块根直接注入 OrderConfigController，不经 innerapi。
 //
-// 配置在这里完成唯一一次翻译：service 收到的 Settings 只有它真正使用的字段，因此
-// 订单模块不 import app/config，也未必要跟着无关配置段重新编译。
+// 容器只交出本代捕获的 order 段，不做翻译：service 的构造参数就是 config.OrderConfig，
+// 因此配置改名或拆段时改动落在配置类型与这里一行，业务包里没有第二份同形状的结构体。
 func (c *Container) OrderConfigService() *orderservice.OrderConfigService {
 	return c.services.OrderConfigService.Get(func() *orderservice.OrderConfigService {
-		order := c.orderConfig()
-		return orderservice.NewOrderConfigService(orderservice.Settings{
-			AuthRequired: order.AuthRequired,
-		}, c.logger())
+		return orderservice.NewOrderConfigService(c.orderConfig(), c.logger())
 	})
 }
 
