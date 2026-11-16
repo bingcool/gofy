@@ -2,7 +2,7 @@
 
 > 审查日期：2026-11-16  
 > 审查范围：Gofy 主仓库、`gofy-interface-api`、`gofy-adapter`，以及主仓库中的 `examples/demo-service`。  
-> 审查方式：基于当前默认分支代码，按实际调用链检查实现、状态转换、资源所有权及失败路径；不是只按提交说明或 README 推断。  
+> 审查方式：基于 `db271b5` 的代码（复核说明见 §1.1.1），按实际调用链检查实现、状态转换、资源所有权及失败路径；不是只按提交说明或 README 推断。  
 > 重要说明：本报告是源码级静态审查。本轮没有在本地真实 MySQL、Kafka、RabbitMQ、RocketMQ、Redis 或 Kubernetes 环境中执行完整集成测试，也没有运行全仓库 `make check-all`。涉及并发、时序和外部系统行为的结论，均按当前源码路径作出；文中标明了需要补充的验证用例。
 
 ## 1. 审查基线与整体判断
@@ -25,6 +25,28 @@
 - 业务示例：`examples/demo-service/main.go`、`config.go`、`reload.go`、`worker/worker.go`、`worker/group1/*`、`app/appio/*`、`app/module/order/query/*`。
 - 接口 Client：`gofy-interface-api/client/client.go`、`client/options.go`、`client/call.go`、`client/sse.go`。
 - K8s Lease：`gofy-adapter/adapter/lease/k8slease/k8slease.go`。
+
+### 1.1.1 复核说明（2026-11-16 13:20，HEAD `f2fb599`）
+
+报告的初审基线是 `db271b5`，写这份报告时 `origin/main` 实际已到 `b84d869`。两者差异只
+涉及 `support/lock`、demo 的 `appio/redislock` 与文档，没有触及本报告审查的 worker /
+consumer / generation 路径，因此结论不受影响；但"基于当前默认分支代码"的说法不准确，
+已在上方改为标注具体基线。
+
+复核时逐条重读 HEAD 上的代码，12 条问题**全部成立**，证据见 §8。其中 5 处需要修正：
+
+1. **P1-02 的作用域**：pid 文件是每台机器本地的，文件锁只能挡住同一主机上的并发启动，
+   挡不住 Kubernetes 里同 group 的两个 Pod（各自文件系统）；不要把它当成跨副本互斥。
+2. **P2-05 的修复建议**：只把过期比较换成数据库 `NOW()` 没有用——`updated_at` 是应用侧
+   写入的，列里的时间仍是被写入时那台机器的时钟。写入与比较必须同时用数据库时间。
+3. **P2-02 与 P1-01 相互掩盖**：默认 `worker restart` 现在根本起不来子进程（P1-01），
+   所以"新进程用旧配置"只在 `--force` / `--daemon=false` 时才实际发生。
+4. **P2-02 的前提已被最新配置弱化**：demo 的 `enableNacosSyncConfig` 在 `f2fb599` 改为
+   `false`，`start` 与 `restart` 都不再同步远端配置；本条只在开关打开或真实项目保留
+   sync 时成立。
+5. **P2-06 与 P1-05 是同一个问题的两个层面**，不应各算一条。
+
+复核没有发现报告之外的 P1 级问题。
 
 ### 1.2 总体结论
 
@@ -215,6 +237,11 @@ daemon 模式的父进程前置检查不能消除这个竞态，因为两个父�
 - PID 文件只能指向最后写入者，另一进程成为无法通过当前 pid 文件管理的孤儿；
 - `worker stop` 可能只停止其中一个，运维误以为整个分组已停止；
 - 订单扫描、定时任务、报表等非天然多副本安全任务可能重复执行。
+
+**范围限定**：pid 文件在每台机器本地，下面建议的文件锁只能挡住**同一主机**上的并发
+启动（systemd 重启与手工启动撞车、两个 shell 同时执行）。Kubernetes 中同一 group 的
+两个 Pod 各有自己的文件系统与 pid 文件，这把锁对它们无效——那种重复要靠副本数约束或
+`support/lease` 之类的跨进程选举解决。不要把本项当成"跨副本互斥"。
 
 ### 修复建议
 
@@ -563,6 +590,15 @@ Ready 计数应按 Runner 内每个逻辑实例去重，而不是按 Ready 调�
 
 ## P2-02：`worker restart` 不执行 Nacos Sync，重启后可能继续使用本地旧配置
 
+> 与 P1-01 的关系：默认 `worker restart` 目前起不来子进程（子进程二次确认后正常退出），
+> 所以"新进程用旧配置"在默认路径下先被 P1-01 掩盖，只有 `--force` 或 `--daemon=false`
+> 时才会实际发生。修好其中一个不会自动修好另一个。
+>
+> 与最新代码的差异：demo 的 `enableNacosSyncConfig` 在 `f2fb599` 已改为 `false`，
+> 同步整体关闭，`worker start` 与 `restart` 都不再拉远端配置。因此本条的前提（start 会
+> sync、restart 不会）只在把开关打开、或真实项目保留 sync 时成立；开关关掉时两者行为
+> 一致，问题被配置掩盖而不是被修掉。
+
 ### 涉及代码
 
 - `examples/demo-service/main.go`
@@ -713,11 +749,29 @@ WHERE id = ?
 
 不同数据库的时间间隔语法应由对应 Dialect 实现或抽象，不要拼接不安全字符串。
 
+**这条建议本身有个坑**：`updated_at` 现在由应用侧写入（GORM 的自动时间戳）。只把比较
+换成数据库 `NOW()` 并不能消除时钟偏差——列里存的仍然是被写入时那台机器的时钟，只是把
+偏差从"比较"挪到了"写入"。要真正以数据库时间为准，两边都必须是数据库时间：
+
+```sql
+-- 写入与比较同源，时钟偏差才真正消失
+UPDATE worker_consumed_messages
+SET status = 'processing', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status = 'processing' AND attempts = ?
+  AND updated_at <= CURRENT_TIMESTAMP - INTERVAL 5 MINUTE; -- 租约长度
+```
+
+若不想改写入侧，就不要假装这能解决偏差——保留应用时钟，并在文档里明确"所有 worker
+节点必须 NTP 同步"，这是一条更弱但诚实的约束。
+
 如果将来确实有分钟级以上长 Handler，再考虑 lease renewal；当前阶段不建议为了理论完整性先引入复杂续租机制。至少要在 Worker 指南中明确 `ProcessingLease` 必须超过最长合法 Handler 时长，并给出超时处理规范。
 
 ---
 
 ## P2-06：ReadyGate 的注释承诺“重复信号忽略”，实现没有按实例去重
+
+> 与 P1-05 是同一个缺陷的两个层面（P1-05 讲时序后果，本条讲 API 契约），修复时合并
+> 处理，不单独排期。
 
 本问题与 P1-05 同源，但即使 Ready 调用时机修正，也应单独补齐 ReadyGate 的 API 保证。
 
@@ -928,3 +982,29 @@ P2
 ```
 
 完成以上事项后，当前 Gofy 架构在框架生命周期、Worker 托管、消息消费和运维控制方面会更完整。除这些边界问题外，其余模块分层和仓库职责建议保持，不要为了抽象而抽象。
+
+---
+
+## 8. 复核结论（2026-11-16 13:20，HEAD `f2fb599`）
+
+逐条在 HEAD 上重读代码的结果。行号为复核时的事实位置，后续改动可能使其漂移。
+
+| 编号 | 结论 | 证据（HEAD） | 说明 |
+|---|---|---|---|
+| P1-01 | 成立 | `internal/commandline/worker.go:158-181`（restart 默认 `Daemon: true`，无 `--force` 时确认）；`worker_host.go:328`（子进程 argv 仍是 `worker restart`）；`internal/process/detach_unix.go:28-31`（stdio 指向 `/dev/null`）；`internal/console/console.go:99-105`（EOF → `false, nil`） | 默认 restart 会停掉旧进程、起一个立刻退出的子进程，父进程已打印成功 |
+| P1-02 | 成立（限同主机） | `worker_host.go:129-136`（Read → Alive → Write）；`worker_host.go:318-322`（daemon 前置同款检查） | 文件锁挡同机并发；跨 Pod 无效，见正文的范围限定 |
+| P1-03 | 成立 | `support/consumer/consume.go:535-548`（`park` 只记 Warn、无返回值）；`:449` / `:481` 调用后 `return nil` | 台账写 dead 失败仍然 ACK |
+| P1-04 | 成立 | `support/consumer/kafka.go:253-256`（`client.Ping` 后立即 Ready，`w.Run` 在 `:266`）；`support/kafka/client.go:150-161`（Ping 走原始 client）；`support/kafka/consumer.go:266-281`（受管情况另建 kgo.Client）；`amqp.go:220-224`；`support/amqp/queue.go:56-64`（NewQueue 只校验，声明在 `Consume` 内）；`rocketmq.go:198`；`queues.go:188` | 四个消费者都在真正 Consume/声明之前上报就绪 |
+| P1-05 | 成立 | `support/worker/ready.go:76-92`（`signal` 无实例键）；`support/worker/runner.go:276`（每次重启复用同一 gate）、`:183-190`（按实例数累加 pending） | 同一实例重启后再次 Ready 会替兄弟实例扣数 |
+| P2-01 | 成立 | `worker_host.go:329-342`（Detach 成功即打印"已在后台启动"） | 与 P1-01 组合时假成功最明显 |
+| P2-02 | 成立（语义待定） | `examples/demo-service/config.go:78-81`（`stop` / `restart` 被排除在 Nacos sync 外）；`worker_host.go:367-386`（restart 在本进程里直接 `runWorker`） | 与 P1-01 互相掩盖；demo 的 `enableNacosSyncConfig` 现为 `false`，前提被配置弱化 |
+| P2-03 | 成立 | `internal/pidfile/pidfile.go`（`Write`/`Read` 只处理整数）；`stop.go:83-101`（`Alive` 即发信号） | PID 复用即可误杀无关进程 |
+| P2-04 | 成立 | `examples/demo-service/main.go:32`（`loadNacosConfig`）→ `:50`（`configInvocation`）→ `:58`（`config.Load`） | 控制命令也会被损坏的配置文件挡住 |
+| P2-05 | 成立（建议已修正） | `support/consumer/consume.go:803-816`（`time.Since(row.UpdatedAt)`） | 原建议只换比较侧无效，写入侧同样要用数据库时间 |
+| P2-06 | 与 P1-05 合并 | `support/worker/ready.go:76-92` 与注释不一致 | 同一缺陷的 API 层面，不单独排期 |
+| P2-07 | 成立（示例层） | `examples/demo-service/worker/group1/handler_order.go:89`（`status <> target` 即更新） | 乱序事件可把 Cancelled 改回 Paid |
+
+复核方法：只读代码，不启动 broker。P1-01 的时序（确认 EOF → 子进程退出）与 P1-05 的
+计数（重启复用 gate）都可由代码路径直接推出，不需要真实进程；其余各项是单点事实。
+
+复核**没有**发现报告之外的 P1 级问题；也没有发现报告中"已修复"清单里与代码不符的条目。
