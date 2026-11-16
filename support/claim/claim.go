@@ -26,16 +26,16 @@ import (
 // 任务在 status 列中的取值。
 const (
 	// StatusPending is a row waiting to be claimed.
-	// StatusPending 表示等待认领。
+	// StatusPending 表示等待认领（待处理）。
 	StatusPending int8 = 0
 	// StatusClaimed is a row currently owned by one worker.
-	// StatusClaimed 表示已被某个 worker 认领。
+	// StatusClaimed 表示已被某个 worker 认领(进行中)。
 	StatusClaimed int8 = 1
 	// StatusDone is a finished row.
-	// StatusDone 表示已完成。
+	// StatusDone 表示已完成（已处理完成）。
 	StatusDone int8 = 2
 	// StatusDead is a row that used up its attempts and needs a human.
-	// StatusDead 表示重试次数耗尽、需要人工介入。
+	// StatusDead 表示重试次数耗尽、最终还是失败，需要人工介入(处理失败)。
 	StatusDead int8 = 3
 )
 
