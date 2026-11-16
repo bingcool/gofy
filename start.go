@@ -869,6 +869,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 }
 
 func (a *App) abort(err error) error {
+	// Tell the parent that detached us why we are going down: its own copy of
+	// this reason would otherwise be an exit code and nothing else.
+	// 告诉脱离出本进程的父进程退出的原因：否则父进程能拿到的只有退出码。
+	a.notifier.failed(err)
 	_ = a.cleanup()
 	a.setState(stateFailed)
 	a.markReady()

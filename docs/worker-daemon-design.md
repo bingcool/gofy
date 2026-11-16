@@ -143,6 +143,7 @@ demo-service worker restart --group=order   # 默认仍后台（--daemon=false �
 | `--concurrency` | 0 | 覆盖全部 worker 的实例数，0 表示按配置 |
 | `--list` | false | 打印分组/worker/并发后退出，不连 MQ、不连 DB |
 | `--daemon` | false（`restart` 为 true） | 脱离到独立会话后由父进程退出；`restart` 默认仍后台 |
+| `--startup-timeout` | 30s | 后台父进程等待子进程就绪上报的预算；子进程未上报则父命令失败，但子进程继续运行 |
 
 `--group=all` 是通配符的免引号写法：`*` 会被 shell 先展开，zsh 直接报
 `no matches found` 并拒绝执行。两者在解析、pid 文件（`-worker-all.pid`）与 `stop` 上完全
@@ -202,6 +203,25 @@ main → app.Execute
 ```
 
 启动失败即退出，不做半启动：任一 worker 的 `Run` 在启动阶段返回错误（例如 MQ 认证失败），整组退出并返回非零。
+
+#### 3.5.1 后台启动的父子握手
+
+`--daemon` 的父进程不能把"`fork` 成功"当成"服务已启动"：子进程的 stdout / stderr 都指向
+`/dev/null`，DB 初始化失败、探针端口被占、broker 拒绝订阅都只会让子进程悄悄退出，而父进程
+已经打印了成功。
+
+因此父进程给子进程一条管道（`ExtraFiles`，子进程侧是 fd 3，编号通过 `GOFY_DAEMON_NOTIFY`
+环境变量告知），然后**阻塞等待一行**：
+
+| 子进程状态 | 写入内容 | 父进程行为 |
+| --- | --- | --- |
+| 分组就绪（`Runner.Ready()` 全部返回后） | `ready` | 打印"已在后台启动"，退出 0 |
+| 启动失败（`abort()` 之前） | `error: <原因>` | 打印原因，退出 1 |
+| 启动前崩溃（配置解析、flag 校验） | 无（管道关闭） | 报"exited before reporting ready"，退出 1 |
+| 超出 `--startup-timeout`（默认 30s） | 无 | 报"未在预算内就绪"，**不杀子进程**，退出 1 |
+
+超时不杀子进程是刻意的：慢 broker 可能仍在建连，杀掉一个即将健康的进程会把"启动慢"变成
+一次故障。父进程能做的是"不确认"，而不是"否定"。
 
 ### 3.6 关闭时序（drain）
 

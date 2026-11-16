@@ -61,6 +61,13 @@ type App struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
+	// notifier reports the startup outcome to the parent that detached this
+	// process. It is nil for every process that was not started as a daemon
+	// child, and a nil notifier is a no-op.
+	// notifier 向脱离出本进程的父进程报告启动结果。非后台子进程为 nil，而 nil 通知器
+	// 什么都不做。
+	notifier *startupNotifier
+
 	// admission is the HTTP door every request passes before it may enter a
 	// generation. StopAccepting closes it before a restart or exit, so new
 	// requests are refused with 503 while in-flight ones keep running;
@@ -145,6 +152,7 @@ func New(opts ...Option) (*App, error) {
 		stopCh:    make(chan struct{}),
 		done:      make(chan struct{}),
 		ready:     make(chan struct{}),
+		notifier:  notifierFromEnv(),
 	}
 	if o.hasVer {
 		a.version = o.version

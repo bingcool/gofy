@@ -481,15 +481,15 @@ func TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown(t *testing.T) {
 // 收到的是启动形态，而不是父进程当初收到的命令。再跑一次 `worker restart` 的子进程会重
 // 复 stop，在 stdin 指向 /dev/null 的确认提示上直接返回，而父进程已经打印了成功。
 func TestDaemonizeWorkerStartsTheWorkerCommand(t *testing.T) {
-	prev := detachProcess
-	t.Cleanup(func() { detachProcess = prev })
+	prev := detachProcessNotify
+	t.Cleanup(func() { detachProcessNotify = prev })
 
 	var gotExe string
 	var gotArgs []string
-	detachProcess = func(executable string, args []string) (int, error) {
+	detachProcessNotify = func(executable string, args []string) (int, *os.File, error) {
 		gotExe = executable
 		gotArgs = append([]string(nil), args...)
-		return 4242, nil
+		return 4242, reportingPipe(t, "ready"), nil
 	}
 
 	group, err := worker.NewGroup("order",
@@ -651,4 +651,103 @@ func TestStopRefusesARecycledPid(t *testing.T) {
 	if _, statErr := os.Stat(pidPath); !os.IsNotExist(statErr) {
 		t.Fatalf("stale pid file was not removed: %v", statErr)
 	}
+}
+
+// reportingPipe returns the read end of a pipe that already holds one startup
+// report, which is what the detached child writes on the other end.
+// reportingPipe 返回一个已经写入一行启动报告的管道的读端——也就是脱离的子进程在另一端写下的
+// 内容。
+func reportingPipe(t *testing.T, line string) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := writer.WriteString(line + "\n"); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
+}
+
+// TestDaemonizeWorkerReportsChildFailure is the P2-01 property: creating the
+// child is not success. A child that fails to start names the reason, and the
+// parent command must fail with that reason instead of printing "started in the
+// background".
+// TestDaemonizeWorkerReportsChildFailure 是 P2-01 的性质：创建子进程不等于成功。启动失败的
+// 子进程会说明原因，父命令必须带着这个原因失败，而不是打印"已在后台启动"。
+func TestDaemonizeWorkerReportsChildFailure(t *testing.T) {
+	prev := detachProcessNotify
+	t.Cleanup(func() { detachProcessNotify = prev })
+	detachProcessNotify = func(string, []string) (int, *os.File, error) {
+		return 4242, reportingPipe(t, "error: gopy: listen 127.0.0.1:8080: address already in use"), nil
+	}
+
+	group, err := worker.NewGroup("order",
+		worker.Func("tick", 1, func(context.Context) error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	app, err := New(WithName("daemon-test"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = app.daemonizeWorker([]*worker.Group{group}, "", commandline.WorkerOptions{Group: "order", Daemon: true})
+	if err == nil {
+		t.Fatal("daemonizeWorker reported success for a child that failed to start")
+	}
+	if !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("error does not carry the child's reason: %v", err)
+	}
+}
+
+// TestDaemonizeWorkerReportsSilentChildDeath covers the child that dies before
+// writing anything: the parent sees EOF and must not call that a success.
+// TestDaemonizeWorkerReportsSilentChildDeath 覆盖什么都没写就退出的子进程：父进程读到
+// EOF，不能把这种情况当成成功。
+func TestDaemonizeWorkerReportsSilentChildDeath(t *testing.T) {
+	prev := detachProcessNotify
+	t.Cleanup(func() { detachProcessNotify = prev })
+	detachProcessNotify = func(string, []string) (int, *os.File, error) {
+		return 4242, reportingPipeEOF(t), nil
+	}
+
+	group, err := worker.NewGroup("order",
+		worker.Func("tick", 1, func(context.Context) error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	app, err := New(WithName("daemon-test"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = app.daemonizeWorker([]*worker.Group{group}, "", commandline.WorkerOptions{Group: "order", Daemon: true})
+	if err == nil {
+		t.Fatal("daemonizeWorker reported success for a child that exited before reporting")
+	}
+	if !strings.Contains(err.Error(), "exited before reporting ready") {
+		t.Fatalf("error does not explain the silent exit: %v", err)
+	}
+}
+
+// reportingPipeEOF is the closed-empty variant: no bytes, immediate EOF.
+// reportingPipeEOF 是"关闭且为空"的变体：没有字节，立即 EOF。
+func reportingPipeEOF(t *testing.T) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
 }

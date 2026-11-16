@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy` worker mode: `--daemon` now waits for the child to report readiness
+  instead of treating `fork` as success. The detached child's stdout is
+  `/dev/null`, so a database that would not open, a health port already taken or
+  a broker that rejected the subscription all looked like a successful start.
+  The child gets a pipe on descriptor 3 and writes one line — `ready` after the
+  whole group reports ready, or `error: ...` before it exits — and the parent
+  prints success only after reading it. A child that dies silently is reported
+  as such; a child that misses `--startup-timeout` (default 30s) is reported as
+  unconfirmed but left running, because a slow start is not a failed one.
 - `gofy` worker mode: two processes on the same host can no longer own one
   group. The startup path read the pid file, checked the pid and wrote its own —
   a check-then-write window in which two starts both saw "no live process" and

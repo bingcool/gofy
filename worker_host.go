@@ -241,6 +241,10 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 				health.setReady()
 			}
 			lg.Info("worker group ready", startedFields...)
+			// The parent that detached this process is waiting for exactly this
+			// line before it prints success.
+			// 脱离出本进程的父进程正等着这一行才打印成功。
+			a.notifier.ready()
 		case err := <-errCh:
 			remaining--
 			if err != nil {
@@ -307,11 +311,12 @@ func workerPIDGroup(groups []*worker.Group) string {
 // daemonizeWorker 在一个独立会话里重新执行本进程并让父进程退出，做法与
 // `start --daemon` 相同。子进程收到 --daemon=false，因此它在该会话里前台运行，不会
 // 再次脱离。
-// detachProcess is process.Detach behind a variable: a test can observe the
-// argv handed to the child without spawning one.
-// detachProcess 把 process.Detach 放进变量：测试因此能在不真正拉起子进程的情况下检查
-// 交给子进程的 argv。
-var detachProcess = process.Detach
+// detachProcessNotify is process.DetachWithNotify behind a variable: a test can
+// observe the argv handed to the child and answer the startup report without
+// spawning a process.
+// detachProcessNotify 把 process.DetachWithNotify 放进变量：测试因此能在不真正拉起子进程
+// 的情况下检查交给子进程的 argv，并回应启动报告。
+var detachProcessNotify = process.DetachWithNotify
 
 // claimWorkerPID makes this process the owner of one worker group.
 //
@@ -396,9 +401,18 @@ func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts comma
 	// 绝不复用 os.Args：父进程的命令可能是 `worker restart`，脱离终端后再执行一次
 	// restart 会重复 stop，然后等一个没有终端能回答的确认。子进程只执行启动形态。
 	args := commandline.WorkerStartArgs(opts)
-	pid, err := detachProcess(executable, args)
+	// The child cannot be asked "did it work" through stdout — that goes to
+	// /dev/null — so it gets a pipe and the parent waits for one line on it. Only
+	// that line turns "a process was created" into "the group accepts work".
+	// 子进程无法通过 stdout 回答"成功了吗"——那里是 /dev/null——因此它拿到一条管道，父进程在
+	// 上面等一行。只有这一行能把"进程被创建了"变成"分组能接活"。
+	pid, notify, err := detachProcessNotify(executable, args)
 	if err != nil {
 		return fmt.Errorf("gofy: daemonize worker: %w", err)
+	}
+	defer func() { _ = notify.Close() }()
+	if err := awaitWorkerStartup(notify, pid, opts.StartupTimeout); err != nil {
+		return err
 	}
 	label := workerGroupLabel(groups)
 	c := a.con()
