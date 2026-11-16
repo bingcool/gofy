@@ -503,7 +503,7 @@ func DDL(table string) (string, error) {
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   job         VARCHAR(64)  NOT NULL COMMENT '任务类型',
-  status      TINYINT      NOT NULL DEFAULT 0 COMMENT '任务状态：0待认领 1已认领 2已完成 3死亡',
+  status      TINYINT      NOT NULL DEFAULT 0 COMMENT '任务状态：0待认领(待处理) 1已认领(进行中) 2已完成 3处理失败,待人工介入',
   owner       VARCHAR(96)  NOT NULL DEFAULT '' COMMENT '当前认领者',
   lease_until DATETIME     NULL COMMENT '租约到期时间',
   attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
