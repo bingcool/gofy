@@ -1025,6 +1025,21 @@ P2
 | P1-04 | `74db36a` | 四个传输层的 `ConsumeOptions` 新增 `OnReady`：Kafka 首次无致命错误 poll 之后、AMQP 拓扑声明 + `ConsumeWithContext` 之后、RocketMQ `Start` 之后、Redis 队列首次 pop 之后；`support/consumer` 改由它上报就绪。延迟订阅也补 `ReadyReporter` | `TestConsumerReportsReadyAfterStart` / `...WhenStartFails`（RocketMQ 假消费者）、`TestConsumeReportsReadyOnceAfterFirstPop`、`TestDelayConsumeReportsReadyOnceAfterFirstPop`；本地 RabbitMQ 实跑确认 ready 在订阅之后 |
 | P1-02 | `7df9820` | 新增 `internal/proclock`（`flock` / `LockFileEx`），`claimWorkerPID` 先抢 `<pid>.lock` 再检查并写 pid；锁随进程退出释放 | `TestAcquireIsExclusive`、`TestAcquireAfterReleaseSucceeds`、`TestClaimWorkerPIDIsExclusive`、`TestClaimWorkerPIDOverwritesAStaleFile`；`/tmp/demo-svc` 起两个进程，第二个 `ErrAlreadyRunning`，前一个退出后第三个能启动 |
 
-仍未处理：P2-01（daemon 父子 Ready 握手）、P2-02（restart 的 Nacos 语义）、P2-03（PID 复用
-校验）、P2-04（CLI 按命令延迟加载配置）、P2-05（租约用数据库时钟）、P2-07（订单状态迁移）。
-其中 P2-01 与 P1-01 同属启动报告链路，建议接着做。
+六条 P2 随后也已修复，见 §10。
+
+---
+
+## 10. P2 修复记录（2026-11-16 下午，接 §9）
+
+| 编号 | 提交 | 修法 | 回归测试 |
+|---|---|---|---|
+| P2-03 | `ba3be7b` | pid 文件由纯整数改为 JSON 记录（pid / executable / claimed_at / token）。token 取进程启动标识：Linux 用 boot id + `/proc/<pid>/stat` 的 starttime，macOS 用 `kern.proc.pid`，Windows 用创建时间 FILETIME。`stop` 发信号前校验，不匹配按"未运行"处理并删除陈旧文件；旧格式仍可读（token 为空 = 未知，退回存活检查并记警告） | `TestWriteRecordCarriesIdentity`、`TestReadRecordAcceptsLegacyInteger`、`TestVerifyDetectsRecycledPID`、`TestStopRefusesARecycledPid`（真实子进程 + 伪造 token，断言未被杀掉） |
+| P2-01 | `5ea0111` | daemon 父进程给子进程一条管道（`ExtraFiles` → fd 3，编号经 `GOFY_DAEMON_NOTIFY` 告知），子进程在 `Runner.Ready()` 之后写 `ready`、`abort()` 之前写 `error: ...`；父进程在 `--startup-timeout`（默认 30s）内等这一行，只有收到 `ready` 才打印成功。超时只报"未确认"，不杀子进程 | `TestDaemonizeWorkerStartsTheWorkerCommand`（断言 argv 且回应 ready）、`TestDaemonizeWorkerReportsChildFailure`、`TestDaemonizeWorkerReportsSilentChildDeath`；实跑：锁被占时父命令带子进程原因失败，`--startup-timeout=1ms` 报未确认且子进程继续运行 |
+| P2-02 + P2-04 | `daecdc4` | 命令行先分类再决定读什么：`version` / `--help` 不读任何配置，`stop` / `worker stop` 只读 `config.yaml`（pid 路径），`worker --list` 不读 `nacos.yaml`，`start` / `worker run` / `restart` / `script` 读完整配置。`worker restart` 归为启动形态，同步发生在停旧进程之前，拉取失败时旧实例继续运行。控制命令只用最小 App（不建 DB、模块、中间件、telemetry、日志文件） | `TestPlanCommand`（逐命令断言六个开关）；实跑：`nacos.yaml` 损坏时 `stop` / `worker stop` / `worker --list` 均正常，`config.yaml` 损坏时 `version` 仍可用 |
+| P2-05 | `a9f7712` | 租约两侧都改用数据库时钟：写入用 `CURRENT_TIMESTAMP`，过期判断在 SQL 里做（MySQL `INTERVAL ... MICROSECOND`、PostgreSQL 区间乘法、SQLite `datetime()` 归一化）；接管 CAS 里复核一次租约条件。未知方言退回节点时钟并在 README 写明需要 NTP | `TestLedgerLeaseIsWrittenInDatabaseTime`（无时区偏移即数据库写入）、`TestLedgerLeaseDecisionComesFromTheDatabase`（struct 无时间戳不再等于"过期"）、`TestLeasePredicateOnMySQL`（`GOFY_TEST_MYSQL_DSN` 下对真实 MySQL 验证新鲜/过期两种行） |
+| P2-07 | `2d9394a` | `orderEventRules` 把目标状态与允许的前置状态放在一起：`order.paid` 只从 `pending`，`order.cancelled` 从 `pending`/`paid`，`cancelled` 是终态。条件写进 UPDATE（`status IN (...)`），0 行时再读一次区分"未落库（重试）/ 已是目标（幂等）/ 过期事件（忽略并告警）" | `TestApplyOrderEventTransitions`（含 `cancelled → order.paid` 不得回退）、`TestApplyOrderEventRetriesUnknownOrder`、`TestApplyOrderEventRejectsUnknownEventType` |
+| P2-06 | 合并入 P1-05（`5cffc5d`） | 闸门按 `Identity` 去重，注释与实现一致 | `TestReadyGateIgnoresASecondSignalFromTheSameInstance` |
+
+`make check`（fmt / vet / race / example / 两个 import guard / contract snapshot / CGO-free
+build）在执行完全部 P2 后全绿。报告中的 P1 与 P2 至此全部关闭；§5 里需要补的集成用例（Nacos
+动作失败、注册失败）仍建议按各自发布节奏补上，它们不在这份报告的缺陷清单内。
