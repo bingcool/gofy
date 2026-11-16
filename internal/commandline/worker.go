@@ -2,6 +2,7 @@ package commandline
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,38 @@ type WorkerOptions struct {
 	// Timeout bounds how long stop waits for the process to exit.
 	// Timeout 限制 stop 等待进程退出的时长。
 	Timeout time.Duration
+}
+
+// WorkerStartArgs rebuilds the argv that starts a worker group. The daemon
+// child must run this, never the command the parent received: a detached
+// `worker restart` would stop again, ask for confirmation with no terminal and
+// return, so the service stays down while the parent reports success.
+//
+// Only flags the run form understands are emitted. --force and --timeout belong
+// to stop and restart, and `worker` rejects them.
+// WorkerStartArgs 重建启动 worker 分组的 argv。daemon 子进程必须执行它，而不是父进程
+// 收到的命令：脱离终端的 `worker restart` 会再停一次、在没有终端时等确认然后直接返回，
+// 服务停在原地而父进程已经报了成功。
+//
+// 只输出运行形态认识的旗标；--force 与 --timeout 属于 stop / restart，`worker` 会拒绝。
+func WorkerStartArgs(opts WorkerOptions) []string {
+	args := []string{"worker", "--group=" + opts.Group}
+	if opts.Concurrency > 0 {
+		args = append(args, "--concurrency="+strconv.Itoa(opts.Concurrency))
+	}
+	for _, name := range opts.Names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		args = append(args, "--name="+name)
+	}
+	// Written explicitly even though false is the default: the child inherits
+	// nothing from the parent's command line, and this flag is the one that
+	// keeps a restart from detaching a second time.
+	// 即使 false 是默认值也显式写出：子进程不继承父进程的命令行，而这个旗标正是防止
+	// restart 再次脱离的开关。
+	return append(args, "--daemon=false")
 }
 
 // WorkerInfo describes one worker for `worker --list`.

@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy` worker mode: `worker restart` no longer re-runs itself in the daemon
+  child. The detached process used to inherit `os.Args`, so it executed
+  `worker restart` again, stopped nothing, and returned at the confirmation
+  prompt with stdin on `/dev/null` — the parent had already printed
+  "started in the background" while the service stayed down. The child now
+  receives the start form rebuilt from the parsed options
+  (`worker --group=... [--name=...] --daemon=false`), which drops `--force`,
+  `--timeout` and the subcommand itself.
 - `gofy`: a reload can no longer pair handler N with module state N+1. Modules
   that own generation-scoped state implement `support.RequestBinder`; the
   framework composes their binders into the generation it publishes and applies

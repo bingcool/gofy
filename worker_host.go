@@ -66,7 +66,7 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	}
 	pidPath = workerPIDPath(pidPath, workerPIDGroup(groups))
 	if opts.Daemon {
-		return a.daemonizeWorker(groups, pidPath)
+		return a.daemonizeWorker(groups, pidPath, opts)
 	}
 
 	if err := a.beginStart(false); err != nil {
@@ -307,7 +307,13 @@ func workerPIDGroup(groups []*worker.Group) string {
 // daemonizeWorker 在一个独立会话里重新执行本进程并让父进程退出，做法与
 // `start --daemon` 相同。子进程收到 --daemon=false，因此它在该会话里前台运行，不会
 // 再次脱离。
-func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string) error {
+// detachProcess is process.Detach behind a variable: a test can observe the
+// argv handed to the child without spawning one.
+// detachProcess 把 process.Detach 放进变量：测试因此能在不真正拉起子进程的情况下检查
+// 交给子进程的 argv。
+var detachProcess = process.Detach
+
+func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts commandline.WorkerOptions) error {
 	if runtime.GOOS == "windows" {
 		return ErrUnsupported
 	}
@@ -325,8 +331,13 @@ func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string) error {
 	if err != nil {
 		return fmt.Errorf("gofy: resolve executable: %w", err)
 	}
-	args := append(append([]string{}, os.Args[1:]...), "--daemon=false")
-	pid, err := process.Detach(executable, args)
+	// Never reuse os.Args: the parent's command may be `worker restart`, and a
+	// detached restart would stop again and then wait for a confirmation no
+	// terminal can answer. The child runs the start form only.
+	// 绝不复用 os.Args：父进程的命令可能是 `worker restart`，脱离终端后再执行一次
+	// restart 会重复 stop，然后等一个没有终端能回答的确认。子进程只执行启动形态。
+	args := commandline.WorkerStartArgs(opts)
+	pid, err := detachProcess(executable, args)
 	if err != nil {
 		return fmt.Errorf("gofy: daemonize worker: %w", err)
 	}

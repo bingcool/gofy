@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/support/worker"
@@ -464,6 +465,64 @@ func TestWithWorkerConcurrencyValidatesAfterGroupsAreKnown(t *testing.T) {
 			if g.Name+"/"+w.Name == "order/scan" && w.Concurrency != 3 {
 				t.Fatalf("order/scan concurrency = %d, want 3", w.Concurrency)
 			}
+		}
+	}
+}
+
+// TestDaemonizeWorkerStartsTheWorkerCommand pins the fix for the recursive
+// restart: the detached child receives the start form, never the command the
+// parent was invoked with. A child that re-ran `worker restart` would stop
+// again, hit the confirmation prompt with stdin on /dev/null and return, while
+// the parent had already printed success.
+// TestDaemonizeWorkerStartsTheWorkerCommand 固定"restart 递归"的修复：脱离的子进程
+// 收到的是启动形态，而不是父进程当初收到的命令。再跑一次 `worker restart` 的子进程会重
+// 复 stop，在 stdin 指向 /dev/null 的确认提示上直接返回，而父进程已经打印了成功。
+func TestDaemonizeWorkerStartsTheWorkerCommand(t *testing.T) {
+	prev := detachProcess
+	t.Cleanup(func() { detachProcess = prev })
+
+	var gotExe string
+	var gotArgs []string
+	detachProcess = func(executable string, args []string) (int, error) {
+		gotExe = executable
+		gotArgs = append([]string(nil), args...)
+		return 4242, nil
+	}
+
+	group, err := worker.NewGroup("order",
+		worker.Func("tick", 1, func(context.Context) error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	app, err := New(WithName("daemon-test"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// What a default `worker restart` carries: daemon, no --force, plus the
+	// stop-only timeout that must not reach the child.
+	// 默认 `worker restart` 携带的选项：daemon、没有 --force，以及不能传给子进程的
+	// stop 专用超时。
+	err = app.daemonizeWorker([]*worker.Group{group}, "", commandline.WorkerOptions{
+		Group:   "order",
+		Daemon:  true,
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("daemonizeWorker: %v", err)
+	}
+
+	if gotExe == "" {
+		t.Fatal("detach received no executable")
+	}
+	want := []string{"worker", "--group=order", "--daemon=false"}
+	if strings.Join(gotArgs, " ") != strings.Join(want, " ") {
+		t.Fatalf("child argv = %v, want %v", gotArgs, want)
+	}
+	for _, arg := range gotArgs {
+		if strings.Contains(arg, "restart") {
+			t.Fatalf("child argv carries %q: the detached child must start the group, not repeat the restart", arg)
 		}
 	}
 }
