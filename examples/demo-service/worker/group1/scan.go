@@ -41,11 +41,12 @@ var scanDefaults = ScanWorkerConfig{
 
 // newScanWorker scans pending orders on an interval. Demo's orders table has no
 // claim columns (status is a business value, not a task state), so this only
-// counts; a real queue declares a job table with claim.DDL and calls
-// claim.Queue.Claim, which is what makes several replicas safe.
+// counts and two replicas count the same rows twice. scan_claim.go is the same
+// loop done properly: a job table plus claim.Queue.Claim, which is what makes
+// several replicas safe.
 // newScanWorker 按间隔扫描待处理订单。demo 的 orders 表没有认领所需的状态列（status
-// 是业务值，不是任务状态），因此这里只统计；真实的队列用 claim.DDL 建任务表，再调
-// claim.Queue.Claim，多副本才安全。
+// 是业务值，不是任务状态），因此这里只统计，两个副本会把同一批行统计两遍。scan_claim.go
+// 是同一个循环的正确做法：任务表加 claim.Queue.Claim，多副本才安全。
 func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 	intervalMS := cfg.IntervalMS
 	if intervalMS == 0 {

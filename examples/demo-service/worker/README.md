@@ -33,8 +33,9 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、三个生产者、十个消费者与心跳
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、四个生产者、十一个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
+│   ├── scan_claim.go      # order-settle-producer / order-settle-consumer：认领队列（入队 + 认领）
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
 │   ├── producer.go        # order-event-producer：每 5s 群发同一订单事件到五个 sink
@@ -74,10 +75,12 @@ worker/
 
 | 分组 | worker | 实例数 | 节奏 | 说明 |
 | --- | --- | --- | --- | --- |
-| group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
+| group1 | `order-scan` | 2 | 5s | 只统计待支付订单（裸扫描，多副本会重复统计）；真正的认领见 `order-settle-consumer` |
 | group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到五个 sink（Kafka 两个 topic），闭环演示生产 → 消费 |
 | group1 | `order-delay-producer` | 1 | 10s | 每 10s 调度一条 5s 后到期的事件到 Redis ZSET、RocketMQ DELAY topic 与 RabbitMQ direct / topic 延迟队列 |
 | group1 | `order-batch-producer` | 1 | 10s | 每 10s 给批量订阅发十条，让一次拉取真的能拿回一批 |
+| group1 | `order-settle-producer` | 1 | 10s | 每 10s 往 `job_task` 写一批任务：五条立即可认领、一条 15s 后到期，每三轮多一条注定失败的 |
+| group1 | `order-settle-consumer` | 2 | 3s | 从 `job_task` 认领到期任务：`FOR UPDATE SKIP LOCKED` 抢行、租约 30s、失败按 2s 指数退避重试，三次不过置为 dead |
 | group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅 `demo.order.events`，默认手动提交位点 |
 | group1 | `order-kafka-manual-consumer` | 1 | 常驻 | 独立 topic / group 的手动提交样例，逐条打印位点提交决策 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
@@ -94,7 +97,7 @@ worker/
 拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
-十个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
+十一个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
 实际跑哪些用 `--name` 选；注册不建连，所以 `--list` 和被过滤掉的消费者都不产生成本。
 实例数写在各自的配置文件里，`--concurrency` 仍可覆盖。
 
@@ -306,6 +309,74 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 （客户端轮询 / broker 定时投递 / direct 死信 / topic 死信）用同一套信封、handler 与
 错误分类。
 
+## 认领队列（claim）
+
+`scan.go` 那种 `SELECT ... WHERE status = 'pending'` 的扫描只能有一个副本：两个副本会同时
+读到同一行、同时处理。`support/claim` 把"哪些行归我"变成一条带 `FOR UPDATE SKIP LOCKED` 的
+认领语句，于是同一个循环可以跑在每个副本上。样例就是这一对：
+
+| 角色 | worker | 做什么 |
+| --- | --- | --- |
+| 入队 | `order-settle-producer` | 每 10s 在一个事务里写五行立即可认领 + 一行 15s 后到期，每三轮多一条 `fail=true` |
+| 认领 | `order-settle-consumer` | 每 3s `Reap` → `Claim` 一批 → 逐条 `Succeed` / `Fail` |
+
+表由迁移建立（`migrations/0005_job_task.sql`，等价于 `claim.DDL("job_task")`）：
+
+```bash
+# 连接参数见 config.yaml 的 database 段
+mysql -h <host> -u <user> -p <database> < migrations/0005_job_task.sql
+```
+
+列的含义：`status` 0/1/2/3 是 pending/claimed/done/dead；`owner` 与 `attempts` 是收尾时的
+围栏；`lease_until` 是租约；`next_run_at` 是到期时间（NULL 表示立刻可认领）。`idx_claim`
+不能省——认领语句按 `(job, status, next_run_at, id)` 排队，没有它会退化成全表扫描并持有
+大量行锁。
+
+`enqueue` 是普通 `INSERT`，没有队列 API：一行 `status=0` 且 `next_run_at` 到期的记录就是
+全部入队动作。真实服务里这条 INSERT 属于创建工作的那个业务事务（建订单与建任务同一个提交），
+样例用定时器只是为了能单独跑起来。
+
+```bash
+$ go run . worker --group=group1 --name=order-settle-producer --name=order-settle-consumer
+{"msg":"claim jobs enqueued","count":6}
+{"msg":"claim batch","worker":"group1/order-settle-consumer#0","claimed":3,"batch":3}
+{"msg":"claim batch","worker":"group1/order-settle-consumer#1","claimed":2,"batch":3}
+{"msg":"claim job settled","task_id":1,"attempt":1,"orders":1,"amount":100}
+{"msg":"claim job failed; retry scheduled","task_id":10,"attempt":1}
+{"msg":"claim job failed; retry scheduled","task_id":10,"attempt":2}
+{"msg":"claim job exhausted its attempts; parked as dead","task_id":10,"attempts":3}
+```
+
+几件值得对着日志看的事：
+
+- **两个实例分走同一批行**。第一批五行被 #0 拿走三条、#1 拿走两条：认领是一条语句，
+  先到的实例整段拿走，所以批大小要小于"每轮新增行数"，否则另一个实例看起来永远空闲。
+- **`attempt` 逐次递增**。`Fail` 在置回 pending 的同时把 `next_run_at` 推后（2s 起，每次翻倍），
+  第三次失败直接转 dead——`Claim` 时已经把 `attempts` 加过，所以 `attempts >= max_attempts`
+  就是"这次是最后一次"。
+- **`next_run_at` 是数据库时间**。入队时用 `DATE_ADD(NOW(3), ...)` 算，认领时用 `NOW(3)` 比，
+  两边同一个时钟；用 Go 的 `time.Now()` 会让延迟在时钟不准的节点上提前或迟到。
+- **`owner` 带主机名**（`group1/order-settle-consumer#0@host`）。两个 Pod 的同名实例 owner 不同，
+  任务表里因此能看出这一行被谁持有。
+- **死信不是异常**。`status=3` 的行 `owner` 为空、`attempts=3`，它就是待排查清单；
+  `Reap` 不会再把它们放回去（`attempts >= max_attempts` 时走的是 dead 分支）。
+
+几条不能踩的线（`support/claim/claim.go` 的注释里也写了）：
+
+- `Task` 必须按 `Claim` 返回的原样传给 `Succeed` / `Fail`：`owner + attempts` 是围栏，
+  手工拼一个会得到 `ErrInvalidTask`，改一个字段就写不到行。
+- `ErrLeaseLost` 表示这行在本次认领之后被接管了，**不要重放副作用**——只记日志。
+  样例里 Succeed / Fail 两条路径都单独处理了它。
+- 租约**不续期**：`Lease` 必须大于最慢一个合法 handler，否则 handler 还在跑，行已经被别人拿走。
+  样例给 30s，而 handler 只有一次查询；这个余量是刻意的。
+- `Reap` 每个副本都可以调，它是幂等的（只动租约确已过期的行）；没人调的话，崩溃实例留下的
+  `claimed` 行会一直卡着。样例把它放在每个 tick 的开头。
+- 只支持 **MySQL 8**：`NOW(3)`、`DATE_ADD`、`SKIP LOCKED` 都是 MySQL 方言，SQLite 测不了这条路径。
+
+`--group=group1` 会同时启动这一对 worker，所以没跑 0005 迁移时认领会以
+`claim table "job_task" is missing: apply migrations/0005_job_task.sql` 失败并被 runner
+带退避重启；补上迁移即自愈，不必重启进程。只想跑其它 worker 时用 `--name` 过滤。
+
 ## 消费者怎么接入
 
 每个订阅一个文件：配置、handler、没有别的：
@@ -457,9 +528,11 @@ $ go run . worker --list
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-event-producer            │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-batch-producer            │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-delay-producer            │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
-│ group1 │ order-batch-producer            │ 1           │
+│ group1 │ order-settle-producer           │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-kafka-consumer            │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
@@ -481,22 +554,25 @@ $ go run . worker --list
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-amqp-delay-topic-consumer │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-settle-consumer           │ 2           │
+├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-heartbeat                 │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group2 │ report-summary                  │ 1           │
 └────────┴─────────────────────────────────┴─────────────┘
+run every group: worker --group=all (an unquoted * is expanded by the shell)
 ```
 
 启动整组。前台运行，日志同时写 stdout 与文件：
 
 ```bash
 $ go run . worker --group=group1
-{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":15,"drain_timeout":20}
+{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":17,"drain_timeout":20}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#0","interval":5}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#1","interval":5}
 ```
 
-`workers:15` 是这个分组的成员数（扫描 1 + 三个生产者 + 十个消费者 + 心跳 1），不是实例数；
+`workers:17` 是这个分组的成员数（扫描 1 + 四个生产者 + 十一个消费者 + 心跳 1），不是实例数；
 `order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
 
 整组启动意味着四个 broker 都要在。本地只有数据库与 Redis 时，用 `--name` 挑一个跑：
@@ -571,6 +647,7 @@ $ ./demo-service worker --group=all --daemon=1
 | 日志 | `storage/log/worker/<date>/info/worker-h15.log` | 整组启动写 `worker-<host>.log` |
 | 日志 | `storage/log/worker/<date>/info/order-scan-h15.log` | `--name` 只跑一个 worker 时用它的名字 |
 | 表 | `worker_consumed_messages` | 消费幂等台账；消费者首次启动自动建表，也可先跑 `migrations/0003_worker_consumed_messages.sql` |
+| 表 | `job_task` | 认领队列；**必须**先跑 `migrations/0005_job_task.sql`（`claim.DDL` 不会自动建表） |
 
 日志文件不带分组名：分组已经在每行日志的 `worker` 字段里（`group1/order-scan#0`）。
 要一个 worker 一组文件，就用 `--name` 单独起；整组启动共用一份，靠字段区分。
@@ -615,6 +692,7 @@ $ go run . worker stop --group=group1 --force
 | 参数 | 放在哪 | 理由 |
 | --- | --- | --- |
 | 扫描节奏、扫描实例数 | `scan.go` 的 `scanDefaults` | 属于实现细节，改它意味着改逻辑 |
+| 认领批大小、租约、重试预算 | `scan_claim.go` 的 `claimScanDefaults` | 租约与退避是这个队列自己的策略，和订阅参数无关 |
 | topic、消费组、并发、重试预算 | 各消费者文件的 `gofyconsumer.XxxConfig` | 一个订阅一个文件，才写得下多条事件流 |
 | broker 地址、账号、超时 | `config.yaml` | HTTP 进程也要用，只配一次 |
 

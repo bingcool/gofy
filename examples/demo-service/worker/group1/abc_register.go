@@ -12,7 +12,10 @@
 // those sinks on a timer, closing the immediate loop inside one process. The
 // delayed half mirrors it: a scheduler writes due-dated events to a Redis ZSET,
 // a RocketMQ DELAY topic and two RabbitMQ TTL + dead-letter workflows (direct
-// and topic), and four more subscriptions consume them.
+// and topic), and four more subscriptions consume them. Beside the transports
+// sits the database queue: a timer enqueues rows into a MySQL job table and two
+// claim consumers take them with row-level leases, which is the shape a scan
+// loop needs when several replicas must not repeat each other's work.
 //
 // The package boundary is the deployment boundary: group1 is started by
 // `demo-service worker --group=group1` and owns its own settings, so a change
@@ -33,7 +36,8 @@
 // 幂等台账、trace 与错误分类都在 support/consumer。生产者按定时器把同一个订单事件群发到
 // 每一个 sink，让立即链路的闭环跑在一个进程里。延迟链路是它的镜像：调度器把带到期时间的
 // 事件写进 Redis ZSET、RocketMQ DELAY topic 与 RabbitMQ 的 direct / topic 两套 TTL +
-// 死信队列，另外四个订阅负责消费。
+// 死信队列，另外四个订阅负责消费。传输层旁边还有数据库队列：定时器把行写进 MySQL 任务表，
+// 两个认领消费者用行级租约取走它们——多副本不能重复干同一件事时，扫描循环要的就是这个形状。
 //
 // 包边界就是部署边界：group1 由 `demo-service worker --group=group1` 启动，参数也归
 // 它自己，因此改动这里不会波及 group2。
@@ -51,7 +55,8 @@ import (
 )
 
 // NewGroup builds group1: the scan loop, the immediate and delayed
-// subscriptions, the three producers and the liveness heartbeat.
+// subscriptions, the four producers, the claim queue pair and the liveness
+// heartbeat.
 //
 // Every consumer is registered unconditionally — that is what "one file per
 // subscription" means. Which ones actually run is decided at startup by
@@ -59,27 +64,31 @@ import (
 // worker cost nothing. A consumer whose broker instance is missing from the
 // application config fails here, before any goroutine exists.
 //
-// The two event producers (producer.go, rocketmq_batch_producer.go) complete
-// the loop: every interval the fan-out one publishes the same order event to
-// every immediate sink and the burst one publishes a batch's worth of messages
-// to the batch subscription, so one process demonstrates produce → consume end
-// to end without a second terminal.
-// NewGroup 构造 group1：扫描循环、立即与延迟订阅、三个生产者与存活心跳。
+// The four producers (producer.go, rocketmq_batch_producer.go,
+// delay_producer.go, scan_claim.go) complete the loop: every interval the
+// fan-out one publishes the same order event to every immediate sink, the burst
+// one publishes a batch's worth of messages to the batch subscription, and the
+// settle producer enqueues a batch of database jobs, so one process demonstrates
+// produce → consume end to end without a second terminal.
+// NewGroup 构造 group1：扫描循环、立即与延迟订阅、四个生产者、认领队列的一对 worker 与
+// 存活心跳。
 //
 // 每个消费者都无条件注册——这正是"一个订阅一个文件"的含义。实际运行哪些由启动时的
 // `worker --name` 决定；它们在 Run 之前都不建连，因此 `--list` 与被过滤掉的 worker
 // 不产生成本。消费者引用的 broker 实例在应用配置里缺失时，会在这一步失败，早于任何
 // goroutine 存在。
 //
-// 两个事件生产者（producer.go 与 rocketmq_batch_producer.go）补全了闭环：群发的那个
-// 每个间隔把同一个订单事件发往所有立即 sink，突发的那个按批把消息发给批量订阅；一个进程
-// 即可演示 生产 → 消费 的完整链路，无需第二个终端。
+// 四个生产者（producer.go、rocketmq_batch_producer.go、delay_producer.go、
+// scan_claim.go）补全了闭环：群发的那个每个间隔把同一个订单事件发往所有立即 sink，突发的
+// 那个按批把消息发给批量订阅，入队的那个每轮写一批数据库任务；一个进程即可演示
+// 生产 → 消费 的完整链路，无需第二个终端。
 func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
 	workers := []gofyworker.Worker{
 		newScanWorker(scanDefaults),
 		newOrderEventProducer(conns, orderEventProducerDefaults),
 		newOrderBatchProducer(conns, orderBatchProducerDefaults),
 		newDelayEventProducer(conns, delayEventProducerDefaults),
+		newClaimScanProducer(claimScanDefaults),
 	}
 
 	kafka, err := gofyconsumer.NewKafka(conns, orderKafka)
@@ -126,6 +135,7 @@ func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
 	workers = append(workers,
 		kafka, kafkaManual, amqp, rocketmq, rocketmqBatch, queues,
 		delayQueues, rocketmqDelay, amqpDelay, amqpDelayTopic,
+		newClaimScanConsumer(claimScanDefaults),
 		newHeartbeatWorker(),
 	)
 	return gofyworker.NewGroup("group1", workers...)

@@ -196,6 +196,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `examples/demo-service`: `group1` gains a working claim queue. A migration
+  (`migrations/0005_job_task.sql`) declares `job_task` in the shape
+  `support/claim` expects, `order-settle-producer` enqueues a batch of rows in one
+  transaction every ten seconds — five due now, one due in fifteen, plus one that
+  is meant to fail every third round — and `order-settle-consumer` claims them
+  from two instances with `FOR UPDATE SKIP LOCKED`, a thirty-second lease and a
+  three-attempt budget. The sample shows the four outcomes on purpose: settled,
+  retried after a two-second exponential backoff, parked as dead, and a row whose
+  `next_run_at` keeps it invisible until it is due. `scan.go`'s comment now
+  points at it instead of describing a queue that did not exist.
 - `examples/demo-service`: `group1` gains a RocketMQ batch-pull subscription and
   the burst producer that feeds it. `batch_size=10` makes one `Receive` return a
   batch; the handler is still per message and each message is acknowledged on
