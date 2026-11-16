@@ -97,8 +97,10 @@ type Config struct {
 	// Table is the task table, optionally schema-qualified ("app.job_task").
 	// Table 是任务表，可以带库名前缀（"app.job_task"）。
 	Table string
-	// Job tags rows so one table can host several task types.
-	// Job 用于标记行，一张表因此可以承载多种任务。
+	// Job tags rows so one table can host several task types. Go keeps the
+	// name Job; the column it selects is job_type.
+	// Job 用于标记行，一张表因此可以承载多种任务。Go 侧保留 Job 这个名字，它选中的列是
+	// job_type。
 	Job string
 	// Batch is the default claim size; zero means DefaultBatch.
 	// Batch 是默认认领批大小，0 表示 DefaultBatch。
@@ -187,6 +189,22 @@ func backoffFor(base, max time.Duration, attempts int) time.Duration {
 	return d
 }
 
+// ceilSeconds turns a duration into whole seconds, rounded up. It is the unit
+// the DDL's DATETIME columns store, and rounding up keeps a short lease or
+// backoff from becoming zero after MySQL rounds the value on write.
+// ceilSeconds 把时长换算成向上取整的整秒。这是 DDL 的 DATETIME 列能存的单位；向上取整保证
+// 短租约或短退避不会在 MySQL 写入舍入后变成 0。
+func ceilSeconds(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	secs := int64(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	return secs
+}
+
 // Queue claims rows of one job from one table.
 // Queue 从一张表里认领一个 job 的行。
 type Queue struct {
@@ -237,16 +255,28 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
 	// transaction already locked are skipped instead of waited for.
 	// FOR UPDATE SKIP LOCKED 是多个副本安全的前提：别的事务已锁定的行会被跳过，
 	// 而不是排队等待。
-	q.selectSQL = fmt.Sprintf(`SELECT id, job, payload, attempts
+	// The Go API keeps the name Job; the column is job_type because a job is a
+	// type of work, not a link. Only these statements know the spelling.
+	// Go 侧仍叫 Job；列名是 job_type，因为它表示工作类型而不是一份工作。只有这些语句
+	// 需要知道列的实际拼写。
+	q.selectSQL = fmt.Sprintf(`SELECT id, job_type, payload, attempts
   FROM %s
- WHERE job = ? AND status = %d
+ WHERE job_type = ? AND status = %d
    AND (next_run_at IS NULL OR next_run_at <= NOW(3))
  ORDER BY next_run_at, id
  LIMIT ?
  FOR UPDATE SKIP LOCKED`, table, StatusPending)
+	// The column is plain DATETIME, so MySQL would round a sub-second interval
+	// to zero or one second depending on the current millisecond — a 200 ms
+	// backoff could retry immediately. Round up in Go instead: the deadline is
+	// never earlier than requested, and the SQL stays the same for DATETIME(3)
+	// tables.
+	// 列是普通 DATETIME，亚秒区间会被 MySQL 按当前毫秒随机舍入到 0 或 1 秒——200ms 的退避
+	// 可能变成立刻重试。改在 Go 侧向上取整：截止时间不会早于请求值，对 DATETIME(3) 的表
+	// 也同样适用。
 	q.updateSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = ?, attempts = attempts + 1,
-       lease_until = DATE_ADD(NOW(3), INTERVAL ? MICROSECOND)
+       lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
  WHERE id IN (?)`, table, StatusClaimed)
 	// Every completion statement is fenced by owner, status and attempts.
 	//
@@ -272,23 +302,27 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
 	// 这些语句刻意不与 NOW(3) 比较 lease_until：租约刚过期但 Reap 还没跑的
 	// handler 仍持有该行（没有别人能拿走），让它完成比判定失败更合理，毕竟副作用
 	// 已经发生。Reap 一旦跑过，attempts 就变了，这个 CAS 会拒绝过期写回。
+	// Succeed clears the last failure reason: a done row still carrying an old
+	// reason reads as a failed one to whoever queries the table later.
+	// Succeed 会清掉上一次的失败原因：否则已完成的行还带着旧的失败原因，后来查表的人会
+	// 以为它失败了。
 	q.succeedSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL
+   SET status = %d, owner = '', lease_until = NULL, fail_resion = NULL
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDone, StatusClaimed)
 	q.failSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL,
-       next_run_at = DATE_ADD(NOW(3), INTERVAL ? MICROSECOND)
+   SET status = %d, owner = '', lease_until = NULL, fail_resion = ?,
+       next_run_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusPending, StatusClaimed)
 	q.deadSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL
+   SET status = %d, owner = '', lease_until = NULL, fail_resion = ?
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDead, StatusClaimed)
 	q.reapSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
- WHERE job = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
+ WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
    AND attempts < ?`, table, StatusPending, StatusClaimed)
 	q.reapDeadSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
- WHERE job = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
+ WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
    AND attempts >= ?`, table, StatusDead, StatusClaimed)
 	return q, nil
 }
@@ -359,7 +393,7 @@ func (q *Queue) Claim(ctx context.Context, owner string, n int) ([]Task, error) 
 		for i := range tasks {
 			ids[i] = tasks[i].ID
 		}
-		if err := tx.Exec(q.updateSQL, owner, q.lease.Microseconds(), ids).Error; err != nil {
+		if err := tx.Exec(q.updateSQL, owner, ceilSeconds(q.lease), ids).Error; err != nil {
 			return fmt.Errorf("claim: update: %w", err)
 		}
 		for i := range tasks {
@@ -409,8 +443,12 @@ func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
 	// Attempts was incremented at claim time, so reaching the cap here means
 	// this failure was the last allowed try.
 	// attempts 在认领时已自增，因此这里达到上限意味着本次失败就是最后一次尝试。
+	reason := failureReason(cause)
 	if task.Attempts >= q.maxAttempts {
-		res := q.db.WithContext(ctx).Exec(q.deadSQL, task.ID, owner, task.Attempts)
+		// The reason sits in the task row rather than only in a log line, so a
+		// dead row answers "why" when somebody opens the table.
+		// 失败原因落到任务行而不只是日志里，这样打开表就能知道一条 dead 行为什么失败。
+		res := q.db.WithContext(ctx).Exec(q.deadSQL, reason, task.ID, owner, task.Attempts)
 		if res.Error != nil {
 			return fmt.Errorf("claim: dead: %w", res.Error)
 		}
@@ -421,7 +459,7 @@ func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
 		return nil
 	}
 	delay := backoffFor(q.backoff, q.maxBackoff, task.Attempts)
-	res := q.db.WithContext(ctx).Exec(q.failSQL, delay.Microseconds(), task.ID, owner, task.Attempts)
+	res := q.db.WithContext(ctx).Exec(q.failSQL, reason, ceilSeconds(delay), task.ID, owner, task.Attempts)
 	if res.Error != nil {
 		return fmt.Errorf("claim: fail: %w", res.Error)
 	}
@@ -430,6 +468,23 @@ func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
 		return fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
 	}
 	return nil
+}
+
+// failureReason stores a bounded cause in the task row. A TEXT column could
+// hold a whole stack trace, but that would turn every failed row into a blob;
+// the rune-aware cut also keeps a Chinese error from ending mid-character.
+// failureReason 把有界的错误原因写进任务行。TEXT 列装得下整段堆栈，但那会让每条失败行
+// 变成一个文本块；按 rune 截断也避免中文错误在半个字上被切断。
+func failureReason(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	const max = 2048
+	runes := []rune(cause.Error())
+	if len(runes) > max {
+		return string(runes[:max])
+	}
+	return string(runes)
 }
 
 // claimFields validates the fencing pair a completion needs.
@@ -489,12 +544,15 @@ func (q *Queue) leaseLostHook() {
 // which compares correctly against both precisions. created_by and deleted_at
 // are application columns: claim never reads or writes them, so a table without
 // them still works. A non-NULL deleted_at does not hide a row from Claim.
+// fail_resion is different: Fail writes the bounded cause there and Succeed
+// clears it, so a dead row carries its own explanation.
 // DDL 返回查询所依赖的表结构，包含防止 SKIP LOCKED 退化为全表扫描的索引。表名与
 // New 走同一套标识符校验。
 //
 // 时间列用普通 DATETIME，因此短于一秒的租约或退避会被 MySQL 取整到秒。claim 的 SQL 仍用
 // NOW(3)，它与两种精度都能正确比较。created_by 与 deleted_at 是应用侧字段：claim 从不读写，
-// 没有这两列的表照样能用；deleted_at 非空也不会让 Claim 跳过该行。
+// 没有这两列的表照样能用；deleted_at 非空也不会让 Claim 跳过该行。fail_resion 不同：Fail
+// 会写入有界的错误原因，Succeed 会清空，因此 dead 行本身就带着失败原因。
 func DDL(table string) (string, error) {
 	quoted, err := quoteTable(strings.TrimSpace(table))
 	if err != nil {
@@ -502,19 +560,20 @@ func DDL(table string) (string, error) {
 	}
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
-  job         VARCHAR(64)  NOT NULL COMMENT '任务类型',
+  job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型',
   status      TINYINT      NOT NULL DEFAULT 0 COMMENT '任务状态：0待认领(待处理) 1已认领(进行中) 2已完成 3处理失败,待人工介入',
   owner       VARCHAR(96)  NOT NULL DEFAULT '' COMMENT '当前认领者',
   lease_until DATETIME     NULL COMMENT '租约到期时间',
   attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
   next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
   payload     JSON         NULL COMMENT '任务载荷',
+  fail_resion TEXT         NULL DEFAULT NULL COMMENT '失败原因',
   created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人',
   created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '创建时间',
   updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间',
   PRIMARY KEY (id),
-  KEY idx_claim (job, status, next_run_at, id)
+  KEY idx_claim (job_type, status, next_run_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='认领任务表'`, quoted), nil
 }
 

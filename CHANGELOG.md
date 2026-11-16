@@ -139,6 +139,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `support/claim`: the task column `job` is now `job_type` (the Go option stays
+  `Job`, so callers are unaffected), and a `fail_resion` TEXT column records the
+  bounded cause on `Fail` and is cleared on `Succeed` — a dead row now explains
+  itself. Lease and retry deadlines are rounded up to whole seconds in Go before
+  reaching the plain DATETIME columns; without that, MySQL could round a
+  sub-second backoff down to zero and retry immediately. Both the DDL string and
+  the demo migration carry the same shape.
 - `support/claim` DDL and the demo's `job_task` migration: every column now has
   a COMMENT, `created_by` and `deleted_at` were added as application-owned
   columns, and the time columns are plain `DATETIME` rather than `DATETIME(3)`.

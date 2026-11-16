@@ -80,8 +80,10 @@ func TestDDLQuotesTableAndAddsClaimIndex(t *testing.T) {
 	}
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS `job_task`",
-		"idx_claim (job, status, next_run_at, id)",
+		"idx_claim (job_type, status, next_run_at, id)",
 		"ENGINE=InnoDB",
+		"job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型'",
+		"fail_resion TEXT         NULL DEFAULT NULL COMMENT '失败原因'",
 		"created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人'",
 		"deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间'",
 		"updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'",

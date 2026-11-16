@@ -6,20 +6,22 @@
 -- 没有这个索引会退化成全表扫描并持有大量行锁。
 -- 时间列用普通 DATETIME（秒精度）：短于一秒的租约或退避会被取整，claim 的 NOW(3)
 -- 与两种精度都能正确比较。created_by / deleted_at 由应用维护，claim 从不读写它们，
--- deleted_at 非空也不会让行从 Claim 里消失。
+-- deleted_at 非空也不会让行从 Claim 里消失。fail_resion 由 Fail 写入、Succeed 清空，
+-- 因此 dead 行本身就带着失败原因。
 CREATE TABLE IF NOT EXISTS job_task (
     id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
-    job         VARCHAR(64)  NOT NULL COMMENT '任务类型',
-    status      TINYINT      NOT NULL DEFAULT 0 COMMENT '任务状态：0待认领 1已认领 2已完成 3死亡',
+    job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型',
+    status      TINYINT      NOT NULL DEFAULT 0 COMMENT '任务状态：0待认领(待处理) 1已认领(进行中) 2已完成 3处理失败,待人工介入',
     owner       VARCHAR(96)  NOT NULL DEFAULT '' COMMENT '当前认领者',
     lease_until DATETIME     NULL COMMENT '租约到期时间',
     attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
     next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
     payload     JSON         NULL COMMENT '任务载荷',
+    fail_resion TEXT         NULL DEFAULT NULL COMMENT '失败原因',
     created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人',
-    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间',
     PRIMARY KEY (id),
-    KEY idx_claim (job, status, next_run_at, id)
+    KEY idx_claim (job_type, status, next_run_at, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '认领任务表';

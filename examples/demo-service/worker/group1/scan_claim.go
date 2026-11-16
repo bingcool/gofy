@@ -269,9 +269,11 @@ func enqueueClaimJob(ctx context.Context, db *gorm.DB, cfg ClaimScanConfig, job 
 		return fmt.Errorf("encode claim payload: %w", err)
 	}
 	row := map[string]any{
-		"job":     cfg.Job,
-		"status":  gofyclaim.StatusPending,
-		"payload": string(payload),
+		// The Go option is Job, the column is job_type.
+		// Go 侧选项是 Job，列名是 job_type。
+		"job_type": cfg.Job,
+		"status":   gofyclaim.StatusPending,
+		"payload":  string(payload),
 	}
 	if job.after > 0 {
 		row["next_run_at"] = gorm.Expr("DATE_ADD(NOW(3), INTERVAL ? MICROSECOND)", job.after.Microseconds())

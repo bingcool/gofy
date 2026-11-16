@@ -327,15 +327,17 @@ docker exec dev-rocketmq-broker sh -c 'export PATH=$PATH:/home/rocketmq/rocketmq
 mysql -h <host> -u <user> -p <database> < migrations/0005_job_task.sql
 ```
 
-列的含义：`status` 0/1/2/3 是 pending/claimed/done/dead；`owner` 与 `attempts` 是收尾时的
-围栏；`lease_until` 是租约；`next_run_at` 是到期时间（NULL 表示立刻可认领）。`idx_claim`
-不能省——认领语句按 `(job, status, next_run_at, id)` 排队，没有它会退化成全表扫描并持有
-大量行锁。每个字段都有 `COMMENT`，`SHOW FULL COLUMNS FROM job_task` 可以直接看。
+列的含义：`job_type` 标记任务类型（Go 侧选项仍叫 `Job`）；`status` 0/1/2/3 是
+pending/claimed/done/dead；`owner` 与 `attempts` 是收尾时的围栏；`lease_until` 是租约；
+`next_run_at` 是到期时间（NULL 表示立刻可认领）；`fail_resion` 由 `Fail` 写入有界的错误原因、
+`Succeed` 清空，所以 dead 行自己就说明失败原因。`idx_claim` 不能省——认领语句按
+`(job_type, status, next_run_at, id)` 排队，没有它会退化成全表扫描并持有大量行锁。每个字段
+都有 `COMMENT`，`SHOW FULL COLUMNS FROM job_task` 可以直接看。
 
-时间列用普通 `DATETIME`（秒精度），`claim` 的 `NOW(3)` 与两种精度都能正确比较；代价是短于
-一秒的租约或退避会被 MySQL 取整。`created_by` 与 `deleted_at` 是应用侧字段，`claim` 从不读写：
-`deleted_at` 非空也不会让行从 `Claim` 里消失，要软删除语义得自己给所有查询加
-`deleted_at IS NULL`。
+时间列用普通 `DATETIME`（秒精度）：`claim` 写入租约与退避时在 Go 侧向上取整到整秒，短于
+一秒的配置不会在 MySQL 写入舍入后变成立刻到期；过期比较仍用数据库时钟。`created_by` 与
+`deleted_at` 是应用侧字段，`claim` 从不读写：`deleted_at` 非空也不会让行从 `Claim` 里消失，
+要软删除语义得自己给所有查询加 `deleted_at IS NULL`。
 
 `enqueue` 是普通 `INSERT`，没有队列 API：一行 `status=0` 且 `next_run_at` 到期的记录就是
 全部入队动作。真实服务里这条 INSERT 属于创建工作的那个业务事务（建订单与建任务同一个提交），

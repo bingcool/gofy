@@ -70,7 +70,7 @@ func seed(t *testing.T, db *gorm.DB, table, job string, n int) {
 			rows = append(rows, "(?, 0, JSON_OBJECT('n', ?))")
 			args = append(args, job, i)
 		}
-		stmt := "INSERT INTO `" + table + "` (job, status, payload) VALUES " + strings.Join(rows, ",")
+		stmt := "INSERT INTO `" + table + "` (job_type, status, payload) VALUES " + strings.Join(rows, ",")
 		if err := db.Exec(stmt, args...).Error; err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -125,7 +125,7 @@ func TestIntegrationClaimIsExclusive(t *testing.T) {
 	}
 
 	var untouched int64
-	if err := db.Raw("SELECT COUNT(*) FROM `" + q.tableName() + "` WHERE job = 'other' AND status = 0").
+	if err := db.Raw("SELECT COUNT(*) FROM `" + q.tableName() + "` WHERE job_type = 'other' AND status = 0").
 		Scan(&untouched).Error; err != nil {
 		t.Fatalf("count other: %v", err)
 	}
@@ -179,6 +179,9 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 	if err := q.Fail(context.Background(), tasks[0], errors.New("boom")); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
+	if got := q.reasonOf(t, tasks[0].ID); got != "boom" {
+		t.Fatalf("fail_resion after retry = %q, want %q", got, "boom")
+	}
 
 	// The retry delay has not elapsed, so the row must stay invisible.
 	// 重试延迟未到，这一行必须仍不可见。
@@ -186,7 +189,11 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 		t.Fatalf("immediate Claim = %v, %v; want none", next, err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	// A sub-second backoff is rounded up to one whole second by ceilSeconds,
+	// because the DDL stores DATETIME (second precision). Wait past that floor.
+	// 亚秒退避会被 ceilSeconds 向上取整到一秒，因为 DDL 存的是 DATETIME（秒精度）。等待要
+	// 越过这个下限。
+	time.Sleep(2200 * time.Millisecond)
 	tasks, err = q.Claim(context.Background(), "worker-b", 1)
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("delayed Claim = %v, %v", tasks, err)
@@ -201,6 +208,9 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 	if got := q.statusOf(t, tasks[0].ID); got != StatusDead {
 		t.Fatalf("status = %d, want %d (dead)", got, StatusDead)
 	}
+	if got := q.reasonOf(t, tasks[0].ID); got != "boom again" {
+		t.Fatalf("fail_resion after dead = %q, want %q", got, "boom again")
+	}
 
 	reaped, dead, err := q.Reap(context.Background())
 	if err != nil {
@@ -208,6 +218,43 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 	}
 	if reaped != 0 || dead != 0 {
 		t.Fatalf("Reap = %d/%d, want 0/0 for a dead row", reaped, dead)
+	}
+}
+
+func TestIntegrationSucceedClearsFailureReason(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:         "orders",
+		Lease:       30 * time.Second,
+		MaxAttempts: 3,
+		Backoff:     200 * time.Millisecond,
+	})
+	seed(t, db, q.tableName(), "orders", 1)
+
+	tasks, err := q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("Claim = %v, %v", tasks, err)
+	}
+	if err := q.Fail(context.Background(), tasks[0], errors.New("transient")); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if got := q.reasonOf(t, tasks[0].ID); got != "transient" {
+		t.Fatalf("fail_resion after Fail = %q, want transient", got)
+	}
+
+	// A sub-second backoff is rounded up to one whole second by ceilSeconds,
+	// because the DDL stores DATETIME (second precision). Wait past that floor.
+	// 亚秒退避会被 ceilSeconds 向上取整到一秒，因为 DDL 存的是 DATETIME（秒精度）。等待要
+	// 越过这个下限。
+	time.Sleep(2200 * time.Millisecond)
+	tasks, err = q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("delayed Claim = %v, %v", tasks, err)
+	}
+	if err := q.Succeed(context.Background(), tasks[0]); err != nil {
+		t.Fatalf("Succeed: %v", err)
+	}
+	if got := q.reasonOf(t, tasks[0].ID); got != "" {
+		t.Fatalf("fail_resion after Succeed = %q, want empty", got)
 	}
 }
 
@@ -334,6 +381,15 @@ func (q *Queue) statusOf(t *testing.T, id uint64) int8 {
 		t.Fatalf("status query: %v", err)
 	}
 	return status
+}
+
+func (q *Queue) reasonOf(t *testing.T, id uint64) string {
+	t.Helper()
+	var reason string
+	if err := q.db.Raw("SELECT COALESCE(fail_resion, '') FROM "+q.table+" WHERE id = ?", id).Scan(&reason).Error; err != nil {
+		t.Fatalf("fail_resion query: %v", err)
+	}
+	return reason
 }
 
 func trimQuotes(quoted string) string {
