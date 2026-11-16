@@ -323,7 +323,10 @@ var detachProcess = process.Detach
 //
 // The returned release function drops the lock. Callers keep it for the life of
 // the process — on a crash the kernel releases it, which is why a stale .lock
-// file from a killed process never blocks the next start.
+// file from a killed process never blocks the next start. The file itself is
+// never removed: deleting a lock file on release lets one process hold the
+// unlinked inode while another locks a freshly created one, and both then
+// believe they own the group.
 // claimWorkerPID 让本进程成为一个 worker 分组的所有者。
 //
 // 先拿锁文件，因为它是唯一原子的部分：内核只把锁授予一个打开的文件描述，两个启动因此
@@ -331,7 +334,8 @@ var detachProcess = process.Detach
 // `worker stop` 使用的地址；锁保证"占住它"这件事是安全的。
 //
 // 返回的 release 释放锁。调用方在进程生命周期内一直持有——崩溃时内核会释放，因此被
-// 杀掉的进程留下的 .lock 文件永远不会挡住下一次启动。
+// 杀掉的进程留下的 .lock 文件永远不会挡住下一次启动。文件本身从不删除：释放时删锁文件
+// 会让一个进程锁住已删除的 inode，另一个进程锁住新建的 inode，两者都认为分组归自己。
 func (a *App) claimWorkerPID(pidPath string) (func(), error) {
 	lock, err := proclock.Acquire(pidPath + workerLockSuffix)
 	if err != nil {

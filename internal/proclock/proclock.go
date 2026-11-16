@@ -9,14 +9,27 @@
 // Scope: the lock lives on the local filesystem, so it prevents two processes
 // on the same host from owning one group. It says nothing about two pods with
 // separate filesystems — that needs replica limits or a distributed lease.
+//
+// The lock file is never removed, and that is deliberate. Deleting a lock file
+// on release is the classic unlink race: a process that already opened the old
+// inode acquires the lock on that now-nameless inode, while a later process
+// creates a fresh file and locks that one — two owners, no error. Leaving the
+// file costs zero bytes and cannot go stale, because ownership lives on the
+// open file description. A tree without the file is not a goal worth the bug;
+// point the pid file at a runtime directory instead.
 // Package proclock 保证一个 worker 分组在一台主机上只有一个所有者。
 //
 // pid 文件回答"哪个进程占了分组"，却无法原子地回答"我可以占吗"：两个启动同时读到
 // 不存在的文件、都没看到活着的 pid、然后都写入。锁补的正是这一块——内核只把锁授予
-// 一个打开的文件描述，并在进程退出时释放（包括 SIGKILL），因此不存在需要清理的残留。
+// 一个打开的文件描述，并在进程退出时释放（包括 SIGKILL），因此不存在需要清理的锁状态。
 //
 // 作用域：锁在本地文件系统上，因此它只能阻止同一主机上的两个进程占同一个分组。它管不了
 // 文件系统各自独立的两个 Pod——那需要副本数约束或分布式租约。
+//
+// 锁文件永不删除，这是刻意的。退出时删锁文件正是经典的 unlink 竞态：已经打开旧 inode 的
+// 进程会在释放后锁住这个没有名字的 inode，而之后的进程新建文件、锁住新的 inode——两个
+// 所有者并存，谁都不报错。留着文件不花空间、也不会过期，因为归属在打开的文件描述上。
+// "目录里没有这个文件"不值得用这个 bug 去换；要干净就把 pid 文件指到运行时目录。
 package proclock
 
 import (
@@ -77,9 +90,11 @@ func (l *Lock) Path() string {
 }
 
 // Close releases the lock. It is safe on a nil lock and safe to call twice, so
-// a `defer lock.Close()` covers both the acquired and the failed branch.
+// a `defer lock.Close()` covers both the acquired and the failed branch. The
+// file stays on disk on purpose — see the package comment for the race that
+// removing it would reintroduce.
 // Close 释放锁。对 nil 锁安全，重复调用也安全，因此 `defer lock.Close()` 可以同时
-// 覆盖成功与失败两条分支。
+// 覆盖成功与失败两条分支。文件按设计留在磁盘上——删除它会带回哪个竞态，见包注释。
 func (l *Lock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
