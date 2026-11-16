@@ -179,13 +179,24 @@ Runner 把身份注入 context，业务用 `worker.IdentityFrom(ctx)` 取。认�
 worker --group=order
 ├─ 建 logger / DB / telemetry / Runtime     与 HTTP 同源，不同实例
 ├─ 解析 --name / --concurrency
-├─ 写 pid 文件（同组已有进程 → ErrAlreadyRunning）
+├─ 抢 .lock 文件（同组已有进程 → ErrAlreadyRunning）
+├─ 写 pid 文件（pid 还活着 → ErrAlreadyRunning）
 ├─ 可选：启动 /healthz（先 503）
 └─ Runner.Run
    ├─ 每个 worker × concurrency 个 goroutine
    ├─ 等所有"自行上报就绪"的实例上报 → /healthz 转 200
    └─ 阻塞，直到停机信号、致命错误或全部实例退出
 ```
+
+### 进程所有权
+
+`<pid 文件>.lock` 是真正的互斥点：内核把 `flock` / `LockFileEx` 只授予一个打开的文件
+描述，进程退出（含 SIGKILL）时自动释放。pid 文件继续作为 `worker stop` 的地址，但"先检查
+再写入"之所以安全，靠的是这把锁——两个启动不会都读到"没有活着的 pid"然后都写。
+
+范围限定：锁在本地文件系统上，**只挡同一主机上的两个进程**。Kubernetes 里同一分组的两个
+Pod 各有文件系统，这把锁对它们无效；那种重复要靠副本数约束或 `support/lease` 之类的跨进程
+选举。HTTP 的 `start` 不需要它：端口绑定本身已经是互斥的。
 
 ### 就绪上报
 

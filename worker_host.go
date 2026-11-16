@@ -14,6 +14,7 @@ import (
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/internal/process"
+	"github.com/bingcool/gofy/internal/proclock"
 	"github.com/bingcool/gofy/support/worker"
 	"go.uber.org/zap"
 )
@@ -127,12 +128,11 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	}
 
 	if pidPath != "" {
-		if existing, readErr := pidfile.Read(pidPath); readErr == nil && process.Alive(existing) {
-			return a.abort(fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath))
-		}
-		if err := pidfile.Write(pidPath, os.Getpid(), a.opts.pidPerm); err != nil {
+		release, err := a.claimWorkerPID(pidPath)
+		if err != nil {
 			return a.abort(err)
 		}
+		defer release()
 		a.pidPath = pidPath
 		a.startPIDRefresh(lg)
 	}
@@ -312,6 +312,53 @@ func workerPIDGroup(groups []*worker.Group) string {
 // detachProcess 把 process.Detach 放进变量：测试因此能在不真正拉起子进程的情况下检查
 // 交给子进程的 argv。
 var detachProcess = process.Detach
+
+// claimWorkerPID makes this process the owner of one worker group.
+//
+// The lock file comes first, because it is the only atomic part: the kernel
+// grants it to one open file description, so two starts can no longer both read
+// an absent pid file, both see no live process and both write. The pid file
+// stays as the address `worker stop` uses; the lock is what makes claiming it
+// safe.
+//
+// The returned release function drops the lock. Callers keep it for the life of
+// the process — on a crash the kernel releases it, which is why a stale .lock
+// file from a killed process never blocks the next start.
+// claimWorkerPID 让本进程成为一个 worker 分组的所有者。
+//
+// 先拿锁文件，因为它是唯一原子的部分：内核只把锁授予一个打开的文件描述，两个启动因此
+// 不再可能都读到不存在的 pid 文件、都没看到活着的进程、然后都写入。pid 文件仍然是
+// `worker stop` 使用的地址；锁保证"占住它"这件事是安全的。
+//
+// 返回的 release 释放锁。调用方在进程生命周期内一直持有——崩溃时内核会释放，因此被
+// 杀掉的进程留下的 .lock 文件永远不会挡住下一次启动。
+func (a *App) claimWorkerPID(pidPath string) (func(), error) {
+	lock, err := proclock.Acquire(pidPath + workerLockSuffix)
+	if err != nil {
+		if errors.Is(err, proclock.ErrHeld) {
+			return nil, fmt.Errorf("%w: %s", ErrAlreadyRunning, pidPath)
+		}
+		return nil, fmt.Errorf("gofy: %w", err)
+	}
+	release := func() { _ = lock.Close() }
+
+	if existing, readErr := pidfile.Read(pidPath); readErr == nil && process.Alive(existing) {
+		release()
+		return nil, fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing, pidPath)
+	}
+	if err := pidfile.Write(pidPath, os.Getpid(), a.opts.pidPerm); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+const (
+	// workerLockSuffix keeps the lock next to its pid file: same directory,
+	// same group, one owner.
+	// workerLockSuffix 把锁放在它的 pid 文件旁边：同一目录、同一分组、一个所有者。
+	workerLockSuffix = ".lock"
+)
 
 func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts commandline.WorkerOptions) error {
 	if runtime.GOOS == "windows" {

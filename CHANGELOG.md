@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy` worker mode: two processes on the same host can no longer own one
+  group. The startup path read the pid file, checked the pid and wrote its own —
+  a check-then-write window in which two starts both saw "no live process" and
+  both went on to consume. Ownership is now claimed through a
+  `<pid file>.lock` file (`flock` on Unix, `LockFileEx` on Windows), which the
+  kernel grants to one process and releases on exit, SIGKILL included. The pid
+  file keeps its job as the address `worker stop` uses.
+  Scope is one host: the lock sits on the local filesystem, so two pods with
+  separate filesystems still need a replica limit or a distributed lease.
 - `support/kafka`, `support/amqp`, `support/rocketmq`, `support/queues`: each
   `ConsumeOptions` gains `OnReady`, fired once when the subscription is really
   usable — the first clean poll (Kafka), after the topology is declared and the

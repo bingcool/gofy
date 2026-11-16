@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/internal/commandline"
+	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/support/worker"
 	"go.uber.org/zap"
 )
@@ -524,5 +525,74 @@ func TestDaemonizeWorkerStartsTheWorkerCommand(t *testing.T) {
 		if strings.Contains(arg, "restart") {
 			t.Fatalf("child argv carries %q: the detached child must start the group, not repeat the restart", arg)
 		}
+	}
+}
+
+// TestClaimWorkerPIDIsExclusive pins the fix for the check-then-write race: a
+// second claim of the same group must fail while the first holds it, even
+// inside one process, because the pid file alone cannot express "mine".
+// TestClaimWorkerPIDIsExclusive 固定"先检查再写入"竞态的修复：第一个声明还持有时，
+// 同一分组的第二次声明必须失败——即使在同一进程内，因为仅凭 pid 文件无法表达"归我"。
+func TestClaimWorkerPIDIsExclusive(t *testing.T) {
+	app, err := New(WithName("lock-test"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pidPath := filepath.Join(t.TempDir(), "demo-worker-order.pid")
+
+	release, err := app.claimWorkerPID(pidPath)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+
+	if _, err := app.claimWorkerPID(pidPath); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second claim = %v, want ErrAlreadyRunning", err)
+	}
+
+	// The pid file still names this live process, so a restart is simulated the
+	// way it actually looks: the old process is gone and its pid is stale.
+	// pid 文件里仍写着当前这个活着的进程，因此按真实重启的样子模拟：旧进程已消失，它
+	// 留下的 pid 是陈旧的。
+	release()
+	if err := os.WriteFile(pidPath, []byte("0"), 0o644); err != nil {
+		t.Fatalf("rewrite pid file: %v", err)
+	}
+	releaseAgain, err := app.claimWorkerPID(pidPath)
+	if err != nil {
+		t.Fatalf("claim after release: %v", err)
+	}
+	releaseAgain()
+}
+
+// TestClaimWorkerPIDOverwritesAStaleFile keeps the crash path working: a pid
+// file whose process is gone must not block the next start, and neither must
+// the lock file left behind.
+// TestClaimWorkerPIDOverwritesAStaleFile 保证崩溃路径可用：进程已不存在的 pid 文件
+// 不能挡住下一次启动，残留的锁文件同样不能。
+func TestClaimWorkerPIDOverwritesAStaleFile(t *testing.T) {
+	app, err := New(WithName("lock-test"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pidPath := filepath.Join(t.TempDir(), "demo-worker-order.pid")
+	// A pid that cannot be alive: 0 is rejected by the kernel for signals and
+	// process.Alive reports false for it.
+	// 一个不可能活着的 pid：内核拒绝向 0 发信号，process.Alive 对它返回 false。
+	if err := os.WriteFile(pidPath, []byte("0"), 0o644); err != nil {
+		t.Fatalf("write stale pid: %v", err)
+	}
+
+	release, err := app.claimWorkerPID(pidPath)
+	if err != nil {
+		t.Fatalf("claim over stale pid file: %v", err)
+	}
+	release()
+
+	written, err := pidfile.Read(pidPath)
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	if written != os.Getpid() {
+		t.Fatalf("pid file = %d, want %d", written, os.Getpid())
 	}
 }

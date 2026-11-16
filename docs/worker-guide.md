@@ -332,6 +332,8 @@ spec:
   `worker.ReadyReporter`）。
 - `maxUnavailable: 0` 让滚动更新先起新 Pod 再停旧 Pod，消费组不会出现空窗口。
 - 不要给 worker 配 liveness 探针：进程崩溃由 k8s 重启，业务卡住不该靠重启解决。
+- 同一主机上的重复启动由 `<pid 文件>.lock` 挡住（`flock`）；它**不跨 Pod**，多副本场景
+  仍要靠 `replicas` 约束或分布式租约。
 
 **停机预算**：`terminationGracePeriodSeconds` > `gofy.WithWorkerDrainTimeout` > 单次处理耗时。默认 30s > 20s，留 5s 给关连接与 flush 遥测。
 

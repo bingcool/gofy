@@ -1,6 +1,7 @@
 .env
 *.log
 *.pid
+*.lock
 .idea
 examples/demo-service/storage/
 bin/
