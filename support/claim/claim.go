@@ -142,9 +142,19 @@ type Config struct {
 	// 武装只保护排队窗口：跑过租约的 handler 仍可能在执行途中被接管并再跑一遍，所以 handler 必须
 	// 幂等。NewRunner 会拒绝 HandlerTimeout >= Lease，这是该约束中可强制的一半。
 	Lease time.Duration
-	// MaxAttempts caps how many times a row may be claimed; zero means
-	// DefaultMaxAttempts.
-	// MaxAttempts 限制一行最多被认领几次，0 表示 DefaultMaxAttempts。
+	// MaxAttempts caps how many times a row may be claimed, so it bounds the
+	// number of executions, not the number of retries: the first claim is
+	// attempt 1, and MaxAttempts=1 means the row runs at most once — and
+	// possibly zero times, because a process that dies right after claiming
+	// leaves attempts at 1, so Reap parks the row as dead without the handler
+	// ever running. Failed attempts and takeovers after an expired lease share
+	// this budget; a row with rerun_allowed=0 is capped at one execution
+	// regardless of this value. Zero means DefaultMaxAttempts.
+	// MaxAttempts 限制一行最多被认领几次，因此它限制的是执行次数而不是重试次数：第一次认领
+	// 就是 attempts=1，MaxAttempts=1 表示这行最多执行一次——也可能零次：认领后进程立刻崩溃时
+	// attempts 已经是 1，Reap 会在 handler 从未运行的情况下把行置为 dead。失败重试与租约过期
+	// 后的接管共用这份预算；rerun_allowed=0 的行无论这里配多大都只执行一次。0 表示
+	// DefaultMaxAttempts。
 	MaxAttempts int
 	// Backoff is the first retry delay after a failure; zero means
 	// DefaultBackoff.
@@ -239,24 +249,26 @@ func ceilSeconds(d time.Duration) int64 {
 // Queue claims rows of one job from one table.
 // Queue 从一张表里认领一个 job 的行。
 type Queue struct {
-	db          *gorm.DB
-	job         string
-	table       string
-	batch       int
-	lease       time.Duration
-	maxAttempts int
-	backoff     time.Duration
-	maxBackoff  time.Duration
-	hooks       Hooks
-	selectSQL   string
-	updateSQL   string
-	extendSQL   string
-	ownsSQL     string
-	succeedSQL  string
-	failSQL     string
-	deadSQL     string
-	reapSQL     string
-	reapDeadSQL string
+	db             *gorm.DB
+	job            string
+	table          string
+	batch          int
+	lease          time.Duration
+	maxAttempts    int
+	backoff        time.Duration
+	maxBackoff     time.Duration
+	hooks          Hooks
+	selectSQL      string
+	updateSQL      string
+	extendSQL      string
+	ownsSQL        string
+	succeedSQL     string
+	failSQL        string
+	deadSQL        string
+	deadNoRerunSQL string
+	reapSQL        string
+	reapDeadSQL    string
+	reapNoRerunSQL string
 }
 
 // New validates the config and builds the queue.
@@ -372,19 +384,41 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
    SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
        fail_handle_time = CURRENT_TIMESTAMP,
        next_run_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
- WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusPending, StatusClaimed)
+ WHERE id = ? AND owner = ? AND status = %d AND attempts = ? AND rerun_allowed = 1`, table, StatusPending, StatusClaimed)
 	q.deadSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
        fail_handle_time = CURRENT_TIMESTAMP
  WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusDead, StatusClaimed)
+	// A row with rerun_allowed = 0 may run once and only once. A handler error is
+	// still an execution, so it is parked rather than rescheduled. This statement
+	// runs after failSQL matched nothing: the row is still ours, it just refuses
+	// another run.
+	// rerun_allowed=0 的行只允许执行一次。handler 报错也算执行过一次，因此置为 dead
+	// 而不是重新排期。该语句在 failSQL 未命中后执行：行仍属于我们，只是拒绝再跑。
+	q.deadNoRerunSQL = fmt.Sprintf(`UPDATE %s
+   SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
+       fail_handle_time = CURRENT_TIMESTAMP
+ WHERE id = ? AND owner = ? AND status = %d AND attempts = ? AND rerun_allowed = 0`, table, StatusDead, StatusClaimed)
 	q.reapSQL = fmt.Sprintf(`UPDATE %s
    SET status = %d, owner = '', lease_until = NULL
  WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
-   AND attempts < ?`, table, StatusPending, StatusClaimed)
+   AND attempts < ? AND rerun_allowed = 1`, table, StatusPending, StatusClaimed)
 	q.reapDeadSQL = fmt.Sprintf(`UPDATE %s
-   SET status = %d, owner = '', lease_until = NULL, fail_handle_time = CURRENT_TIMESTAMP
+   SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
+       fail_handle_time = CURRENT_TIMESTAMP
  WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
-   AND attempts >= ?`, table, StatusDead, StatusClaimed)
+   AND attempts >= ? AND rerun_allowed = 1`, table, StatusDead, StatusClaimed)
+	// The other half of the expired-lease split: a row that refuses another run
+	// cannot go back to pending, so an expired lease parks it. The two reap
+	// statements are mutually exclusive through rerun_allowed, and this one does
+	// not test attempts — the cap is irrelevant for a row that never reruns.
+	// 过期租约的另一半：拒绝重跑的行不能回到待认领，租约一过期就置为 dead。两条回收语句
+	// 靠 rerun_allowed 互斥；这一条不判断 attempts——对不会重跑的行来说上限没有意义。
+	q.reapNoRerunSQL = fmt.Sprintf(`UPDATE %s
+   SET status = %d, owner = '', lease_until = NULL, fail_reason = ?,
+       fail_handle_time = CURRENT_TIMESTAMP
+ WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
+   AND rerun_allowed = 0`, table, StatusDead, StatusClaimed)
 	return q, nil
 }
 
@@ -544,12 +578,19 @@ func (q *Queue) Succeed(ctx context.Context, task Task) error {
 // Fail records an attempt and schedules a retry with exponential backoff, or
 // moves the task to the dead state once MaxAttempts is reached. It returns
 // ErrLeaseLost when the row was taken over after this claim.
+//
+// The dead return says the row was parked rather than rescheduled — either the
+// attempt cap was reached or the row carries rerun_allowed = 0. Callers use it
+// to tell "gave up" from "will try again" without a second query.
 // Fail 记录一次失败并按指数退避安排重试；达到 MaxAttempts 后转为死亡态。若该行
 // 在本次认领之后已被接管，返回 ErrLeaseLost。
-func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
+//
+// dead 返回值表示行被置死而非重新排期：要么尝试次数用尽，要么该行的 rerun_allowed=0。
+// 调用方据此区分"放弃了"和"还会再试"，不需要再查一次库。
+func (q *Queue) Fail(ctx context.Context, task Task, cause error) (dead bool, err error) {
 	owner, err := claimFields(task)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Attempts was incremented at claim time, so reaching the cap here means
 	// this failure was the last allowed try.
@@ -561,24 +602,39 @@ func (q *Queue) Fail(ctx context.Context, task Task, cause error) error {
 		// 失败原因落到任务行而不只是日志里，这样打开表就能知道一条 dead 行为什么失败。
 		res := q.db.WithContext(ctx).Exec(q.deadSQL, reason, task.ID, owner, task.Attempts)
 		if res.Error != nil {
-			return fmt.Errorf("claim: dead: %w", res.Error)
+			return false, fmt.Errorf("claim: dead: %w", res.Error)
 		}
 		if res.RowsAffected == 0 {
 			q.leaseLostHook()
-			return fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
+			return false, fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
 		}
-		return nil
+		return true, nil
 	}
 	delay := backoffFor(q.backoff, q.maxBackoff, task.Attempts)
 	res := q.db.WithContext(ctx).Exec(q.failSQL, reason, ceilSeconds(delay), task.ID, owner, task.Attempts)
 	if res.Error != nil {
-		return fmt.Errorf("claim: fail: %w", res.Error)
+		return false, fmt.Errorf("claim: fail: %w", res.Error)
 	}
-	if res.RowsAffected == 0 {
-		q.leaseLostHook()
-		return fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
+	if res.RowsAffected > 0 {
+		return false, nil
 	}
-	return nil
+	// failSQL matched nothing for one of two reasons, and they need opposite
+	// answers: the row refuses another run (rerun_allowed = 0), or it is no
+	// longer ours. Park it in the first case; report ErrLeaseLost in the second.
+	// The no-rerun statement carries the same owner/status/attempts fence, so it
+	// can only match while the row is still ours.
+	// failSQL 未命中只有两种可能，而它们要用相反的方式处理：行拒绝再跑（rerun_allowed=0），
+	// 或行已不属于我们。前者置死，后者报 ErrLeaseLost。该语句带同样的 owner/status/attempts
+	// 围栏，因此只有行仍属于我们时才会命中。
+	res = q.db.WithContext(ctx).Exec(q.deadNoRerunSQL, reason, task.ID, owner, task.Attempts)
+	if res.Error != nil {
+		return false, fmt.Errorf("claim: dead (no rerun): %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		return true, nil
+	}
+	q.leaseLostHook()
+	return false, fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
 }
 
 // failureReason stores a bounded cause in the task row. A TEXT column could
@@ -598,6 +654,16 @@ func failureReason(cause error) string {
 	return string(runes)
 }
 
+// Reasons Reap writes on rows it parks. A dead row that only says "lease
+// expired" cannot tell an operator whether the task failed or simply never got
+// a second chance, and the two need different follow-up.
+// Reap 置死时写入的原因。只写"租约过期"分不清是任务真失败还是根本没拿到第二次机会，
+// 而这两种情况的人工处理方式不同。
+const (
+	reasonAttemptsExhausted = "attempts exhausted after the lease expired"
+	reasonNoRerun           = "lease expired and rerun_allowed = 0"
+)
+
 // claimFields validates the fencing pair a completion needs.
 // claimFields 校验收尾所需的围栏组合。
 func claimFields(task Task) (string, error) {
@@ -614,8 +680,15 @@ func claimFields(task Task) (string, error) {
 // Reap returns expired leases to the pending state and moves exhausted rows to
 // the dead state. It is safe to call from every replica: the UPDATE only
 // touches rows whose lease already expired.
+//
+// Rows with rerun_allowed = 0 never go back to pending: an expired lease parks
+// them as dead instead, because nobody may run them a second time. That is the
+// at-most-once half of the switch — see DDL.
 // Reap 把租约过期的任务放回待处理态，并把重试耗尽的转为死亡态。每个副本都可以
 // 调用：UPDATE 只影响租约确已过期的行。
+//
+// rerun_allowed=0 的行不会回到待认领：租约过期直接置为 dead，因为不允许任何人再跑第二遍。
+// 这是该开关 at-most-once 的那一半——见 DDL。
 func (q *Queue) Reap(ctx context.Context) (reaped, dead int64, err error) {
 	res := q.db.WithContext(ctx).Exec(q.reapSQL, q.job, q.maxAttempts)
 	if res.Error != nil {
@@ -623,11 +696,18 @@ func (q *Queue) Reap(ctx context.Context) (reaped, dead int64, err error) {
 	}
 	reaped = res.RowsAffected
 
-	res = q.db.WithContext(ctx).Exec(q.reapDeadSQL, q.job, q.maxAttempts)
+	res = q.db.WithContext(ctx).Exec(q.reapDeadSQL, reasonAttemptsExhausted, q.job, q.maxAttempts)
 	if res.Error != nil {
 		return reaped, 0, fmt.Errorf("claim: reap dead: %w", res.Error)
 	}
 	dead = res.RowsAffected
+
+	res = q.db.WithContext(ctx).Exec(q.reapNoRerunSQL, reasonNoRerun, q.job)
+	if res.Error != nil {
+		return reaped, dead, fmt.Errorf("claim: reap no-rerun: %w", res.Error)
+	}
+	dead += res.RowsAffected
+
 	if q.hooks.OnReap != nil {
 		q.hooks.OnReap(q.job, reaped, dead)
 	}
@@ -660,6 +740,15 @@ func (q *Queue) leaseLostHook() {
 // finish_handle_time stamp the transition into status 1 and 2. fail_handle_time
 // stamps every failure, including a retryable one that returns the row to
 // pending (status 0) — it is the last time the row failed, not a status marker.
+//
+// rerun_allowed is the business-side switch between at-least-once and
+// at-most-once, per row. It defaults to 1: a failed or abandoned row may be
+// claimed again. Set it to 0 for work that must never execute twice — claim then
+// refuses to reschedule it. A handler error parks the row as dead instead of
+// backing off, and an expired lease parks it instead of returning it to pending.
+// The row can still be claimed once more if it was already pending, so set the
+// column when the row is inserted, not after the first handler starts. claim
+// reads the column and never writes it.
 // DDL 返回查询所依赖的表结构，包含防止 SKIP LOCKED 退化为全表扫描的索引。表名与
 // New 走同一套标识符校验。
 //
@@ -670,6 +759,12 @@ func (q *Queue) leaseLostHook() {
 // deleted_at 是应用侧字段：claim 从不读写，没有这两列的表照样能用；deleted_at 非空也不会让
 // Claim 跳过该行。fail_reason 不同：Fail 会写入有界的错误原因，Succeed 会清空，因此 dead 行
 // 本身就带着失败原因。
+//
+// rerun_allowed 是业务侧的逐行开关，在 at-least-once 与 at-most-once 之间选择。默认 1：
+// 失败或被放弃的行可以被再次认领。对绝不能执行两次的活设为 0——claim 就不再重新排期它：
+// handler 报错直接置 dead 而不是退避重试，租约过期直接置 dead 而不是放回待认领。仍在待认领
+// 状态的行还是可能被认领一次，因此要在插入时就设好这一列，而不是等 handler 跑起来再改。
+// claim 只读这一列，从不写它。
 func DDL(table string) (string, error) {
 	quoted, err := quoteTable(strings.TrimSpace(table))
 	if err != nil {
@@ -683,6 +778,7 @@ func DDL(table string) (string, error) {
   lease_until DATETIME     NULL COMMENT '租约到期时间',
   attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
   next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
+  rerun_allowed TINYINT    NOT NULL DEFAULT 1 COMMENT '是否允许被再次消费：1允许(失败重试/租约过期后可被重跑)，0只执行一次(失败或租约过期直接转3)',
   payload     JSON         NULL COMMENT '任务载荷',
   fail_reason TEXT         NULL DEFAULT NULL COMMENT '失败原因',
   start_handle_time  DATETIME NULL DEFAULT NULL COMMENT '状态改为1(已认领进行中)的时间',

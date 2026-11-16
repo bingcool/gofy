@@ -335,7 +335,8 @@ mysql -h <host> -u <user> -p <database> < migrations/0005_job_task.sql
 
 列的含义：`job_type` 标记任务类型（Go 侧选项仍叫 `Job`）；`status` 0/1/2/3 是
 pending/claimed/done/dead；`owner` 与 `attempts` 是收尾时的围栏；`lease_until` 是租约；
-`next_run_at` 是到期时间（NULL 表示立刻可认领）；`fail_reason` 由 `Fail` 写入有界的错误原因、
+`next_run_at` 是到期时间（NULL 表示立刻可认领）；`rerun_allowed` 默认 1，置 0 表示这行只允许
+执行一次（见下文"只跑一次"）；`fail_reason` 由 `Fail` 写入有界的错误原因、
 `Succeed` 清空，所以 dead 行自己就说明失败原因。三个处理时间列：`start_handle_time` 由 `Claim`
 写（进入 status 1）、`finish_handle_time` 由 `Succeed` 写（进入 status 2）、`fail_handle_time`
 在**每次失败**时写——包括退避重试回到 pending（status 0），以及 `Fail` 走到 dead 或 `Reap`
@@ -386,6 +387,24 @@ return runner.Run(worker.DrainContext(ctx), id.Owner())
 `ErrBatchTooLarge`，不会静默截断。一个实例是串行处理整批的，加大批次既不会提高吞吐，又会拉长
 尾部排队、让单实例同时租住更多行；要更并行请加 worker 并发。样例显式配成 3，是为了让两个实例
 都能分到行。
+
+**业务必须保证幂等——这一层框架替不了。** claim 提供的是 at-least-once，不是 exactly-once：
+上面那些 CAS 和续租保证的是"同一时刻只有一个 worker 在处理这一行"，但保证不了"这行只被处理一次"。
+最有代表性的场景是 handler 已经做完副作用、还没来得及写 `Succeed` 时进程崩溃：这一行一直停在
+`status=1`，租约到期后被别的 worker 回收重跑。这是**先后重复，不是同时重复**，围栏挡不住——数据库
+无从知道那次外部副作用到底发生了没有。失败重试同理：行被置回 pending 后，下一个拿到它的可能已经
+不是原来那个 worker。所以同一行确实**有可能被重复消费处理**，业务层面必须幂等：用 payload 里的
+业务单号做唯一键或 upsert，或者按 `Result.RowID` / 业务单号写一张幂等台账，再执行真正的副作用。
+非幂等的活（比如无条件发消息、无唯一键的累加）不要直接放进 claim handler。
+
+如果某类任务确实无法幂等、又绝不能执行两次，表里的 `rerun_allowed` 是逐行开关（默认 1）。
+插入时置 0，这一行就只允许执行一次：handler 报错不再退避重试，直接转 `status=3`；租约过期也直接
+转 3，不会回到待认领被别的 worker 重跑。代价同样明确——k8s 里 OOM、滚动发布、节点回收都会让执行中
+的进程消失，这些行只能进 dead 等人工核对，dead 队列会比允许重跑时更长。所以它是"宁可漏、不可重"
+的显式选择，不是幂等的替代品；能用业务单号做唯一约束的，优先做幂等。两种 dead 的原因可区分：
+次数用尽写 `attempts exhausted after the lease expired`，开关关闭写
+`lease expired and rerun_allowed = 0`。注意开关要在插入时就写好，已经在待认领状态的行仍然会被
+认领一次——claim 只读这一列，不会替业务改。
 
 `enqueue` 是普通 `INSERT`，没有队列 API：一行 `status=0` 且 `next_run_at` 到期的记录就是
 全部入队动作。真实服务里这条 INSERT 属于创建工作的那个业务事务（建订单与建任务同一个提交），

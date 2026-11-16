@@ -263,6 +263,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/claim`: a per-row `rerun_allowed` TINYINT column (default 1) switches
+  a task between at-least-once and at-most-once. With 0, claim refuses to
+  reschedule the row: a handler error parks it as dead instead of backing off,
+  and an expired lease parks it instead of returning it to pending. Claim only
+  reads the column; the business sets it when inserting. Both at-most-once dead
+  paths write their own `fail_reason` so a parked row says whether it ran out of
+  attempts or was simply forbidden a second run. `Fail` now returns whether the
+  row was parked, since the attempt count alone cannot tell Runner that a
+  no-rerun row died on its first failure.
 - `examples/demo-service`: `group1` gains a working claim queue. A migration
   (`migrations/0005_job_task.sql`) declares `job_task` in the shape
   `support/claim` expects, `order-settle-producer` enqueues a batch of rows in one

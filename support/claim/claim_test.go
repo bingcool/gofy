@@ -91,7 +91,7 @@ func TestClaimRequiresOwner(t *testing.T) {
 	if err := q.Succeed(context.Background(), Task{}); !errors.Is(err, ErrOwnerRequired) {
 		t.Fatalf("Succeed error = %v, want ErrOwnerRequired", err)
 	}
-	if err := q.Fail(context.Background(), Task{}, nil); !errors.Is(err, ErrOwnerRequired) {
+	if _, err := q.Fail(context.Background(), Task{}, nil); !errors.Is(err, ErrOwnerRequired) {
 		t.Fatalf("Fail error = %v, want ErrOwnerRequired", err)
 	}
 }
@@ -107,6 +107,7 @@ func TestDDLQuotesTableAndAddsClaimIndex(t *testing.T) {
 		"ENGINE=InnoDB",
 		"job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型'",
 		"fail_reason TEXT         NULL DEFAULT NULL COMMENT '失败原因'",
+		"rerun_allowed TINYINT    NOT NULL DEFAULT 1 COMMENT '是否允许被再次消费：1允许(失败重试/租约过期后可被重跑)，0只执行一次(失败或租约过期直接转3)'",
 		"start_handle_time  DATETIME NULL DEFAULT NULL COMMENT '状态改为1(已认领进行中)的时间'",
 		"finish_handle_time DATETIME NULL DEFAULT NULL COMMENT '状态改为2(已完成)的时间'",
 		"fail_handle_time   DATETIME NULL DEFAULT NULL COMMENT '最近一次失败时间'",
@@ -240,6 +241,64 @@ func TestSQLUsesSkipLockedAndGuards(t *testing.T) {
 // extend a row it no longer owns and still run its side effects.
 // TestExtendIsFencedByOwnerStatusAndAttempts 守住 P1 修复：续租必须是 CAS，否则行被回收后过期
 // handler 仍能给它续租、继续执行副作用。
+// TestRerunAllowedSplitsTheQueue guards the at-most-once switch: a row with
+// rerun_allowed = 0 must never be rescheduled. Both write paths — a retryable
+// Fail and an expired lease — have to park it instead, and the two reap
+// statements must stay mutually exclusive on that column.
+// TestRerunAllowedSplitsTheQueue 守住 at-most-once 开关：rerun_allowed=0 的行绝不能被重新
+// 排期。两条写入路径——可重试的 Fail 与过期租约——都必须改为置死，且两条回收语句要在该列上
+// 互斥。
+func TestRerunAllowedSplitsTheQueue(t *testing.T) {
+	q, err := New(new(gorm.DB), Config{Table: "job_task", Job: "order"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for name, sql := range map[string]string{
+		"fail":      q.failSQL,
+		"reap":      q.reapSQL,
+		"reap dead": q.reapDeadSQL,
+	} {
+		if !strings.Contains(sql, "rerun_allowed = 1") {
+			t.Fatalf("%sSQL must refuse rows that forbid a rerun: %s", name, sql)
+		}
+	}
+	for name, sql := range map[string]string{
+		"dead no rerun": q.deadNoRerunSQL,
+		"reap no rerun": q.reapNoRerunSQL,
+	} {
+		if !strings.Contains(sql, "rerun_allowed = 0") {
+			t.Fatalf("%sSQL must target only rows that forbid a rerun: %s", name, sql)
+		}
+	}
+	// The no-rerun statements are the fallback after the normal one matched
+	// nothing, so they write a reason. deadNoRerun needs the full per-claim
+	// fence; reapNoRerun deliberately skips attempts — a row that never reruns
+	// has no meaningful attempt count, and the reap statements are already split
+	// on rerun_allowed.
+	// 两条 no-rerun 语句都是正常语句未命中后的兜底，因此都要写原因。deadNoRerun 需要完整的
+	// 每次认领围栏；reapNoRerun 刻意不判断 attempts——不会重跑的行没有有意义的尝试次数，而且
+	// 两条回收语句已经按 rerun_allowed 分流了。
+	if !strings.Contains(q.deadNoRerunSQL, "status = 1 AND attempts = ?") ||
+		!strings.Contains(q.deadNoRerunSQL, "fail_reason = ?") {
+		t.Fatalf("deadNoRerunSQL lacks the fence or the reason: %s", q.deadNoRerunSQL)
+	}
+	if !strings.Contains(q.reapNoRerunSQL, "status = 1") ||
+		!strings.Contains(q.reapNoRerunSQL, "fail_reason = ?") {
+		t.Fatalf("reapNoRerunSQL lacks the status filter or the reason: %s", q.reapNoRerunSQL)
+	}
+	if strings.Contains(q.reapNoRerunSQL, "attempts") {
+		t.Fatalf("reapNoRerunSQL must not filter on attempts: %s", q.reapNoRerunSQL)
+	}
+	// Reap must not park a no-rerun row twice: the attempts-based statement only
+	// takes rows that allow a rerun.
+	if !strings.Contains(q.reapDeadSQL, "attempts >= ?") {
+		t.Fatalf("reapDeadSQL lacks the attempts cap: %s", q.reapDeadSQL)
+	}
+	if strings.Contains(q.reapDeadSQL, "rerun_allowed = 0") {
+		t.Fatalf("reapDeadSQL and reapNoRerunSQL overlap: %s", q.reapDeadSQL)
+	}
+}
+
 func TestExtendIsFencedByOwnerStatusAndAttempts(t *testing.T) {
 	q, err := New(new(gorm.DB), Config{Table: "job_task", Job: "order"})
 	if err != nil {
@@ -269,7 +328,7 @@ func TestCompletionRequiresFencingPair(t *testing.T) {
 	if err := q.Succeed(context.Background(), task); !errors.Is(err, ErrInvalidTask) {
 		t.Fatalf("Succeed without attempts = %v, want ErrInvalidTask", err)
 	}
-	if err := q.Fail(context.Background(), task, errors.New("boom")); !errors.Is(err, ErrInvalidTask) {
+	if _, err := q.Fail(context.Background(), task, errors.New("boom")); !errors.Is(err, ErrInvalidTask) {
 		t.Fatalf("Fail without attempts = %v, want ErrInvalidTask", err)
 	}
 	if err := q.Succeed(context.Background(), Task{ID: 7, Attempts: 1}); !errors.Is(err, ErrOwnerRequired) {

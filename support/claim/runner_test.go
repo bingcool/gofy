@@ -29,8 +29,11 @@ func TestNewRunnerAppliesDefaultsAndKeepsConfig(t *testing.T) {
 	if r.handlerTimeout != DefaultHandlerTimeout {
 		t.Fatalf("handlerTimeout = %v, want %v", r.handlerTimeout, DefaultHandlerTimeout)
 	}
-	if r.maxAttempts != DefaultMaxAttempts {
-		t.Fatalf("maxAttempts = %d, want %d", r.maxAttempts, DefaultMaxAttempts)
+	// Attempts live on the queue now: Fail reports whether it parked the row, so
+	// Runner no longer keeps its own copy of the cap.
+	// 尝试次数只留在队列上：Fail 会告诉调用方是否置死，Runner 不再自己存一份上限。
+	if got := r.queue.MaxAttempts(); got != DefaultMaxAttempts {
+		t.Fatalf("queue maxAttempts = %d, want %d", got, DefaultMaxAttempts)
 	}
 	if r.queue.Job() != "order" {
 		t.Fatalf("queue job = %q, want order", r.queue.Job())

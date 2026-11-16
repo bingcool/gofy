@@ -663,6 +663,7 @@ CREATE TABLE job_task (
   lease_until DATETIME(3)  NULL,                  -- 处理中租约到期时间
   attempts    INT          NOT NULL DEFAULT 0,
   next_run_at DATETIME(3)  NULL,                  -- 失败退避后的可再执行时间
+  rerun_allowed TINYINT    NOT NULL DEFAULT 1,    -- 0 = 只执行一次，失败或租约过期直接转 3
   payload     JSON         NULL,
   created_at  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
@@ -686,6 +687,8 @@ CREATE TABLE job_task (
 ```
 
 - 只有 `1` 能被 `succeed` 或 `reap` 推进，其它转换一律拒绝（CAS 的 `WHERE` 条件保证）。
+- `reap` 只把 `rerun_allowed = 1` 且未到上限的行放回 `0`；该列为 `0` 的行（只允许执行一次）
+  失败或租约过期都直接进 `3`，不再被任何 worker 重跑。
 - `2/3` 是终态；重跑需要人工重置，避免"自动复活"掩盖 bug。
 
 ### 7.3 抢占 SQL（MySQL 8）

@@ -80,6 +80,15 @@ var (
 // handler must pass ctx through to its DB, HTTP, Redis and downstream calls;
 // rebuilding with context.Background cancels nothing and can outlive the lease.
 //
+// A row may be handled more than once. If the process dies after the handler
+// produced its side effects but before Succeed commits, the lease eventually
+// expires, another worker reaps the row and runs the same handler again — a
+// sequential repeat, not a concurrent one. Claiming and fencing cannot prevent
+// it: the database has no way to know whether an external side effect already
+// happened. Make the handler idempotent — a unique key or upsert on the
+// business id from the payload, or an idempotency ledger keyed by Result.RowID.
+// Do not put non-idempotent work in a claim handler.
+//
 // Handler 处理一条已认领的行。
 //
 // data 是该行的原始 payload，由业务自行解码。当本轮没有到期任务时，Run 会用 data == nil
@@ -96,6 +105,11 @@ var (
 //
 // ctx 携带的是协作式 deadline（HandlerTimeout），不是强制终止。handler 必须把 ctx 透传到它的
 // DB、HTTP、Redis 和下游调用；用 context.Background 重建等于取消了超时，还可能活过租约。
+//
+// 同一行可能被处理多次：handler 已经产生副作用、但 Succeed 还没提交时进程崩溃，租约到期后别的
+// worker 会回收并重跑这一行——这是先后重复，不是同时重复。认领与围栏挡不住，因为数据库无从知道
+// 外部副作用是否已经发生。handler 必须幂等：用 payload 里的业务单号做唯一键或 upsert，或用
+// Result.RowID 做幂等台账。非幂等的活不要放进 claim handler。
 type Handler func(ctx context.Context, data []byte) (taskID uint64, err error)
 
 // Result is the full context handed to the success and failure hooks. It carries
@@ -122,9 +136,11 @@ type Result struct {
 	// Err is the handler error; nil on the success path.
 	// Err 是 handler 的错误；成功路径上为 nil。
 	Err error
-	// Dead is true when a failed handler exhausted its attempts and the row was
-	// parked as dead rather than rescheduled.
-	// Dead 表示失败的 handler 已用尽尝试次数、行被置为 dead 而非重新排期。
+	// Dead is true when a failed handler parked the row as dead instead of
+	// rescheduling it: either the attempts ran out or the row carries
+	// rerun_allowed = 0 (it may run only once).
+	// Dead 表示失败的 handler 把行置为 dead 而非重新排期：要么尝试次数用尽，要么该行
+	// rerun_allowed=0（只允许执行一次）。
 	Dead bool
 	// LeaseLost is true when Succeed/Fail found the row had been taken over, so
 	// nothing was written and the side effects may have already run elsewhere.
@@ -150,8 +166,12 @@ type RunnerConfig struct {
 	// 它只取消 ctx，不会杀死忽略它的 handler。要小于 Lease。
 	HandlerTimeout time.Duration
 
-	// Handler is the only mandatory callback. A nil Handler is rejected by NewRunner.
-	// Handler 是唯一必须提供的回调；为 nil 时 NewRunner 会拒绝。
+	// Handler is the only mandatory callback; nil is rejected by NewRunner. It
+	// must be idempotent: a crash after the side effect but before Succeed
+	// commits lets another worker rerun the same row. It must also propagate ctx
+	// so the cooperative timeout can actually stop it.
+	// Handler 是唯一必须提供的回调；为 nil 时 NewRunner 会拒绝。它必须幂等：有一个worker取到后，已完成但
+	// Succeed 未提交时崩溃了，那别的worker会重跑同一行；同时必须透传 ctx，协作式超时才有效。
 	Handler Handler
 
 	// OnSuccess fires after Succeed commits. OnFailure fires after Fail commits,
@@ -171,7 +191,6 @@ type Runner struct {
 	queue          *Queue
 	handler        Handler
 	handlerTimeout time.Duration
-	maxAttempts    int
 	onSuccessHook  func(Result)
 	onFailureHook  func(Result)
 }
@@ -216,7 +235,6 @@ func NewRunner(db *gorm.DB, cfg RunnerConfig) (*Runner, error) {
 		queue:          q,
 		handler:        cfg.Handler,
 		handlerTimeout: cfg.HandlerTimeout,
-		maxAttempts:    q.maxAttempts,
 		onSuccessHook:  successHook,
 		onFailureHook:  failureHook,
 	}, nil
@@ -318,10 +336,15 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 	res.Elapsed = time.Since(started)
 
 	if handleErr != nil {
-		// Fail stores the reason and time, then retries or parks as dead. Pass the
-		// Task through unchanged: owner + attempts are the fencing pair.
-		// Fail 写原因与时间，然后重试或置 dead。Task 原样传下去：owner + attempts 是围栏。
-		failErr := r.queue.Fail(ctx, task, handleErr)
+		// Fail stores the reason and time, then retries or parks as dead — either
+		// because the attempt cap is reached or because the row refuses another
+		// run. Its dead return is the only correct answer here; the attempt count
+		// alone cannot see rerun_allowed. Pass the Task through unchanged:
+		// owner + attempts are the fencing pair.
+		// Fail 写原因与时间，然后重试或置 dead——要么尝试次数用尽，要么该行拒绝再跑。它的
+		// dead 返回值才是这里唯一正确的答案：只看尝试次数看不出 rerun_allowed。Task 原样
+		// 传下去：owner + attempts 是围栏。
+		dead, failErr := r.queue.Fail(ctx, task, handleErr)
 		if errors.Is(failErr, ErrLeaseLost) {
 			res.LeaseLost = true
 			r.onFailureHook(res)
@@ -330,7 +353,7 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 		if failErr != nil {
 			return failErr
 		}
-		res.Dead = task.Attempts >= r.maxAttempts
+		res.Dead = dead
 		r.onFailureHook(res)
 		return nil
 	}

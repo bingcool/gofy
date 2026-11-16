@@ -218,7 +218,7 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("Claim = %v, %v", tasks, err)
 	}
-	if err := q.Fail(context.Background(), tasks[0], errors.New("boom")); err != nil {
+	if _, err := q.Fail(context.Background(), tasks[0], errors.New("boom")); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 	if got := q.reasonOf(t, tasks[0].ID); got != "boom" {
@@ -247,7 +247,7 @@ func TestIntegrationFailSchedulesRetryThenDead(t *testing.T) {
 		t.Fatalf("attempts = %d, want 2", tasks[0].Attempts)
 	}
 
-	if err := q.Fail(context.Background(), tasks[0], errors.New("boom again")); err != nil {
+	if _, err := q.Fail(context.Background(), tasks[0], errors.New("boom again")); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 	if got := q.statusOf(t, tasks[0].ID); got != StatusDead {
@@ -282,7 +282,7 @@ func TestIntegrationSucceedClearsFailureReason(t *testing.T) {
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("Claim = %v, %v", tasks, err)
 	}
-	if err := q.Fail(context.Background(), tasks[0], errors.New("transient")); err != nil {
+	if _, err := q.Fail(context.Background(), tasks[0], errors.New("transient")); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 	if got := q.reasonOf(t, tasks[0].ID); got != "transient" {
@@ -340,6 +340,117 @@ func TestIntegrationReapReturnsExpiredLease(t *testing.T) {
 	}
 }
 
+// A row with rerun_allowed = 0 may run once. Its first failure is not scheduled
+// for a retry — it goes straight to dead even though attempts is far below the
+// cap, and no worker can claim it afterwards.
+// rerun_allowed=0 的行只允许跑一次。它的第一次失败不会被排期重试，而是直接置死——即使
+// attempts 远未到上限——之后也没有 worker 能再认领它。
+func TestIntegrationFailParksNoRerunRow(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:         "orders",
+		Lease:       time.Minute,
+		MaxAttempts: 3,
+	})
+	seed(t, db, q.tableName(), "orders", 1)
+
+	tasks, err := q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("Claim = %v, %v", tasks, err)
+	}
+	// Set the switch after the claim: Fail reads the column, Claim does not, so
+	// the first execution is the one that gets parked.
+	// 认领之后再打开开关：Fail 读该列而 Claim 不读，因此被置死的是这第一次执行。
+	if err := db.Exec("UPDATE `"+q.tableName()+
+		"` SET rerun_allowed = 0 WHERE id = ?", tasks[0].ID).Error; err != nil {
+		t.Fatalf("mark no-rerun: %v", err)
+	}
+
+	dead, err := q.Fail(context.Background(), tasks[0], errors.New("boom"))
+	if err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if !dead {
+		t.Fatal("Fail scheduled a retry for a row that forbids reruns")
+	}
+	if got := q.statusOf(t, tasks[0].ID); got != StatusDead {
+		t.Fatalf("status = %d, want %d", got, StatusDead)
+	}
+	if got := q.reasonOf(t, tasks[0].ID); got != "boom" {
+		t.Fatalf("fail_reason = %q, want %q", got, "boom")
+	}
+	if !q.timeOf(t, tasks[0].ID, "fail_handle_time").Valid {
+		t.Fatal("fail_handle_time not stamped")
+	}
+
+	again, err := q.Claim(context.Background(), "worker-b", 1)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("a no-rerun row was claimed again: %+v", again)
+	}
+}
+
+// Reap must split an expired batch on rerun_allowed: the row that forbids a
+// rerun is parked with its own reason, the one that allows it goes back to
+// pending and is claimable again. This is the at-most-once half of the switch.
+// Reap 必须按 rerun_allowed 拆分一批过期行：禁止重跑的行带着自己的原因被置死，允许重跑的
+// 回到待认领并可再次被认领。这是该开关 at-most-once 的那一半。
+func TestIntegrationReapParksNoRerunRow(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:         "orders",
+		Lease:       time.Minute,
+		MaxAttempts: 3,
+	})
+	seed(t, db, q.tableName(), "orders", 2)
+
+	tasks, err := q.Claim(context.Background(), "worker-a", 2)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("Claim = %v, %v", tasks, err)
+	}
+	if err := db.Exec("UPDATE `"+q.tableName()+
+		"` SET rerun_allowed = 0 WHERE id = ?", tasks[0].ID).Error; err != nil {
+		t.Fatalf("mark no-rerun: %v", err)
+	}
+	for _, task := range tasks {
+		if err := db.Exec("UPDATE `"+q.tableName()+
+			"` SET lease_until = DATE_SUB(NOW(3), INTERVAL 1 SECOND) WHERE id = ?", task.ID).Error; err != nil {
+			t.Fatalf("expire lease: %v", err)
+		}
+	}
+
+	reaped, dead, err := q.Reap(context.Background())
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if reaped != 1 || dead != 1 {
+		t.Fatalf("Reap = %d/%d, want 1/1", reaped, dead)
+	}
+	if got := q.statusOf(t, tasks[0].ID); got != StatusDead {
+		t.Fatalf("no-rerun row status = %d, want %d", got, StatusDead)
+	}
+	if got := q.reasonOf(t, tasks[0].ID); got != reasonNoRerun {
+		t.Fatalf("no-rerun reason = %q, want %q", got, reasonNoRerun)
+	}
+	if !q.timeOf(t, tasks[0].ID, "fail_handle_time").Valid {
+		t.Fatal("fail_handle_time not stamped on the parked row")
+	}
+	if got := q.statusOf(t, tasks[1].ID); got != StatusPending {
+		t.Fatalf("rerun-allowed row status = %d, want %d", got, StatusPending)
+	}
+
+	again, err := q.Claim(context.Background(), "worker-b", 2)
+	if err != nil {
+		t.Fatalf("Claim after reap: %v", err)
+	}
+	if len(again) != 1 || again[0].ID != tasks[1].ID {
+		t.Fatalf("Claim after reap = %+v, want only row %d", again, tasks[1].ID)
+	}
+	if again[0].Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", again[0].Attempts)
+	}
+}
+
 func TestIntegrationReapDeadStampsFailTime(t *testing.T) {
 	q, db := newIntegrationQueue(t, Config{
 		Job:         "orders",
@@ -390,7 +501,7 @@ func TestIntegrationFailAfterLeaseLost(t *testing.T) {
 		"` SET owner = 'worker-b', attempts = 2 WHERE id = ?", tasks[0].ID).Error; err != nil {
 		t.Fatalf("steal row: %v", err)
 	}
-	if err := q.Fail(context.Background(), tasks[0], errors.New("late")); !errors.Is(err, ErrLeaseLost) {
+	if _, err := q.Fail(context.Background(), tasks[0], errors.New("late")); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("Fail error = %v, want ErrLeaseLost", err)
 	}
 }
@@ -440,7 +551,7 @@ func TestIntegrationStaleClaimOfSameOwnerCannotWriteBack(t *testing.T) {
 	if err := q.Succeed(context.Background(), first[0]); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale Succeed = %v, want ErrLeaseLost", err)
 	}
-	if err := q.Fail(context.Background(), first[0], errors.New("late")); !errors.Is(err, ErrLeaseLost) {
+	if _, err := q.Fail(context.Background(), first[0], errors.New("late")); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale Fail = %v, want ErrLeaseLost", err)
 	}
 	if got := q.statusOf(t, first[0].ID); got != StatusClaimed {

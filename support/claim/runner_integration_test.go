@@ -314,6 +314,51 @@ func TestIntegrationRunnerDeadPathSetsDeadFlag(t *testing.T) {
 	}
 }
 
+// A no-rerun row is parked on its first failure even though the attempt cap is
+// far away. Before Fail returned its own outcome, Runner derived Dead from
+// attempts and would have reported a retry for a row that was already dead.
+// 禁止重跑的行在第一次失败时就置死，尽管离尝试上限还很远。在 Fail 自己返回结果之前，
+// Runner 靠 attempts 推导 Dead，会把一条实际已死的行报成"已安排重试"。
+func TestIntegrationRunnerNoRerunRowParksOnFirstFailure(t *testing.T) {
+	var got Result
+	r, db := newIntegrationRunner(t, RunnerConfig{
+		Config: Config{Job: "orders", Lease: time.Minute, MaxAttempts: 3, Backoff: time.Second},
+		Handler: func(context.Context, []byte) (uint64, error) {
+			return 9, errors.New("must not retry")
+		},
+		OnFailure: func(res Result) { got = res },
+	})
+	seed(t, db, r.queue.tableName(), "orders", 1)
+	if err := db.Exec("UPDATE `" + r.queue.tableName() + "` SET rerun_allowed = 0").Error; err != nil {
+		t.Fatalf("mark no-rerun: %v", err)
+	}
+
+	if err := r.Run(context.Background(), "worker-a"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !got.Dead {
+		t.Fatal("OnFailure did not set Dead for a no-rerun row")
+	}
+	if got.Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", got.Attempts)
+	}
+	if status := r.queue.statusOf(t, got.RowID); status != StatusDead {
+		t.Fatalf("status = %d, want %d (dead)", status, StatusDead)
+	}
+	if reason := r.queue.reasonOf(t, got.RowID); reason != "must not retry" {
+		t.Fatalf("fail_reason = %q, want the handler error", reason)
+	}
+
+	// A second round must not pick it up again.
+	// 第二轮不能再拿到它。
+	if err := r.Run(context.Background(), "worker-b"); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if status := r.queue.statusOf(t, got.RowID); status != StatusDead {
+		t.Fatalf("row was rescheduled: status = %d", status)
+	}
+}
+
 func TestIntegrationRunnerBatchContinuesAfterOneHandlerError(t *testing.T) {
 	// One handler always fails; its bookkeeping is written but returns nil from
 	// process, so other rows in the same batch must still be settled.

@@ -10,7 +10,8 @@
 -- Fail 都写（含退避重试回 pending），Reap 判定 dead 也写。created_by / deleted_at 由应用维护，
 -- claim 从不读写它们，
 -- deleted_at 非空也不会让行从 Claim 里消失。fail_reason 由 Fail 写入、Succeed 清空，
--- 因此 dead 行本身就带着失败原因。
+-- 因此 dead 行本身就带着失败原因。rerun_allowed 默认 1，业务插入时按行设置：0 表示这行
+-- 只允许执行一次，handler 报错或租约过期都直接转 status 3，不再被任何人重跑。
 CREATE TABLE IF NOT EXISTS job_task (
     id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
     job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型',
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS job_task (
     lease_until DATETIME     NULL COMMENT '租约到期时间',
     attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
     next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
+    rerun_allowed TINYINT    NOT NULL DEFAULT 1 COMMENT '是否允许被再次消费：1允许(失败重试/租约过期后可被重跑)，0只执行一次(失败或租约过期直接转3)',
     payload     JSON         NULL COMMENT '任务载荷',
     fail_reason TEXT         NULL DEFAULT NULL COMMENT '失败原因',
     start_handle_time  DATETIME NULL DEFAULT NULL COMMENT '状态改为1(已认领进行中)的时间',
