@@ -23,7 +23,7 @@ var (
 // 简单项目只维护本地 config.yaml 时设为 false；不创建 nacos.yaml 且不设置
 // NACOS_* 环境变量时，配置本身也是禁用的，效果相同。
 // 该开关只影响配置同步，不影响 nacos.yaml 中显式开启的服务注册。
-const enableNacosSyncConfig = true
+const enableNacosSyncConfig = false
 
 func main() {
 	ctx, stop := gofy.SignalContext(context.Background())
