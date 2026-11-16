@@ -78,10 +78,20 @@ func TestDDLQuotesTableAndAddsClaimIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
-	for _, want := range []string{"CREATE TABLE IF NOT EXISTS `job_task`", "idx_claim (job, status, next_run_at, id)", "ENGINE=InnoDB"} {
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS `job_task`",
+		"idx_claim (job, status, next_run_at, id)",
+		"ENGINE=InnoDB",
+		"created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人'",
+		"deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间'",
+		"updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'",
+	} {
 		if !strings.Contains(ddl, want) {
 			t.Fatalf("DDL does not contain %q:\n%s", want, ddl)
 		}
+	}
+	if strings.Contains(ddl, "DATETIME(3)") || strings.Contains(ddl, "CURRENT_TIMESTAMP(3)") {
+		t.Fatalf("DDL still uses millisecond time columns:\n%s", ddl)
 	}
 
 	scoped, err := DDL("app.job_task")

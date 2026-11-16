@@ -483,28 +483,39 @@ func (q *Queue) leaseLostHook() {
 // DDL returns the table definition the queries expect, including the index that
 // keeps SKIP LOCKED from degenerating into a full scan. The table name goes
 // through the same identifier check as New.
+//
+// The time columns are plain DATETIME, so a lease or a backoff shorter than one
+// second is rounded to whole seconds by MySQL. Claim's SQL still uses NOW(3),
+// which compares correctly against both precisions. created_by and deleted_at
+// are application columns: claim never reads or writes them, so a table without
+// them still works. A non-NULL deleted_at does not hide a row from Claim.
 // DDL 返回查询所依赖的表结构，包含防止 SKIP LOCKED 退化为全表扫描的索引。表名与
 // New 走同一套标识符校验。
+//
+// 时间列用普通 DATETIME，因此短于一秒的租约或退避会被 MySQL 取整到秒。claim 的 SQL 仍用
+// NOW(3)，它与两种精度都能正确比较。created_by 与 deleted_at 是应用侧字段：claim 从不读写，
+// 没有这两列的表照样能用；deleted_at 非空也不会让 Claim 跳过该行。
 func DDL(table string) (string, error) {
 	quoted, err := quoteTable(strings.TrimSpace(table))
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  job         VARCHAR(64)  NOT NULL,
-  status      TINYINT      NOT NULL DEFAULT 0,
-  owner       VARCHAR(96)  NOT NULL DEFAULT '',
-  lease_until DATETIME(3)  NULL,
-  attempts    INT          NOT NULL DEFAULT 0,
-  next_run_at DATETIME(3)  NULL,
-  payload     JSON         NULL,
-  created_at  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  updated_at  DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-                           ON UPDATE CURRENT_TIMESTAMP(3),
+  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  job         VARCHAR(64)  NOT NULL COMMENT '任务类型',
+  status      TINYINT      NOT NULL DEFAULT 0 COMMENT '任务状态：0待认领 1已认领 2已完成 3死亡',
+  owner       VARCHAR(96)  NOT NULL DEFAULT '' COMMENT '当前认领者',
+  lease_until DATETIME     NULL COMMENT '租约到期时间',
+  attempts    INT          NOT NULL DEFAULT 0 COMMENT '已认领次数',
+  next_run_at DATETIME     NULL COMMENT '下次可执行时间，NULL表示立即可认领',
+  payload     JSON         NULL COMMENT '任务载荷',
+  created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人',
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间',
   PRIMARY KEY (id),
   KEY idx_claim (job, status, next_run_at, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, quoted), nil
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='认领任务表'`, quoted), nil
 }
 
 func quoteTable(table string) (string, error) {

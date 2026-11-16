@@ -139,6 +139,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `support/claim` DDL and the demo's `job_task` migration: every column now has
+  a COMMENT, `created_by` and `deleted_at` were added as application-owned
+  columns, and the time columns are plain `DATETIME` rather than `DATETIME(3)`.
+  Claim never reads or writes the two new columns — a non-NULL `deleted_at` does
+  not hide a row — and second precision rounds any lease or backoff below one
+  second, which neither the demo nor claim's defaults use.
 - `examples/demo-service`: the order consumer now enforces the state machine
   instead of only skipping a same-status write. `order.paid` may move pending to
   paid, `order.cancelled` may move pending or paid to cancelled, and no event
