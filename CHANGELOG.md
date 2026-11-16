@@ -139,6 +139,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `examples/demo-service`: the order consumer now enforces the state machine
+  instead of only skipping a same-status write. `order.paid` may move pending to
+  paid, `order.cancelled` may move pending or paid to cancelled, and no event
+  moves a cancelled order anywhere — a late `order.paid` for a cancelled order
+  used to write the status back to paid. The allowed sources live in the UPDATE
+  (`status IN (...)`), so two concurrent handlers cannot both pass a read; zero
+  rows is then split into "not created yet" (retry), "already there"
+  (idempotent), and "stale event" (acknowledged with a warn line), which
+  idempotency alone could not tell apart.
 - `examples/demo-service`: the command line is classified before any file is
   opened, so a command only reads what it needs. `version` and `--help` read
   nothing, `stop` / `worker stop` read `config.yaml` for the pid path but never

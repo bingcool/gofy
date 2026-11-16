@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
@@ -13,14 +16,41 @@ import (
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
-// orderEventStatus maps an event type to the order status it drives. Adding a
-// new lifecycle event is one line here plus the producer that emits it; the
-// consumer does not need a new worker.
-// orderEventStatus 把事件类型映射到它驱动的订单状态。新增一个生命周期事件就是
-// 这里加一行、生产者发出它；消费端不需要新增 worker。
-var orderEventStatus = map[string]orderenum.OrderStatus{
-	"order.paid":      orderenum.OrderStatusPaid,
-	"order.cancelled": orderenum.OrderStatusCancelled,
+// orderEventRule says which status an event drives and which states it may move
+// an order from. Target and sources live in one value on purpose: keeping them
+// apart lets a new event map to a target nobody can legally reach.
+//
+// Idempotency and ordering are different problems. The ledger makes a repeated
+// event harmless; it cannot stop an older event from arriving after a newer one,
+// so the source set is what keeps a cancelled order cancelled.
+// orderEventRule 说明一个事件驱动的目标状态，以及它允许从哪些状态迁移过来。目标与前置
+// 状态放在同一个值里是有意的：分开维护会让新增事件映射到一个谁也到不了的目标。
+//
+// 幂等与顺序是两个问题。台账让重复事件无害，但挡不住旧事件在新事件之后到达，因此"已取消"
+// 要靠前置状态集合来保证。
+type orderEventRule struct {
+	Target  orderenum.OrderStatus
+	Sources []orderenum.OrderStatus
+}
+
+// orderEventRules maps an event type to its transition rule. Adding a lifecycle
+// event is one line here plus the producer that emits it; the consumer does not
+// need a new worker.
+// orderEventRules 把事件类型映射到它的迁移规则。新增一个生命周期事件就是这里加一行、
+// 生产者发出它；消费端不需要新增 worker。
+var orderEventRules = map[string]orderEventRule{
+	// Pending -> Paid. Nothing else may become paid: cancelled is final, and a
+	// paid order receiving another order.paid touches zero rows.
+	// Pending -> Paid。其他状态都不能变成 paid：cancelled 是终态，已支付的订单再收到
+	// order.paid 也不会改任何行。
+	"order.paid": {Target: orderenum.OrderStatusPaid, Sources: []orderenum.OrderStatus{orderenum.OrderStatusPending}},
+	// Pending/Paid -> Cancelled. A paid order may still be cancelled; cancelling
+	// twice is a no-op.
+	// Pending/Paid -> Cancelled。已支付的订单仍可取消；重复取消是无操作。
+	"order.cancelled": {
+		Target:  orderenum.OrderStatusCancelled,
+		Sources: []orderenum.OrderStatus{orderenum.OrderStatusPending, orderenum.OrderStatusPaid},
+	},
 }
 
 // orderEventPayload is the body carried by every order lifecycle event.
@@ -65,10 +95,11 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	}
 	db := rt.DB
 
-	target, ok := orderEventStatus[event.Type]
+	rule, ok := orderEventRules[event.Type]
 	if !ok {
 		return gofyconsumer.Permanent(fmt.Errorf("unsupported event type %q", event.Type))
 	}
+	target := rule.Target
 	var payload orderEventPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return gofyconsumer.Permanent(fmt.Errorf("decode payload of %s: %w", event.Type, err))
@@ -77,16 +108,18 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 		return gofyconsumer.Permanent(fmt.Errorf("%s payload: order_id is required", event.Type))
 	}
 
-	// The update is written as "set the target status where it differs", so a
-	// redelivery touches zero rows instead of writing the same value twice.
-	// Zero rows then splits into the two cases that matter: already in the
-	// target state (idempotent success) and not in the table yet (retry — the
-	// create may still be in flight).
-	// 更新写成"把与目标状态不同的行改成目标状态"，因此重复投递影响 0 行，而不是把
-	// 同一个值写两次。0 行随后分成两种要紧的情况：已是目标状态（幂等成功）与尚未
-	// 落库（重试——创建请求可能还在路上）。
+	// The transition condition lives in the UPDATE, not in a read-modify-write:
+	// two concurrent handlers would both pass a SELECT and both write. Only rows
+	// whose current status is a legal source move, and a redelivery to a status
+	// the order already has touches nothing.
+	// 迁移条件写在 UPDATE 里，而不是先读再写：两个并发 handler 会同时通过 SELECT 然后都
+	// 写入。只有当前状态属于合法前置集合的行会变，重复投递到已处于目标状态的行也不会改任何东西。
+	sources := make([]string, 0, len(rule.Sources))
+	for _, source := range rule.Sources {
+		sources = append(sources, string(source))
+	}
 	res := db.WithContext(ctx).Model(&model.Order{}).
-		Where("id = ? AND status <> ?", payload.OrderID, string(target)).
+		Where("id = ? AND status IN ?", payload.OrderID, sources).
 		Update("status", string(target))
 	if res.Error != nil {
 		return fmt.Errorf("update order %d to %s: %w", payload.OrderID, target, res.Error)
@@ -95,17 +128,42 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 		return nil
 	}
 
-	var count int64
-	if err := db.WithContext(ctx).Model(&model.Order{}).
+	// Zero rows has three causes, and they must not be confused: the order is not
+	// there yet (retry), it is already in the target state (idempotent success),
+	// or the event is stale and the transition is not allowed (ignore — retrying
+	// cannot change the outcome). Only a read can tell them apart.
+	// 0 行有三种原因，必须分清：订单还没落库（重试）、已经是目标状态（幂等成功）、事件过期
+	// 且迁移不被允许（忽略——重试改变不了结果）。只有读一次才能区分。
+	var current model.Order
+	err := db.WithContext(ctx).Model(&model.Order{}).
+		Select("status").
 		Where("id = ?", payload.OrderID).
-		Count(&count).Error; err != nil {
-		return fmt.Errorf("lookup order %d: %w", payload.OrderID, err)
-	}
-	if count == 0 {
+		Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// Out-of-order delivery is normal on several partitions: retry until
 		// the order row appears or the attempt budget runs out.
 		// 多分区上乱序投递是常态：重试到订单行出现，或尝试次数用完为止。
 		return fmt.Errorf("order %d does not exist yet", payload.OrderID)
+	}
+	if err != nil {
+		return fmt.Errorf("lookup order %d: %w", payload.OrderID, err)
+	}
+	if current.Status == string(target) {
+		return nil
+	}
+	// The event is older than the state it would overwrite: ack it, because a
+	// retry would arrive at the same answer, and leave a line that says why the
+	// order did not move.
+	// 这条事件比它要覆盖的状态更旧：确认它——重试会得到同一个答案——并留一行日志说明订单
+	// 为什么没有变化。
+	if rt.Logger != nil {
+		rt.Logger.Warn("order event ignored: transition not allowed",
+			zap.String("event_type", event.Type),
+			zap.String("event_id", event.ID),
+			zap.Uint64("order_id", payload.OrderID),
+			zap.String("from", current.Status),
+			zap.String("to", string(target)),
+		)
 	}
 	return nil
 }

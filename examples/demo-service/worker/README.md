@@ -355,7 +355,9 @@ handler_order.go
 
 "处理中"必须当"还有人持有"，不能当"可以重跑"：确认掉重投的副本，第一个 handler 崩溃时
 就没有备份了。租约默认 5 分钟，由 `ProcessorConfig.ProcessingLease` 配置，复用
-`updated_at` 做判断，不新增列。
+`updated_at` 做判断，不新增列。写入与过期比较都用**数据库时钟**（`CURRENT_TIMESTAMP`），
+因此节点时钟偏差不会让某个节点提前接管或一直占着消息；代价是它不续期，`ProcessingLease`
+必须大于最慢一个合法 handler。
 
 消息 ID 的来源按协议降级：
 
@@ -368,6 +370,27 @@ handler_order.go
 
 AMQP 的空兜底是刻意的：拿 `DeliveryTag` 当 ID 会把每次重投当成新消息，而随机 ID
 只是放弃去重，不会把两条不同消息误判成同一条。
+
+### 状态迁移
+
+幂等解决"同一条消息处理两次"，解决不了"旧事件在新事件之后到达"——后者是顺序问题。订单
+状态机写在 `handler_order.go` 的 `orderEventRules` 里，目标状态与允许的前置状态放在同一个
+值中：
+
+| 事件 | 允许的前置状态 | 目标 |
+| --- | --- | --- |
+| `order.paid` | `pending` | `paid` |
+| `order.cancelled` | `pending`、`paid` | `cancelled` |
+
+条件进的就是 UPDATE 本身（`WHERE id = ? AND status IN (...)`），不是先 `SELECT` 再判断：
+并发 handler 在前者下只有一个能改到行，在后者下会两个都通过。影响 0 行时再读一次当前状态，
+把三种原因分开：
+
+- 订单行不存在 → 返回普通错误，让 broker 重投（创建请求可能还在路上）；
+- 已经是目标状态 → 幂等成功，确认；
+- 其它 → 事件比当前状态更旧（例如取消之后才到的 `order.paid`），**忽略并确认**，同时打一行
+  `order event ignored: transition not allowed` 说明 `from` / `to`。重试改变不了这个结果，
+  留在 broker 上只会把后面的消息一起卡住。
 
 ### 错误分类
 
