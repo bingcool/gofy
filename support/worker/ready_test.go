@@ -124,3 +124,106 @@ func TestReadyStaysClosedWhenStartupFails(t *testing.T) {
 	default:
 	}
 }
+
+// TestReadyGateIgnoresASecondSignalFromTheSameInstance pins the accounting: a
+// gate of two instances closes only after both reported, even when the first
+// one reports twice.
+// TestReadyGateIgnoresASecondSignalFromTheSameInstance 固定记账规则：两个实例的闸门
+// 只有在两者都上报后才关闭，即使第一个上报了两次。
+func TestReadyGateIgnoresASecondSignalFromTheSameInstance(t *testing.T) {
+	a := Identity{Group: "orders", Name: "consumer", Index: 0, Total: 2}
+	b := Identity{Group: "orders", Name: "consumer", Index: 1, Total: 2}
+
+	gate := newReadyGate()
+	gate.add([]Identity{a, b})
+
+	gate.signal(a)
+	gate.signal(a)
+	select {
+	case <-gate.wait():
+		t.Fatal("a duplicate signal from instance 0 closed the gate for instance 1")
+	default:
+	}
+
+	gate.signal(b)
+	select {
+	case <-gate.wait():
+	default:
+		t.Fatal("gate stayed open after both instances reported")
+	}
+}
+
+// doubleReportingWorker reports twice from instance 0 — what an adapter
+// reconnecting inside one Run, or the runner restarting the same instance,
+// produces on the wire.
+// doubleReportingWorker 让实例 0 上报两次——适配器在一次 Run 内重连，或 runner 重启
+// 同一实例时，线上看到的就是这种信号。
+type doubleReportingWorker struct {
+	first  chan struct{}
+	second chan struct{}
+}
+
+func (w *doubleReportingWorker) Name() string  { return "consumer" }
+func (w *doubleReportingWorker) ReportsReady() {}
+
+func (w *doubleReportingWorker) Run(ctx context.Context) error {
+	id, _ := IdentityFrom(ctx)
+	wait := w.first
+	if id.Index > 0 {
+		wait = w.second
+	}
+	select {
+	case <-wait:
+	case <-ctx.Done():
+		return nil
+	}
+	Ready(ctx)
+	if id.Index == 0 {
+		Ready(ctx)
+	}
+	<-ctx.Done()
+	return nil
+}
+
+// TestReadyIsNotClosedByARepeatedSignal is the runner-level version of the
+// property P1-05 asked for: a worker that reports twice must not complete the
+// group's readiness on behalf of an instance that never connected.
+// TestReadyIsNotClosedByARepeatedSignal 是 P1-05 在 runner 层的体现：重复上报的
+// worker 不能替一个从未连上的实例把分组的就绪状态完成掉。
+func TestReadyIsNotClosedByARepeatedSignal(t *testing.T) {
+	w := &doubleReportingWorker{first: make(chan struct{}), second: make(chan struct{})}
+	group, err := NewGroup("orders", w)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	runner, err := NewRunner(group, RunConfig{Concurrency: map[string]int{"consumer": 2}})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runner did not stop")
+		}
+	}()
+
+	close(w.first)
+	select {
+	case <-runner.Ready():
+		t.Fatal("a repeated signal from instance 0 made the group ready before instance 1 connected")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(w.second)
+	select {
+	case <-runner.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("group did not report ready after both instances connected")
+	}
+}

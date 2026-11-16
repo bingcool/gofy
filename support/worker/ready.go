@@ -33,33 +33,35 @@ type ReadyReporter interface {
 
 type readyKey struct{}
 
-// readyGate collects the readiness signals of one Runner. A gate with no
-// pending instance is satisfied immediately, which is what keeps workers that
-// do not report readiness on the old "ready when Run starts" path.
-// readyGate 收集一个 Runner 内各实例的就绪信号。没有待上报实例时立刻满足，这正是
-// 不上报就绪的 worker 保持"Run 开始即就绪"的方式。
+// readyGate collects the readiness signals of one Runner, one per instance.
+//
+// A gate with no pending instance is satisfied immediately, which is what keeps
+// workers that do not report readiness on the old "ready when Run starts" path.
+// readyGate 收集一个 Runner 内各实例的就绪信号，每个实例一次。
+//
+// 没有待上报实例时立刻满足，这正是不上报就绪的 worker 保持"Run 开始即就绪"的方式。
 type readyGate struct {
 	mu      sync.Mutex
-	pending int
+	pending map[Identity]struct{}
 	closed  bool
 	done    chan struct{}
 }
 
 func newReadyGate() *readyGate {
-	return &readyGate{done: make(chan struct{})}
+	return &readyGate{pending: make(map[Identity]struct{}), done: make(chan struct{})}
 }
 
-// add registers n instances that will each signal once. Registering zero
-// instances satisfies the gate immediately, which is how a group of polling
-// workers stays "ready when Run starts".
-// add 登记 n 个将各上报一次的实例。登记 0 个实例会立刻满足闸门，全由轮询任务组成的
-// 分组因此保持"Run 开始即就绪"。
-func (g *readyGate) add(n int) {
+// add registers the instances that will each signal once. Registering none
+// satisfies the gate immediately, which is how a group of polling workers stays
+// "ready when Run starts".
+// add 登记将各上报一次的实例。没有实例时立刻满足闸门，全由轮询任务组成的分组因此保持
+// "Run 开始即就绪"。
+func (g *readyGate) add(ids []Identity) {
 	g.mu.Lock()
-	if n > 0 {
-		g.pending += n
+	for _, id := range ids {
+		g.pending[id] = struct{}{}
 	}
-	closeNow := g.pending == 0 && !g.closed
+	closeNow := len(g.pending) == 0 && !g.closed
 	if closeNow {
 		g.closed = true
 	}
@@ -69,16 +71,21 @@ func (g *readyGate) add(n int) {
 	}
 }
 
-// signal consumes one pending instance. Extra signals are ignored: a worker
-// that reports twice must not close the gate for its siblings.
-// signal 消耗一个待上报实例。多余的信号被忽略：重复上报的 worker 不能替同组其他
-// 实例把闸门关掉。
-func (g *readyGate) signal() {
+// signal consumes one pending instance. Signals are keyed by instance, so a
+// worker that reports twice — the adapter reconnecting inside one Run, or the
+// runner restarting the same instance after an error — does not consume a
+// sibling's slot. Unknown keys are ignored, which makes a late signal from a
+// superseded run harmless.
+// signal 消耗一个待上报实例。信号按实例记账，因此重复上报的 worker——适配器在一次 Run
+// 内重连，或 runner 在错误后重启同一实例——不会消耗兄弟实例的名额。未知的键直接忽略，
+// 已被取代的那次 Run 迟到的信号因此无害。
+func (g *readyGate) signal(id Identity) {
 	g.mu.Lock()
-	if g.pending > 0 {
-		g.pending--
+	_, ok := g.pending[id]
+	if ok {
+		delete(g.pending, id)
 	}
-	closeNow := g.pending == 0 && !g.closed
+	closeNow := ok && len(g.pending) == 0 && !g.closed
 	if closeNow {
 		g.closed = true
 	}
@@ -102,16 +109,18 @@ func withReadyGate(ctx context.Context, gate *readyGate) context.Context {
 }
 
 // Ready reports that the calling instance can now accept work. It must be
-// called once, after the broker connection and the subscription are in place
-// and before the consume loop starts.
+// called once per instance, after the broker connection and the subscription
+// are in place and before the consume loop starts.
 //
-// It is a no-op when the context carries no gate, so a consumer can call it
+// The instance comes from the identity the runner injected into ctx, so a second
+// call from the same instance is a no-op. It is also a no-op when the context
+// carries no gate or no identity, which is what lets a consumer call it
 // unconditionally — tests and hand-built runners are not forced to install one.
-// Ready 上报当前实例已经可以接活。它只调用一次，时机是 broker 连接与订阅都已就绪、
+// Ready 上报当前实例已经可以接活。每个实例调用一次，时机是 broker 连接与订阅都已就绪、
 // 消费循环开始之前。
 //
-// ctx 没有携带闸门时它是空操作，因此消费者可以无条件调用——测试与自建 runner 不必
-// 特意安装闸门。
+// 实例来自 runner 注入 ctx 的身份，因此同一实例第二次调用是空操作。ctx 没有携带闸门或
+// 身份时同样是空操作，消费者因此可以无条件调用——测试与自建 runner 不必特意安装闸门。
 func Ready(ctx context.Context) {
 	if ctx == nil {
 		return
@@ -120,5 +129,9 @@ func Ready(ctx context.Context) {
 	if !ok || gate == nil {
 		return
 	}
-	gate.signal()
+	id, ok := IdentityFrom(ctx)
+	if !ok {
+		return
+	}
+	gate.signal(id)
 }

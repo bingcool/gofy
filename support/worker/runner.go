@@ -176,15 +176,41 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	host := cfg.hostname()
-	// The gate counts instances, not workers: with concurrency 3 a consumer
-	// must have all three connections up before the group is ready.
-	// 闸门按实例计数而不是按 worker：并发为 3 的消费者必须三条连接都就绪，分组才算
-	// 就绪。
-	gate := newReadyGate()
-	reporters := 0
+	// Instances are built once, before anything starts: the gate must register
+	// exactly the identities the goroutines will carry, otherwise a signal can
+	// arrive under a key nobody is waiting for.
+	// 实例在启动任何东西之前一次建好：闸门登记的键必须与 goroutine 携带的身份完全一致，
+	// 否则信号会落在一个没人等待的键上。
+	type instance struct {
+		worker Worker
+		id     Identity
+	}
+	var instances []instance
 	for _, w := range r.group.Workers() {
-		if _, ok := w.(ReadyReporter); ok {
-			reporters += cfg.instances(w)
+		total := cfg.instances(w)
+		for index := 0; index < total; index++ {
+			instances = append(instances, instance{
+				worker: w,
+				id: Identity{
+					Group: r.group.Name(),
+					Name:  w.Name(),
+					Index: index,
+					Total: total,
+					Host:  host,
+				},
+			})
+		}
+	}
+
+	// The gate counts instances, not signals, and only for the workers that
+	// report: a group of polling loops is ready as soon as Run starts.
+	// 闸门按实例记账而不是按信号次数，且只统计自行上报的 worker：全由轮询任务组成的分组
+	// 在 Run 开始时即就绪。
+	gate := newReadyGate()
+	var reporters []Identity
+	for _, inst := range instances {
+		if _, ok := inst.worker.(ReadyReporter); ok {
+			reporters = append(reporters, inst.id)
 		}
 	}
 	gate.add(reporters)
@@ -201,22 +227,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}()
 
-	for _, w := range r.group.Workers() {
-		total := cfg.instances(w)
-		for index := 0; index < total; index++ {
-			id := Identity{
-				Group: r.group.Name(),
-				Name:  w.Name(),
-				Index: index,
-				Total: total,
-				Host:  host,
-			}
-			wg.Add(1)
-			go func(w Worker, id Identity) {
-				defer wg.Done()
-				r.supervise(runCtx, drainCtx, w, id, gate, fail)
-			}(w, id)
-		}
+	for _, inst := range instances {
+		wg.Add(1)
+		go func(w Worker, id Identity) {
+			defer wg.Done()
+			r.supervise(runCtx, drainCtx, w, id, gate, fail)
+		}(inst.worker, inst.id)
 	}
 
 	done := make(chan struct{})

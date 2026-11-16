@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/worker`: readiness is counted per instance, not per signal. The gate
+  kept a single counter, so an instance that reported twice — an adapter
+  reconnecting inside one Run, or the runner restarting it after an error —
+  subtracted a sibling's pending slot and the group could report ready while
+  another instance had not connected yet. Signals are now keyed by the identity
+  the runner injects, duplicates are ignored, and the registered keys are built
+  from the same list the goroutines carry.
 - `support/consumer`: a failed dead-state write no longer lets the broker
   acknowledge the message. `park` used to log the failure and return nil, so a
   permanent failure whose ledger row could not be written was ACKed anyway —
