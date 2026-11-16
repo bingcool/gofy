@@ -182,7 +182,19 @@ handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕
 
 `ProcessingLease`（默认 5 分钟，`ProcessorConfig.ProcessingLease`）决定一条 `processing`
 记录多久后允许接管。它复用 `updated_at` 作为隐式租约，不新增列；接管用
-`id + status + attempts` 做 CAS，两个并发重投只有一个能进入 handler。
+`id + status + attempts` 做 CAS，两个并发重投只有一个能进入 handler，`processing` 行还在
+UPDATE 里复核一次租约（读到这里之间可能已有别的投递接管并推后了时间戳）。
+
+**租约的写入与比较都用数据库时钟。** `updated_at` 由 `CURRENT_TIMESTAMP` 写入，过期判断也
+在 SQL 里用数据库时钟做（MySQL / PostgreSQL / SQLite 各一种写法，见
+`leaseExpiredPredicate`）。这样做的原因很直接：只把比较换成 `NOW()` 而写入仍用应用时钟，
+等于把偏差从"比较"挪到"写入"，列里存的还是那台机器的时钟。两边同源之后，节点时钟偏差不再
+影响接管时机——时钟快的节点不能提前接管（那会让两个 handler 同时跑），时钟慢的节点也不会
+让消息被一直占着。
+
+`ProcessingLease` 不会在 handler 执行期间续期，因此它必须**大于最慢一个合法 handler 的
+耗时**；否则 handler 还在跑，别的节点已经接管。未知方言退回本节点时钟比较，此时必须保证所有
+节点 NTP 同步。
 
 所有写回（`succeed` / `fail` / `park`）都带本次认领的 `attempts` 做围栏，且 `fail` /
 `park` 只接受 `processing` / `failed`：迟到的旧 handler 既不能把新一轮认领标成完成，

@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/consumer`: the processing lease is now written and compared in
+  database time. `updated_at` came from GORM's application-clock timestamps
+  while the expiry test ran in the consuming process, so a node whose clock ran
+  fast could take over a message another node was still handling, and a slow
+  node could hold a message hostage. Both sides now use `CURRENT_TIMESTAMP`
+  (each dialect's own interval spelling for the comparison), and the takeover
+  re-checks the lease inside its CAS. Dialects without an expression fall back
+  to the node clock, which the README now states as requiring NTP.
 - `gofy` worker mode: `--daemon` now waits for the child to report readiness
   instead of treating `fork` as success. The detached child's stdout is
   `/dev/null`, so a database that would not open, a health port already taken or

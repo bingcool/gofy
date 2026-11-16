@@ -725,17 +725,25 @@ func isTableExists(err error) bool {
 // 接管是一条由 id + status + attempts 围起来的 UPDATE，两次并发重投不可能都进入
 // handler：输的那个看到 0 行受影响，按在途处理。
 func (d *deduper) claim(ctx context.Context, messageID string) (messageClaim, error) {
-	row := consumedMessage{
-		Consumer:  d.consumer,
-		MessageID: messageID,
-		Status:    consumedStatusProcessing,
-		Attempts:  1,
+	// The insert takes both timestamps from the database clock. updated_at is
+	// the lease itself, so a node whose clock runs ahead would otherwise create a
+	// lease that never expires from the point of view of every other node.
+	// 插入时两个时间戳都取数据库时钟。updated_at 就是租约本身，否则时钟走快的节点会造出
+	// 一条在其他所有节点看来永不过期的租约。
+	row := map[string]any{
+		"consumer":   d.consumer,
+		"message_id": messageID,
+		"status":     consumedStatusProcessing,
+		"attempts":   1,
+		"created_at": d.dbNow(),
+		"updated_at": d.dbNow(),
 	}
 	// DoNothing turns the unique index into a cheap "was I first?" question
 	// that also works on SQLite, so tests do not need MySQL-specific SQL.
 	// DoNothing 把唯一索引变成一个廉价的"我是第一个吗"判断，在 SQLite 上也能
 	// 用，测试因此不必写 MySQL 专有 SQL。
-	tx := d.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+	tx := d.db.WithContext(ctx).Model(&consumedMessage{}).
+		Clauses(clause.OnConflict{DoNothing: true}).Create(row)
 	if tx.Error != nil {
 		return messageClaim{}, tx.Error
 	}
@@ -756,7 +764,17 @@ func (d *deduper) claim(ctx context.Context, messageID string) (messageClaim, er
 	case consumedStatusDead:
 		return messageClaim{reason: "already parked as dead"}, nil
 	case consumedStatusProcessing:
-		if !d.leaseExpired(existing) {
+		// The lease is judged by the database, which is the clock that wrote
+		// updated_at in the first place. A node whose clock is off can no longer
+		// take over early (both handlers run) or hold a message hostage (nothing
+		// takes over).
+		// 租约交给数据库判断——updated_at 本来就是数据库时钟写的。时钟偏差的节点因此既不能
+		// 提前接管（两个 handler 同时跑），也不会让消息被一直占着（没人接管）。
+		expired, err := d.leaseExpired(ctx, existing)
+		if err != nil {
+			return messageClaim{}, err
+		}
+		if !expired {
 			return messageClaim{inFlight: true}, nil
 		}
 	case consumedStatusFailed:
@@ -779,15 +797,25 @@ func (d *deduper) claim(ctx context.Context, messageID string) (messageClaim, er
 	}
 
 	// The status and attempt pair is the CAS: only the delivery that read this
-	// exact version can move the row forward.
-	// status 与 attempts 这一对就是 CAS：只有读到这个确切版本的投递才能推进该行。
-	res := d.db.WithContext(ctx).Model(&consumedMessage{}).
-		Where("id = ? AND status = ? AND attempts = ?", existing.ID, existing.Status, existing.Attempts).
-		Updates(map[string]any{
-			"status":     consumedStatusProcessing,
-			"attempts":   gorm.Expr("attempts + 1"),
-			"last_error": "",
-		})
+	// exact version can move the row forward. A processing row also re-checks the
+	// lease inside the UPDATE, because another delivery may have taken over
+	// between the read and here — and it would have renewed updated_at.
+	// status 与 attempts 这一对就是 CAS：只有读到这个确切版本的投递才能推进该行。processing
+	// 的行还要在 UPDATE 里复核一次租约：读到这里之间可能已有别的投递完成了接管，而接管会把
+	// updated_at 推后。
+	takeover := d.db.WithContext(ctx).Model(&consumedMessage{}).
+		Where("id = ? AND status = ? AND attempts = ?", existing.ID, existing.Status, existing.Attempts)
+	if existing.Status == consumedStatusProcessing {
+		if predicate, ok := d.leaseExpiredPredicate(); ok {
+			takeover = takeover.Where(predicate)
+		}
+	}
+	res := takeover.Updates(map[string]any{
+		"status":     consumedStatusProcessing,
+		"attempts":   gorm.Expr("attempts + 1"),
+		"last_error": "",
+		"updated_at": d.dbNow(),
+	})
 	if res.Error != nil {
 		return messageClaim{}, res.Error
 	}
@@ -799,30 +827,83 @@ func (d *deduper) claim(ctx context.Context, messageID string) (messageClaim, er
 	return messageClaim{proceed: true, attempt: existing.Attempts + 1}, nil
 }
 
-// leaseExpired reports whether a processing row may be taken over.
+// leaseExpired asks the database whether a processing row may be taken over.
 //
 // updated_at is the implicit lease: it is written on every claim and on every
-// outcome, so "last touched longer than the lease ago" means the handler that
-// owned it is gone. No extra column is added, which keeps the table unchanged
-// for existing deployments and lets SQLite tests cover the path.
-// leaseExpired 报告一条 processing 记录是否可以被接管。
+// outcome in database time, so "last touched longer than the lease ago" means
+// the handler that owned it is gone. The comparison has to run in the database
+// for the same reason the write does — comparing a database timestamp with this
+// node's clock would reintroduce exactly the skew the write avoided.
+// leaseExpired 问数据库：一条 processing 记录是否可以被接管。
 //
-// updated_at 就是隐式租约：每次认领与每次记录结果都会写它，因此"最近一次触碰距今
-// 超过租约"意味着持有它的 handler 已经不在了。这样不必新增列，已有部署的表结构
-// 不变，SQLite 测试也能覆盖这条路径。
-func (d *deduper) leaseExpired(row consumedMessage) bool {
+// updated_at 就是隐式租约：每次认领与每次记录结果都用数据库时间写它，因此"最近一次触碰距今
+// 超过租约"意味着持有它的 handler 已经不在了。比较必须在数据库里做，理由与写入相同——拿
+// 数据库时间戳和本节点时钟比，等于把写入时避开的偏差又请回来。
+func (d *deduper) leaseExpired(ctx context.Context, row consumedMessage) (bool, error) {
 	if d.lease <= 0 {
-		return true
+		return true, nil
 	}
-	if row.UpdatedAt.IsZero() {
-		// A row written outside this package has no lease to trust. Treat it
-		// as expired so a stuck message can progress instead of blocking
-		// forever.
-		// 由本包之外的代码写入的行没有可信任的租约。按过期处理，卡住的消息才能继续
-		// 推进，而不是永久阻塞。
-		return true
+	predicate, ok := d.leaseExpiredPredicate()
+	if !ok {
+		// No dialect-specific predicate: fall back to this node's clock and say
+		// so in the docs rather than pretending the comparison is global.
+		// 没有对应方言的表达式时退回本节点时钟，并在文档里说明——不假装这个比较是全局一致的。
+		if row.UpdatedAt.IsZero() {
+			// A row written outside this package has no lease to trust. Treat it
+			// as expired so a stuck message can progress instead of blocking
+			// forever.
+			// 由本包之外的代码写入的行没有可信任的租约。按过期处理，卡住的消息才能继续
+			// 推进，而不是永久阻塞。
+			return true, nil
+		}
+		return time.Since(row.UpdatedAt) >= d.lease, nil
 	}
-	return time.Since(row.UpdatedAt) >= d.lease
+	var expired bool
+	err := d.db.WithContext(ctx).Model(&consumedMessage{}).
+		Select(predicate).
+		Where("id = ?", row.ID).
+		Scan(&expired).Error
+	if err != nil {
+		return false, err
+	}
+	return expired, nil
+}
+
+// dbNow is the database clock as a SQL expression, used wherever this package
+// writes a timestamp the lease later depends on.
+// dbNow 是数据库时钟的 SQL 表达式，本包写入租约依赖的时间戳时都用它。
+func (d *deduper) dbNow() clause.Expr {
+	return gorm.Expr("CURRENT_TIMESTAMP")
+}
+
+// leaseExpiredPredicate builds the SQL that answers "has this row's lease run
+// out", using only the database clock. The value is built from a duration, never
+// from input, so interpolating it is safe; each dialect spells interval
+// arithmetic differently, and guessing one spelling for all of them is how
+// silent timezone bugs start.
+// leaseExpiredPredicate 构造只用数据库时钟回答"这行的租约是否过期"的 SQL。表达式由时长
+// 拼出、不含外部输入，因此直接内联是安全的；各家的区间语法不同，给所有方言用同一种写法正是
+// 静默时区 bug 的来源。
+func (d *deduper) leaseExpiredPredicate() (string, bool) {
+	if d.lease <= 0 {
+		return "1 = 1", true
+	}
+	micros := d.lease.Microseconds()
+	switch d.db.Dialector.Name() {
+	case "mysql":
+		return fmt.Sprintf("updated_at <= CURRENT_TIMESTAMP(3) - INTERVAL %d MICROSECOND", micros), true
+	case "postgres":
+		return fmt.Sprintf("updated_at <= CURRENT_TIMESTAMP - %d * INTERVAL '1 microsecond'", micros), true
+	case "sqlite":
+		// datetime() normalises both sides. The driver stores time.Time with its
+		// numeric offset while datetime('now') is UTC without one, and comparing
+		// the two as text is wrong in a way that never errors.
+		// datetime() 会把两侧归一化。驱动把 time.Time 连同时区偏移一起存成文本，而
+		// datetime('now') 是不带偏移的 UTC，按文本比较会错，而且不会报错。
+		return fmt.Sprintf("datetime(updated_at) <= datetime('now', '-%.6f seconds')", float64(micros)/1e6), true
+	default:
+		return "", false
+	}
 }
 
 // markExhausted moves a row that used up its attempts to the dead state. The
@@ -836,6 +917,7 @@ func (d *deduper) markExhausted(ctx context.Context, row consumedMessage) error 
 		Updates(map[string]any{
 			"status":     consumedStatusDead,
 			"last_error": "attempts exhausted",
+			"updated_at": d.dbNow(),
 		}).Error
 }
 
@@ -848,7 +930,11 @@ func (d *deduper) succeed(ctx context.Context, messageID string, attempt int) er
 	res := d.db.WithContext(ctx).Model(&consumedMessage{}).
 		Where("consumer = ? AND message_id = ? AND attempts = ? AND status = ?",
 			d.consumer, messageID, attempt, consumedStatusProcessing).
-		Updates(map[string]any{"status": consumedStatusDone, "last_error": ""})
+		Updates(map[string]any{
+			"status":     consumedStatusDone,
+			"last_error": "",
+			"updated_at": d.dbNow(),
+		})
 	if res.Error != nil {
 		return res.Error
 	}
@@ -871,6 +957,7 @@ func (d *deduper) fail(ctx context.Context, messageID string, attempt int, cause
 		Updates(map[string]any{
 			"status":     consumedStatusFailed,
 			"last_error": truncate(cause.Error(), 512),
+			"updated_at": d.dbNow(),
 		})
 	if res.Error != nil {
 		return res.Error
@@ -893,6 +980,7 @@ func (d *deduper) park(ctx context.Context, messageID string, attempt int, cause
 		Updates(map[string]any{
 			"status":     consumedStatusDead,
 			"last_error": truncate(cause.Error(), 512),
+			"updated_at": d.dbNow(),
 		})
 	if res.Error != nil {
 		return res.Error

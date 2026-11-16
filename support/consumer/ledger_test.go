@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -448,5 +449,81 @@ func TestLedgerAcknowledgesPermanentFailureWhenParkSucceeds(t *testing.T) {
 	}
 	if row := ledgerRow(t, db, "m-park-ok"); row.Status != consumedStatusDead {
 		t.Fatalf("status = %s, want dead", row.Status)
+	}
+}
+
+// TestLedgerLeaseIsWrittenInDatabaseTime pins the write half of P2-05. The
+// SQLite driver stores a Go time.Time together with its numeric offset, while
+// CURRENT_TIMESTAMP is UTC without one: a value without an offset can only have
+// come from the database. That is the whole point — the lease must not carry the
+// writing node's clock into every other node's decision.
+// TestLedgerLeaseIsWrittenInDatabaseTime 固定 P2-05 的写入侧。SQLite 驱动会把 Go 的
+// time.Time 连同时区偏移一起存下来，而 CURRENT_TIMESTAMP 是不带偏移的 UTC：没有偏移的值
+// 只可能来自数据库。这正是重点——租约不能把写入节点的时钟带到其他所有节点的判断里。
+func TestLedgerLeaseIsWrittenInDatabaseTime(t *testing.T) {
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		return nil
+	}, 5, time.Minute)
+
+	if _, err := proc.deduper.claim(context.Background(), "m-write-clock"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var stored string
+	if err := db.Raw(
+		`SELECT CAST(updated_at AS TEXT) FROM worker_consumed_messages WHERE consumer = ? AND message_id = ?`,
+		testConsumerName, "m-write-clock",
+	).Scan(&stored).Error; err != nil {
+		t.Fatalf("read updated_at: %v", err)
+	}
+	if strings.ContainsAny(stored, "+T") {
+		t.Fatalf("updated_at = %q looks like a Go timestamp; the lease must be written by the database clock", stored)
+	}
+}
+
+// TestLedgerLeaseDecisionComesFromTheDatabase pins the read half: the expiry
+// question is answered by the row stored in the database, not by whatever
+// timestamp the caller happens to hold. A struct with no UpdatedAt used to mean
+// "expired, take over"; now it means nothing at all.
+// TestLedgerLeaseDecisionComesFromTheDatabase 固定读取侧：过期与否由数据库里的那一行回答，
+// 不由调用方手里的时间戳回答。过去 struct 里没有 UpdatedAt 就等于"已过期，接管"；现在它
+// 什么都不代表。
+func TestLedgerLeaseDecisionComesFromTheDatabase(t *testing.T) {
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		return nil
+	}, 5, time.Minute)
+
+	if _, err := proc.deduper.claim(context.Background(), "m-read-clock"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var id uint64
+	if err := db.Raw(
+		`SELECT id FROM worker_consumed_messages WHERE consumer = ? AND message_id = ?`,
+		testConsumerName, "m-read-clock",
+	).Scan(&id).Error; err != nil {
+		t.Fatalf("read id: %v", err)
+	}
+
+	expired, err := proc.deduper.leaseExpired(context.Background(), consumedMessage{ID: id})
+	if err != nil {
+		t.Fatalf("leaseExpired: %v", err)
+	}
+	if expired {
+		t.Fatal("a row written moments ago was judged expired because the caller's struct carried no timestamp")
+	}
+
+	// Backdate it past the lease: now the database says expired, and it is still
+	// the database saying it.
+	// 把时间戳挪到租约之外：此时数据库说已过期，而说这话的仍然是数据库。
+	if err := db.Exec(
+		`UPDATE worker_consumed_messages SET updated_at = datetime('now', '-3600 seconds') WHERE id = ?`, id,
+	).Error; err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	expired, err = proc.deduper.leaseExpired(context.Background(), consumedMessage{ID: id})
+	if err != nil {
+		t.Fatalf("leaseExpired after backdate: %v", err)
+	}
+	if !expired {
+		t.Fatal("a row backdated an hour was still treated as under a live lease")
 	}
 }

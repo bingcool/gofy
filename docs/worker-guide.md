@@ -348,6 +348,7 @@ spec:
 | 两个 Pod 处理同一批行 | 没用 claim / 用了 `SELECT` 再 `UPDATE` | 换 `claim.Queue`，别自己写 SQL |
 | 同一个全局任务跑了两次 | 只加锁没带 fencing token | 业务表加 `fence` 列，写入带 `fence < :token` |
 | 每次发版都重复消费一批消息 | 停机时直接取消，没走 drain | 用 `consumer` 适配器，别自己写 `Consume` |
+| 长 handler 被别的节点接管，业务副作用做了两遍 | `ProcessingLease` 小于 handler 耗时 | 把租约调到大于最慢合法 handler；它不做续期 |
 | healthz 一直 503 | 分组还在启动（消费者未建连/订阅），或已进入 drain | 看日志有没有 `worker group ready`；只有 `worker group started` 说明还停在建连 |
 
 ## 7. 与 HTTP 进程的边界
