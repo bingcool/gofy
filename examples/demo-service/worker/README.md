@@ -33,16 +33,18 @@ worker/
 ├── worker.go              # Register：构造全部分组，交给 main
 ├── connections.go         # ConnectionsFrom：把 config.yaml 的连接段转成实例名表
 ├── group1/
-│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、两个生产者、九个消费者与心跳
+│   ├── abc_register.go    # group1 的 NewGroup：装配扫描、三个生产者、十个消费者与心跳
 │   ├── scan.go            # order-scan：扫表 + 它的 Defaults
 │   ├── heartbeat.go       # order-heartbeat：存活心跳
 │   ├── handler_order.go   # 业务分支：order.paid / order.cancelled
 │   ├── producer.go        # order-event-producer：每 5s 群发同一订单事件到五个 sink
 │   ├── delay_producer.go  # order-delay-producer：每 10s 调度一条 5s 后到期的事件
+│   ├── rocketmq_batch_producer.go # order-batch-producer：每 10s 发十条给批量订阅
 │   ├── kafka_order.go     # order-kafka-consumer：一个订阅 + 它的配置
 │   ├── kafka_manual_order.go # order-kafka-manual-consumer：手动提交位点样例
 │   ├── amqp_order.go      # order-amqp-consumer
 │   ├── rocketmq_order.go  # order-rocketmq-consumer
+│   ├── rocketmq_batch_order.go # order-rocketmq-batch-consumer：一次拉十条，逐条确认
 │   ├── queues_order.go    # order-queues-consumer（Redis 队列）
 │   ├── delay_queues_order.go    # order-delay-queues-consumer（Redis ZSET）
 │   ├── rocketmq_delay_order.go  # order-rocketmq-delay-consumer（DELAY topic）
@@ -75,10 +77,12 @@ worker/
 | group1 | `order-scan` | 2 | 5s | 统计待支付订单；真实队列在这里调 `claim.Queue.Claim` |
 | group1 | `order-event-producer` | 1 | 5s | 把同一个订单事件（order_id=1）群发到五个 sink（Kafka 两个 topic），闭环演示生产 → 消费 |
 | group1 | `order-delay-producer` | 1 | 10s | 每 10s 调度一条 5s 后到期的事件到 Redis ZSET、RocketMQ DELAY topic 与 RabbitMQ direct / topic 延迟队列 |
+| group1 | `order-batch-producer` | 1 | 10s | 每 10s 给批量订阅发十条，让一次拉取真的能拿回一批 |
 | group1 | `order-kafka-consumer` | 1 | 常驻 | Kafka 订阅 `demo.order.events`，默认手动提交位点 |
 | group1 | `order-kafka-manual-consumer` | 1 | 常驻 | 独立 topic / group 的手动提交样例，逐条打印位点提交决策 |
 | group1 | `order-amqp-consumer` | 1 | 常驻 | RabbitMQ 队列，prefetch 32 |
 | group1 | `order-rocketmq-consumer` | 1 | 常驻 | RocketMQ 订阅 `test-demo` / `tag=demo`，SDK 侧拉取 |
+| group1 | `order-rocketmq-batch-consumer` | 1 | 常驻 | 同一 topic 的 `tag=batch`，`batch_size=10` 一次拉十条、逐条确认 |
 | group1 | `order-queues-consumer` | 2 | 常驻 | Redis 队列，弹出即删除 |
 | group1 | `order-delay-queues-consumer` | 1 | 常驻 | Redis ZSET 到期消息，Lua 原子取出 |
 | group1 | `order-rocketmq-delay-consumer` | 1 | 常驻 | `test-demo-delay` / `tag=delay`，broker 定时投递 |
@@ -90,7 +94,7 @@ worker/
 拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
-九个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
+十个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
 实际跑哪些用 `--name` 选；注册不建连，所以 `--list` 和被过滤掉的消费者都不产生成本。
 实例数写在各自的配置文件里，`--concurrency` 仍可覆盖。
 
@@ -175,6 +179,58 @@ EOF
 为什么可重试失败必须配 `Idempotency`，否则 Kafka 没有投递次数概念，会无限重投。把 `type`
 改成 `order.unknown` 则走永久错误分支：`message discarded: permanent failure` +
 `decision=park as dead, commit anyway`，位点同样提交。
+
+## RocketMQ 批量消费
+
+`rocketmq_batch_order.go` 与 `rocketmq_order.go` 是同一 topic 上的两个订阅，差别只在
+拉取参数：前者 `batch_size=10`，后者默认 1。RocketMQ v5 没有 push 消费者，gofy 的
+handler 又是单条的，所以「批量」完全在拉取侧：
+
+| 环节 | 行为 | 代码位置 |
+| --- | --- | --- |
+| 拉取 | 一次 `Receive(batch_size, invisible_duration)` 要回至多 10 条 | `support/rocketmq/consumer.go` 的 `poll` |
+| 处理 | 一个 worker 按顺序逐条调 handler，**没有批量 handler** | 同文件 `process` |
+| 确认 | 每条成功各自 `Ack`，失败的那条不 ack | 同文件 `ack` |
+| 重投 | 未确认的消息在 `InvisibleDuration` 后重新可见，`DeliveryAttempt` +1 | 同文件 `process` |
+| 并发 | `PullWorkers > 1` 时多个 goroutine 各自拉一批，批次之间交错 | 同文件 `Consume` |
+
+一句话：**批量拉取、逐条确认**。这条设计带来两个结果：
+
+- **失败隔离**。批次里一条失败只让它自己重投，其余九条照常 ack——不像 Kafka 手动提交
+  那样把失败位点之后的记录一起留下。代价是 handler 看不到批次边界，没法把十条合并成
+  一次 `UPDATE` 或一个事务。
+- **顺序只在单 worker 内成立**。样例把 `PullWorkers` 设成 1，一批内的消息按到达顺序逐条
+  处理；调大之后批次会被不同 goroutine 拿走，跨批次没有顺序保证。另外位点是**队列内**的
+  编号，一批通常跨多个队列（`test-demo` 有多个队列），所以日志里的 `offset` 不会连续——
+  判断"是不是一批"看的是处理时间与 `queued`（消息在 broker 里等了多久），不是位点。
+
+为什么不能"整批 ack"：v5.1.2 的 `SimpleConsumer` 只暴露单条 `Ack(ctx, *MessageView)`，
+SDK 没有批量确认接口，框架也做不出比 SDK 更强的语义。真要批量写库，得在 handler 里自己
+攒窗口——那就绕开了幂等台账与逐条重投，本示例不这么做。
+
+配套生产者 `rocketmq_batch_producer.go` 每 10 秒发十条，正好凑满一批（条数不超过
+`BatchSize`，否则日志里的批次会混进上一批的尾巴）。每条消息用自己的信封 ID：台账按
+`(consumer, message_id)` 记账，共用一个 ID 会让九条变成 `message skipped`。
+
+看日志确认一次拉取拿回整批（十条在同一两秒内处理完，`queued` 都在亚秒级）：
+
+```bash
+$ go run . worker --group=group1 --name=order-batch-producer --name=order-rocketmq-batch-consumer
+{"msg":"order batch published","burst":10,...}
+{"msg":"rocketmq batch delivery","offset":446,"delivery_attempt":1,"queued":0.588,"decision":"ack this message",...}
+{"msg":"rocketmq batch delivery","offset":462,"delivery_attempt":1,"queued":0.283,"decision":"ack this message",...}
+...
+```
+
+首次用一个新建的消费组启动时，可能会先看到一次 proxy 的
+`INTERNAL_SERVER_ERROR ... NullPointerException`（`ReceiveMessageActivity`）：这是
+broker 侧还没建好组分配。框架按 1s 退避重试，随后自愈；这批消息会带着
+`delivery_attempt=2` 重投，`Idempotency: true` 保证重复处理不重复写库。
+
+想看不确认的路径，让其中一条失败即可（例如把 `OrderID` 改成不存在的订单）：那条会打出
+`decision=leave unacknowledged, redeliver after invisible_duration`，15 秒后带着
+`delivery_attempt=2` 回来，同批其余九条此时早已 ack。第三次认领会把消息记为 dead
+（`MaxAttempts: 3`），后续重投变成 `message skipped`，消费继续向前。
 
 ## 延迟队列
 
@@ -380,6 +436,8 @@ $ go run . worker --list
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-delay-producer            │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-batch-producer            │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-kafka-consumer            │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-kafka-manual-consumer     │ 1           │
@@ -387,6 +445,8 @@ $ go run . worker --list
 │ group1 │ order-amqp-consumer             │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-rocketmq-consumer         │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group1 │ order-rocketmq-batch-consumer   │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group1 │ order-queues-consumer           │ 2           │
 ├────────┼─────────────────────────────────┼─────────────┤
@@ -408,12 +468,12 @@ $ go run . worker --list
 
 ```bash
 $ go run . worker --group=group1
-{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":13,"drain_timeout":20}
+{"level":"info","caller":"gofy/worker_host.go:112","msg":"worker group started","group":"group1","workers":15,"drain_timeout":20}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#0","interval":5}
 {"level":"info","caller":"group1/scan.go:53","msg":"order scan started","worker":"group1/order-scan#1","interval":5}
 ```
 
-`workers:13` 是这个分组的成员数（扫描 1 + 两个生产者 + 九个消费者 + 心跳 1），不是实例数；
+`workers:15` 是这个分组的成员数（扫描 1 + 三个生产者 + 十个消费者 + 心跳 1），不是实例数；
 `order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
 
 整组启动意味着四个 broker 都要在。本地只有数据库与 Redis 时，用 `--name` 挑一个跑：

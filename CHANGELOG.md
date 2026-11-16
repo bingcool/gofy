@@ -107,6 +107,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `examples/demo-service`: `group1` gains a RocketMQ batch-pull subscription and
+  the burst producer that feeds it. `batch_size=10` makes one `Receive` return a
+  batch; the handler is still per message and each message is acknowledged on
+  its own, so one failure costs one redelivery instead of the whole batch — and
+  the handler never sees a batch boundary, which is why the sample explains when
+  a batch cannot become one transaction. The burst producer sends its ten
+  messages every ten seconds with a distinct envelope id each: the ledger is
+  keyed by `(consumer, message id)`, so a shared id would turn nine of them into
+  `message skipped`.
 - `support/lock`: Redis-backed distributed mutexes on top of redsync
   (`github.com/go-redsync/redsync/v4`, go-redis v9 adapter). `Lock` retries per
   policy and reports `ErrAlreadyHeld`; `TryLock` makes exactly one attempt;

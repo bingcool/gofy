@@ -234,7 +234,7 @@ err = consumer.Consume(ctx, func(ctx context.Context, message *rocketmq.Message)
 | `Topic` / `Group` | 必填 | 订阅的 topic 与消费者组；v5 的消费者必须显式指定 group |
 | `Tags` | 全部 | 订阅的 Tag；空数组或 `["*"]` 表示全部，元素不能含 `\|\|` |
 | `SQL` | 空 | SQL92 属性过滤，例如 `eventType IN ('created','cancelled')`；不能和具体 Tag 同时设置 |
-| `BatchSize` | `16` | 一次 `Receive` 最多取回的消息数 |
+| `BatchSize` | `16` | 一次 `Receive` 最多取回的消息数；只是拉取批量，handler 仍逐条处理、逐条 ack |
 | `Concurrency` | `1` | 拉取 worker 数；大于 1 时批次之间无序 |
 | `AwaitDuration` | `5s` | 一次长轮询在 broker 侧的等待时间 |
 | `InvisibleDuration` | `30s` | 消息投递后的不可见时间；处理失败未 ack 的消息在这之后重投 |
