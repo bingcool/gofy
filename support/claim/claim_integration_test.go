@@ -135,6 +135,38 @@ func TestIntegrationClaimIsExclusive(t *testing.T) {
 	}
 }
 
+// TestIntegrationExtendRejectsReapedRow is the P1 regression: a handler that
+// finds its row was reaped while it waited must not proceed. Extend succeeds
+// while the claim is live and fails with ErrLeaseLost once another replica has
+// returned the row to pending (the state Reap leaves behind).
+// TestIntegrationExtendRejectsReapedRow 是 P1 回归：handler 在排队期间发现行被回收就不能继续。
+// 认领有效时 Extend 成功；一旦别的副本把行放回 pending（Reap 留下的状态），Extend 返回 ErrLeaseLost。
+func TestIntegrationExtendRejectsReapedRow(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:   "orders",
+		Lease: time.Minute,
+	})
+	seed(t, db, q.tableName(), "orders", 1)
+
+	tasks, err := q.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("Claim = %v, %v", tasks, err)
+	}
+	if err := q.Extend(context.Background(), tasks[0]); err != nil {
+		t.Fatalf("Extend on a live claim: %v", err)
+	}
+
+	// Simulate Reap: status back to pending, lease cleared, attempts unchanged.
+	// 模拟 Reap：状态回到 pending、租约清空、attempts 不变。
+	if err := db.Exec("UPDATE `"+q.tableName()+
+		"` SET status = 0, owner = '', lease_until = NULL WHERE id = ?", tasks[0].ID).Error; err != nil {
+		t.Fatalf("reap row: %v", err)
+	}
+	if err := q.Extend(context.Background(), tasks[0]); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("Extend after reap = %v, want ErrLeaseLost", err)
+	}
+}
+
 func TestIntegrationSucceedCAS(t *testing.T) {
 	lost := 0
 	q, _ := newIntegrationQueue(t, Config{

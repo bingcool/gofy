@@ -66,6 +66,36 @@ func TestNewRunnerKeepsExplicitTimeouts(t *testing.T) {
 	}
 }
 
+// TestNewRunnerRejectsHandlerTimeoutNotBelowLease locks in the construction-time
+// guard: Extend only protects the queueing window, so a handler allowed to run
+// past its lease can be executed twice. The pair must be rejected up front.
+// TestNewRunnerRejectsHandlerTimeoutNotBelowLease 锁定构造期校验：Extend 只保护排队窗口，
+// 允许跑过租约的 handler 可能被执行两遍，这种组合必须当场拒绝。
+func TestNewRunnerRejectsHandlerTimeoutNotBelowLease(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"equal": {Table: "job_task", Job: "order", Lease: 5 * time.Second},
+		"over":  {Table: "job_task", Job: "order", Lease: 4 * time.Second},
+	} {
+		_, err := NewRunner(new(gorm.DB), RunnerConfig{
+			Config:         cfg,
+			HandlerTimeout: 5 * time.Second,
+			Handler:        func(context.Context, []byte) (uint64, error) { return 0, nil },
+		})
+		if !errors.Is(err, ErrHandlerTimeoutExceedsLease) {
+			t.Fatalf("%s: NewRunner error = %v, want ErrHandlerTimeoutExceedsLease", name, err)
+		}
+	}
+
+	// Just below the lease is accepted.
+	if _, err := NewRunner(new(gorm.DB), RunnerConfig{
+		Config:         Config{Table: "job_task", Job: "order", Lease: 5 * time.Second},
+		HandlerTimeout: 4 * time.Second,
+		Handler:        func(context.Context, []byte) (uint64, error) { return 0, nil },
+	}); err != nil {
+		t.Fatalf("NewRunner with timeout below lease: %v", err)
+	}
+}
+
 // TestRunnerSQLWiresSucceedAndFail guards the core promise of this layer: a
 // successful handler closes the row (which stamps finish_handle_time) and a
 // failing one records reason + time (which stamps fail_reason and

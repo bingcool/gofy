@@ -48,6 +48,28 @@ func TestNewAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestNewRejectsOversizedBatch(t *testing.T) {
+	db := new(gorm.DB)
+	if _, err := New(db, Config{Table: "job_task", Job: "order", Batch: MaxBatch}); err != nil {
+		t.Fatalf("New(batch=%d) should be accepted: %v", MaxBatch, err)
+	}
+	for _, batch := range []int{MaxBatch + 1, 100, 1000} {
+		_, err := New(db, Config{Table: "job_task", Job: "order", Batch: batch})
+		if !errors.Is(err, ErrBatchTooLarge) {
+			t.Fatalf("New(batch=%d) error = %v, want ErrBatchTooLarge", batch, err)
+		}
+	}
+
+	// An explicit n bypasses Config, so Claim has to enforce the same ceiling.
+	q, err := New(db, Config{Table: "job_task", Job: "order"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := q.Claim(context.Background(), "worker-a", MaxBatch+1); !errors.Is(err, ErrBatchTooLarge) {
+		t.Fatalf("Claim(n=%d) error = %v, want ErrBatchTooLarge", MaxBatch+1, err)
+	}
+}
+
 func TestNewAcceptsSchemaQualifiedTable(t *testing.T) {
 	q, err := New(new(gorm.DB), Config{Table: "app.job_task", Job: "order"})
 	if err != nil {
@@ -210,6 +232,26 @@ func TestSQLUsesSkipLockedAndGuards(t *testing.T) {
 	}
 	if strings.Contains(q.reapSQL, "_handle_time") {
 		t.Fatalf("reapSQL must not stamp a handle-time column: %s", q.reapSQL)
+	}
+}
+
+// TestExtendIsFencedByOwnerStatusAndAttempts guards the P1 fix: re-arming a
+// lease must be a CAS, otherwise a stale handler whose row was reaped could
+// extend a row it no longer owns and still run its side effects.
+// TestExtendIsFencedByOwnerStatusAndAttempts 守住 P1 修复：续租必须是 CAS，否则行被回收后过期
+// handler 仍能给它续租、继续执行副作用。
+func TestExtendIsFencedByOwnerStatusAndAttempts(t *testing.T) {
+	q, err := New(new(gorm.DB), Config{Table: "job_task", Job: "order"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, want := range []string{
+		"lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)",
+		"WHERE id = ? AND owner = ? AND status = 1 AND attempts = ?",
+	} {
+		if !strings.Contains(q.extendSQL, want) {
+			t.Fatalf("extendSQL lacks %q: %s", want, q.extendSQL)
+		}
 	}
 }
 

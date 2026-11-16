@@ -8,6 +8,32 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/claim`: fixed a batch-lease race (P1). Claim stamped every row in a
+  batch with the same `lease_until`, but Runner processed them serially, so a
+  row near the back could have its lease expire while queued, be reaped and run
+  by another replica — producing duplicate side effects. Runner now calls the
+  new fenced `Queue.Extend` right before each handler, re-arming the lease from
+  the moment of execution and skipping the handler (via LeaseLost) if the row
+  was already reclaimed. Extend protects the queueing window only: a handler that
+  outruns the lease can still be taken over mid-flight, so `NewRunner` now
+  rejects `HandlerTimeout >= Lease` and the docs state that handlers must be
+  idempotent. Lease only has to exceed one handler's duration, not
+  `batch × handler`. Added regression tests for the CAS, the skip path and a
+  two-replica batch handover (A claims 3, B reaps and takes the tail, every row
+  still runs exactly once).
+- `gofy-adapter` k8slease: `Renew` on an Update Conflict now releases the local
+  in-process reservation, matching the NotFound and changed-holder branches.
+  Previously the same Locker stayed stuck in `ErrHeld` forever after reporting
+  LeaseLost. Added a conflict regression test. The README now states that a Pod
+  name only satisfies the per-process uniqueness requirement when the Pod runs a
+  single application process; multiple processes need a pid/instance suffix.
+- `gofy-adapter` nacos: concurrent `Resolve` calls on a cache miss/expiry now
+  coalesce into one Nacos query per service (per-service singleflight) instead
+  of fanning out N requests. Waiters share the leader's result and still honor
+  their own context. Cache timestamps are taken when the refresh completes, so a
+  slow `ListInstances` no longer makes the entry expire early, and stale checks
+  measure from now rather than from when a waiter entered. Added a 32-way
+  concurrency test.
 - `support/consumer`: the processing lease is now written and compared in
   database time. `updated_at` came from GORM's application-clock timestamps
   while the expiry test ran in the consuming process, so a node whose clock ran
@@ -139,6 +165,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `support/claim`: `DefaultBatch` dropped from 100 to 10 and batch size is now
+  capped by `MaxBatch = 20`. One instance processes a batch serially, so a large
+  batch buys no throughput — it only lengthens the queueing tail and keeps more
+  rows leased by a single worker; concurrency, not batch size, is how one
+  instance does more in parallel. `New` and `Claim` both reject an oversized
+  value with `ErrBatchTooLarge` instead of silently clamping it, so a
+  misconfiguration is visible at startup rather than showing up as unexplained
+  reap churn.
+- Documentation: `claim.HandlerTimeout` is now explicitly a cooperative
+  deadline — it cancels the ctx passed to the handler, which the business must
+  propagate to its IO calls; it is not a forced kill. The demo README also
+  states the RocketMQ batch constraint `InvisibleDuration > BatchSize × handler
+  p99 + ack margin`, since visibility for a whole batch starts at Receive while
+  messages are handled one by one.
 - `support/claim`: the task column `job` is now `job_type` (the Go option stays
   `Job`, so callers are unaffected), and a `fail_reason` TEXT column records the
   bounded cause on `Fail` and is cleared on `Succeed` — a dead row now explains

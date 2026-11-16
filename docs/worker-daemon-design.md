@@ -150,6 +150,12 @@ restart 会启动下一个进程，因此**先拉取并校验配置，再停旧�
 不会留下空窗。这条语义在 `main` 的命令分类里表达（见 `docs/worker-guide.md` §7.1），不藏在子命令的
 字符串判断中。
 
+`stop` 会校验 pid 文件里的进程身份 token：只有 `IdentityMatch` 才能证明目标进程就是写入该文件
+的那个；`IdentityMismatch` 视为 pid 已被复用，不发信号并删除过期 pid 文件。旧格式 pid 文件或
+当前平台读不到 token 时会返回 `IdentityUnknown`，此时带警告按 pid 存活状态继续发信号以保持兼容。
+**`IdentityUnknown` 不等于 `Match`**——运维应把它当成兼容性折中而非身份已确认，遇到误杀疑虑时先按
+pid、worker 日志和健康检查确认目标，再决定是否停止。
+
 `--group=all` 是通配符的免引号写法：`*` 会被 shell 先展开，zsh 直接报
 `no matches found` 并拒绝执行。两者在解析、pid 文件（`-worker-all.pid`）与 `stop` 上完全
 等价。`worker stop` 不带 `--group` 时扫 `<pid_file>` 旁边的 `-worker-*.pid`，因为分组可能
@@ -705,7 +711,7 @@ COMMIT;
 
 **为什么不用 `UPDATE ... ORDER BY ... LIMIT`**：MySQL 的 `UPDATE` 不支持 `SKIP LOCKED`，遇到已被别的事务锁定的行会阻塞等待，并发下容易演变成锁等待甚至死锁。`SELECT ... FOR UPDATE SKIP LOCKED` 才是"跳过别人正在处理的，只拿空闲的"。
 
-**为什么一次只抢一批**：批次过大导致单实例长时间持有大量行锁；批次过小则空轮询浪费。建议 `batch = 100`，`lease = 3 × p99 处理耗时`。
+**为什么一次只抢一批**：批次过大导致单实例长时间持有大量行锁；批次过小则空轮询浪费。默认 `batch = 10`，硬上限 `20`——一个实例是串行处理一批的，加大批次不会提高吞吐，只会拉长排队尾巴；要更并行应该加并发。`lease` 必须大于单次 handler 耗时：Runner 在每行 handler 开始前会重新武装租约，所以批大小不再进入租约公式。
 
 ### 7.4 API
 
@@ -720,8 +726,8 @@ package claim
 type Config struct {
 	Table       string        // 可带库名前缀："app.job_task"
 	Job         string
-	Batch       int           // 默认 100
-	Lease       time.Duration // 默认 60s，至少为处理耗时 p99 的 3 倍
+	Batch       int           // 默认 10，上限 20（超过返回 ErrBatchTooLarge）
+	Lease       time.Duration // 默认 60s，必须大于单次 handler 耗时
 	MaxAttempts int           // 默认 5
 	Backoff     time.Duration // 默认 10s
 	MaxBackoff  time.Duration // 默认 10m
@@ -824,7 +830,7 @@ worker:
       concurrency: 2
       claim:
         table: job_task
-        batch: 100
+        batch: 10
         lease: 60s
         max_attempts: 5
         idle_delay: 2s       # 无任务时的退避
@@ -856,8 +862,8 @@ worker:
 | `restart.max_backoff` | `30s` | `>= backoff` |
 | `restart.max_restarts` | `0`（不限） | — |
 | `<g>.<w>.concurrency` | `1` | `1..255`（`Func` 用 `uint8` 承载，越界在构造分组时报错） |
-| `claim.batch` | `100` | `1..1000` |
-| `claim.lease` | `60s` | `>= 3 × p99 处理耗时` |
+| `claim.batch` | `10` | `1..20`，超过即报错 |
+| `claim.lease` | `60s` | `> HandlerTimeout`（建议 ≥ handler p99 加余量） |
 | `claim.max_attempts` | `5` | `>= 1` |
 | `claim.idle_delay` | `2s` | `>= 200ms` |
 

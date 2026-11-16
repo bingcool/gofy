@@ -199,6 +199,12 @@ handler 又是单条的，所以「批量」完全在拉取侧：
 
 一句话：**批量拉取、逐条确认**。这条设计带来两个结果：
 
+`InvisibleDuration` 从 `Receive` 返回那刻起对整批一起计时，而批内是逐条串行处理——尾部的
+消息可能还没轮到就已重新可见，被另一个副本先处理。因此串行模式下必须满足
+`InvisibleDuration > BatchSize × handler p99 + ack/网络余量`；拿不准 handler 耗时上界时，
+要么调大 `InvisibleDuration`，要么把 `BatchSize` 降到 1 逐条拉取。样例是轻量数据库更新，
+`BatchSize=10` / `InvisibleDuration=15s` 够用，但这是演示参数，别直接套到慢 handler 上。
+
 - **失败隔离**。批次里一条失败只让它自己重投，其余九条照常 ack——不像 Kafka 手动提交
   那样把失败位点之后的记录一起留下。代价是 handler 看不到批次边界，没法把十条合并成
   一次 `UPDATE` 或一个事务。
@@ -369,6 +375,17 @@ return runner.Run(worker.DrainContext(ctx), id.Owner())
 心跳。收尾写失败只影响该行、不拖累同批其余任务；租约丢失不上抛（副作用可能已发生），而是通过
 `Result.LeaseLost` 通知 `OnFailure`。`Runner` 持有本代连接池，要在 worker 的 `Run` 内构建，
 热更新后用新一代重建。也可直接复制 `support/claim/claim.sql` 建表（表名 `claim_job_task`）。
+
+一条必须知道的边界：`Runner` 在每条 handler 开始前用 CAS 重新武装该行租约（`Queue.Extend`），
+所以批大小不再进入租约公式——尾部任务排队再久，只要轮到前还没被回收，就会拿到一个完整窗口。
+但它**只保护排队期，不保护执行期**：handler 一旦开跑，租约在脚下过期仍会被别的副本回收并再跑
+一遍。因此 `Lease` 必须大于 `HandlerTimeout`（`NewRunner` 会直接拒绝 `HandlerTimeout >= Lease`），
+且 handler 必须幂等。这个样例是 `Lease=30s`、`HandlerTimeout=5s`，余量足够。
+
+批大小默认 10、硬上限 20（`claim.MaxBatch`）：`New` 和 `Claim` 收到超过上限的值都返回
+`ErrBatchTooLarge`，不会静默截断。一个实例是串行处理整批的，加大批次既不会提高吞吐，又会拉长
+尾部排队、让单实例同时租住更多行；要更并行请加 worker 并发。样例显式配成 3，是为了让两个实例
+都能分到行。
 
 `enqueue` 是普通 `INSERT`，没有队列 API：一行 `status=0` 且 `next_run_at` 到期的记录就是
 全部入队动作。真实服务里这条 INSERT 属于创建工作的那个业务事务（建订单与建任务同一个提交），

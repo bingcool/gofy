@@ -53,6 +53,138 @@ func newIntegrationRunner(t *testing.T, cfg RunnerConfig) (*Runner, *gorm.DB) {
 	return r, db
 }
 
+// TestIntegrationRunnerBatchLeaseHandover covers the full P1 report scenario:
+// replica A claims a batch, the tail rows expire while queued, replica B reaps
+// and re-claims them, and A must skip those rows instead of running their
+// handlers. Every row must be handled exactly once across both replicas.
+// TestIntegrationRunnerBatchLeaseHandover 覆盖 P1 报告的完整场景：副本 A 认领一批，尾部行在排队
+// 期间过期，副本 B 回收并重新认领；A 必须跳过这些行而不是继续执行 handler。最终每一行在两个
+// 副本之间只被执行一次。
+func TestIntegrationRunnerBatchLeaseHandover(t *testing.T) {
+	handled := 0
+	succeeded := map[uint64]bool{}
+	skipped := map[uint64]bool{}
+	r, db := newIntegrationRunner(t, RunnerConfig{
+		Config: Config{Job: "orders", Lease: time.Minute, MaxAttempts: 3, Batch: 3},
+		Handler: func(context.Context, []byte) (uint64, error) {
+			handled++
+			return 0, nil
+		},
+		OnSuccess: func(res Result) { succeeded[res.RowID] = true },
+		OnFailure: func(res Result) {
+			if res.LeaseLost {
+				skipped[res.RowID] = true
+			}
+		},
+	})
+	seed(t, db, r.queue.tableName(), "orders", 3)
+	ctx := context.Background()
+
+	// Replica A claims all three rows in one batch.
+	// 副本 A 一次认领三行。
+	aTasks, err := r.queue.Claim(ctx, "worker-a", 3)
+	if err != nil || len(aTasks) != 3 {
+		t.Fatalf("A Claim = %v, %v", aTasks, err)
+	}
+
+	// The tail rows expire while A is still working on the first one.
+	// 尾部两行在 A 还在处理第一行时就过期了。
+	if err := db.Exec("UPDATE `"+r.queue.tableName()+
+		"` SET lease_until = DATE_SUB(NOW(3), INTERVAL 1 SECOND) WHERE id IN (?, ?)",
+		aTasks[1].ID, aTasks[2].ID).Error; err != nil {
+		t.Fatalf("expire tail leases: %v", err)
+	}
+
+	// Replica B reaps the expired rows and takes them over.
+	// 副本 B 回收过期行并接管。
+	reaped, dead, err := r.queue.Reap(ctx)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if reaped != 2 || dead != 0 {
+		t.Fatalf("Reap = %d/%d, want 2/0", reaped, dead)
+	}
+	bTasks, err := r.queue.Claim(ctx, "worker-b", 3)
+	if err != nil || len(bTasks) != 2 {
+		t.Fatalf("B Claim = %v, %v", bTasks, err)
+	}
+
+	// A now walks its batch: row 1 is still owned, rows 2 and 3 must be skipped.
+	// A 继续走自己的批次：第 1 行仍持有，第 2、3 行必须跳过。
+	for _, task := range aTasks {
+		if err := r.process(ctx, task); err != nil {
+			t.Fatalf("A process row %d: %v", task.ID, err)
+		}
+	}
+	if handled != 1 {
+		t.Fatalf("handled = %d after A, want 1 (only the still-owned row)", handled)
+	}
+	for _, task := range aTasks[1:] {
+		if !skipped[task.ID] {
+			t.Fatalf("row %d was not reported as LeaseLost to OnFailure", task.ID)
+		}
+	}
+
+	// B runs the two rows it owns; now every row has been handled exactly once.
+	// B 执行它持有的两行；此时每一行都恰好被执行一次。
+	for _, task := range bTasks {
+		if err := r.process(ctx, task); err != nil {
+			t.Fatalf("B process row %d: %v", task.ID, err)
+		}
+	}
+	if handled != 3 {
+		t.Fatalf("handled = %d after B, want 3 (each row exactly once)", handled)
+	}
+	for _, task := range aTasks {
+		if !succeeded[task.ID] {
+			t.Fatalf("row %d never succeeded", task.ID)
+		}
+	}
+	if len(succeeded) != 3 {
+		t.Fatalf("succeeded rows = %d, want 3 distinct", len(succeeded))
+	}
+}
+
+// TestIntegrationRunnerSkipsReapedRowBeforeHandler is the end-to-end P1 guard:
+// if a claimed row was reaped while waiting in the batch, Runner must skip its
+// handler entirely — no side effect may run for a task another replica now owns.
+// TestIntegrationRunnerSkipsReapedRowBeforeHandler 是 P1 的端到端守卫：若一批中的某行在排队期间
+// 被回收，Runner 必须整个跳过它的 handler——对已被别的副本认领的任务绝不能产生副作用。
+func TestIntegrationRunnerSkipsReapedRowBeforeHandler(t *testing.T) {
+	handled := 0
+	var got Result
+	r, db := newIntegrationRunner(t, RunnerConfig{
+		Config: Config{Job: "orders", Lease: time.Minute, MaxAttempts: 3},
+		Handler: func(context.Context, []byte) (uint64, error) {
+			handled++
+			return 0, nil
+		},
+		OnFailure: func(res Result) { got = res },
+	})
+	seed(t, db, r.queue.tableName(), "orders", 1)
+
+	tasks, err := r.queue.Claim(context.Background(), "worker-a", 1)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("Claim = %v, %v", tasks, err)
+	}
+	// Reap this row behind the handler's back before process() runs.
+	// 在 process() 之前偷偷回收这一行。
+	if err := db.Exec("UPDATE `"+r.queue.tableName()+
+		"` SET status = 0, owner = '', lease_until = NULL WHERE id = ?", tasks[0].ID).Error; err != nil {
+		t.Fatalf("reap row: %v", err)
+	}
+
+	if err := r.process(context.Background(), tasks[0]); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if handled != 0 {
+		t.Fatalf("handler ran %d times for a reaped row, want 0 (side effects must not run)", handled)
+	}
+	if !got.LeaseLost {
+		t.Fatal("OnFailure did not report LeaseLost for the skipped row")
+	}
+}
+
 func TestIntegrationRunnerIdleCallsHandlerWithNilData(t *testing.T) {
 	gotNil := false
 	success, failure := 0, 0

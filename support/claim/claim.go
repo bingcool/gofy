@@ -42,7 +42,22 @@ const (
 // Defaults applied when the matching Config field is zero.
 // 当对应 Config 字段为零时使用的默认值。
 const (
-	DefaultBatch       = 100
+	// DefaultBatch is deliberately small. One instance handles a batch serially,
+	// so a big batch does not increase throughput — it only lengthens the tail
+	// that waits behind the head, and holds more rows locked (or leased) by one
+	// worker at a time. Raise Concurrency instead of the batch when one instance
+	// must do more work in parallel.
+	// DefaultBatch 故意取得小。单实例是串行处理一批的，大批次不会提高吞吐，只会拉长排队尾巴，
+	// 并让一个 worker 同时锁住/租住更多行。单实例要更并行应该加并发，而不是加批大小。
+	DefaultBatch = 10
+	// MaxBatch is the hard ceiling on a claim size; New and Claim reject
+	// anything above it. With Runner re-arming each row right before its handler
+	// starts, an oversized batch is not incorrect — it just wastes a reap cycle
+	// for every row still queued when the shared deadline expires.
+	// MaxBatch 是认领批大小的硬上限，New 与 Claim 都会拒绝超过它的值。Runner 在每行 handler
+	// 开始前会重新武装租约，所以超大批次并不会算错——只是共享截止时间到期时，还在排队的行每人
+	// 白等一个回收周期。
+	MaxBatch           = 20
 	DefaultLease       = 60 * time.Second
 	DefaultMaxAttempts = 5
 	DefaultBackoff     = 10 * time.Second
@@ -65,6 +80,14 @@ var (
 	// ErrOwnerRequired means Claim was called without an owner.
 	// ErrOwnerRequired 表示调用 Claim 时没有提供 owner。
 	ErrOwnerRequired = errors.New("claim: owner is required")
+
+	// ErrBatchTooLarge means the configured or requested claim size exceeds
+	// MaxBatch. It is returned instead of silently clamping: a batch someone
+	// typed as 200 is a misunderstanding of the serial model, and quietly
+	// shrinking it would hide that.
+	// ErrBatchTooLarge 表示配置或请求的认领批大小超过 MaxBatch。这里返回错误而不是静默截断：
+	// 有人写成 200 说明他误解了串行模型，悄悄改小只会掩盖这一点。
+	ErrBatchTooLarge = fmt.Errorf("claim: batch exceeds the maximum of %d", MaxBatch)
 
 	// ErrLeaseLost means the row no longer belongs to the caller: another owner
 	// took it over after a lease expired, or the same owner claimed it again
@@ -102,14 +125,22 @@ type Config struct {
 	// Job 用于标记行，一张表因此可以承载多种任务。Go 侧保留 Job 这个名字，它选中的列是
 	// job_type。
 	Job string
-	// Batch is the default claim size; zero means DefaultBatch.
-	// Batch 是默认认领批大小，0 表示 DefaultBatch。
+	// Batch is the default claim size; zero means DefaultBatch, and anything
+	// above MaxBatch is rejected by New with ErrBatchTooLarge.
+	// Batch 是默认认领批大小，0 表示 DefaultBatch；超过 MaxBatch 会被 New 以
+	// ErrBatchTooLarge 拒绝。
 	Batch int
-	// Lease is how long a claim stays valid; zero means DefaultLease. Keep it
-	// at least three times the p99 handler duration, otherwise a slow handler
-	// gets its row taken away.
-	// Lease 是认领有效期，0 表示 DefaultLease。它至少应为处理耗时 p99 的 3 倍，
-	// 否则慢任务的行会被别人抢走。
+	// Lease is how long a claim stays valid; zero means DefaultLease. Runner
+	// re-arms it right before each handler starts, so it must exceed the longest
+	// legitimate handler duration (p99 plus margin) — batch size no longer
+	// multiplies this requirement. Re-arming protects the queueing window only:
+	// a handler that outruns the lease can still be taken over mid-flight and
+	// executed again, so handlers must be idempotent. NewRunner rejects
+	// HandlerTimeout >= Lease as the enforceable part of that contract.
+	// Lease 是认领有效期，0 表示 DefaultLease。Runner 会在每个 handler 开始前重新武装它，
+	// 因此它只需大于单次 handler 的最长合法耗时（p99 加余量）——批大小不再放大这个要求。重新
+	// 武装只保护排队窗口：跑过租约的 handler 仍可能在执行途中被接管并再跑一遍，所以 handler 必须
+	// 幂等。NewRunner 会拒绝 HandlerTimeout >= Lease，这是该约束中可强制的一半。
 	Lease time.Duration
 	// MaxAttempts caps how many times a row may be claimed; zero means
 	// DefaultMaxAttempts.
@@ -219,6 +250,8 @@ type Queue struct {
 	hooks       Hooks
 	selectSQL   string
 	updateSQL   string
+	extendSQL   string
+	ownsSQL     string
 	succeedSQL  string
 	failSQL     string
 	deadSQL     string
@@ -233,6 +266,9 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
 		return nil, ErrDBRequired
 	}
 	cfg = cfg.withDefaults()
+	if cfg.Batch > MaxBatch {
+		return nil, fmt.Errorf("%w: configured %d", ErrBatchTooLarge, cfg.Batch)
+	}
 	if cfg.Job == "" {
 		return nil, ErrJobRequired
 	}
@@ -279,6 +315,27 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
        start_handle_time = CURRENT_TIMESTAMP,
        lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
  WHERE id IN (?)`, table, StatusClaimed)
+	// Extend re-arms one row's lease right before its handler starts. Claim stamps
+	// every row in a batch with the same lease_until, but Runner executes them
+	// serially: a row near the back can wait past that deadline. Re-arming from
+	// the moment of execution gives it a full lease window, and the owner/status/
+	// attempts fence makes a row already reaped by another replica fail the CAS —
+	// so a stale handler is skipped before it can produce a side effect.
+	// Extend 在每条任务执行前重新武装它的租约。Claim 给整批行写同一个 lease_until，但 Runner
+	// 串行执行：靠后的行可能还没轮到就已过期。从执行时刻重新计时给它完整的租约窗口；owner/
+	// status/attempts 围栏让已被其它副本回收的行 CAS 失败——于是过期 handler 在产生副作用之前
+	// 就被跳过。
+	q.extendSQL = fmt.Sprintf(`UPDATE %s
+   SET lease_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)
+ WHERE id = ? AND owner = ? AND status = %d AND attempts = ?`, table, StatusClaimed)
+	// MySQL reports rows changed, not rows matched (unless CLIENT_FOUND_ROWS is
+	// set, which we cannot assume). Re-arming within the same second can produce
+	// the same lease_until and thus affect zero rows. ownsSQL lets Extend tell a
+	// no-op update from a lost claim: re-read the fence and check it still holds.
+	// MySQL 默认返回被修改的行数而非匹配行数（除非设了 CLIENT_FOUND_ROWS，我们不能假设）。
+	// 同一秒内续租可能算出相同的 lease_until，导致 affected=0。ownsSQL 让 Extend 能区分
+	// "空更新"与"租约已丢"：重读围栏字段，检查是否仍成立。
+	q.ownsSQL = fmt.Sprintf(`SELECT owner, status, attempts FROM %s WHERE id = ?`, table)
 	// Every completion statement is fenced by owner, status and attempts.
 	//
 	// attempts is the per-claim fencing token: Claim increments it on every
@@ -366,13 +423,14 @@ type Task struct {
 }
 
 // Claim locks and marks up to n rows for owner. It returns an empty slice when
-// nothing is due; callers should back off instead of spinning.
+// nothing is due; callers should back off instead of spinning. n <= 0 means the
+// configured Batch, and n > MaxBatch is rejected with ErrBatchTooLarge.
 //
 // Rows another transaction is already working on are skipped, so every replica
 // can run the same loop. The claim and the update happen in one transaction: a
 // crash between them would otherwise leave rows claimed by nobody.
 // Claim 为 owner 锁定并标记最多 n 行；没有到期任务时返回空切片，调用方应退避
-// 而不是空转。
+// 而不是空转。n <= 0 表示用配置的 Batch，n > MaxBatch 会以 ErrBatchTooLarge 拒绝。
 //
 // 其它事务正在处理的行会被跳过，因此每个副本都能跑同一个循环。认领与更新在同一
 // 个事务里完成，否则中途崩溃会留下无人负责的行。
@@ -383,6 +441,13 @@ func (q *Queue) Claim(ctx context.Context, owner string, n int) ([]Task, error) 
 	}
 	if n <= 0 {
 		n = q.batch
+	} else if n > MaxBatch {
+		// An explicit n comes from a caller, not from validated config, so it
+		// gets checked here as well: MaxBatch is the ceiling no matter where the
+		// number came from.
+		// 显式传的 n 来自调用方而不是已验证的配置，因此这里也要校验：不管数字从哪来，
+		// MaxBatch 都是上限。
+		return nil, fmt.Errorf("%w: requested %d", ErrBatchTooLarge, n)
 	}
 
 	var tasks []Task
@@ -412,6 +477,48 @@ func (q *Queue) Claim(ctx context.Context, owner string, n int) ([]Task, error) 
 	}
 	q.claimHook(len(tasks))
 	return tasks, nil
+}
+
+// Extend re-arms one claimed row's lease for a fresh full Lease window, before
+// its handler starts. Runner calls it for every task in a batch because Claim
+// stamped them all with the same deadline; without this, a row waiting behind
+// slow siblings could be reaped and run by another replica. The CAS on
+// owner + status + attempts means a row already reaped fails with ErrLeaseLost,
+// and the caller must skip the handler — its side effects must not run twice.
+// Extend 在 handler 开始前把一条已认领行的租约重新武装为一个完整的 Lease 窗口。Runner 对批次中
+// 每条任务都调用它，因为 Claim 给所有行写了同一个截止时间；否则排在慢任务后面的行可能被回收、
+// 被另一个副本执行。owner + status + attempts 的 CAS 保证已被回收的行返回 ErrLeaseLost，
+// 调用方必须跳过 handler——它的副作用绝不能跑两遍。
+func (q *Queue) Extend(ctx context.Context, task Task) error {
+	owner, err := claimFields(task)
+	if err != nil {
+		return err
+	}
+	res := q.db.WithContext(ctx).Exec(q.extendSQL, ceilSeconds(q.lease), task.ID, owner, task.Attempts)
+	if res.Error != nil {
+		return fmt.Errorf("claim: extend: %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	// Zero rows changed can mean either "the row was taken over" or "the new
+	// lease_until equals the old one" (DATETIME seconds, same-second re-arm).
+	// Re-read the fence: only a matching owner/status/attempts means we still
+	// own the row and the no-op update is harmless.
+	// 0 行被修改可能是"已被接管"，也可能是"新 lease_until 与旧值相同"（DATETIME 秒精度、
+	// 同一秒内续租）。重读围栏：只有 owner/status/attempts 都匹配才算仍持有，空更新无害。
+	var cur struct {
+		Owner    string
+		Status   int8
+		Attempts int
+	}
+	if err := q.db.WithContext(ctx).Raw(q.ownsSQL, task.ID).Scan(&cur).Error; err != nil {
+		return fmt.Errorf("claim: extend verify: %w", err)
+	}
+	if cur.Owner == owner && cur.Status == StatusClaimed && cur.Attempts == task.Attempts {
+		return nil
+	}
+	return fmt.Errorf("%w: task %d", ErrLeaseLost, task.ID)
 }
 
 // Succeed closes a task. ErrLeaseLost means the row was taken over after this

@@ -3,6 +3,7 @@ package claim
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,11 +29,14 @@ import (
 // （或把行置为 dead）。Runner 只保证这些调用用的是 Claim 原样返回的 Task——owner 与 attempts
 // 这对围栏，用来挡住过期的 handler。
 const (
-	// DefaultHandlerTimeout bounds one Handler call when Config leaves it at zero.
-	// It must stay below Lease: claim does not renew a lease, and a handler that
-	// outlives it can have its row taken over.
-	// DefaultHandlerTimeout 是配置为零时单次 Handler 的耗时上限。它必须小于 Lease：claim
-	// 不续租，超过租约的 handler 可能被接管。
+	// DefaultHandlerTimeout is the deadline given to one Handler call when the
+	// config leaves it at zero. It is a cooperative deadline, not a kill switch:
+	// it cancels the ctx passed to Handler, which the business must propagate to
+	// its DB/HTTP/Redis calls to actually stop. Keep it below Lease — a handler
+	// that ignores ctx and outlives its lease can still have the row taken over.
+	// DefaultHandlerTimeout 是配置为零时单次 Handler 的截止时间。它是协作式 deadline，不是强杀：
+	// 它只取消传给 Handler 的 ctx，业务必须把它透传到 DB/HTTP/Redis 调用才能真正停止。要小于
+	// Lease——忽略 ctx 且超过租约的 handler 仍可能被接管。
 	DefaultHandlerTimeout = 5 * time.Second
 )
 
@@ -41,6 +45,16 @@ var (
 	// without one would claim rows nobody processes and let their leases expire.
 	// ErrHandlerRequired 表示 NewRunner 没有拿到 Handler。没有回调就认领行只会让租约过期。
 	ErrHandlerRequired = errors.New("claim: runner handler is required")
+
+	// ErrHandlerTimeoutExceedsLease means HandlerTimeout is not shorter than
+	// Lease. Extend only re-arms a lease before the handler starts; a handler
+	// allowed to run past the lease can be reaped mid-flight and executed by
+	// another replica, so this combination is rejected at construction instead
+	// of failing silently in production.
+	// ErrHandlerTimeoutExceedsLease 表示 HandlerTimeout 没有短于 Lease。Extend 只在 handler
+	// 开始前重新武装租约；允许跑过租约的 handler 可能被执行途中被回收、由另一个副本再执行一遍，
+	// 因此这种组合在构造时就拒绝，而不是在生产里静默出错。
+	ErrHandlerTimeoutExceedsLease = errors.New("claim: handler timeout must be shorter than lease")
 )
 
 // Handler processes one claimed row.
@@ -62,6 +76,10 @@ var (
 // hook can say "order 42 failed" instead of "row 9128 failed". The claim row id
 // is available separately as Result.RowID.
 //
+// ctx carries a cooperative deadline (HandlerTimeout), not a forced kill. The
+// handler must pass ctx through to its DB, HTTP, Redis and downstream calls;
+// rebuilding with context.Background cancels nothing and can outlive the lease.
+//
 // Handler 处理一条已认领的行。
 //
 // data 是该行的原始 payload，由业务自行解码。当本轮没有到期任务时，Run 会用 data == nil
@@ -75,6 +93,9 @@ var (
 //
 // taskID 是 handler 从 payload 里解出的业务标识。Runner 不解释它，只把它透传给结果钩子和日志，
 // 于是钩子能说"订单 42 失败"而不是"第 9128 行失败"。claim 行号单独放在 Result.RowID。
+//
+// ctx 携带的是协作式 deadline（HandlerTimeout），不是强制终止。handler 必须把 ctx 透传到它的
+// DB、HTTP、Redis 和下游调用；用 context.Background 重建等于取消了超时，还可能活过租约。
 type Handler func(ctx context.Context, data []byte) (taskID uint64, err error)
 
 // Result is the full context handed to the success and failure hooks. It carries
@@ -122,10 +143,11 @@ type Result struct {
 type RunnerConfig struct {
 	Config
 
-	// HandlerTimeout bounds one Handler call; zero means DefaultHandlerTimeout.
-	// Keep it well below Lease so a slow handler finishes before its lease does.
-	// HandlerTimeout 限制单次 Handler 耗时；零表示 DefaultHandlerTimeout。要远小于 Lease，
-	// 保证慢 handler 在租约到期前完成。
+	// HandlerTimeout is the cooperative deadline passed to Handler via ctx;
+	// zero means DefaultHandlerTimeout. It cancels ctx, it does not kill a
+	// handler that ignores it. Keep it below Lease.
+	// HandlerTimeout 是经 ctx 传给 Handler 的协作式截止时间；零表示 DefaultHandlerTimeout。
+	// 它只取消 ctx，不会杀死忽略它的 handler。要小于 Lease。
 	HandlerTimeout time.Duration
 
 	// Handler is the only mandatory callback. A nil Handler is rejected by NewRunner.
@@ -169,6 +191,16 @@ func NewRunner(db *gorm.DB, cfg RunnerConfig) (*Runner, error) {
 	}
 	if cfg.HandlerTimeout <= 0 {
 		cfg.HandlerTimeout = DefaultHandlerTimeout
+	}
+	// New has already applied the lease default, so compare the effective values.
+	// A handler allowed to outlive its lease can be reaped while still running and
+	// executed a second time by another replica — Extend cannot help there,
+	// because it only runs before the handler starts.
+	// New 已经补齐租约默认值，这里比较生效后的值。允许活过租约的 handler 会在执行中被回收、被
+	// 另一个副本再跑一遍——Extend 帮不上忙，因为它只在 handler 开始前执行。
+	if cfg.HandlerTimeout >= q.lease {
+		return nil, fmt.Errorf("%w: handler timeout %s >= lease %s",
+			ErrHandlerTimeoutExceedsLease, cfg.HandlerTimeout, q.lease)
 	}
 	// Normalize nil hooks to no-ops once, so the hot path can call them without
 	// a nil check on every outcome.
@@ -242,20 +274,48 @@ func (r *Runner) Run(ctx context.Context, owner string) error {
 // process 在超时约束下运行一次 handler 并记录结果。超时只作用于 handler；Succeed/Fail 使用调用方
 // 的 context，因此慢业务调用不会打断记录失败的那次写库。
 func (r *Runner) process(ctx context.Context, task Task) error {
+	res := Result{
+		RowID:    task.ID,
+		Job:      task.Job,
+		Attempts: task.Attempts,
+		Data:     task.Payload,
+	}
+
+	// Re-arm this row's lease immediately before running its handler. Claim gave
+	// every row in the batch the same deadline; a row near the back may have
+	// waited past it. Extend grants a fresh window and, through the CAS, tells us
+	// whether another replica already reaped the row. If so, skip the handler —
+	// running it now would duplicate side effects that the new owner may already
+	// be producing.
+	//
+	// This protects the queueing window, not the execution window: once the
+	// handler is running, a lease that expires underneath it is still reaped and
+	// the row can run elsewhere. That is why Lease must exceed HandlerTimeout
+	// (enforced in NewRunner) and why handlers must be idempotent.
+	// 执行 handler 前立刻重新武装本行租约。Claim 给整批行同一个截止时间，靠后的行可能已经等过
+	// 期。Extend 给一个新窗口，并通过 CAS 告诉我们是否已被其它副本回收；若是则跳过 handler——
+	// 现在再跑只会和新 owner 的副作用重复。
+	//
+	// 它保护的是排队窗口，不是执行窗口：handler 一旦开始跑，租约在其脚下过期仍会被回收、行可能
+	// 在别处再跑一遍。所以 Lease 必须大于 HandlerTimeout（NewRunner 强制），handler 必须幂等。
+	if err := r.queue.Extend(ctx, task); err != nil {
+		if errors.Is(err, ErrLeaseLost) {
+			res.LeaseLost = true
+			res.Err = err
+			r.onFailureHook(res)
+			return nil
+		}
+		return err
+	}
+
 	started := time.Now()
 	handleCtx, cancel := context.WithTimeout(ctx, r.handlerTimeout)
 	taskID, handleErr := r.handler(handleCtx, task.Payload)
 	cancel()
 
-	res := Result{
-		TaskID:   taskID,
-		RowID:    task.ID,
-		Job:      task.Job,
-		Attempts: task.Attempts,
-		Data:     task.Payload,
-		Err:      handleErr,
-		Elapsed:  time.Since(started),
-	}
+	res.TaskID = taskID
+	res.Err = handleErr
+	res.Elapsed = time.Since(started)
 
 	if handleErr != nil {
 		// Fail stores the reason and time, then retries or parks as dead. Pass the
