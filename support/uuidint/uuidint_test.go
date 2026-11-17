@@ -443,3 +443,40 @@ func TestFallbackDelayOptionValidation(t *testing.T) {
 		t.Fatalf("New with zero delay: %v", err)
 	}
 }
+
+// TestWithRetryZeroUsesDefaultAttempts pins C5: zero retries means the default
+// budget, and an exhausted primary returns a clean ErrUnavailable instead of an
+// error built around a nil cause (which used to render as "%!w(<nil>)" and
+// alert the error handler with nil).
+// TestWithRetryZeroUsesDefaultAttempts 固定 C5：次数为 0 表示使用默认重试次数，
+// 主连接耗尽后返回干净的 ErrUnavailable，而不是围绕 nil 原因拼接的错误（此前会渲染
+// 成 "%!w(<nil>)"，并以 nil 触发告警回调）。
+func TestWithRetryZeroUsesDefaultAttempts(t *testing.T) {
+	client := goredis.NewClient(&goredis.Options{
+		Addr:        "127.0.0.1:1",
+		MaxRetries:  -1,
+		DialTimeout: 50 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+
+	var reported []error
+	gen, err := uuidint.New("uuid-key",
+		uuidint.WithClient(client),
+		uuidint.WithRetry(0, 0),
+		uuidint.WithErrorHandler(func(err error) { reported = append(reported, err) }),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = gen.Get(context.Background())
+	if !errors.Is(err, uuidint.ErrUnavailable) {
+		t.Fatalf("Get = %v, want ErrUnavailable", err)
+	}
+	if strings.Contains(err.Error(), "%!") {
+		t.Fatalf("error wraps a nil cause: %v", err)
+	}
+	if len(reported) != 1 || reported[0] == nil {
+		t.Fatalf("error handler calls = %v, want one non-nil error", reported)
+	}
+}

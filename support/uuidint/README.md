@@ -64,7 +64,7 @@ Go 侧最终 ID：`id = prefixNumber + incrId`（19 位数字，`int64` 可容�
 | `WithFallbackInstances(...)` | 主连接重试耗尽后依次尝试的命名实例 | 无 |
 | `WithFallbackDelay(time.Duration)` | 尝试第一个备用前的停顿；无备用时不等待，ctx 取消立即中断 | `10ms` |
 | `WithTTL(time.Duration)` | 计数 key 的 TTL，至少 1s（Redis EXPIRE 只接受整秒） | `15s` |
-| `WithRetry(times, delay)` | 主连接尝试次数与间隔；同毫秒冲突也走重试 | `3` / `150ms` |
+| `WithRetry(times, delay)` | 主连接尝试次数与间隔；同毫秒冲突也走重试；`0` 表示默认次数 | `3` / `150ms` |
 | `WithErrorHandler(func(error))` | 主连接重试耗尽时回调一次，再尝试备用连接 | 无 |
 | `WithPool(size, interval)` | 启用本地预取池：启动预热 `size` 个号，之后每 `interval` 补一批 | 不启用 |
 
@@ -112,10 +112,12 @@ ids, err := gen.GetBatch(ctx, 10)
 ## 失败与降级
 
 1. 主连接最多尝试 `retryTimes` 次（含第一次），失败间隔 `retryDelay`；
+   `WithRetry(0, …)` 按默认 3 次处理，负数报错；
 2. 仍失败 → 调用 `WithErrorHandler`（若有）；
 3. 有备用时停顿 `WithFallbackDelay` 的时长（默认 10ms，可被 ctx 取消）；
 4. 依次尝试每个备用客户端/实例各一次；
 5. 全部失败返回包裹 `ErrUnavailable` 的错误，可用 `errors.Is` 判断；
+   没有任何可报原因时返回裸 `ErrUnavailable`，`WithErrorHandler` 不会被 nil 触发；
    `ctx` 被取消时返回 `context.Canceled` / `context.DeadlineExceeded`。
 
 请保证 Redis 高可用，或配置可写的备用实例。

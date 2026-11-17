@@ -155,11 +155,16 @@ func WithTTL(ttl time.Duration) Option {
 	}
 }
 
+const defaultRetryTimes = 3
+
 // WithRetry sets how many attempts the primary source gets (default 3) and the
 // delay between them (default 150ms). Retries also cover same-millisecond
-// collisions reported by the Lua script.
+// collisions reported by the Lua script. Zero attempts means the default: a
+// caller that only wants to tune the delay must not accidentally disable the
+// primary source.
 // 设置主连接的总尝试次数（默认 3）与间隔（默认 150ms）；Lua 报同毫秒冲突时也走
-// 这套重试。等待可被 ctx 取消，取消后立即返回 ctx.Err() 而不进入备用连接。
+// 这套重试。次数为 0 表示使用默认值：只想调整间隔的调用方不应因此关掉主连接。
+// 等待可被 ctx 取消，取消后立即返回 ctx.Err() 而不进入备用连接。
 func WithRetry(times int, delay time.Duration) Option {
 	return func(s *settings) error {
 		if times < 0 {
@@ -167,6 +172,9 @@ func WithRetry(times int, delay time.Duration) Option {
 		}
 		if delay < 0 {
 			return errors.New("uuidint: retry delay must not be negative")
+		}
+		if times == 0 {
+			times = defaultRetryTimes
 		}
 		s.retryTimes = times
 		s.retryDelay = delay
@@ -283,7 +291,7 @@ func New(key string, opts ...Option) (*Generator, error) {
 
 	s := settings{
 		ttl:           15 * time.Second,
-		retryTimes:    3,
+		retryTimes:    defaultRetryTimes,
 		retryDelay:    150 * time.Millisecond,
 		fallbackDelay: defaultFallbackDelay,
 	}
@@ -378,6 +386,13 @@ func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
 	}
 
 	lastErr := errors.Join(errs...)
+	if lastErr == nil {
+		// No attempt ran or none reported a reason: return the bare sentinel
+		// instead of wrapping a nil cause and alerting with a nil error.
+		// 一次尝试都没执行、或没有任何原因可报时，直接返回哨兵错误，避免包装 nil
+		// 原因、也不要用 nil 触发告警回调。
+		return 0, ErrUnavailable
+	}
 	if g.onError != nil {
 		g.onError(lastErr)
 	}
@@ -398,7 +413,11 @@ func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
 		}
 		errs = append(errs, err)
 	}
-	return 0, fmt.Errorf("%w: %w", ErrUnavailable, errors.Join(errs...))
+	joined := errors.Join(errs...)
+	if joined == nil {
+		return 0, ErrUnavailable
+	}
+	return 0, fmt.Errorf("%w: %w", ErrUnavailable, joined)
 }
 
 func (g *Generator) wait(ctx context.Context) error {
