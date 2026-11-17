@@ -203,3 +203,42 @@ func TestDiscoveryTimeoutEnvOverride(t *testing.T) {
 		t.Fatalf("Timeout = %s, want 800ms", cfg.Discovery.Timeout)
 	}
 }
+
+// The inner base URL is the one value an assembly root sets after Load, so it
+// has to normalize on the way in: a scheme-less host and a trailing slash both
+// appear in real configuration files.
+// 内网 base URL 是装配根在 Load 之后设置的唯一值，因此归一化必须发生在这里：真实配置
+// 里既有不带 scheme 的主机，也有带末尾斜杠的写法。
+func TestSetInnerExternalBaseURINormalizes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "bare host", in: "demo-service-dev.example.com:8080", want: "http://demo-service-dev.example.com:8080"},
+		{name: "trailing slash", in: "https://demo.example.com/", want: "https://demo.example.com"},
+		{name: "already normalized", in: "http://10.0.0.5:8080", want: "http://10.0.0.5:8080"},
+		{name: "blank", in: "   ", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := RegisterConfig{ServiceName: "demo-service"}
+			reg.SetInnerExternalBaseURI(tc.in)
+			if got := reg.Metadata[MetadataInnerExternalBaseURI]; got != tc.want {
+				t.Fatalf("metadata = %q, want %q", got, tc.want)
+			}
+			if tc.want == "" && len(reg.Metadata) != 0 {
+				t.Fatalf("metadata = %v, want no key for a blank value", reg.Metadata)
+			}
+		})
+	}
+}
+
+// A nil RegisterConfig must not panic: the assembly root calls the setter on a
+// config it may not have loaded (stop, version, script without LoadNacos).
+// nil RegisterConfig 不能 panic：装配根可能在没加载配置的命令上调用它
+// （stop、version、不读 nacos 的 script）。
+func TestSetInnerExternalBaseURINilSafe(t *testing.T) {
+	var reg *RegisterConfig
+	reg.SetInnerExternalBaseURI("http://demo:8080")
+}

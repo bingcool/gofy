@@ -13,6 +13,16 @@ import (
 	"go.uber.org/zap"
 )
 
+// MetadataInnerExternalBaseURI is the instance metadata key that carries a base
+// URL reachable from outside the cluster. An instance IP is often a pod address
+// that a laptop or the office network cannot route to, so a consumer resolving
+// this instance can use the base URL instead. The value is this instance's own
+// address, in the environment the configuration came from.
+// MetadataInnerExternalBaseURI 是实例 metadata 的键，值为集群外可达的 base URL。
+// 实例 IP 常常是笔记本或办公网路由不到的 Pod 地址，解析到该实例的调用方可以改用这个
+// URL。值是本实例自己的地址，取的是配置文件来源的那套环境。
+const MetadataInnerExternalBaseURI = "inner_external_base_uri"
+
 // RegisterConfig describes how the application instance is published in
 // Nacos. It maps to application.yaml nacos.service_register.
 // RegisterConfig 描述应用实例如何发布到 Nacos，对应 application.yaml 的
@@ -88,6 +98,34 @@ func (c RegisterConfig) normalize(nacosNamespace string) RegisterConfig {
 		c.Metadata = map[string]string{}
 	}
 	return c
+}
+
+// SetInnerExternalBaseURI records uri as MetadataInnerExternalBaseURI. The value
+// usually comes from a config section the assembly root reads, not from
+// application.yaml, so it is applied after Load and therefore normalizes here:
+// a trailing slash is dropped and a missing scheme becomes http://. An empty
+// uri leaves the metadata untouched, so "not configured" never publishes an
+// empty address that a consumer would then try to dial.
+// SetInnerExternalBaseURI 把 uri 写进 MetadataInnerExternalBaseURI。该值通常来自装配根
+// 读取的配置段而不是 application.yaml，因此在 Load 之后才写入，归一化也放在这里：去掉
+// 末尾斜杠，缺少 scheme 时补 http://。uri 为空时不动 metadata，"没配"因此不会发布一个
+// 空地址让调用方去拨。
+func (c *RegisterConfig) SetInnerExternalBaseURI(uri string) {
+	if c == nil {
+		return
+	}
+	uri = strings.TrimSpace(uri)
+	uri = strings.TrimRight(uri, "/")
+	if uri == "" {
+		return
+	}
+	if !strings.Contains(uri, "://") {
+		uri = "http://" + uri
+	}
+	if c.Metadata == nil {
+		c.Metadata = map[string]string{}
+	}
+	c.Metadata[MetadataInnerExternalBaseURI] = uri
 }
 
 func (c RegisterConfig) validate() error {
