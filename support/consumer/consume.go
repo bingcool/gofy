@@ -283,17 +283,34 @@ type ProcessorConfig struct {
 	// MaxAttempts bounds the retries of one message.
 	// MaxAttempts 限制单条消息的重试次数。
 	MaxAttempts int
-	// ProcessingLease is how long a "processing" row blocks another delivery
-	// from entering the handler; zero means DefaultProcessingLease. It must be
-	// at least the p99 handler duration and at least the broker's redelivery
-	// timeout: a shorter value lets a slow-but-alive handler be taken over by
-	// the copy the broker redelivers, which is the very overlap the ledger
-	// exists to prevent.
-	// ProcessingLease 是一条 processing 记录阻止另一次投递进入 handler 的时长，0
-	// 表示 DefaultProcessingLease。它至少应为处理耗时 p99，且不短于 broker 的重投
-	// 间隔：取值偏小会让"还活着但很慢"的 handler 被 broker 重投的副本接管，而那正是
-	// 台账要消除的重叠。
+	// ProcessingLease is how long a "processing" row may go without a renewal
+	// before another delivery is allowed to take it over; zero means
+	// DefaultProcessingLease. While the handler runs, the row is renewed every
+	// third of this window under the attempts fence, so the lease no longer has
+	// to cover the whole handler duration: it only has to outlive the gap
+	// between two renewals plus one database write. A process that stalls for a
+	// full window still loses the row to another replica, which is why handlers
+	// must stay idempotent. Keeping it at least the broker's redelivery interval
+	// avoids extra redelivery rounds on in-flight copies.
+	// ProcessingLease 是一条 processing 记录在两次续期之间最多可保持多久、之后允许另一次
+	// 投递接管；0 表示 DefaultProcessingLease。handler 运行期间，台账行每三分之一窗口在
+	// attempts 围栏下续期一次，因此租约不再需要覆盖整个 handler 耗时：它只需活过两次续期之间
+	// 的间隔加一次写库。进程整体停顿满一个窗口时行仍会被别的副本接管，所以 handler 必须幂等。
+	// 取值不短于 broker 的重投间隔，可避免在途副本多转几轮重投。
 	ProcessingLease time.Duration
+	// OnLedgerError reports a ledger write that failed after the acknowledgement
+	// decision was already made: a done/failed marker that could not be stored.
+	// The message still follows that decision — a successful handler is
+	// acknowledged even when its marker fails — so the ledger now lags reality:
+	// the next redelivery of that message repeats the handler, and a "done" row
+	// someone queries is missing. Wire this to a metric or an alert; without it
+	// the only trace is a warning log line. It runs on the consumer goroutine
+	// and must not block.
+	// OnLedgerError 上报在确认决定已作出之后失败的台账写入，即没能落库的 done/failed
+	// 标记。消息仍按该决定处理——handler 成功就会确认，即使标记写失败——因此台账从此落后
+	// 于现实：该消息下次重投会重做 handler，别人查 "done" 也查不到这行。请把它接到指标或
+	// 告警；不接则只剩一行 Warn 日志。它在消费者 goroutine 上执行，不得阻塞。
+	OnLedgerError func(messageID string, err error)
 }
 
 // Processor is the shared middle of every consumer: it continues the trace,
@@ -306,14 +323,16 @@ type ProcessorConfig struct {
 //
 // 可安全并发使用：构造之后所有字段只读，每条消息的状态都留在栈上。
 type Processor struct {
-	consumer    string
-	handler     HandlerFunc
-	deduper     *deduper
-	logger      *zap.Logger
-	tracer      trace.Tracer
-	propagator  propagation.TextMapPropagator
-	maxAttempts int
-	lease       time.Duration
+	consumer      string
+	handler       HandlerFunc
+	deduper       *deduper
+	logger        *zap.Logger
+	tracer        trace.Tracer
+	propagator    propagation.TextMapPropagator
+	maxAttempts   int
+	lease         time.Duration
+	renewInterval time.Duration
+	onLedgerError func(messageID string, err error)
 }
 
 // NewProcessor builds the shared chain. It fails when idempotency is requested
@@ -329,16 +348,26 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 		return nil, errors.New("consumer handler is required")
 	}
 	p := &Processor{
-		consumer:    cfg.Consumer,
-		handler:     cfg.Handler,
-		logger:      rt.Logger,
-		tracer:      consumerTracer(rt),
-		propagator:  rt.Propagator,
-		maxAttempts: max(cfg.MaxAttempts, 1),
-		lease:       cfg.ProcessingLease,
+		consumer:      cfg.Consumer,
+		handler:       cfg.Handler,
+		logger:        rt.Logger,
+		tracer:        consumerTracer(rt),
+		propagator:    rt.Propagator,
+		maxAttempts:   max(cfg.MaxAttempts, 1),
+		lease:         cfg.ProcessingLease,
+		onLedgerError: cfg.OnLedgerError,
 	}
 	if p.lease <= 0 {
 		p.lease = DefaultProcessingLease
+	}
+	// Renew three times per lease window, so one slow database write cannot by
+	// itself consume a whole window. The floor keeps a sub-millisecond lease
+	// from turning into a tight renewal loop.
+	// 每个租约窗口续期三次，一次慢写库不至于独自吃掉整个窗口。设下限是为了避免亚毫秒
+	// 租约变成紧循环续期。
+	p.renewInterval = p.lease / 3
+	if p.renewInterval < 10*time.Millisecond {
+		p.renewInterval = 10 * time.Millisecond
 	}
 	if p.logger == nil {
 		p.logger = zap.NewNop()
@@ -463,7 +492,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		return parkErr
 	}
 
-	err = p.handler(ctx, msg, env)
+	err = p.runHandler(ctx, msg, env, attempt, lg)
 	switch {
 	case err == nil:
 		if p.deduper != nil {
@@ -473,7 +502,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 				// redelivery repeats work the handler must tolerate.
 				// 副作用已经发生，消息照样确认；标记失败只意味着下次重投会重做，
 				// 而 handler 本来就必须容忍这一点。
-				lg.Warn("consume mark done failed", zap.Error(markErr))
+				p.ledgerFailed(lg, "done", msg.ID, markErr)
 			}
 		}
 		span.SetStatus(codes.Ok, "")
@@ -498,7 +527,10 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 	default:
 		if p.deduper != nil {
 			if markErr := p.deduper.fail(ctx, msg.ID, attempt, err); markErr != nil {
-				lg.Warn("consume mark failed", zap.Error(markErr))
+				// The redelivery still happens — the handler error is what
+				// decides that — so the lost marker only widens the retry gap.
+				// 重投照样发生——决定它的是 handler 错误——丢掉的标记只会拉长重试间隔。
+				p.ledgerFailed(lg, "failed", msg.ID, markErr)
 			}
 		}
 		span.RecordError(err)
@@ -511,6 +543,113 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		)
 		return err
 	}
+}
+
+// runHandler runs the business handler with the ledger lease kept fresh.
+//
+// Without the renewer, a handler slower than ProcessingLease would let the
+// broker's redelivery take the row over while the first copy is still running —
+// exactly the overlap the ledger exists to prevent. The renewer writes
+// updated_at in database time under the same attempts fence as the outcome
+// writes, so a row that was taken over anyway (the process stalled for a whole
+// window) stops renewing instead of touching the new owner's row.
+//
+// The renewer goroutine always ends before this method returns: cancellation
+// plus the done channel also cover a panicking handler, so no ticker is left
+// renewing a dead claim.
+// runHandler 运行 handler，同时保持台账租约不过期。
+//
+// 没有续期者时，耗时超过 ProcessingLease 的 handler 会被 broker 的重投副本接管——正是台账
+// 要消除的重叠。续期者用与结果写回相同的 attempts 围栏、以数据库时间写 updated_at，因此已被
+// 接管的行（进程停顿满一个窗口）会停止续期，而不是碰新 owner 的行。
+//
+// 续期 goroutine 一定在本方法返回前结束：取消加 done 通道也覆盖 handler panic 的路径，
+// 不会漏下一个还在为死认领续期的 ticker。
+func (p *Processor) runHandler(ctx context.Context, msg Message, env Envelope, attempt int, lg *zap.Logger) error {
+	if p.deduper == nil || p.renewInterval <= 0 {
+		return p.handler(ctx, msg, env)
+	}
+	renewCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(p.renewInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				err := p.deduper.renew(renewCtx, msg.ID, attempt)
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, ErrStaleClaim) {
+					// The row moved on and another delivery owns it now.
+					// Renewing further would be a no-op at best; stop here and
+					// let the outcome write report the stale claim.
+					// 行已易主，现在属于另一次投递。继续续期毫无意义；就此停掉，
+					// 让收尾写回报告过期认领。
+					return
+				}
+				// A transient database error: keep the ticker running, the next
+				// renewal may succeed before the lease runs out.
+				// 暂时性写库错误：ticker 继续，下次续期可能在租约到期前成功。
+				lg.Warn("consume renew processing lease failed", zap.Error(err))
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	return p.handler(ctx, msg, env)
+}
+
+// ledgerFailed is the single place a post-decision ledger failure is reported:
+// a warning in the log and, when configured, the OnLedgerError hook. The
+// acknowledgement decision stays what the handler result said — the ledger
+// records the outcome, it does not decide it.
+// ledgerFailed 是上报"决定之后台账写失败"的唯一入口：日志 Warn，配置了就再调
+// OnLedgerError 钩子。确认决定仍由 handler 结果决定——台账只记录结果，不决定结果。
+func (p *Processor) ledgerFailed(lg *zap.Logger, marker, messageID string, err error) {
+	lg.Warn("consume ledger mark failed",
+		zap.String("marker", marker),
+		zap.Error(err),
+	)
+	if p.onLedgerError != nil {
+		p.onLedgerError(messageID, err)
+	}
+}
+
+// Prune deletes this consumer's terminal ledger rows older than olderThan and
+// reports how many were removed. Terminal means done or dead; processing and
+// failed rows are never pruned, because they are still live claims or carry a
+// retry reason.
+//
+// Call it from a scheduled maintenance loop, not from the consume path. Without
+// it the ledger only grows: every message ever consumed keeps a row, and the
+// unique index that makes claiming cheap keeps widening.
+//
+// With idempotency off there is no ledger, so it reports zero and no error. A
+// non-positive window is rejected instead of deleting everything: pruning is
+// irreversible and a zero window would wipe the terminal history by accident.
+// Prune 删除本消费者早于 olderThan 的终态台账行并返回删除条数。终态指 done 与 dead；
+// processing 与 failed 永不清理，它们要么仍是活的认领，要么带着待重试的原因。
+//
+// 请从定时维护任务调用，不要放进消费路径。没有它台账只增不减：每条被消费过的消息都留一行，
+// 让认领如此廉价的唯一索引也越来越宽。
+//
+// 关闭幂等时没有台账，返回 0 与 nil。窗口非正数会被拒绝而不是全删：清理不可逆，零窗口会
+// 意外抹掉全部终态历史。
+func (p *Processor) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if p.deduper == nil {
+		return 0, nil
+	}
+	if olderThan <= 0 {
+		return 0, ErrInvalidPruneWindow
+	}
+	return p.deduper.prune(ctx, olderThan)
 }
 
 // extract continues the producer's trace when the message carries one.
@@ -614,6 +753,11 @@ var (
 	// ErrStaleClaim 表示收尾时发现该行已属于另一次认领。handler 的副作用（如果有）
 	// 已经发生，消息照样确认；这个错误只告诉调用方台账没有被更新。
 	ErrStaleClaim = errors.New("consumer: message claim was superseded")
+
+	// ErrInvalidPruneWindow means Prune received a non-positive window, which
+	// would delete the whole terminal history immediately.
+	// ErrInvalidPruneWindow 表示 Prune 收到的窗口不是正数，那会立刻删除全部终态历史。
+	ErrInvalidPruneWindow = errors.New("consumer: prune window must be positive")
 )
 
 // messageClaim is what claim decided about one delivery.
@@ -892,6 +1036,43 @@ func (d *deduper) leaseExpired(ctx context.Context, row consumedMessage) (bool, 
 	return expired, nil
 }
 
+// renew re-arms the processing lease of a live claim. updated_at is the lease,
+// so writing it in database time is the whole operation; the attempts fence
+// keeps a superseded handler from touching the new owner's row, which is
+// reported as ErrStaleClaim.
+// renew 重新武装一条活认领的 processing 租约。updated_at 就是租约，用数据库时间写它就是
+// 全部操作；attempts 围栏挡住已被取代的 handler 碰新 owner 的行，命中不到时报
+// ErrStaleClaim。
+func (d *deduper) renew(ctx context.Context, messageID string, attempt int) error {
+	fence := func() *gorm.DB {
+		return d.db.WithContext(ctx).
+			Where("consumer = ? AND message_id = ? AND attempts = ? AND status = ?",
+				d.consumer, messageID, attempt, consumedStatusProcessing)
+	}
+	res := fence().Model(&consumedMessage{}).
+		Updates(map[string]any{"updated_at": d.dbNow()})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	// MySQL and SQLite report rows changed, not rows matched: a renewal that
+	// lands in the same clock tick as the previous write changes nothing and
+	// affects zero rows. Re-read the fence to tell that no-op apart from a lost
+	// claim.
+	// MySQL 与 SQLite 返回被修改的行数而非匹配行数：与上一次写入落在同一时钟刻度的
+	// 续期不改变任何值，影响 0 行。重读围栏，把这种空更新与丢失的认领区分开。
+	var cur consumedMessage
+	if err := fence().First(&cur).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("%w: message %s attempt %d", ErrStaleClaim, messageID, attempt)
+		}
+		return err
+	}
+	return nil
+}
+
 // dbNow is the database clock as a SQL expression, used wherever this package
 // writes a timestamp the lease later depends on. MySQL must keep millisecond
 // precision: the lease predicate compares against CURRENT_TIMESTAMP(3), and a
@@ -915,18 +1096,25 @@ func dbNowExpr(dialect string) clause.Expr {
 }
 
 // leaseExpiredPredicate builds the SQL that answers "has this row's lease run
-// out", using only the database clock. The value is built from a duration, never
-// from input, so interpolating it is safe; each dialect spells interval
-// arithmetic differently, and guessing one spelling for all of them is how
-// silent timezone bugs start.
-// leaseExpiredPredicate 构造只用数据库时钟回答"这行的租约是否过期"的 SQL。表达式由时长
-// 拼出、不含外部输入，因此直接内联是安全的；各家的区间语法不同，给所有方言用同一种写法正是
-// 静默时区 bug 的来源。
+// out", using only the database clock.
+// leaseExpiredPredicate 构造只用数据库时钟回答"这行的租约是否过期"的 SQL。
 func (d *deduper) leaseExpiredPredicate() (string, bool) {
-	if d.lease <= 0 {
+	return d.elapsedPredicate(d.lease)
+}
+
+// elapsedPredicate builds the SQL that answers "was this row last touched at
+// least window ago", using only the database clock. The value is built from a
+// duration, never from input, so interpolating it is safe; each dialect spells
+// interval arithmetic differently, and guessing one spelling for all of them is
+// how silent timezone bugs start.
+// elapsedPredicate 构造只用数据库时钟回答"这行最近一次触碰是否至少在 window 之前"的 SQL。
+// 表达式由时长拼出、不含外部输入，因此直接内联是安全的；各家的区间语法不同，给所有方言用
+// 同一种写法正是静默时区 bug 的来源。
+func (d *deduper) elapsedPredicate(window time.Duration) (string, bool) {
+	if window <= 0 {
 		return "1 = 1", true
 	}
-	micros := d.lease.Microseconds()
+	micros := window.Microseconds()
 	switch d.db.Dialector.Name() {
 	case "mysql":
 		return fmt.Sprintf("updated_at <= CURRENT_TIMESTAMP(3) - INTERVAL %d MICROSECOND", micros), true
@@ -1027,6 +1215,34 @@ func (d *deduper) park(ctx context.Context, messageID string, attempt int, cause
 		return fmt.Errorf("%w: message %s attempt %d", ErrStaleClaim, messageID, attempt)
 	}
 	return nil
+}
+
+// prune deletes terminal rows older than the window, judged by the same
+// database clock that wrote updated_at on every claim and outcome. The
+// consumer scope keeps one worker's maintenance from deleting another's
+// history; done and dead are the only statuses touched.
+// prune 删除早于窗口的终态行，比较用的是每次认领与收尾写入 updated_at 的同一个数据库
+// 时钟。按消费者限定，避免一个 worker 的维护删掉另一个 worker 的历史；只碰 done 与
+// dead 两种状态。
+func (d *deduper) prune(ctx context.Context, olderThan time.Duration) (int64, error) {
+	query := d.db.WithContext(ctx).
+		Where("consumer = ?", d.consumer).
+		Where("status IN ?", []string{consumedStatusDone, consumedStatusDead})
+	if predicate, ok := d.elapsedPredicate(olderThan); ok {
+		query = query.Where(predicate)
+	} else {
+		// No dialect-specific predicate: fall back to this node's clock. Skew
+		// only shifts the cut-off, so a row is never deleted more than the skew
+		// too early.
+		// 没有对应方言的表达式时退回本节点时钟。偏差只会平移截止点，最多让一行提前
+		// 被删掉与偏差相当的时间。
+		query = query.Where("updated_at < ?", time.Now().Add(-olderThan))
+	}
+	res := query.Delete(&consumedMessage{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
 }
 
 // truncate cuts s to at most n bytes without splitting a rune.

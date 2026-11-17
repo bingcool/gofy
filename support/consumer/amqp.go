@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -122,6 +123,10 @@ type AMQPHandlerFunc func(ctx context.Context, cfg AMQPConfig, msg AMQPMessage) 
 type AMQPConsumer struct {
 	cfg  AMQPConfig
 	conn gofyamqp.Config
+	// noIDOnce keeps the "this queue cannot deduplicate" warning to one line per
+	// consumer instead of one per message.
+	// noIDOnce 让"该队列无法去重"的警告每个消费者只打一行，而不是每条消息一行。
+	noIDOnce sync.Once
 }
 
 // NewAMQP validates cfg, resolves its connection block and returns the
@@ -148,7 +153,7 @@ func (c *AMQPConsumer) Name() string { return c.cfg.Name }
 // same as "the process can accept work".
 // ReportsReady 告诉 runner：Run 自行上报就绪。该消费者在 Run 内建连并订阅，因此
 // "Run 已进入"并不等于"进程可以接活"。
-func (c AMQPConsumer) ReportsReady() {}
+func (c *AMQPConsumer) ReportsReady() {}
 
 // Concurrency returns how many instances the worker should run.
 // Concurrency 返回 worker 应当运行的实例数。
@@ -190,7 +195,23 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 
 	w, err := amqpconsumer.New(name, queue, amqpconsumer.Config{
 		Handler: func(ctx context.Context, delivery amqp091.Delivery) error {
-			return proc.Handle(ctx, amqpMessage(delivery))
+			msg := amqpMessage(delivery)
+			if c.cfg.Idempotency && strings.TrimSpace(msg.ID) == "" {
+				// With no MessageId, message_id header or X-Correlation-Id, the
+				// processor invents a random id per delivery, so a redelivery is
+				// never recognized as a duplicate. Say so once instead of on
+				// every message: producers that need deduplication must set
+				// MessageId.
+				// 没有 MessageId、message_id 头或 X-Correlation-Id 时，处理器会给每次
+				// 投递编一个随机 ID，重投永远认不出是重复。这里只提醒一次而不是每条都
+				// 刷屏：需要去重的生产端必须设置 MessageId。
+				c.noIDOnce.Do(func() {
+					lg.Warn("amqp deliveries without MessageId cannot be deduplicated",
+						zap.String("queue", c.cfg.Queue),
+					)
+				})
+			}
+			return proc.Handle(ctx, msg)
 		},
 		Options: gofyamqp.ConsumeOptions{
 			PrefetchCount:  c.cfg.PrefetchCount,
@@ -326,11 +347,15 @@ func amqpMessage(delivery amqp091.Delivery) Message {
 // An empty result is intentional: the processor then generates a random id,
 // which disables deduplication for that message instead of collapsing two
 // different messages published under the same tag. Producers that care about
-// redelivery must set MessageId.
+// redelivery must set MessageId. With idempotency on, the consumer logs one
+// warning per subscription when this first happens, because no idempotency
+// ledger can recognize a redelivery that carries a fresh random id.
 // amqpMessageID 优先使用 broker 提供的消息 ID。
 //
 // 返回空值是刻意保留的行为：处理器会补一个随机 ID，使这条消息不做去重，而不是把
-// 两条不同的消息当成同一条。在意重投的生产者必须设置 MessageId。
+// 两条不同的消息当成同一条。在意重投的生产者必须设置 MessageId。开启幂等时，消费者
+// 会在首次遇到这种情况时按订阅打一条警告：带着全新随机 ID 的重投，任何幂等台账都认
+// 不出来。
 func amqpMessageID(delivery amqp091.Delivery, headers map[string]string) string {
 	if id := delivery.MessageId; id != "" {
 		return id

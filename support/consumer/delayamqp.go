@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -160,6 +161,10 @@ type DelayAMQPHandlerFunc func(ctx context.Context, cfg DelayAMQPConfig, msg Del
 type DelayAMQPConsumer struct {
 	cfg  DelayAMQPConfig
 	conn gofyamqp.Config
+	// noIDOnce keeps the "this queue cannot deduplicate" warning to one line per
+	// consumer instead of one per message.
+	// noIDOnce 让"该队列无法去重"的警告每个消费者只打一行，而不是每条消息一行。
+	noIDOnce sync.Once
 }
 
 // NewDelayAMQP validates cfg, resolves its connection block and returns the
@@ -186,7 +191,7 @@ func (c *DelayAMQPConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concu
 // nothing about whether the subscription exists.
 // ReportsReady 告诉 runner：Run 自行上报就绪。延迟拓扑的两半都在 Run 内声明，进入 Run
 // 并不能证明订阅已经存在。
-func (c DelayAMQPConsumer) ReportsReady() {}
+func (c *DelayAMQPConsumer) ReportsReady() {}
 
 // QueueConfig builds the transport-level configuration for this subscription.
 // A producer should publish through it, so the staging and target topologies
@@ -250,7 +255,21 @@ func (c *DelayAMQPConsumer) Run(ctx context.Context) error {
 
 	w, err := amqpconsumer.New(name, queue, amqpconsumer.Config{
 		Handler: func(ctx context.Context, delivery amqp091.Delivery) error {
-			return proc.Handle(ctx, delayAMQPMessage(delivery))
+			msg := delayAMQPMessage(delivery)
+			if c.cfg.Idempotency && strings.TrimSpace(msg.ID) == "" {
+				// Delayed deliveries keep the producer's MessageId through the
+				// dead-letter hop. Without one the processor invents a random id
+				// per delivery, so a redelivery can never be recognized as a
+				// duplicate; say so once per subscription.
+				// 延迟投递经过死信转发仍会保留生产端的 MessageId。没有它时处理器会给
+				// 每次投递编随机 ID，重投永远认不出重复；这里按订阅只提醒一次。
+				c.noIDOnce.Do(func() {
+					lg.Warn("delay amqp deliveries without MessageId cannot be deduplicated",
+						zap.String("queue", c.cfg.Queue),
+					)
+				})
+			}
+			return proc.Handle(ctx, msg)
 		},
 		Options: gofyamqp.ConsumeOptions{
 			PrefetchCount:  c.cfg.PrefetchCount,

@@ -527,3 +527,174 @@ func TestLedgerLeaseDecisionComesFromTheDatabase(t *testing.T) {
 		t.Fatal("a row backdated an hour was still treated as under a live lease")
 	}
 }
+
+// TestLedgerSurfacesFailedDoneMarker pins B2: a done marker that cannot be
+// stored must not block the acknowledgement — the side effect already happened
+// — but it must reach OnLedgerError, because that hook is the only signal that
+// the ledger now disagrees with reality.
+// TestLedgerSurfacesFailedDoneMarker 固定 B2：写不进去的 done 标记不能挡住确认——副作用
+// 已经发生——但必须送到 OnLedgerError，因为这个钩子是"台账已与现实不符"的唯一信号。
+func TestLedgerSurfacesFailedDoneMarker(t *testing.T) {
+	var db *gorm.DB
+	proc, opened := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		// Renaming the table makes the succeed UPDATE fail after the handler has
+		// already produced its side effect.
+		// 重命名表让 succeed 的 UPDATE 在 handler 已产生副作用之后失败。
+		return db.Exec("ALTER TABLE worker_consumed_messages RENAME TO worker_consumed_messages_hidden").Error
+	}, 5, time.Minute)
+	db = opened
+
+	var calls atomic.Int32
+	proc.onLedgerError = func(messageID string, err error) {
+		calls.Add(1)
+		if messageID != "m-marker" {
+			t.Errorf("hook messageID = %q, want m-marker", messageID)
+		}
+		if err == nil {
+			t.Error("hook received a nil error")
+		}
+	}
+
+	if err := proc.Handle(context.Background(), ledgerMessage("m-marker")); err != nil {
+		t.Fatalf("Handle = %v, want nil: a failed marker must not cancel the acknowledgement", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("OnLedgerError calls = %d, want 1", got)
+	}
+}
+
+// TestRunHandlerRenewsLeaseWhileRunning pins B8: a handler that outlives the
+// processing lease keeps the row locked, so the copy the broker redelivers is
+// held back instead of taking the work over mid-flight. The test backdates the
+// lease, then waits for the renewer to move it forward again.
+// TestRunHandlerRenewsLeaseWhileRunning 固定 B8：活过 processing 租约的 handler 仍持有该行，
+// broker 重投的副本因此被挡在外面，而不是在半途接管这笔活。测试先把租约拨旧，再等续期者把它
+// 重新推近。
+func TestRunHandlerRenewsLeaseWhileRunning(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		close(entered)
+		<-release
+		return nil
+	}, 5, 600*time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- proc.Handle(context.Background(), ledgerMessage("m-renew")) }()
+	<-entered
+
+	if err := db.Exec(
+		`UPDATE worker_consumed_messages SET updated_at = datetime('now', '-3600 seconds') WHERE consumer = ? AND message_id = ?`,
+		testConsumerName, "m-renew",
+	).Error; err != nil {
+		t.Fatalf("backdate lease: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var recent int64
+		if err := db.Raw(
+			`SELECT COUNT(*) FROM worker_consumed_messages WHERE consumer = ? AND message_id = ? AND updated_at > datetime('now', '-60 seconds')`,
+			testConsumerName, "m-renew",
+		).Scan(&recent).Error; err != nil {
+			t.Fatalf("read lease: %v", err)
+		}
+		if recent == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the processing lease was not renewed while the handler ran")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+}
+
+// TestDeduperRenewFencesStaleAttempt pins the fencing half of the renewal: only
+// the claim that currently owns the row may extend it.
+// TestDeduperRenewFencesStaleAttempt 固定续期的围栏那一半：只有当前持有该行的认领才能续期。
+func TestDeduperRenewFencesStaleAttempt(t *testing.T) {
+	proc, _ := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		return nil
+	}, 5, time.Minute)
+
+	ctx := context.Background()
+	if _, err := proc.deduper.claim(ctx, "m-renew-cas"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := proc.deduper.renew(ctx, "m-renew-cas", 1); err != nil {
+		t.Fatalf("renew as the owner: %v", err)
+	}
+	if err := proc.deduper.renew(ctx, "m-renew-cas", 2); !errors.Is(err, ErrStaleClaim) {
+		t.Fatalf("renew as a stale attempt = %v, want ErrStaleClaim", err)
+	}
+}
+
+// TestLedgerPruneRemovesOnlyOldTerminalRows pins B9: the ledger gains a way to
+// shed terminal history — done and dead rows past the window — without touching
+// rows that are still live, still retryable, or belong to another consumer.
+// TestLedgerPruneRemovesOnlyOldTerminalRows 固定 B9：台账有了丢弃终态历史的手段——窗口之外的
+// done 与 dead 行——同时不动仍活着、仍可重试、或属于别的消费者的行。
+func TestLedgerPruneRemovesOnlyOldTerminalRows(t *testing.T) {
+	proc, db := newLedgerProcessor(t, func(context.Context, Message, Envelope) error {
+		return nil
+	}, 5, time.Minute)
+
+	old := time.Now().Add(-48 * time.Hour)
+	rows := []consumedMessage{
+		{Consumer: testConsumerName, MessageID: "m-old-done", Status: consumedStatusDone, Attempts: 1, CreatedAt: old, UpdatedAt: old},
+		{Consumer: testConsumerName, MessageID: "m-old-dead", Status: consumedStatusDead, Attempts: 5, CreatedAt: old, UpdatedAt: old},
+		{Consumer: testConsumerName, MessageID: "m-recent-done", Status: consumedStatusDone, Attempts: 1},
+		{Consumer: testConsumerName, MessageID: "m-old-failed", Status: consumedStatusFailed, Attempts: 2, CreatedAt: old, UpdatedAt: old},
+		{Consumer: "other-consumer", MessageID: "m-foreign-done", Status: consumedStatusDone, Attempts: 1, CreatedAt: old, UpdatedAt: old},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatalf("seed %s: %v", rows[i].MessageID, err)
+		}
+	}
+
+	deleted, err := proc.Prune(context.Background(), 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("Prune deleted %d rows, want 2 (old done and old dead)", deleted)
+	}
+
+	var remaining []string
+	if err := db.Model(&consumedMessage{}).Order("message_id").Pluck("message_id", &remaining).Error; err != nil {
+		t.Fatalf("read remaining rows: %v", err)
+	}
+	want := []string{"m-foreign-done", "m-old-failed", "m-recent-done"}
+	if strings.Join(remaining, ",") != strings.Join(want, ",") {
+		t.Fatalf("remaining rows = %v, want %v", remaining, want)
+	}
+
+	if _, err := proc.Prune(context.Background(), 0); !errors.Is(err, ErrInvalidPruneWindow) {
+		t.Fatalf("Prune(0) = %v, want ErrInvalidPruneWindow", err)
+	}
+}
+
+// TestPruneWithoutIdempotencyIsANoop pins the maintenance contract for a
+// consumer that never built a ledger: asking it to prune removes nothing and
+// reports no error, so a scheduled job can call it unconditionally.
+// TestPruneWithoutIdempotencyIsANoop 固定"从未建台账"消费者的维护契约：调用清理什么都不删、
+// 也不报错，定时任务因此可以无条件下调。
+func TestPruneWithoutIdempotencyIsANoop(t *testing.T) {
+	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
+	proc, err := NewProcessor(rt, ProcessorConfig{
+		Consumer: "no-ledger",
+		Handler:  func(context.Context, Message, Envelope) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+	n, err := proc.Prune(context.Background(), time.Hour)
+	if err != nil || n != 0 {
+		t.Fatalf("Prune without idempotency = (%d, %v), want (0, nil)", n, err)
+	}
+}

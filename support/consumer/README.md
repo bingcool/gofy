@@ -159,8 +159,13 @@ handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕
  "payload":{"order_id":1,"user_id":7}}
 ```
 
-`id` 缺失时回退到传输层消息 ID（重投之间稳定），`payload` 缺失时给 `{}`，`type` 必填。
-消息体解不出或没有 `type` 都算永久失败——它不会在第五次投递时变成合法 JSON。
+`id` 缺失时回退到传输层消息 ID（重投之间稳定）：Kafka 用位点、RocketMQ 用 broker 消息 ID、
+Redis 队列用队列 ID。AMQP 只有投递带 `MessageId`（或 `message_id` 头 / `X-Correlation-Id`）
+时才稳定；都没有时每次投递都会生成随机 ID，去重实际失效——消费者在 `Idempotency=true`
+时每个队列只 Warn 一次。需要去重的生产端必须设置 `MessageId`（延迟队列经死信转发仍保留它）。
+
+`payload` 缺失时给 `{}`，`type` 必填。消息体解不出或没有 `type` 都算永久失败——它不会在
+第五次投递时变成合法 JSON。
 
 ## 幂等台账
 
@@ -187,22 +192,38 @@ handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕
 `id + status + attempts` 做 CAS，两个并发重投只有一个能进入 handler，`processing` 行还在
 UPDATE 里复核一次租约（读到这里之间可能已有别的投递接管并推后了时间戳）。
 
+handler 执行期间租约会自动续期：`NewProcessor` 每 `lease/3`（下限 10ms）按
+`consumer + message_id + attempts` 围栏刷新一次 `updated_at`，`ErrStaleClaim` 时停止；
+handler 返回时取消并 join 续期协程，panic 也不会泄漏。因此 `ProcessingLease` 不再需要覆盖
+最慢 handler 的完整耗时，但**必须不小于 broker 的重投间隔**，且 handler 仍须幂等：
+续期失败（例如数据库短暂不可用）后其它节点仍可能接管。
+
 **租约的写入与比较都用数据库时钟。** `updated_at` 由数据库时钟写入（MySQL 用
 `CURRENT_TIMESTAMP(3)` 保留毫秒精度，PostgreSQL / SQLite 用 `CURRENT_TIMESTAMP`），过期判断也
 在 SQL 里用数据库时钟做（MySQL / PostgreSQL / SQLite 各一种写法，见
-`leaseExpiredPredicate`）。这样做的原因很直接：只把比较换成 `NOW()` 而写入仍用应用时钟，
+`elapsedPredicate`）。这样做的原因很直接：只把比较换成 `NOW()` 而写入仍用应用时钟，
 等于把偏差从"比较"挪到"写入"，列里存的还是那台机器的时钟。两边同源之后，节点时钟偏差不再
 影响接管时机——时钟快的节点不能提前接管（那会让两个 handler 同时跑），时钟慢的节点也不会
 让消息被一直占着。
 
-`ProcessingLease` 不会在 handler 执行期间续期，因此它必须**大于最慢一个合法 handler 的
-耗时**；否则 handler 还在跑，别的节点已经接管。未知方言退回本节点时钟比较，此时必须保证所有
-节点 NTP 同步。
+未知方言退回本节点时钟比较，此时必须保证所有节点 NTP 同步。
 
 所有写回（`succeed` / `fail` / `park`）都带本次认领的 `attempts` 做围栏，且 `fail` /
 `park` 只接受 `processing` / `failed`：迟到的旧 handler 既不能把新一轮认领标成完成，
 也不能把已 `done` 的消息改回 `failed` / `dead`。冲突时返回 `ErrStaleClaim`，消息仍然确认
 （副作用已经发生），只在日志里留下一条 warn。
+
+写回失败的处理因状态而异：`fail` / `park`（dead）写失败按可重试错误处理，消息不确认；
+`succeed` 的 `done` 写失败只 Warn，ACK 仍跟随 handler 结果——副作用已经发生，撤回确认也
+撤销不了它。`ProcessorConfig.OnLedgerError(messageID, err)` 与 Warn 同时触发，用来接指标或
+告警。因此 done 路径依赖业务幂等，只有 `dead` 台账保证落库。
+
+### 台账清理
+
+`Processor.Prune(ctx, olderThan)` 删除窗口之外、状态为 `done` / `dead` 的行，`processing`
+与 `failed` 永不删除。窗口按数据库时钟比较（未知方言回退本节点时钟），非正值返回
+`ErrInvalidPruneWindow`。清理不自动调度：由部署方按日或按周调用（维护脚本或 worker），
+`olderThan` 应大于最长重投窗口与排查所需时间。
 
 表在消费者首次启动时创建（先 `HasTable` 再 `AutoMigrate`，避免多副本同时建表撞 1050）。
 schema 变更走发布流程的环境，用 `migrations/0003_worker_consumed_messages.sql` 里的同一份
