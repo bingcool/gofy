@@ -40,6 +40,6 @@ func (a *App) start(ctx context.Context, opts commandline.StartOptions) error {
 	// path or by a name on PATH, so the application name may not be a command.
 	// 提示里不带二进制名，理由与 worker 的脱离路径相同：进程不知道自己是被 `go run .`、
 	// 绝对路径还是 PATH 上的名字启动的，应用名未必是一条可执行的命令。
-	c.Note("使用 stop --force=1 停止")
+	c.Note("使用 status 查看状态，stop --force=1 停止")
 	return nil
 }

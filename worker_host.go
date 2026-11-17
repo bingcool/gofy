@@ -422,7 +422,8 @@ func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts comma
 	// reach here — so naming demo-service would be a command that may not exist.
 	// 提示里不带二进制名：本进程无从知道自己是怎么被启动的（`go run .`、绝对路径、
 	// 裸命令名都会走到这里），写上 demo-service 反而可能是一条并不存在的命令。
-	c.Note("使用 worker stop --group=%s 停止，worker restart --group=%s 重启", label, label)
+	c.Note("使用 worker status --group=%s 查看状态，worker stop --group=%s 停止，worker restart --group=%s 重启",
+		label, label, label)
 	return nil
 }
 
