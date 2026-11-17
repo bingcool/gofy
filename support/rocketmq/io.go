@@ -53,7 +53,19 @@ func Configure(configs map[string]Config) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	reg.Install()
+	// Closing the displaced generation is the point of the swap: once this
+	// generation is current, nothing can reach the old connections through
+	// NewIO, so nothing else would ever close them. A caller that keeps
+	// per-generation handles uses NewRegistry + Install and closes the
+	// displaced generation itself.
+	// 关闭被换下的旧代正是换代的要点：本代成为当前代之后，NewIO 再也够不到旧连接，
+	// 也没有别人会关闭它们。持有按代句柄的调用方应改用 NewRegistry + Install，并自行
+	// 关闭被换下的旧代。
+	if previous := reg.Install(); previous != nil {
+		if err := previous.Close(); err != nil {
+			return reg, fmt.Errorf("rocketmq: close displaced generation: %w", err)
+		}
+	}
 	return reg, nil
 }
 
@@ -85,14 +97,20 @@ func NewRegistry(configs map[string]Config) (*Registry, error) {
 	return reg, nil
 }
 
-// Install makes this generation current for package-level NewIO. Installing a
-// closed generation is a no-op.
-// Install 把本代设为包级 NewIO 使用的当前代。安装已关闭的代是空操作。
-func (r *Registry) Install() {
+// Install makes this generation current for package-level NewIO and returns the
+// generation it displaced, which may be nil. Installing a closed generation is a
+// no-op and reports nil. Configure closes the displaced generation; a caller
+// that installs a registry directly owns that close.
+// Install 把本代设为包级 NewIO 使用的当前代，并返回被它换下的旧代（可能为 nil）。
+// 安装已关闭的代是空操作并返回 nil。Configure 会关闭被换下的旧代；直接 Install 的
+// 调用方自己负责这次关闭。
+func (r *Registry) Install() *Registry {
 	if r == nil {
-		return
+		return nil
 	}
-	r.slots.Publish(func() { current.Store(r) })
+	var previous *Registry
+	r.slots.Publish(func() { previous = current.Swap(r) })
+	return previous
 }
 
 // NewIO returns the client registered under name in the current generation,

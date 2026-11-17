@@ -62,7 +62,7 @@ client, err := redis.NewIO(ctx, "default") // 业务代码：从当前一代取�
   共用同一份懒加载缓存，返回同一个客户端，不会建第二条连接；
 - `reg` 是用 `NewRegistry` 建好但尚未 `Install` 的新代时，`reg.NewIO`
   只预建这一代的连接，业务侧包级调用仍然用旧代；全部实例就绪后
-  `reg.Install()` 才切换；
+  `reg.Install()` 才切换，并返回被换下的旧代：`Configure` 会关闭旧代，直接调用 `Install` 的装配层自己负责关闭（demo 的按代句柄即走这条路）。
 - 关闭同样按代区分：`CloseAllIO()` 只关闭当前一代，`reg.Close()` 关闭
   `reg` 这一代（即使它已经不是当前代）。
 

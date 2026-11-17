@@ -168,6 +168,36 @@ func TestNewerGenerationSurvivesOldClose(t *testing.T) {
 	}
 }
 
+// TestConfigureClosesDisplacedGeneration pins the C2 fix: once Configure makes
+// a new generation current, the pools of the displaced one are unreachable and
+// must therefore already be closed instead of leaking.
+// TestConfigureClosesDisplacedGeneration 固定 C2 修复：Configure 让新一代成为当前代
+// 之后，旧代的 pool 再也够不到，因此必须已经关闭而不是泄漏。
+func TestConfigureClosesDisplacedGeneration(t *testing.T) {
+	clearRegistry(t)
+	old, err := sqlite.Configure(map[string]sqlite.Config{"order": {DSN: tempDSN(t)}}, nil)
+	if err != nil {
+		t.Fatalf("Configure(old): %v", err)
+	}
+	pool, err := old.NewIO(context.Background(), "order")
+	if err != nil {
+		t.Fatalf("old.NewIO: %v", err)
+	}
+
+	fresh, err := sqlite.Configure(map[string]sqlite.Config{"order": {DSN: tempDSN(t)}}, nil)
+	if err != nil {
+		t.Fatalf("Configure(new): %v", err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+
+	if _, err := old.NewIO(context.Background(), "order"); !errors.Is(err, sqlite.ErrNotConfigured) {
+		t.Fatalf("old.NewIO after swap = %v, want ErrNotConfigured", err)
+	}
+	if err := pool.Exec("CREATE TABLE t (id INTEGER)").Error; err == nil {
+		t.Fatal("the displaced generation left its pool open")
+	}
+}
+
 func TestCloseAllIO(t *testing.T) {
 	clearRegistry(t)
 	if _, err := sqlite.Configure(nil, nil); err != nil {
