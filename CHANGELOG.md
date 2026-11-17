@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy` CLI: `start --daemon` now shares the worker daemon's fd 3 startup
+  channel. The detached child writes `ready` only after the listener accepts
+  connections, every module started and Nacos registration succeeded, and names
+  the reason when any of those fails; the parent prints success only after that
+  line. `--startup-timeout` (default 30s) bounds the wait, and a timeout reports
+  an unconfirmed start without killing the child. Previously an occupied port,
+  a module start failure or a failed registration exited silently while the
+  parent still reported success.
+
+- `support/nacos`: the one-shot `Sync` and the `Watcher` no longer leak their
+  self-built clients. `Sync(ctx, cfg)` closes the client before returning,
+  `Watcher.Run` closes it on every return path, and `Watcher.Close` covers a
+  watcher that was built but never started. Each client owns a cloned transport
+  with its own connection pool, so repeated syncs or an exited watcher used to
+  leave idle connections and read goroutines behind.
+
+- `gofy` shutdown: `cleanup` cancels the run context before deregistering from
+  Nacos, stopping modules, closing the database and syncing loggers. Goroutines
+  that watch `Runtime.Context()` now stop while the resources they use are
+  still open, and a module `Stop` that waits on that context no longer burns
+  the whole shutdown budget. The trailing idempotent cancel is kept.
+
 - `support/queues` + `support/consumer`: an in-flight duplicate is no longer
   dropped. `consumer.ErrInFlight` is returned while another instance holds the
   processing lease, but the Redis queue adapter charged it as an ordinary
@@ -20,6 +42,38 @@ All notable changes to this project are documented here. The format follows
   `DefaultProcessingLease` (five minutes), so the copy cannot race the handler
   that still owns it; `Queue.RetryInFlight` exposes the same
   non-budget-consuming re-queue.
+
+- `support/amqp` + `support/kafka` + `support/rocketmq`: the other three
+  transports now honor the same in-flight marker, so a duplicate held by
+  another instance no longer burns the normal retry budget or falls through
+  `DiscardOnError`. The marker lives in `support/internal/inflight`, which
+  `queues.InFlightError` aliases; `consumer.ErrInFlight` satisfies it
+  structurally, so no broker imports `support/consumer`. AMQP keeps the
+  delivery unacknowledged and Nacks it after `ConsumeOptions.InFlightDelay`;
+  Kafka commits the records before the duplicate, seeks back to its offset
+  while the rebalance gate is still held, and re-polls without rejoining the
+  group; RocketMQ leaves the message unacknowledged and calls
+  `ChangeInvisibleDuration` for the same delay. The consumer adapters set the
+  delay to `DefaultProcessingLease` (five minutes).
+
+- `support/consumer`: the ledger no longer hard-codes MySQL's `datetime(3)`
+  column type, which made `AutoMigrate` fail on PostgreSQL. Timestamp columns
+  now use GORM's per-dialect mapping (`datetime(3)` on MySQL, `timestamptz` on
+  PostgreSQL, `datetime` on SQLite), and the MySQL clock expression is
+  `CURRENT_TIMESTAMP(3)` so the lease write has the same millisecond precision
+  as the expiry predicate.
+
+- `gofy-interface-api` client: the streaming helpers now reject a response
+  shape they were not called for. `StreamSSE`, `DownloadFile` and
+  `StreamChunked` require matching `ResponseKind` before sending
+  (`ErrResponseKindMismatch`), and every 2xx stream response is checked
+  against its `Content-Type`: SSE must be `text/event-stream`, a declared
+  download/chunked type must match (with `*/*` and `type/*` wildcards), and an
+  undeclared type may be anything except JSON. A gofy error envelope therefore
+  surfaces as `*APIError` instead of file bytes or a silent empty stream. SSE
+  also treats a clean EOF as a disconnect: it re-resolves the address,
+  reconnects with `Last-Event-ID`, and delivers `ErrStreamEnded` once `Retry`
+  is exhausted instead of closing the event channel silently.
 
 - `support/nacos` + `gofy-adapter` resolver: `healthy_only` is now readable
   outside the package. The setting has three states — unset, explicit true,
@@ -76,13 +130,25 @@ All notable changes to this project are documented here. The format follows
   `ErrStaleTTLShorterThanCache` instead of silently widening it. Added tests for
   the throttle (100 calls → 1 lookup), the negative cache, cancellation and the
   invariant, plus `Resolver.Close`.
-- `gofy-interface-api` client: a grouped contract keeps the deployment prefix on
-  `endpoint.Group` and only the in-group path in `Spec.Path`, so a typed client
-  called `/config` instead of `/api/v1/order/config` and the server answered 404
-  for every grouped route. Added `client.WithPathPrefix`, applied in the one
-  place that builds URLs (so `Call`, SSE, download and chunked all get it), and
-  the demo clients now pass `orderroute.Config.Prefix` /
-  `productroute.Products.Prefix`. Tests assert the prefixed paths.
+- `gofy-interface-api` contracts + client: a grouped contract no longer needs the
+  deployment prefix passed on every call. `Group.Add` stamps `Group.Prefix` into
+  the descriptor (`Spec.Prefix`), and the client joins it with
+  `endpoint.JoinPath` in the one place that builds URLs, so `Call`, SSE,
+  download and chunked all reach the path the service binds. `WithPathPrefix`
+  remains for one extra outer mount (a gateway sub-path), and the demo clients
+  plus the contract template stopped passing `orderroute.X.Prefix`. docgen reads
+  the same stamped prefix by default; `Config.Prefixes` replaces it while
+  keeping the group-relative remainder, so the CLI `-prefix` override still
+  works. `gofyadapter.BindGroup` fails at startup when a route was re-added to
+  another group and its stamped prefix no longer matches (aggregated as
+  `inconsistent route prefixes`).
+- `gofy-interface-api` docgen + client: `required` is now decided by one rule.
+  `endpoint.FieldRequired` (omitempty option/tag → optional, `default` tag →
+  optional, `validate:"required"` → required, otherwise non-pointer required)
+  feeds both the OpenAPI `required` list and the form/header/cookie/multipart
+  encoder, so a required scalar keeps its zero value on the wire instead of
+  being silently dropped. `endpoint.PathParamName` likewise makes a `uri`-tagged
+  field stop being repeated in the query, matching the docgen form grouping.
 - `gofy-interface-api` client and `support/nacos`: internal service calls no
   longer go through `HTTP_PROXY`. Both used the environment proxy, so a resolved
   pod/LAN address was sent to the proxy and a dead target came back as the

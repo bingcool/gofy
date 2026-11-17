@@ -1501,8 +1501,11 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
 - 分组 `Prefix` 可以携带完整部署前缀（推荐，如 `/api/v1/order`），此时组内
   `Spec.Path` 只写相对路径，完整路由 = `Prefix` + `Spec.Path`；分组 `Prefix`
   也可以只是分组名，`BindGroup`/`BindAll` 会通过 `Router.GroupPrefix()` 把
-  完整 `Spec.Path` 裁剪成组内相对路径后注册；客户端与 OpenAPI 始终使用
-  `Spec.Path` 的相对路径，部署前缀由分组或 `docgen.Options.Prefixes` 提供；
+  完整 `Spec.Path` 裁剪成组内相对路径后注册；
+- `Group.Add` 在声明阶段把 `Prefix` 写入每条描述符的 `Spec.Prefix`，客户端与
+  docgen 都经 `endpoint.JoinPath` 从同一来源拼出完整路径，调用方不再逐次传
+  前缀；`docgen.Config.Prefixes` 命中标签时替换该前缀并保留组内剩余路径
+  （CLI `-prefix` 覆盖），`BindGroup` 启动期断言 stamped 前缀与分组一致；
 - 中间件顺序：分组中间件（按 `group.Use` 顺序）→ `RateLimit`（契约声明时）→
   `BindOptions.Global` → 路由中间件名（按 `spec.Middleware` 顺序）→
   `Routes[OperationID]`；限流放在路由链最前面，超额请求在进入其余路由中间件
@@ -2112,6 +2115,12 @@ func StreamChunked[Req any](...) (io.ReadCloser, error)
 - 注释行 `:` 忽略。
 - 服务端 `heartbeat` 注释不产生事件。
 - 连接断开且 ctx 未取消：按 `Retry` 配置重连（默认 1 次），从 `Last-Event-ID` 续传。
+  服务端正常返回（EOF）与传输中断同等处理；重试预算用尽后向错误 channel 投递
+  `ErrStreamEnded`，不再静默关闭。
+- 三个流式 helper 只接受对应 `ResponseKind` 的路由，接错在发请求前返回
+  `ErrResponseKindMismatch`。2xx 还校验 `Content-Type`：SSE 必须是
+  `text/event-stream`；下载/分块在声明 `ResponseContentType` 时精确匹配
+  （支持 `*/*`、`type/*` 通配），未声明时拒绝 JSON 类型，避免错误信封被当成数据。
 
 ### 6.7 服务发现
 
@@ -2215,7 +2224,9 @@ apicore/cmd/gofy-openapi
 - `[]endpoint.Descriptor`。
 - 全局配置：`title`、`version`、`description`、`servers`、`securitySchemes`。
 - 路由过滤：`-service demoservice` 只生成该模块，`-all` 生成全量。
-- 部署前缀映射：`-prefix demoservice=/api/v1/order`，用于把 `Spec.Path` 的相对路径拼成完整服务端路径。
+- 部署前缀映射：`-prefix demoservice=/api/v1/order`，用配置值替换描述符
+  `Spec.Prefix`（`Group.Add` 写入的分组前缀）并保留组内剩余路径，便于按另一
+  基址发布文档。
 - 输出目录。
 
 **CLI：**
@@ -3324,7 +3335,7 @@ go.work
 - 路由分组 `Prefix` 写**完整部署前缀**，如 `orderroute.RoutePrefix = "/api/v1/order"`；组内 `Spec.Path` 只写相对路径，如 `/orders`、`/orders/{id}`、`/config`。
 - 完整路由 = 分组 `Prefix` + `Spec.Path`。order-service 的 `order` 模块 `Prefix()` 返回 `""`，App 不设置 `WithAPIPrefix`，也不再叠加模块名，因此最终是 `/api/v1/order/orders`，与迁移前一致。
 - 契约即部署契约：同一份路由描述符挂到其他服务时，需要改分组 `Prefix` 才能换前缀；契约层不再依赖 gofy 的 `apiPrefix`。
-- OpenAPI 生成时用 `apicore/cmd/gofy-openapi -prefix demoservice=/api/v1/order`，或 `docgen.Options.PathPrefixes`，值与分组 `Prefix` 保持一致。生成出的 `paths` 是完整服务端路径，`servers` 只写协议/域名。
+- OpenAPI 默认直接使用 `Group.Add` 写入描述符的 `Spec.Prefix`；需要按另一基址发布时用 `apicore/cmd/gofy-openapi -prefix demoservice=/api/v1/order`，配置值替换该前缀并保留组内剩余路径。生成出的 `paths` 是完整服务端路径，`servers` 只写协议/域名。
 - `apicore/contracts/README.md` 固定该规则；`internal/lint` 检查组内 `Spec.Path` 不以 `/api/` 开头、不包含模块名，保证前缀只出现在分组声明处。
 
 **order-service 迁移前后对照：**

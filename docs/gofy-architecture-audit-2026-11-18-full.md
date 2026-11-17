@@ -15,18 +15,18 @@
 | 严重度 | 条数 | 定义 |
 |---|---|---|
 | P0 | 1 | 静默数据丢失，或可用性被无条件破坏，无外部征兆 |
-| P1 | 12 | 常见触发条件下产生错误行为（错误 ACK、连接泄漏、误判、崩溃） |
+| P1 | 11 | 常见触发条件下产生错误行为（错误 ACK、连接泄漏、误判、崩溃） |
 | P2 | 32 | 特定配置/边界/并发下出错，或资源单调增长、契约不一致 |
 | P3 | 16 | 局部健壮性、可观测性、文档与实现偏差 |
 
-> 上表是**逐条回读复核后**的结果（初稿为 1/13/34/14）：1 条不成立已移入 §1，2 条因触发前提过窄降为 P3，另有 17 条修正了表述或前提。复核方法与结论见 §1。
+> 上表是**逐条回读复核后**的结果（初稿为 1/13/34/14）：2 条不成立已移入 §1（B3、F2；F2 经作者确认，worker 属于入口层，可直接使用 Runtime 注入的 DB 写原生 SQL），2 条因触发前提过窄降为 P3，另有 17 条修正了表述或前提。复核方法与结论见 §1。
 
 总体判断：
 
 1. **架构骨架是稳的**：分代装配（`support/generation` + Snapshot）、pid 身份记录、claim 的 `owner+attempts` 围栏、worker 就绪闸门、消费终态落库才 ACK、Nacos 双时间戳节流、类型化客户端唯一 URL 构造点，这些都经过前几轮修复，本轮未发现结构性反转。
-2. **系统性风险集中在三条链路**：① 消费台账与 broker 重投语义的错配（B1/B6）；② 「Close 只关连接、不清状态」在多个包重复出现（C1/C2/E3/D8）；③ 出厂配置/守卫/注释与实现之间的三处偏差，让部分能力实际不可达（F1/F2/F3）。
-3. **常驻内存不是普遍问题，但有几个明确点**：resolver 的 `cache/rr` 两张 map、限流 `hits` map、台账表只增不删、派生 transport 缓存满后不回收、换代时旧代连接池不可达。均为「随运行时间单调增长」，见 §4。
-4. **本轮逐条回读后撤销 1 条、降级 6 条**（§1 X-1~X-7），它们是刻意设计、框架内不会触发或前提写错，不应作为 bug 排期；另有 17 条修正了表述与前提（如 B5 只影响 MySQL 路径、D2 的「当数据」只适用于下载/分块流、D1 限于非 JSON 编码、C6 需 `RequireExpiry=false`、C4 的 XFF 伪造只在放宽信任代理后成立）。
+2. **系统性风险集中在三条链路**：① 消费台账与 broker 重投语义的错配（B1/B6）；② 「Close 只关连接、不清状态」在多个包重复出现（C1/E3 已修复，C2/D8 仍在）；③ 出厂配置/注释与实现之间的两处偏差，让部分能力实际不可达（F1/F3）。
+3. **常驻内存不是普遍问题，但有几个明确点**：限流 `hits` map、台账表只增不删、派生 transport 缓存满后不回收、换代时旧代连接池不可达。均为「随运行时间单调增长」，见 §4；resolver 的 `cache/rr` 已在 E3 修复中加上关闭清理与 stale 窗口淘汰。
+4. **本轮逐条回读及作者确认后撤销 2 条、降级 6 条**（§1 X-1~X-8），它们是刻意设计、框架内不会触发或前提写错，不应作为 bug 排期；另有 17 条修正了表述与前提（如 B5 只影响 MySQL 路径、D2 的「当数据」只适用于下载/分块流、D1 限于非 JSON 编码、C6 需 `RequireExpiry=false`、C4 的 XFF 伪造只在放宽信任代理后成立）。
 
 ---
 
@@ -43,8 +43,9 @@
 | X-5 | `claim.Runner` 全程用 runCtx、不用 `DrainContext`，判为 P1 | **不成立，删除**。Runner 只透传调用方给的 ctx；唯一的项目内调用方 `demo/worker/group1/scan_claim.go:420` 传的正是 `worker.DrainContext(ctx)`，与 `support/worker/ticker.go:22-33` 的约定一致。库不强制 drain 属于 API 契约，不是实现缺陷；若担心新调用方遗漏，可另立一条「文档/示例约束」，不计入问题清单。 |
 | X-6 | `Runner.Run` 的 `fatal` 变量「稳定数据竞争」，判为 P2 | **降级为 P3**。写入走 `once.Do`，读取点 `runner.go:259` 经 `fatalCh` 关闭或 `wg.Wait` 到达时有 happens-before；只有 select 选中 `ctx.Done()` 且 fail 同时写入的窄窗口无同步。是真竞态但窗口很窄，`-race` 未必复现。 |
 | X-7 | 限流键可伪造（`ClientIP` 信任 XFF），判为 P2 | **只保留一半，降为 P3**。`gofy/start.go:275` 默认 `SetTrustedProxies([]string{})`，XFF 默认不可用，只有显式放宽信任代理后才可伪造；成立的是 `hits` map 在 GC 周期内没有硬上限（`ratelimit.go:97,135-150` 有周期 sweep，不是「永不回收」）。 |
+| X-8 | demo 分层守卫只覆盖 `app/module`、worker 直接 `rt.DB` 写 SQL，判为 P1「绕开快照」（F2） | **不成立，删除**。worker 与 script 是入口层：框架通过 `worker.RuntimeFrom(ctx)` 注入 Runtime（`gofy/worker_host.go:103-197`、`gofy/support/worker/runtime.go:11-30`），入口直接使用 `rt.DB`、甚至写原生 SQL 是设计能力；`appio` 快照规则只约束共享的 `service` / `repository` / `query`，守卫不扩到入口/装配层是刻意的。真实残留是 worker 包注释高估了复用关系，作为 F9 保留。 |
 
-另有一条**已知遗留**：`interface-api` 的 `validate:"required"` 与编码器 `isZero` 判定漂移（D1），即 2026-11-17 复核中的 P2-01，当前仍未实现。本报告保留它，但标注为已知项，不计入新增工作量。
+另有一条**已知遗留**：`interface-api` 的 `validate:"required"` 与编码器 `isZero` 判定漂移（D1），即 2026-11-17 复核中的 P2-01；2026-11-18 已随 D4 一并修复，见 §2.2。
 
 ---
 
@@ -61,17 +62,19 @@
 
 ### 2.2 P1
 
-#### A1 · `start --daemon` 没有父子握手，父进程无条件报成功（P1 · 已复核）
+#### A1 · `start --daemon` 没有父子握手，父进程无条件报成功（P1 · 已复核 · 已修复）
 
 - **证据**：`gofy/daemon.go:31-37` 用 `process.Detach(executable, args)`（不带 NotifyEnv/ExtraFiles），随即 `c.Success("已在后台启动")`；`gofy/start.go:222` 的 `markReady()` 从不调用 `notifier.ready()`（唯一调用在 `gofy/worker_host.go:247`）；`gofy/start.go:875` 的 `a.notifier.failed(err)` 因 `notifierFromEnv()` 为 nil 而 no-op。
 - **风险**：端口被占、pid 判重失败、Nacos 注册失败或模块 Start 失败时子进程静默退出，父进程仍打印成功；worker 的 daemon 路径却有完整 fd 3 握手（`worker_host.go:409-416`），两条路径不对称。
 - **建议**：`start` 复用 worker 的 `DetachWithNotify` + `awaitWorkerStartup`，并在 HTTP `run()` 就绪后发 `notifier.ready()`。
+- **修复（2026-11-18）**：`start` 改用 `detachProcessNotify`（`process.DetachWithNotify`），父进程在 `--startup-timeout`（默认 30s，新增同名旗标）内等待 fd 3 上的就绪行；`run()` 在 listener 可用、模块启动、Nacos 注册完成后调用 `notifier.ready()`，失败路径由 `abort()` 写 `error: ...`。回归测试覆盖父进程收到 ready、子进程报错、子进程静默退出，以及 HTTP 启动失败上报。
 
-#### A2 · `Shutdown()` 停机时 runCtx 取消排在 DB 关闭之后（P1 · 已复核）
+#### A2 · `Shutdown()` 停机时 runCtx 取消排在 DB 关闭之后（P1 · 已复核 · 已修复）
 
 - **证据**：`gofy/start.go:101` `run` 用 `context.WithCancelCause(parent)` 建 runCtx 并存入 `a.cancel`；`gofy/start.go:846-850` 的 `Shutdown()` 只 `close(a.stopCh)`；`gofy/start.go:930-956` 的 cleanup 顺序为模块 Stop → `gofydb.Close` → telemetry Shutdown → `a.cancel(nil)`。
 - **风险**：凡按 `core/runtime.go:115-117` 监听 `rt.Context().Done()` 的后台 goroutine，直到 DB/logger 释放后才收到信号，期间可能 use-after-close；模块 Stop 若等待该 ctx，会卡满 shutdown 预算。
 - **建议**：把 `a.cancel(nil)` 提到 cleanup 开头（registrar.Stop 之前），保留末尾的幂等取消。
+- **修复（2026-11-18）**：`cleanup()` 在获取 Reload 锁、注销 Nacos、停模块、关 DB 之前先调用 `a.cancel(nil)`，末尾保留幂等的第二次取消；回归测试断言模块 `Stop` 执行时 `Runtime.Context()` 已经取消。
 
 #### B4 · 消费台账列类型硬编码 MySQL `datetime(3)`，PG/SQLite 方言分支形同虚设（P1 · 已复核）
 
@@ -91,17 +94,23 @@
 - **风险**：AMQP 在 5min 租约内零延迟紧循环打满 DB/CPU；Kafka 则整体退出循环、触发 Runner 退避重启与重新入组，而不是单条稍后重投。
 - **建议**：定义统一 in-flight 错误类型，各 broker 走「延迟重投且不推进正常重试预算」分支。
 
-#### C1 · Nacos `Sync` / `Watcher` 从不关闭自建 Client（P1 · 已复核）
+#### C1 · Nacos `Sync` / `Watcher` 从不关闭自建 Client（P1 · 已复核 · 已修复）
 
 - **证据**：`gofy/support/nacos/sync.go:33-39` 顶层 `Sync` 每次 `NewClient(cfg)` 后直接返回 `client.Sync(ctx)`；`gofy/support/nacos/watch.go:116-207` 的 `NewWatcher/Watch/Run` 全程无 `client.Close()`，Watcher 也没有 Close；`gofy/support/nacos/client.go:83` 定义了 `Close()`，包内无调用点。
 - **风险**：`client.go:69` 每次 `http.DefaultTransport.Clone()` 生成独立连接池，频繁 Sync 或 Watch 退出后，空闲连接与读 goroutine 滞留累积。
 - **建议**：`Sync` 内 `defer client.Close()`；Watcher 加 `Close()`，或在 `Run` 开头 `defer w.client.Close()`。
+- **修复（2026-11-18）**：顶层 `Sync` 在返回前 `defer client.Close()`；`Watcher` 新增 `Close()`，`Run` 在入口 `defer w.Close()`，覆盖每个返回路径（exec 策略除外，进程映像已被替换）。回归测试用服务端 `ConnState` 断言 `Sync` 返回后连接关闭，并用记录型 transport 断言 `Run` 退出时调用 `CloseIdleConnections`。
 
-#### D1 · `validate:required` 零值被编码器静默丢弃，与 docgen required 漂移（P1 · 已知遗留 P2-01）
+#### D1 · `validate:required` 零值被编码器静默丢弃，与 docgen required 漂移（P1 · 已知遗留 P2-01 · 已修复）
 
 - **证据**：`interface-api/client/encode.go:395,424,450` 的 collectForm/collectHeaders/collectCookies 均忽略 tag options，靠 `isZero` 跳过；`interface-api/docgen/schema.go:243-260` `fieldRequired` 对 `required` / 非指针字段返回 true，`docgen/operation.go:140,155,169` 直接写进 required。另 `docgen/operation.go:105-107` 跳过 uri+form 双 tag 的 form 字段，而 `client/encode.go:393` 不跳过（`ItemRequest` 会多发 `?id=7`）。
 - **风险**：文档标必填，GET/上传在零值时漏发 query/header/cookie/form；JSON body 走 `json.Marshal` 不受影响，同一字段跨方法表现不一。
 - **建议**：抽 `endpoint.FieldRequired` 作为 docgen 与编码器的唯一判定源；顺带对齐双 tag 跳过规则。该项在 2026-11-17 复核中列为暂缓，本轮不实现。
+- **修复（2026-11-18）**：
+  - 新增 `contracts/common/endpoint/fields.go`：`endpoint.FieldRequired(field, tag)` 是 docgen 与编码器的唯一判定源，优先级为 omitempty 选项/tag → default tag → `validate:"required"` → `validate:"omitempty"` → 非指针默认必填；`endpoint.PathParamName(field)` 统一 uri 名（`uri:"-"` 视为无）。
+  - docgen 删除本地 `fieldRequired` 与 `parseTagOptions`，schema/operation 的 required 标记与 form 分组全部改走 `endpoint.FieldRequired` / `endpoint.PathParamName`。
+  - client 的 `collectForm` / `collectHeaders` / `collectCookies` 改判必填：必填字段零值也发送，可选字段零值仍跳过；uri+form 双 tag 字段不再重复进 query；multipart 的必填标量零值写入，缺失文件仍跳过（`isFileField`）。
+  - 回归测试：`endpoint` 覆盖判定优先级、`uri:"-"` 与双形态 `JoinPath`；client 覆盖必填零值、双 tag 无重复 query、multipart 必填零值与缺失文件；fixture 的 `ListRequest.UserID/Status` 由可选变为必填，与 OpenAPI required 一致。
 
 #### D2 · 流式响应不校验 Content-Type / ResponseKind，下载与分块流会把错误信封当数据（P1）
 
@@ -115,23 +124,29 @@
 - **风险**：断连最常见的形态恰是 EOF，长连接退化为一次性请求，调用方既拿不到事件也收不到错误。
 - **建议**：EOF 返回可重试哨兵错误走 `c.base(ctx)` 重连，仅 ctx 取消/显式结束才终止。
 
-#### D4 · Group Prefix 在文档与请求之间没有一致性保证（P1）
+#### D4 · Group Prefix 在文档与请求之间没有一致性保证（P1 · 已修复）
 
 - **证据**：`interface-api/docgen/openapi.go:59` 用 `cfg.prefixFor(spec.Tags)+spec.Path`，`Build` 读不到 `Group.Prefix`；`interface-api/client/encode.go:49` 只拼 `opts.pathPrefix`（默认空），`client/options.go:71-74` 把责任交给调用方。
 - **风险**：文档路径带部署前缀、client 默认不带 → 404；两套来源（Tags / Config.Prefixes vs 手传）之间没有守卫。
 - **建议**：让描述符自身携带前缀，client 自动拼接，docgen 复用同一来源；过渡期加启动期一致性断言。
+- **修复（2026-11-18）**：
+  - `endpoint.Spec.Prefix` 由 `Group.Add` 在声明阶段写入（未分组路由保持空）；`endpoint.JoinPath` 按段边界拼接并去重重叠，同时兼容「分组前缀 + 相对路径」与「分组名 + 完整路径」两种既有形态。
+  - client 的 `buildRequest` 自动拼接描述符前缀，`WithPathPrefix` 改为更外层的挂载前缀；生成的 demo client 与模板不再逐调用传 `orderroute.X.Prefix`。
+  - docgen 的 `routePath` 默认取描述符前缀；`Config.Prefixes` 命中标签时替换该前缀并保留分组内剩余路径，CLI `-prefix` 覆盖继续可用。
+  - adapter 的 `BindGroup` 增加启动期断言 `checkGroupPrefix`：路由被重新加入其他分组导致 stamped 前缀与分组不一致时，启动直接失败并列出全部冲突路由。
+  - 回归测试：`endpoint` 覆盖 `Group.Add` stamping 与 `JoinPath` 两种形态；client 覆盖前缀自动拼接（`/api/v1/order/orders/7`）；docgen 覆盖前缀替换语义；adapter 覆盖不一致拒绝；demo 集成测试断言完整部署路径 `/api/v1/order/orders/42`。
 
-#### E3 · Resolver 的 `cache` / `rr` 无上限，`Close` 只关连接不清状态（P1 · 已复核）
+#### E3 · Resolver 的 `cache` / `rr` 无上限，`Close` 只关连接不清状态（P1 · 已复核 · 已修复）
 
 - **证据**：`adapter/client/nacos/resolver.go:194-195` `cache/rr` 按 `service@group` 永驻（`inflight` 每次刷新结束即删，见 `:488,514`，不在此列）；`:296-301` `Close()` 仅 `r.client.Close()`，不清 map、不置 closed；`:362` 键拼接无转义。
 - **风险**：高基数服务名内存单调增长；Close 后 `Resolve` 仍会打已关闭的连接且缓存不释放；服务名含 `@` 时键可能碰撞。
 - **建议**：Close 加锁清 `cache/rr` 并置 `closed`，入口拒绝已关闭调用；键改用结构化分隔（含长度或 JSON 编码）。
-
-#### F2 · 分层守卫只覆盖 `app/module`，worker 直写 SQL 绕开快照（P1）
-
-- **证据**：`demo/shell/check-imports.sh:33,36` 只 `go list ./app/...` 且 case 仅匹配 `app/module/`；`demo/shell/check-io-access.sh:17` dirs 仅 service/repository/query；`demo/worker/group1/scan.go:73`、`scan_claim.go:284,452` 直接 `rt.DB.Table("orders")` / `Create(row)`；`demo/worker/worker.go:19-23` 却写「复用与 HTTP 处理器相同的数据访问」。
-- **风险**：worker / script / serviceclients / container 是门禁盲区，新增越界 import 或跨模块写表不会被拦；注释与实际不符，误导审查。
-- **建议**：守卫 dirs 扩到 `worker/`，或让 worker 改走 query/repository + `appio` 快照，并同步注释。
+- **修复（2026-11-18）**：
+  - `Close()` 加锁置 `closed`、清空 `cache` 与 `rr`，再关闭客户端；幂等，之后 `Resolve` 返回 `ErrClosed`。
+  - 回源完成的 leader 重新取锁后先查 `closed`：若 `Close` 已发生则不回填 `cache/rr`，把 `ErrClosed` 发布给等待者并从 `inflight` 移除，避免结算后重新长回来。
+  - 缓存键改为长度前缀编码 `<len>:<service>:<group>`，服务名含 `@` 时不再与别的 service/group 组合撞键。
+  - 每次回源完成后 `pruneLocked` 删除两个时间戳都超过 `StaleTTL` 的槽（连带 `rr` 游标）：这类槽既不能直返也不能兜底，高基数服务名最多占用一个 `StaleTTL` 窗口。
+  - 新增 `TestResolveAfterCloseReturnsErrClosed`、`TestCloseDuringRefreshLeavesStateEmpty`、`TestResolverPrunesSlotsPastStaleTTL`、`TestCacheKeyDisambiguatesServiceAndGroup`，`go test -race ./client/nacos/` 通过。
 
 ### 2.3 P2
 
@@ -282,7 +297,7 @@
 | E9b | rr 键拼接无转义（并入 E3） | `adapter/client/nacos/resolver.go:362` | 结构化键 |
 | A9 | `start --daemon` 在 Windows 直接 panic | `gofy/daemon.go:20-22` | 返回明确错误而非 panic |
 | C11 | `otel` 导出失败只记录日志（设计取舍，记录备查） | `gofy/start.go:948-952` | 保持现状，但补一条计数器 |
-| F9 | demo 注释称 worker 复用 HTTP 数据访问（与 F2 同源） | `demo/worker/worker.go:19-23` | 与 F2 一并改 |
+| F9 | demo 注释称 worker 复用 repository 级数据访问，实际直接使用 Runtime DB 写 SQL | `demo/worker/worker.go:19-23` | 修正注释：worker 是入口层，直接使用 Runtime/DB |
 
 ---
 
@@ -293,8 +308,8 @@
 - **分代可见性**：`generation.Set.Middleware` 只做兜底、不覆盖已有 pin；`support/generation` 的 gate + lease + defer release 保证请求入口固定一代。
 - **claim 围栏**：`owner + attempts` CAS、`FOR UPDATE SKIP LOCKED` 事务内取行、`park` 失败不 ACK、dead/done 终态、`ceilSeconds` 避免 DATETIME 舍入成 0。
 - **worker 就绪**：`ReadyReporter` 由各传输层 `OnReady` 回调、`Runner.Ready()` 汇总、按 Identity 去重、drain 立刻 503、启动失败永不就绪。
-- **Nacos resolver 主链路**：`lastAttempt` 节流 / `lastSuccess` stale 双时间戳、负缓存、单飞按 `service@group` 隔离、本地分组门控、metadata URL 主校验、weight 策略排除 0 权重并 fail-closed。
-- **类型化客户端**：`WithPathPrefix` 只在唯一构造点拼接，Call/SSE/download/chunked 覆盖；`Proxy:nil` 避免内网地址走环境代理；`cappedBuffer` 让 multipart 峰值等于上限。
+- **Nacos resolver 主链路**：`lastAttempt` 节流 / `lastSuccess` stale 双时间戳、负缓存、单飞按 service+group（长度前缀键）隔离、本地分组门控、metadata URL 主校验、weight 策略排除 0 权重并 fail-closed。
+- **类型化客户端**：URL 只在唯一构造点拼接；分组部署前缀由 `Group.Add` 写入 `Spec.Prefix` 并自动拼接，`WithPathPrefix` 只作更外层的挂载前缀，Call/SSE/download/chunked 覆盖；`Proxy:nil` 避免内网地址走环境代理；`cappedBuffer` 让 multipart 峰值等于上限。
 - **demo 分层与迁移**：service 唯一可 import `app/config` 且只收本模块配置值；query 跨模块只写 SQL 表名；`migrations/0005_job_task.sql` 与 `claim.DDL` 逐字段一致；`Create` 在同一事务扣库存+建单。
 - **客户端跨 reload**：`serviceclients` 进程级构造一次、Reload 不重建，`DemoService/Source/SetLogger/Close` 全 nil 安全，`worker --list` 传 nil 不 panic。
 - **三仓库 replace 与 broker 实例名**：目标存在且 module 名匹配，group1 订阅引用的 `default/ratelimit` 与配置一一对应。
@@ -305,12 +320,12 @@
 
 | 位置 | 增长/泄漏形态 | 触发 | 关联条目 |
 |---|---|---|---|
-| `adapter/client/nacos/resolver.go:194-206` | `cache/rr` 按 service@group 永驻（`inflight` 每次刷新结束即删），Close 不清 | 服务名高基数、动态服务发现 | E3 |
+| `adapter/client/nacos/resolver.go:194-206` | `cache/rr` 按 service+group 分键；E3 修复后 Close 清空并置 closed，回源时淘汰超过 `StaleTTL` 的槽 | 已修复（2026-11-18） | E3 |
 | `gofy/support/ratelimit/ratelimit.go:81-150` | `hits` map 有周期 sweep（过期键会清），但 GC 周期内无 key 总数硬上限 | 大量不同来源 IP / 大 window | C4 |
 | `gofy/support/consumer/consume.go:929-992` | 台账行只 UPDATE 不删/归档，唯一索引单调膨胀 | 长跑消费者 | B9 |
 | `interface-api/client/client.go:308-341` | 派生 transport 缓存满后新建池不入 map，Close 回收不到 | 调用方传多种 connectTimeout | D8 |
 | `gofy/support/db/io.go:57-106` 等四个 io 包 | `Install` 覆盖旧代，旧连接池不可达 | 反复 Reload | C2 |
-| `gofy/support/nacos/sync.go:33-39`、`watch.go` | 每次 Sync/Watch 自建 Transport，退出不 Close | 频繁 Sync、Watcher 重启 | C1 |
+| `gofy/support/nacos/sync.go:33-39`、`watch.go` | 每次 Sync/Watch 自建 Transport，退出不 Close | 已修复（2026-11-18） | C1 |
 | `adapter/lease/k8slease/k8slease.go:191-210` | `held` map 在句柄丢失后永久残留 | 调用方忘记 Release | E4 |
 | `gofy/reload.go:315` | 旧代排空用 Background，无取消路径 | 停机时慢 Reload | A7 |
 
@@ -318,11 +333,11 @@
 
 ---
 
-## 5. 修复优先级建议（B1 已于 2026-11-18 修复，其余不在本轮实现）
+## 5. 修复优先级建议（A1/A2/B1/B4/B5/B6/C1/D1/D2/D3/D4/E3 已于 2026-11-18 修复）
 
-1. **第一批（数据正确性）**：~~B1~~ → B6 → B4/B5 → D2/D3。先堵住「消息被丢」和「流被当成功」，再统一租约精度。（B1 已修复，见 §2.1；B3 原列于此，复核后撤销，见 §1 X-5。）
-2. **第二批（生命周期与资源）**：A1/A2 → C1/C2 → E3/D8 → A7。这一批都是「Close/取消顺序」，改动小但回归面广，需要配套停机测试。
-3. **第三批（契约一致性）**：D1（已知遗留）、D4、F2/F3/F4/F5、E5/E8、D11/E10。以守卫与断言为主，避免行为突变。
+1. **第一批（数据正确性）**：~~B1~~ → ~~B6~~ → ~~B4/B5~~ → ~~D2/D3~~。先堵住「消息被丢」和「流被当成功」，再统一租约精度。（均已修复；B3 原列于此，复核后撤销，见 §1 X-5。）
+2. **第二批（生命周期与资源）**：~~A1/A2~~ → ~~C1~~ → ~~E3~~ → C2/D8 → A7。这一批都是「Close/取消顺序」，改动小但回归面广，需要配套停机测试。
+3. **第三批（契约一致性）**：~~D1~~ → ~~D4~~ → F3/F4/F5 → E5/E8 → D11/E10。D1/D4 已修复（统一必填判定源、描述符携带前缀 + 启动期断言）；其余仍以守卫与断言为主，避免行为突变。
 4. **第四批（P3）**：按模块顺手清理，不单独排期。
 
 验证建议：B1 用 Redis + 双副本注入 in-flight；A1/A2 用 daemon 启停与 `SIGTERM` 时序；C1/C2/E3 用连接数/内存曲线；D2/D3 用假后端返回错误信封与 EOF；F1 用 dev-nacos 真机 e2e（本轮已有脚本与方法，见 `docs/nacos-service-discovery-client-design.md` §0.1）。
@@ -343,23 +358,22 @@
 
 ## 7. 问题索引（按严重度排序）
 
-按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」是 **2026-11-18 生成本报告时** 的快照：B1 已在同日修复并更新该列，其余条目本轮只做审计、未改动业务代码，因此仍为「否」；后续修复可直接在表中更新该列。§1 的 X-1 ~ X-7 是复核后撤销/降级/修正的结论，不计入本索引。
+按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」是 **2026-11-18 生成本报告时** 的快照：A1、A2、B1、B4、B5、B6、C1、D1、D2、D3、D4、E3 已在同日修复并更新该列，其余条目本轮只做审计、未改动业务代码，因此仍为「否」；后续修复可直接在表中更新该列。§1 的 X-1 ~ X-8 是复核后撤销/降级/修正的结论，不计入本索引。
 
 | 编号 | 严重度 | 问题 | 是否已修复 |
 |---|---|---|---|
 | B1 | P0 | Redis 队列把 `ErrInFlight` 当成普通失败，耗尽重试后永久丢消息 | 是（2026-11-18） |
-| A1 | P1 | `start --daemon` 没有父子握手，父进程无条件报成功 | 否 |
-| A2 | P1 | `Shutdown()` 停机时 runCtx 取消排在 DB 关闭之后 | 否 |
-| B4 | P1 | 消费台账列类型硬编码 MySQL `datetime(3)`，PG/SQLite 方言分支形同虚设 | 否 |
-| B5 | P1 | MySQL 路径写库用秒精度、过期比较用毫秒精度 | 否 |
-| B6 | P1 | `ErrInFlight` 与四种 broker 的重投语义都不匹配 | 否 |
-| C1 | P1 | Nacos `Sync` / `Watcher` 从不关闭自建 Client | 否 |
-| D1 | P1 | `validate:required` 零值被编码器静默丢弃，与 docgen required 漂移 | 否（已知遗留） |
-| D2 | P1 | 流式响应不校验 Content-Type / ResponseKind，下载与分块流会把错误信封当数据 | 否 |
-| D3 | P1 | SSE 服务端正常关闭（EOF）不触发重连 | 否 |
-| D4 | P1 | Group Prefix 在文档与请求之间没有一致性保证 | 否 |
-| E3 | P1 | Resolver 的 `cache` / `rr` 无上限，`Close` 只关连接不清状态 | 否 |
-| F2 | P1 | 分层守卫只覆盖 `app/module`，worker 直写 SQL 绕开快照 | 否 |
+| A1 | P1 | `start --daemon` 没有父子握手，父进程无条件报成功 | 是（2026-11-18） |
+| A2 | P1 | `Shutdown()` 停机时 runCtx 取消排在 DB 关闭之后 | 是（2026-11-18） |
+| B4 | P1 | 消费台账列类型硬编码 MySQL `datetime(3)`，PG/SQLite 方言分支形同虚设 | 是（2026-11-18） |
+| B5 | P1 | MySQL 路径写库用秒精度、过期比较用毫秒精度 | 是（2026-11-18） |
+| B6 | P1 | `ErrInFlight` 与四种 broker 的重投语义都不匹配 | 是（2026-11-18） |
+| C1 | P1 | Nacos `Sync` / `Watcher` 从不关闭自建 Client | 是（2026-11-18） |
+| D1 | P1 | `validate:required` 零值被编码器静默丢弃，与 docgen required 漂移 | 是（2026-11-18） |
+| D2 | P1 | 流式响应不校验 Content-Type / ResponseKind，下载与分块流会把错误信封当数据 | 是（2026-11-18） |
+| D3 | P1 | SSE 服务端正常关闭（EOF）不触发重连 | 是（2026-11-18） |
+| D4 | P1 | Group Prefix 在文档与请求之间没有一致性保证 | 是（2026-11-18） |
+| E3 | P1 | Resolver 的 `cache` / `rr` 无上限，`Close` 只关连接不清状态 | 是（2026-11-18） |
 | A3 | P2 | SIGKILL / 进程无法执行清理时 pid 文件残留 | 否 |
 | A4 | P2 | 自定义命令保留字漏 `restart` / `status` | 否 |
 | A5 | P2 | 去重路径把 `IdentityUnknown` 当成「确有其它实例」 | 否 |
@@ -407,4 +421,4 @@
 | E9b | P3 | rr 键拼接无转义（并入 E3） | 否 |
 | A9 | P3 | `start --daemon` 在 Windows 直接 panic | 否 |
 | C11 | P3 | `otel` 导出失败只记录日志（设计取舍，记录备查） | 否 |
-| F9 | P3 | demo 注释称 worker 复用 HTTP 数据访问（与 F2 同源） | 否 |
+| F9 | P3 | demo 注释称 worker 复用 repository 级数据访问，实际直接使用 Runtime DB 写 SQL | 否 |

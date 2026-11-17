@@ -15,9 +15,11 @@
 1. **分组路由的客户端少拼前缀**。契约把部署前缀放在 `endpoint.Group`、`Spec.Path` 只
    留组内路径，而 `client` 只用 `Spec.Path` 建 URL，于是类型化客户端打的是 `/config`
    而不是 `/api/v1/order/config`，服务端一律 404（`GetOrder` 等同样受影响，集成测试的
-   假后端也照抄了错误路径，所以一直没暴露）。修法是新增
+   假后端也照抄了错误路径，所以一直没暴露）。当时的修法是新增
    `client.WithPathPrefix`，在唯一构造 URL 的地方拼接，`Call` / SSE / download /
-   chunked 全覆盖；demo 的三个客户端分别传各自分组的 `Prefix`。
+   chunked 全覆盖；demo 的三个客户端分别传各自分组的 `Prefix`。2026-11-18 起
+   `Group.Add` 把分组前缀写入描述符的 `Spec.Prefix`，`client` 自动拼接该前缀，
+   demo 客户端不再逐次传前缀；`WithPathPrefix` 保留为更外层的挂载前缀。
 2. **内网调用走了环境代理**。`client` 与 `support/nacos` 都用
    `http.ProxyFromEnvironment`，而 `NO_PROXY` 通常只含 localhost：从 Nacos 解析出的
    Pod IP / 内网地址被送给代理，目标死掉时拿到的是代理的 502（甚至可能变成一次超时，
@@ -339,8 +341,9 @@ main.go: nacosCfg 加载后
    `planCommand("script")` 现在**没有** `LoadNacos`，脚本里会拿到零值 `nacosCfg`（指向
    127.0.0.1:8848）——加脚本消费方时必须同时把这一项补上。
 4. **Close**。`gclient.Client.Close()` 已存在；`Resolver.Close()` 关闭 naming 客户端的
-   空闲连接，`serviceclients.Clients.Close()` 统一关闭，`main` 在 `app.Execute` 返回后
-   defer 调用。
+   空闲连接，同时加锁清空实例缓存与轮询游标、置 `closed`，之后的 `Resolve` 返回
+   `ErrClosed` 而不是继续在已释放的客户端上查询；`serviceclients.Clients.Close()` 统一
+   关闭，`main` 在 `app.Execute` 返回后 defer 调用。
 
 #### 4.7 三种寻址方式
 
@@ -390,14 +393,17 @@ IP；`nacos.New` 只校验端口，空地址会被 `normalize()` 补成 `127.0.0
 3. 只有这条路径才优先使用实例 metadata 的 `inner_external_base_uri`，其余情况仍用
    `scheme://IP:port`。
 
-四条边界，漏掉任何一条都会让这个机制变成故障源：
+五条边界，漏掉任何一条都会让这个机制变成故障源：
 
 - **开关默认 false，且只在环境变量里**：它回答的是"我在哪运行"，不是"部署了什么"；
   集群内调用方绝不能因为本地分组为空就借用别的环境；
 - **只有"空"才切换**：Nacos 故障不切换（两个分组在同一个注册中心后面，切换只会把故障
   翻倍）；权重全为 0 也不切换（那是运维摘流，不是没部署）；
-- **缓存/游标/单飞都按 `service@group` 分键**：否则兜底结果会记在本地分组名下，本地实例
-  恢复后再也不会被发现；
+- **缓存/游标/单飞都按 service+group 分键**：否则兜底结果会记在本地分组名下，本地实例
+  恢复后再也不会被发现。键带服务名长度前缀（`<len>:<service>:<group>`），服务名里的
+  `@` 不会与别的服务/分组组合撞键；
+- **超出 stale 窗口的槽会被清理**：两个时间戳都超过 `stale_ttl` 的条目既不能直返、
+  也不能兜底，下一次回源完成时删除，避免一次性服务名让缓存单调增长；
 - **metadata 校验失败只影响该实例**：非 `http(s)`、无 host、带 query 或 userinfo 一律回退
   `IP:port`。让它过去会在 `client.validateResolvedBase` 变成整个服务解析失败。
 
