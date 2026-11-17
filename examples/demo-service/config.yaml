@@ -163,11 +163,13 @@ lock:
 # 本机 dev-rabbitmq 的凭据来自 dockerfiles/docker-compose.yml
 # （rabbitmq / 123456 / vhost my_vhost）；没有 RabbitMQ 时把 enabled 改成
 # false，服务仍可启动。hosts 可配置多个 broker 节点，按顺序尝试连接。
+# host 写宿主机的 LAN IP 而不是 127.0.0.1：在容器里跑（bridge 网络）时
+# 127.0.0.1 指容器自己，连不到宿主机上的 broker；kafka/rocketmq 同理。
 amqp:
   default:
     enabled: true
     hosts:
-      - host: 127.0.0.1
+      - host: 192.168.10.187
         port: 5672
         username: rabbitmq
         password: 123456
@@ -178,7 +180,7 @@ amqp:
   order:
     enabled: false
     hosts:
-      - host: 127.0.0.1
+      - host: 192.168.10.187
         port: 5672
         username: rabbitmq
         password: 123456
@@ -194,7 +196,7 @@ kafka:
   default:
     enabled: true
     brokers:
-      - 127.0.0.1:9092
+      - 192.168.10.187:9092
     client_id: demo-service
     dial_timeout: 5s
     idempotent: false
@@ -203,7 +205,7 @@ kafka:
   order:
     enabled: false
     brokers:
-      - 127.0.0.1:9092
+      - 192.168.10.187:9092
 
 # 多实例 RocketMQ：按名字分组，由 app/appio 建连和关闭。
 # 业务经 appio.WithContext(ctx).RocketMQIO(ctx, name) 取用，default 是最常用的名字。
@@ -214,13 +216,13 @@ kafka:
 rocketmq:
   default:
     enabled: false
-    endpoint: 127.0.0.1:8081
+    endpoint: 192.168.10.187:8081
     send_timeout: 3s
     max_attempts: 3
   # 演示第二个实例：独立 producer，按需打开。
   order:
     enabled: false
-    endpoint: 127.0.0.1:8081
+    endpoint: 192.168.10.187:8081
 
 # 常驻消费者没有配置段：每个订阅是 worker/group1 里的一个文件，topic、消费组、
 # 并发与 handler 都写在那个文件里（像扫描节奏写在 scan.go 一样）。这里只保留
