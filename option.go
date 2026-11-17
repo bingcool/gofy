@@ -816,10 +816,13 @@ func WithServerConfigurator(fn func(*http.Server) error) Option {
 	}
 }
 
-// WithVersionInfo sets explicit version info, overriding the version read from the
-// build info (ldflags); without it the App uses the result of version.Read().
-// WithVersionInfo 设置显式的版本信息，覆盖从构建信息（ldflags）自动读取的
-// 版本；不设置时 App 使用 version.Read() 的结果。
+// WithVersionInfo sets explicit version info, overriding the defaults: the
+// version falls back to the framework's Version constant, and commit/build time
+// are read from the build info when available. Without it the App reports
+// version.Read(Version).
+// WithVersionInfo 设置显式的版本信息，覆盖默认值：版本默认取框架的 Version 常量，
+// commit/构建时间在可用时从构建信息读取；不设置时 App 报告 version.Read(Version)
+// 的结果。
 func WithVersionInfo(info core.VersionInfo) Option {
 	return func(o *options) error {
 		o.version = info

@@ -157,7 +157,7 @@ func New(opts ...Option) (*App, error) {
 	if o.hasVer {
 		a.version = o.version
 	} else {
-		a.version = version.Read()
+		a.version = version.Read(Version)
 	}
 	a.logger = o.logger
 	if a.logger == nil {
@@ -247,8 +247,11 @@ func (a *App) Logger() *zap.Logger {
 	return a.logger
 }
 
-// Version returns build information.
-// Version 返回构建信息。
+// Version returns build information. Its Version field is the framework version
+// (the Version constant) unless the application replaced it with
+// WithVersionInfo; commit and build time come from the build, when available.
+// Version 返回构建信息。其中 Version 字段是框架版本（Version 常量），除非应用用
+// WithVersionInfo 整体替换；commit 与构建时间在可用时取自构建信息。
 func (a *App) Version() VersionInfo { return a.version }
 
 // Name returns the application name.

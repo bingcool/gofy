@@ -169,6 +169,24 @@ func TestNewDoesNotTouchTheFilesystem(t *testing.T) {
 	}
 }
 
+// TestVersionFallsBackToTheFramework pins the default an application that never
+// calls WithVersionInfo sees: the framework version, not "dev" or a module
+// version that a local replace turns into v0.0.0.
+// TestVersionFallsBackToTheFramework 固定"未调用 WithVersionInfo 的应用"看到的默认值：
+// 框架版本，而不是 dev，也不是被本地 replace 变成 v0.0.0 的模块版本。
+func TestVersionFallsBackToTheFramework(t *testing.T) {
+	app, err := gofy.New(gofy.WithPIDFile(filepath.Join(t.TempDir(), "app.pid")))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := app.Version().Version; got != gofy.Version {
+		t.Fatalf("Version().Version = %q, want gofy.Version %q", got, gofy.Version)
+	}
+	if gofy.Version != "1.0.0" {
+		t.Fatalf("gofy.Version = %q; changing it means a release", gofy.Version)
+	}
+}
+
 func TestHandlerServesTypedRoutes(t *testing.T) {
 	module := &testModule{
 		name: "order",

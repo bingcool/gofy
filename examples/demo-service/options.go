@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/bingcool/gofy"
@@ -37,10 +38,16 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		gofy.WithName("demo-service"),
 		gofy.WithEnv(systemenv.GetEnv()),
 		gofy.WithPIDFile(cfg.PIDFile),
+		// WithVersionInfo replaces the framework default wholesale, so every
+		// field it wants to report has to be filled here — an omitted GoVersion
+		// shows up as an empty line in `version`, not as a framework fallback.
+		// WithVersionInfo 是整体替换框架默认值，因此它想报告的每个字段都必须在这里填；
+		// 漏掉 GoVersion 的表现是 `version` 输出一行空白，而不是回退到框架的值。
 		gofy.WithVersionInfo(gofy.VersionInfo{
 			Version:   version,
 			Commit:    commit,
 			BuildTime: buildTime,
+			GoVersion: runtime.Version(),
 		}),
 		gofy.WithShutdownTimeout(10 * time.Second),
 	}

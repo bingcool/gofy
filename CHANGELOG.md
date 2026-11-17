@@ -342,6 +342,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Version: the framework now reports its own version. `gofy.Version` (currently
+  `1.0.0`) is the single source of truth, and `App.Version()` uses it as the
+  version field. `debug.ReadBuildInfo` could not answer this: a build from a
+  local `replace` reports `v0.0.0` or `(devel)`, so every development build
+  showed the wrong framework version instead of the one it was built from. Build
+  info still supplies the commit and build time.
 - `gofy-adapter` nacos resolver: the local-development fallback the PHP SDK already
   had. When `discovery_service_client.group_name` (the local group) answers "no
   instances" **and** `LOCAL_NACOS_SERVICE_AUTO_SWITCH=true`, the lookup is
