@@ -15,13 +15,13 @@ import (
 // GetProduct fetches one product.
 // GetProduct 按产品 ID 查询单个产品，产品不存在时返回 60001。
 func (c *Client) GetProduct(ctx context.Context, req *productrequest.GetProductRequest, opts ...client.CallOption) (*productresponse.GetProductResponse, error) {
-	return call(ctx, c.c, productroute.GetProduct, productroute.Products.Prefix, req, opts)
+	return call(ctx, c.c, productroute.GetProduct, req, opts)
 }
 
 // ListProducts pages through products.
 // ListProducts 分页查询产品，结果包含已下架产品，调用方按 on_sale 字段过滤。
 func (c *Client) ListProducts(ctx context.Context, req *productrequest.ListProductsRequest, opts ...client.CallOption) (*paging.ListData[productdto.ProductDTO], error) {
-	return call(ctx, c.c, productroute.ListProducts, productroute.Products.Prefix, req, opts)
+	return call(ctx, c.c, productroute.ListProducts, req, opts)
 }
 
 // IsProductNotFound reports whether err carries the product-not-found code.

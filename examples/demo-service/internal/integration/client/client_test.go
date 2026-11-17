@@ -53,7 +53,11 @@ func TestCallSuccessAndRequestID(t *testing.T) {
 	if res.Order == nil || res.Order.ID != 42 {
 		t.Fatalf("unexpected response: %+v", res)
 	}
-	if gotPath != "/orders/42" {
+	// Group.Add stamped the deployment prefix onto the descriptor, so the client
+	// calls the full path the service binds without repeating the prefix here.
+	// Group.Add 已把部署前缀写入描述符，客户端直接调用服务端绑定的完整路径，
+	// 这里无需重复传前缀。
+	if gotPath != "/api/v1/order/orders/42" {
 		t.Fatalf("path = %q", gotPath)
 	}
 	if gotAuth != "Bearer token" {
@@ -545,28 +549,40 @@ var (
 type emptyReq struct{}
 
 func TestStreamSSE(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
 		_, _ = io.WriteString(w, ": heartbeat\n\nevent: tick\nid: 1\ndata: hello\ndata: world\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
+		<-r.Context().Done()
 	}))
 	defer server.Close()
 
 	c := newClient(t, server.URL, client.Config{})
-	events, errs, err := client.StreamSSE(context.Background(), c, sseRoute, &emptyReq{})
+	ctx, cancel := context.WithCancel(context.Background())
+	events, errs, err := client.StreamSSE(ctx, c, sseRoute, &emptyReq{})
 	if err != nil {
+		cancel()
 		t.Fatalf("StreamSSE: %v", err)
 	}
 	var got []client.Event
-	for event := range events {
+	select {
+	case event, ok := <-events:
+		if !ok {
+			cancel()
+			t.Fatalf("stream closed early; err = %v", <-errs)
+		}
 		got = append(got, event)
-	}
-	if err := <-errs; err != nil {
+	case err := <-errs:
+		cancel()
 		t.Fatalf("stream error: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for the first event")
 	}
+	cancel()
 	if len(got) != 1 {
 		t.Fatalf("events = %d: %+v", len(got), got)
 	}
