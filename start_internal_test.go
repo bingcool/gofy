@@ -1,6 +1,7 @@
 package gofy
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -8,11 +9,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/pidfile"
+	"go.uber.org/zap"
 )
 
 func TestDuplicatePID(t *testing.T) {
@@ -176,5 +181,190 @@ func TestStopAcceptingOverRealListener(t *testing.T) {
 	cancel()
 	if err := <-runDone; err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+// TestStartDaemonWaitsForChildReady pins A1's parent side: the detached child
+// gets the startup pipe and the parent prints success only after the "ready"
+// line. Without it an occupied port or a failed module start looked exactly like
+// a successful start, because the child's own output goes to /dev/null.
+// TestStartDaemonWaitsForChildReady 固定 A1 父进程一侧的行为：脱离的子进程拿到启动
+// 管道，父进程只在读到 "ready" 之后才打印成功。没有这条通道时，端口被占或模块启动失败
+// 与成功启动看起来完全一样，因为子进程自己的输出去了 /dev/null。
+func TestStartDaemonWaitsForChildReady(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("start --daemon is not supported on windows")
+	}
+	prev := detachProcessNotify
+	t.Cleanup(func() { detachProcessNotify = prev })
+
+	var gotArgs []string
+	detachProcessNotify = func(_ string, args []string) (int, *os.File, error) {
+		gotArgs = append([]string(nil), args...)
+		return 4242, reportingPipe(t, "ready"), nil
+	}
+
+	app, err := New(WithName("daemon-start-test"), WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := app.start(context.Background(), commandline.StartOptions{
+		Daemon:         true,
+		StartupTimeout: time.Second,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if len(gotArgs) == 0 || gotArgs[len(gotArgs)-1] != "--daemon=false" {
+		t.Fatalf("child argv = %v, want a trailing --daemon=false", gotArgs)
+	}
+}
+
+// TestStartDaemonReportsChildFailure makes the parent carry the child's reason
+// instead of claiming success: a start that fails before reporting ready must
+// surface the error the child wrote on the pipe.
+// TestStartDaemonReportsChildFailure 要求父进程转达子进程给出的原因，而不是声称成功：
+// 在上报就绪之前就失败的启动，必须把子进程写在管道上的错误暴露出来。
+func TestStartDaemonReportsChildFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("start --daemon is not supported on windows")
+	}
+	prev := detachProcessNotify
+	t.Cleanup(func() { detachProcessNotify = prev })
+	detachProcessNotify = func(string, []string) (int, *os.File, error) {
+		return 4242, reportingPipe(t, "error: gofy: listen 127.0.0.1:8080: address already in use"), nil
+	}
+
+	app, err := New(WithName("daemon-start-test"), WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = app.start(context.Background(), commandline.StartOptions{Daemon: true, StartupTimeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("start = %v, want the child's listen error", err)
+	}
+}
+
+// TestStartDaemonReportsSilentChildDeath covers the child that dies before
+// writing anything: the closed pipe is the only evidence, and the parent must
+// report it instead of success.
+// TestStartDaemonReportsSilentChildDeath 覆盖还没写任何东西就退出的子进程：关闭的管道是
+// 唯一证据，父进程必须报告失败而不是成功。
+func TestStartDaemonReportsSilentChildDeath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("start --daemon is not supported on windows")
+	}
+	prev := detachProcessNotify
+	t.Cleanup(func() { detachProcessNotify = prev })
+	detachProcessNotify = func(string, []string) (int, *os.File, error) {
+		return 4242, reportingPipeEOF(t), nil
+	}
+
+	app, err := New(WithName("daemon-start-test"), WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = app.start(context.Background(), commandline.StartOptions{Daemon: true, StartupTimeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "exited before reporting ready") {
+		t.Fatalf("start = %v, want the silent-death report", err)
+	}
+}
+
+// TestRunReportsReadyToTheDaemonParent pins A1's child side: the HTTP run path
+// writes "ready" only after the listener accepts connections and modules
+// started, which is what lets the detached parent print success truthfully.
+// TestRunReportsReadyToTheDaemonParent 固定 A1 子进程一侧的行为：HTTP 运行路径只在
+// listener 已能接受连接、模块已启动之后写 "ready"，父进程因此才能如实打印成功。
+func TestRunReportsReadyToTheDaemonParent(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	app, err := New(
+		WithName("daemon-ready-test"),
+		WithHTTP(HTTPConfig{Host: "127.0.0.1", Port: port, Mode: "test"}),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	app.notifier = &startupNotifier{file: writer}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(context.Background()) }()
+
+	if err := reader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	line, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read startup report: %v", err)
+	}
+	if got := strings.TrimSpace(line); got != "ready" {
+		t.Fatalf("startup report = %q, want %q", got, "ready")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
+// TestRunReportsStartupFailureToTheDaemonParent covers the child that fails
+// after the handshake is set up: a listen error must reach the parent as
+// "error: ..." rather than as a silent exit.
+// TestRunReportsStartupFailureToTheDaemonParent 覆盖握手建立后才失败的子进程：监听错误
+// 必须以 "error: ..." 到达父进程，而不是变成静默退出。
+func TestRunReportsStartupFailureToTheDaemonParent(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer occupied.Close()
+	port := occupied.Addr().(*net.TCPAddr).Port
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	app, err := New(
+		WithName("daemon-failure-test"),
+		WithHTTP(HTTPConfig{Host: "127.0.0.1", Port: port, Mode: "test"}),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	app.notifier = &startupNotifier{file: writer}
+
+	if err := app.Run(context.Background()); err == nil {
+		t.Fatal("Run succeeded on an occupied port")
+	}
+	line, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read startup report: %v", err)
+	}
+	report := strings.TrimSpace(line)
+	if !strings.HasPrefix(report, "error: ") || !strings.Contains(report, "listen") {
+		t.Fatalf("startup report = %q, want an error naming the listen failure", report)
 	}
 }

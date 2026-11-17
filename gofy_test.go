@@ -19,6 +19,7 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/apperr"
+	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/gofytest"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/logger"
@@ -1643,4 +1644,78 @@ func countEvents(r *recorder, want string) int {
 		}
 	}
 	return count
+}
+
+// shutdownContextModule records whether Runtime.Context() was already cancelled
+// when Stop ran. Background goroutines watch that context, so cleanup must
+// cancel it before module IO, the database and the logger are torn down.
+// shutdownContextModule 记录 Stop 执行时 Runtime.Context() 是否已经取消。后台 goroutine
+// 监听的就是这个 context，因此清理必须在模块 IO、数据库与日志拆除之前取消它。
+type shutdownContextModule struct {
+	rt             *core.Runtime
+	canceledOnStop bool
+}
+
+func (m *shutdownContextModule) Name() string                   { return "shutdown-context" }
+func (m *shutdownContextModule) Register(*support.Router) error { return nil }
+func (m *shutdownContextModule) Start(context.Context) error    { return nil }
+
+func (m *shutdownContextModule) Stop(context.Context) error {
+	select {
+	case <-m.rt.Context().Done():
+		m.canceledOnStop = true
+	default:
+	}
+	return nil
+}
+
+// TestShutdownCancelsRunContextBeforeStoppingModules pins A2: modules stop
+// after the run context is cancelled, so a module (or any goroutine it owns)
+// that waits on Runtime.Context() is released before the resources it uses are
+// closed instead of blocking the whole shutdown budget.
+// TestShutdownCancelsRunContextBeforeStoppingModules 固定 A2：模块在 run context 取消
+// 之后才停止，等待 Runtime.Context() 的模块（或其后台 goroutine）会在依赖的资源关闭之前
+// 被释放，而不是卡满整个停机预算。
+func TestShutdownCancelsRunContextBeforeStoppingModules(t *testing.T) {
+	port := freePort(t)
+	var observer *shutdownContextModule
+
+	app, err := gofy.New(
+		gofy.WithName("shutdown-cancel-test"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(func(rt *core.Runtime) (support.Module, error) {
+			observer = &shutdownContextModule{rt: rt}
+			return observer, nil
+		}),
+		gofy.WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+
+	if observer == nil {
+		t.Fatal("module factory never ran")
+	}
+	if !observer.canceledOnStop {
+		t.Fatal("module Stop ran before the run context was cancelled")
+	}
 }

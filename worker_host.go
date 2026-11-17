@@ -411,7 +411,7 @@ func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts comma
 		return fmt.Errorf("gofy: daemonize worker: %w", err)
 	}
 	defer func() { _ = notify.Close() }()
-	if err := awaitWorkerStartup(notify, pid, opts.StartupTimeout); err != nil {
+	if err := awaitDaemonStartup(notify, pid, opts.StartupTimeout, "worker"); err != nil {
 		return err
 	}
 	label := workerGroupLabel(groups)

@@ -220,6 +220,12 @@ func (a *App) run(parent context.Context) error {
 	)
 	a.printStartup(addr)
 	a.markReady()
+	// The detached parent prints success only after this line: the listener
+	// accepts connections, every module started and Nacos registration
+	// succeeded. A nil notifier makes this a no-op in the foreground.
+	// 脱离的父进程只有读到这一行才打印成功：listener 已能接受连接、所有模块已启动、
+	// Nacos 注册成功。前台运行时通知器为 nil，这里什么也不做。
+	a.notifier.ready()
 
 	var reason error
 	select {
@@ -883,6 +889,17 @@ func (a *App) abort(err error) error {
 // cleanup 只执行一次，释放 App 持有的全部资源；重复调用返回首次的结果。
 func (a *App) cleanup() error {
 	a.cleanupOnce.Do(func() {
+		// Cancel the run context before touching any resource: goroutines that
+		// watch Runtime.Context() must stop while the DB, logger and module IO
+		// they use are still open. The trailing cancel stays as the idempotent
+		// second call.
+		// 在触碰任何资源之前先取消 run context：监听 Runtime.Context() 的后台 goroutine
+		// 必须在其使用的 DB、日志与模块 IO 仍然可用时停下。末尾的取消保留，作为幂等的
+		// 第二次调用。
+		if a.cancel != nil {
+			a.cancel(nil)
+		}
+
 		// Wait for an in-flight Reload: it may still be swapping modules and
 		// resources, and cleanup must see the final state.
 		// 等待在途的 Reload 结束：它可能还在替换模块与资源，清理必须看到最终状态。

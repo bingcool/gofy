@@ -86,15 +86,18 @@ func (n *startupNotifier) report(line string) {
 	})
 }
 
-// awaitWorkerStartup blocks until the detached child reports ready, reports a
-// failure, or the budget runs out. It deliberately does not kill the child on
-// timeout: a slow broker may still be connecting, and killing a process that is
-// about to become healthy would turn a slow start into an outage.
-// awaitWorkerStartup 阻塞到脱离的子进程报告就绪、报告失败，或预算耗尽。超时时它刻意不杀
-// 子进程：慢的 broker 可能仍在建连，杀掉一个即将健康的进程会把"启动慢"变成一次故障。
-func awaitWorkerStartup(notify *os.File, pid int, budget time.Duration) error {
+// awaitDaemonStartup blocks until the detached child reports ready, reports a
+// failure, or the budget runs out. subject names the child in errors, because
+// both the HTTP instance and a worker group detach through this channel. It
+// deliberately does not kill the child on timeout: a slow broker may still be
+// connecting, and killing a process that is about to become healthy would turn
+// a slow start into an outage.
+// awaitDaemonStartup 阻塞到脱离的子进程报告就绪、报告失败，或预算耗尽。subject 是错误
+// 信息里对子进程的称呼，因为 HTTP 实例与 worker 分组共用这条通道。超时时它刻意不杀子
+// 进程：慢的 broker 可能仍在建连，杀掉一个即将健康的进程会把"启动慢"变成一次故障。
+func awaitDaemonStartup(notify *os.File, pid int, budget time.Duration, subject string) error {
 	if budget <= 0 {
-		budget = commandline.DefaultWorkerStartupTimeout
+		budget = commandline.DefaultStartupTimeout
 	}
 	if err := notify.SetReadDeadline(time.Now().Add(budget)); err != nil {
 		return fmt.Errorf("gofy: daemon startup channel: %w", err)
@@ -103,9 +106,9 @@ func awaitWorkerStartup(notify *os.File, pid int, budget time.Duration) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrDeadlineExceeded):
-			return fmt.Errorf("gofy: worker (pid %d) has not reported ready within %s; it is still running, check its logs", pid, budget)
+			return fmt.Errorf("gofy: %s (pid %d) has not reported ready within %s; it is still running, check its logs", subject, pid, budget)
 		case errors.Is(err, io.EOF):
-			return fmt.Errorf("gofy: worker (pid %d) exited before reporting ready; its own output holds the reason", pid)
+			return fmt.Errorf("gofy: %s (pid %d) exited before reporting ready; its own output holds the reason", subject, pid)
 		default:
 			return fmt.Errorf("gofy: daemon startup report: %w", err)
 		}
@@ -115,7 +118,7 @@ func awaitWorkerStartup(notify *os.File, pid int, budget time.Duration) error {
 		return nil
 	}
 	if reason, ok := strings.CutPrefix(status, "error: "); ok {
-		return fmt.Errorf("gofy: worker failed to start: %s", reason)
+		return fmt.Errorf("gofy: %s failed to start: %s", subject, reason)
 	}
 	return fmt.Errorf("gofy: unexpected daemon startup report %q", status)
 }

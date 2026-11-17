@@ -7,7 +7,6 @@ import (
 	"runtime"
 
 	"github.com/bingcool/gofy/internal/commandline"
-	"github.com/bingcool/gofy/internal/process"
 )
 
 // start runs the server in the foreground, or re-executes itself detached when
@@ -29,11 +28,20 @@ func (a *App) start(ctx context.Context, opts commandline.StartOptions) error {
 	// without re-detaching.
 	// 追加 --daemon=false，让子进程解析同一份命令行但不会再次脱离。
 	args := append(append([]string{}, os.Args[1:]...), "--daemon=false")
-	c := a.con()
-	pid, err := process.Detach(executable, args)
+	// The child cannot answer through stdout — that goes to /dev/null — so it
+	// gets the same startup pipe the worker detach uses. Only a "ready" line
+	// turns "a process was created" into "the instance accepts requests".
+	// 子进程无法通过 stdout 回答——那里是 /dev/null——因此它拿到与 worker 脱离相同的启动
+	// 管道。只有 "ready" 这一行才能把"进程被创建了"变成"实例能接请求"。
+	pid, notify, err := detachProcessNotify(executable, args)
 	if err != nil {
 		return fmt.Errorf("gofy: daemonize: %w", err)
 	}
+	defer func() { _ = notify.Close() }()
+	if err := awaitDaemonStartup(notify, pid, opts.StartupTimeout, "application"); err != nil {
+		return err
+	}
+	c := a.con()
 	c.Success("应用【%s】已在后台启动 (pid %d)", a.opts.name, pid)
 	// No binary name in the hint, for the same reason as the worker detach path:
 	// the process cannot know whether it was started as `go run .`, by absolute

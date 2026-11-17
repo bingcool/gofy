@@ -16,10 +16,24 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// DefaultStartupTimeout is the budget a daemon parent allows the child to
+// report readiness. It is generous on purpose: the child may be opening a
+// database, binding a listener and registering with Nacos, and a budget that is
+// too small reports failure for a process that is merely slow.
+// DefaultStartupTimeout 是后台父进程留给子进程上报就绪的预算。它刻意宽松：子进程可能
+// 正在打开数据库、绑定 listener、注册 Nacos，预算太小会把"慢"报成失败。
+const DefaultStartupTimeout = 30 * time.Second
+
 // StartOptions are the flags of the start command.
 // StartOptions 是 start 命令的旗标；Daemon 为 true 时先 detach 到后台再让父进程退出。
 type StartOptions struct {
 	Daemon bool
+	// StartupTimeout bounds how long the daemon parent waits for the child's
+	// readiness report before giving up on confirming the start. It has no
+	// meaning without Daemon.
+	// StartupTimeout 限制后台父进程等待子进程就绪上报的时长，超时后不再确认启动结果。
+	// 未设置 Daemon 时该值没有意义。
+	StartupTimeout time.Duration
 }
 
 // StopOptions are the flags of the stop command.
@@ -155,6 +169,8 @@ func newStartCmd(d Deps) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Daemon, "daemon", false, "detach into the background and exit the parent process")
+	cmd.Flags().DurationVar(&opts.StartupTimeout, "startup-timeout", DefaultStartupTimeout,
+		"how long the daemon parent waits for the child to report ready before giving up")
 	return cmd
 }
 

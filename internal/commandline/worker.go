@@ -126,14 +126,6 @@ type WorkerGroup struct {
 	Workers []WorkerInfo
 }
 
-// DefaultWorkerStartupTimeout is the budget a daemon parent allows the child to
-// report readiness. It is generous on purpose: the child may be opening a
-// database, binding a health port and joining consumer groups, and a budget that
-// is too small reports failure for a process that is merely slow.
-// DefaultWorkerStartupTimeout 是后台父进程留给子进程上报就绪的预算。它刻意宽松：子进程可能
-// 正在打开数据库、绑定探针端口、加入消费组，预算太小会把"慢"报成失败。
-const DefaultWorkerStartupTimeout = 30 * time.Second
-
 func newWorkerCmd(d Deps) *cobra.Command {
 	var opts WorkerOptions
 	cmd := &cobra.Command{
@@ -164,7 +156,7 @@ func newWorkerCmd(d Deps) *cobra.Command {
 	cmd.Flags().IntVar(&opts.Concurrency, "concurrency", 0, "override the instance count of every worker (0 = config)")
 	cmd.Flags().BoolVar(&opts.List, "list", false, "list groups and workers, then exit")
 	cmd.Flags().BoolVar(&opts.Daemon, "daemon", false, "detach into the background and exit the parent process")
-	cmd.Flags().DurationVar(&opts.StartupTimeout, "startup-timeout", DefaultWorkerStartupTimeout,
+	cmd.Flags().DurationVar(&opts.StartupTimeout, "startup-timeout", DefaultStartupTimeout,
 		"how long the daemon parent waits for the child to report ready before giving up")
 	cmd.AddCommand(newWorkerStopCmd(d, &opts.Group))
 	cmd.AddCommand(newWorkerRestartCmd(d, &opts.Group))
@@ -231,7 +223,7 @@ func newWorkerRestartCmd(d Deps, group *string) *cobra.Command {
 	addWorkerStopFlags(d, cmd, &opts.Timeout, &opts.Force)
 	cmd.Flags().BoolVar(&opts.Daemon, "daemon", opts.Daemon,
 		"restart in the background; --daemon=false stays in the foreground")
-	cmd.Flags().DurationVar(&opts.StartupTimeout, "startup-timeout", DefaultWorkerStartupTimeout,
+	cmd.Flags().DurationVar(&opts.StartupTimeout, "startup-timeout", DefaultStartupTimeout,
 		"how long the daemon parent waits for the child to report ready before giving up")
 	return cmd
 }

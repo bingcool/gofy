@@ -835,7 +835,7 @@ orders, err := demoserviceclient.NewWithBaseURL("https://orders.example.com")
 | 命令 | 行为 |
 | --- | --- |
 | `./service` / `./service start` | 前台运行，直到收到 SIGINT/SIGTERM |
-| `./service start --daemon=1` | 派生后台子进程后父进程退出，日志与标准输出重定向到 `/dev/null`；Windows 不支持，启动时直接 panic |
+| `./service start --daemon=1` | 派生后台子进程后父进程退出，日志与标准输出重定向到 `/dev/null`；父进程经 fd 3 管道等待子进程上报 `ready`（listener 可用、模块已启动、Nacos 注册完成）才打印成功，失败时转达子进程原因；`--startup-timeout`（默认 `30s`）控制等待预算，超时不杀子进程；Windows 不支持，启动时直接 panic |
 | `./service stop [--pid-file path] [--timeout 10s] [--force=1]` | 发送 SIGTERM，超时后可发送 SIGKILL；默认要求输入 `yes` 确认 |
 | `./service restart [--force=1]` | 先停止 pid 文件对应的实例（如有），再前台启动；默认要求输入 `yes` 确认 |
 | `./service status [--pid-file path] [--json]` | 只读 pid 文件报告 HTTP 实例：状态、PID、已运行时长、监听地址、健康检查；未运行时退出码 1 |

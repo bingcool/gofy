@@ -1932,6 +1932,13 @@ func RawJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any
 | `app help` / `app --help` | 否 | 否 | 输出帮助，返回 nil |
 | `app completion` | 否 | 否 | cobra 自动生成 |
 
+`start` 参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--daemon` | `false` | 脱离到独立会话；父进程等子进程上报就绪后退出 |
+| `--startup-timeout` | `30s` | 父进程等待就绪上报的预算；超时只报未确认，不杀子进程 |
+
 `start` 不提供 `--port`、`--config` 等参数：
 
 - 配置由业务在 `New` 之前加载；
@@ -2035,18 +2042,19 @@ Execute("start")
   ├─ 15. 调用 Module.Start（顺序；失败则 Stop 已启动模块 + 关闭 listener）
   ├─ 16. go srv.Serve(listener)         // 进入 running
   ├─ 17. 等待：ctx.Done / serve error / Runtime.Fail
-  ├─ 18. HTTP Shutdown(timeout)         // 停止接收新请求，等待在途请求
-  ├─ 19. Module.Stop（逆序）
-  ├─ 20. DB.Close（仅 WithDatabase 创建的）
-  ├─ 21. logger.Sync（仅 App 创建的）
-  ├─ 22. 删除 pid（仅当内容仍是自己的 pid）
-  ├─ 23. 返回 nil / 原始错误
+  ├─ 18. 取消 runCtx（Runtime.Context()） // 先通知后台 goroutine
+  ├─ 19. HTTP Shutdown(timeout)         // 停止接收新请求，等待在途请求
+  ├─ 20. Module.Stop（逆序）
+  ├─ 21. DB.Close（仅 WithDatabase 创建的）
+  ├─ 22. logger.Sync（仅 App 创建的）
+  ├─ 23. 删除 pid（仅当内容仍是自己的 pid）
+  ├─ 24. 返回 nil / 原始错误
 ```
 
 关键点：
 
 - **先 `net.Listen` 再 `Serve`**：端口占用、权限错误同步返回，不会出现"启动成功但实际没监听"。
-- **先 Stop HTTP，再 Stop Module，最后 Close DB**：避免模块停止后仍有请求访问已关闭的 DB。
+- **先取消 runCtx，再 Stop HTTP、Stop Module，最后 Close DB**：监听 `Runtime.Context()` 的后台 goroutine 在 DB、日志与模块 IO 仍然可用时收到停止信号，模块 Stop 也不会卡满停机预算；HTTP 先停仍避免模块停止后还有请求访问 DB。
 - `Module.Start` 失败：执行逆序 `Stop`（已启动的模块）+ 关闭资源，返回错误。
 - `Module.Stop` 失败：记录日志，继续停止其余模块；最终返回第一个 Stop 错误（如果能与主错误合并，用 `errors.Join`）。
 - `Shutdown` 总预算 = `WithShutdownTimeout`；HTTP 与模块共享这个预算，避免无限等待。
