@@ -59,9 +59,13 @@ type ClientConfig struct {
 	// 斜杠会被去掉。
 	InnerExternalBaseURI string `yaml:"inner_external_base_uri"`
 
-	// Timeout bounds one call, including the resolution it triggers. A degraded
-	// call is a second call, so the worst case is about twice this value.
-	// Timeout 限制单次调用（含它触发的寻址）。降级是第二次调用，最坏耗时约为它的两倍。
+	// Timeout bounds one attempt, including the resolution it triggers. A
+	// degraded call is a second attempt with its own deadline, so the worst case
+	// for one logical call is twice this value (5s each → 10s). The caller's own
+	// context deadline still caps both attempts.
+	// Timeout 限制单次尝试（含它触发的寻址）。降级是第二次尝试、有独立的 deadline，因此
+	// 一次逻辑调用的最坏耗时是它的两倍（各 5s，共最坏 10s）。调用方自己的 context
+	// deadline 仍然是两次尝试的硬上限。
 	Timeout time.Duration `yaml:"timeout"`
 }
 

@@ -131,3 +131,51 @@ func TestRunnerSQLWiresSucceedAndFail(t *testing.T) {
 			r.queue.failSQL, r.queue.deadSQL)
 	}
 }
+
+// The idle round is user code too: it must run under the same HandlerTimeout as
+// a real row. Without the deadline a heartbeat that blocks on a slow call would
+// hold the polling goroutine until it returned, no matter how long that took.
+// 空闲轮同样是用户代码：必须和真实任务一样受 HandlerTimeout 约束。没有这个 deadline
+// 时，阻塞在慢调用上的心跳会一直占住轮询 goroutine。
+func TestIdleCallbackHonoursHandlerTimeout(t *testing.T) {
+	var gotNil bool
+	var hadDeadline bool
+	released := make(chan struct{})
+	r, err := NewRunner(new(gorm.DB), RunnerConfig{
+		Config:         Config{Table: "job_task", Job: "order"},
+		HandlerTimeout: 20 * time.Millisecond,
+		Handler: func(ctx context.Context, data []byte) (uint64, error) {
+			gotNil = data == nil
+			_, hadDeadline = ctx.Deadline()
+			<-ctx.Done()
+			close(released)
+			return 0, errors.New("ignored: there is no row to settle")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.idle(context.Background())
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle did not return: HandlerTimeout was not applied to the nil-data call")
+	}
+	select {
+	case <-released:
+	default:
+		t.Fatal("idle returned before the handler finished")
+	}
+	if !gotNil {
+		t.Fatal("idle call did not pass nil data")
+	}
+	if !hadDeadline {
+		t.Fatal("idle ctx carried no deadline")
+	}
+}

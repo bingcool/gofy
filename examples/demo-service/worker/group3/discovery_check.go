@@ -68,6 +68,21 @@ func newDiscoveryCheckWorker(clients *serviceclients.Clients, cfg DiscoveryCheck
 				)
 				return nil
 			}
+			// A 2xx with no data payload decodes to a nil result and no error:
+			// the client treats "empty data" as a valid empty answer (that is
+			// how a 204 or data:null route comes back). A handler that reads
+			// res.AuthRequired without this check panics, and the ticker's
+			// recover would report it as a worker panic every interval.
+			// 2xx 但没有 data 载荷时解码结果是 nil 且没有错误：客户端把"空 data"当作
+			// 合法的空答复（204 或 data:null 的路由就是这样返回的）。handler 不判空就
+			// 读 res.AuthRequired 会 panic，而 ticker 的 recover 会把它当成 worker
+			// panic 每个周期报一次。
+			if res == nil {
+				lg.Warn("discovery check got an empty payload",
+					zap.Duration("elapsed", time.Since(started)),
+				)
+				return nil
+			}
 			lg.Info("discovery check ok",
 				zap.Bool("auth_required", res.AuthRequired),
 				zap.Duration("elapsed", time.Since(started)),

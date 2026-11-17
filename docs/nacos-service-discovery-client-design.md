@@ -28,6 +28,34 @@
 改成 `client.inner_external_base_uri` + `client.timeout`。语义从"钉死下游地址"变成"本服务
 自己在配置来源那套环境里的地址"：注册时写进实例 metadata，调用失败时作为降级目标（§4.7）。
 
+再往后补齐了 PHP SDK 里已有、Go 侧一直缺的一环：**本地分组兜底**（§4.7.1）。它解决的是
+"一个进程调多个下游、每个下游都在另一个环境"时，单个 `inner_external_base_uri` 表达不了的
+场景：调用方借的是被调方实例自己发布的地址。
+
+### 0.1 三项修复的真机复测（2026-11-17 晚）
+
+环境与阶段一相同：dev-nacos（`dev` / `GO_GROUP`）、HTTP 进程 8080、`group3` 作为独立
+worker 进程；另起一个只应答 `auth_required=true` 的假后端 18080 充当"部署地址"，用来
+区分"走实例地址"与"走 metadata 地址"。六个场景全部通过：
+
+| 场景 | 配置 | 结果 |
+| --- | --- | --- |
+| 同组发现 | `group=GO_GROUP`，开关关 | `auth_required=false`，首调 30ms、命中缓存 2~3ms |
+| 本地分组兜底 | `group=local-bingcool` + `LOCAL_NACOS_SERVICE_AUTO_SWITCH=true` | 一次 warn（`fallback_group=GO_GROUP`、`from_metadata=true`），请求落到 18080 |
+| 开关关闭 | 同上但不设环境变量 | 只报 `no available instances`，没有第二次分组查询，也没有 fallback warn |
+| SIGKILL 黑洞 Pod | 杀 8080（实例仍在 Nacos） | 10s 内（cache_ttl 5s）出现 `degraded to inner_external_base_uri`，`connection refused` 后由 18080 作答 |
+| weight=0 摘流 | `load_balancer=weight`，18080 权重 0 | 30s 内 14 次调用 0 次命中权重 0 实例 |
+| 全部摘流 | 两个实例权重都 0 | 报 `all instances have weight 0: "demo-service"`，随后按 `shouldDegrade` 降级 |
+| claim 空队列 | `HandlerTimeout=1.5s`，空表 | idle 回调拿到截止时间，`Run` 在 1.53s 返回且 `err=nil`；真实行 `status=2` |
+
+两点实测结论：
+
+1. **Nacos 的 hosts 响应始终带 `weight`**（未设置时下发 1.0），所以 §P2-02 里"不能区分
+   缺省与显式 0"的顾虑在真实响应上不构成问题；`Instance.Weight` 保持 `float64` 即可。
+2. **全 0 权重的降级会掩盖摘流信号**：错误信息完整（`all instances have weight 0`）且
+   有 warn，但配置了 `inner_external_base_uri` 时调用最终成功。这是"可用性优先"的既定
+   取舍；把整批实例摘流时，运维不能只看调用成功率，要看这条 warn。
+
 
 ## 1. 背景与结论
 
@@ -350,6 +378,32 @@ main.go: nacosCfg 加载后
 IP；`nacos.New` 只校验端口，空地址会被 `normalize()` 补成 `127.0.0.1:8848`，**构造期无法
 分辨"没配"和"配错"**。所以必须由装配根显式选路，否则本地一跑就是每次调用等 2s 超时。
 
+#### 4.7.1 本地分组兜底（已落地）
+
+参照实现在 PHP：`interface-api-service/Support/NacosServiceDiscovery.php:47-118` 的
+`resolveInstance()`。Go 侧按同样的门控补在 `gofy-adapter/client/nacos/resolver.go`：
+
+1. 先用 `discovery_service_client.group_name`（**本地分组**）选址；
+2. 本地分组**明确回答"没有实例"**、且进程环境设了
+   `LOCAL_NACOS_SERVICE_AUTO_SWITCH=true` 时，改到 `service_register.group_name`
+   （**部署分组**）再查一次；
+3. 只有这条路径才优先使用实例 metadata 的 `inner_external_base_uri`，其余情况仍用
+   `scheme://IP:port`。
+
+四条边界，漏掉任何一条都会让这个机制变成故障源：
+
+- **开关默认 false，且只在环境变量里**：它回答的是"我在哪运行"，不是"部署了什么"；
+  集群内调用方绝不能因为本地分组为空就借用别的环境；
+- **只有"空"才切换**：Nacos 故障不切换（两个分组在同一个注册中心后面，切换只会把故障
+  翻倍）；权重全为 0 也不切换（那是运维摘流，不是没部署）；
+- **缓存/游标/单飞都按 `service@group` 分键**：否则兜底结果会记在本地分组名下，本地实例
+  恢复后再也不会被发现；
+- **metadata 校验失败只影响该实例**：非 `http(s)`、无 host、带 query 或 userinfo 一律回退
+  `IP:port`。让它过去会在 `client.validateResolvedBase` 变成整个服务解析失败。
+
+可观测：`Resolver.SetOnFallback` 每次刷新上报一次（demo 接到 zap 的 `warn`），
+`serviceclients.Source()` 在开关打开且两个分组不同时多打一个 `fallback_group=`。
+
 #### 4.8 服务名来自契约
 
 服务名用 `demoservice.ServiceName`（`examples/interface-service/appinterface/demoservice/nacos.go`），
@@ -464,3 +518,4 @@ IP；`nacos.New` 只校验端口，空地址会被 `normalize()` 补成 `127.0.0
 | 空列表 | 覆盖为空列表 | 删缓存（每次回源） | 改为负缓存（§4.1.2） |
 | `clusters` | 支持 | 支持 | 文档补齐第七个键 |
 | 服务注册 `ephemeral` | 可配 | `application.yaml` 的 `ephemeral` 未被解析，注册固定 `Ephemeral: true` | 要么接上，要么从示例里删掉这个键 |
+| `healthy_only` 未设置 | 无此配置（默认只取健康实例） | 三态：未设置 / 显式 true / 显式 false，未设置等于 true | 手工构造 `nacos.Config` 时必须用 `SetHealthyOnly(false)` 才能包含不健康实例；只赋字段等于留零值（P3-03） |

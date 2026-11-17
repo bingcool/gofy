@@ -3,8 +3,11 @@ package serviceclients
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"testing"
 
+	nacosadapter "github.com/bingcool/gofy-adapter/client/nacos"
 	gclient "github.com/bingcool/gofy-interface-api/client"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderresponse"
@@ -28,10 +31,12 @@ func newDegradable(primary, fallback DemoService) *degradable {
 }
 
 // The scenario the fallback exists for: the resolved instance refuses the
-// connection, so the deployment address answers instead.
-// 兜底存在的场景：解析到的实例拒绝连接，改由部署地址答复。
+// connection, so the deployment address answers instead. The error must be a
+// real transport error — the whitelist looks at types, not at message text.
+// 兜底存在的场景：解析到的实例拒绝连接，改由部署地址答复。错误必须是真实的传输错误——
+// 白名单看类型，不看文本。
 func TestDegradableFallsBackOnTransportError(t *testing.T) {
-	primary := &fakeCall{err: errors.New("dial tcp 10.0.0.9:8080: connect: connection refused")}
+	primary := &fakeCall{err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}}
 	want := &orderresponse.GetConfigResponse{}
 	fallback := &fakeCall{res: want}
 
@@ -92,8 +97,12 @@ func TestDegradableSkipsCanceledCaller(t *testing.T) {
 // 兜底也失败时两个原因都要留下：前一个说明为什么没用解析到的地址，后一个说明重试为什么
 // 失败。
 func TestDegradableJoinsBothErrors(t *testing.T) {
-	primaryErr := errors.New("nacos resolver: no available instances")
-	fallbackErr := errors.New("dial tcp: i/o timeout")
+	// The primary failure is a discovery miss, which is on the whitelist; a
+	// plain errors.New with the same text would not be, because the rule is
+	// type-based.
+	// primary 的失败是寻址失败，在白名单内；同样文本的 errors.New 不在，因为规则按类型判定。
+	primaryErr := fmt.Errorf("client: resolve %q: %w", "demo-service", nacosadapter.ErrNoInstances)
+	fallbackErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")}
 	primary := &fakeCall{err: primaryErr}
 	fallback := &fakeCall{err: fallbackErr}
 

@@ -33,6 +33,11 @@ nacos:
     timeout_ms: 2000
     healthy_only: true
     namespace_id: dev
+    # 本地开发兜底：本分组查不到实例、且进程环境里设置了
+    # LOCAL_NACOS_SERVICE_AUTO_SWITCH=true 时，改到 service_register.group_name
+    # （部署分组）解析，并优先使用实例 metadata 的 inner_external_base_uri。
+    # 本地调试把这里改成自己的分组（如 local-bingcool）就能借用 dev 环境；
+    # 两个 group_name 相同时不会发生第二次查询，集群内不要打开这个开关。
     group_name: GO_GROUP
 
   # 监控配置变化(main.go的enableNacosSyncConfig配置是总开关)

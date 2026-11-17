@@ -8,6 +8,46 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/nacos` + `gofy-adapter` resolver: `healthy_only` is now readable
+  outside the package. The setting has three states — unset, explicit true,
+  explicit false — carried by a private `healthyOnlySet` flag, but only
+  `support/nacos` could see the flag while `ConfigFromNacos` read the raw field,
+  so a hand-built zero-value `nacos.Config` looked like "include unhealthy
+  instances". Added `DiscoveryConfig.HealthyOnlyEnabled()` and
+  `SetHealthyOnly()`; `normalize` and the YAML decoder now go through the setter
+  and `ConfigFromNacos` uses the getter. A hand-built config that really wants
+  unhealthy instances must call `SetHealthyOnly(false)` — assigning the field is
+  indistinguishable from leaving it unset, and the filter stays on.
+- `examples/demo-service` service clients: the degradation rule is a whitelist.
+  It used to degrade anything that was not an `APIError` / `HTTPError` /
+  `ProtocolError`, including failures raised before the request left the process
+  (encoding, validation, credentials). Those fail the same way against any
+  address, so the second attempt was pure cost and turned the error into a
+  two-layer `errors.Join`. Only `net.Error`, `context.DeadlineExceeded` and the
+  resolver's `ErrNoInstances` / `ErrStaleExpired` degrade now; an answered
+  response and a cancelled caller still never do. The internal tests had been
+  faking transport errors with `errors.New("dial tcp ...")`, which the whitelist
+  correctly rejects — they now use real `*net.OpError` / resolver sentinels.
+- `gofy-interface-api` client: multipart bodies have a size limit. The body is
+  assembled in memory, and there was no cap, so a single upload was bounded only
+  by available RAM and a burst could OOM the process. `Config.MaxMultipartBytes`
+  (default 16 MiB) is enforced as the body is written and returns
+  `ErrMultipartTooLarge` before anything is sent; the limit is per request, not
+  per client, so concurrent uploads are not charged against one budget. The
+  package doc now states the memory shape: peak ≈ body size × concurrent uploads.
+- `gofy-adapter` nacos resolver: the `weight` strategy no longer feeds drained
+  instances. `weight <= 0` used to be normalised to 1, so an instance an operator
+  had drained to 0 still received traffic (a Nacos instance reports 1.0 by
+  default, so 0 is a decision, not a missing field). Zero and negative weights are
+  now excluded; when every candidate is drained the lookup fails closed with
+  `ErrAllZeroWeight` instead of quietly routing somewhere. `random` and
+  `round_robin` still include drained instances — draining is a weight-strategy
+  operation — which is now stated in the code.
+- `support/claim`: the empty-round callback (`data == nil`) now runs under
+  `HandlerTimeout`, like a real row. It was called with the caller's context, so a
+  heartbeat that blocked on a slow dependency could hold the polling goroutine
+  indefinitely. Its return values are still ignored — there is no row to settle —
+  and that contract is now documented on `Run` as well.
 - `gofy-adapter` nacos resolver: a failed lookup is now cached for `cache_ttl`,
   like a successful one. Previously only successes carried a timestamp, so once
   the cache expired while Nacos was unreachable **every** `Resolve` became a
@@ -198,6 +238,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Documentation: the demo's `client.timeout` comment now states the real budget.
+  The value bounds **one attempt** (including its lookup), and degradation is a
+  second attempt with its own deadline, so one logical call can take twice the
+  configured value — 5s each, 10s worst case. The caller's own context deadline
+  remains the hard cap. The previous wording ("about twice") left readers
+  assuming "5s in total".
 - `support/claim`: `DefaultBatch` dropped from 100 to 10 and batch size is now
   capped by `MaxBatch = 20`. One instance processes a batch serially, so a large
   batch buys no throughput — it only lengthens the queueing tail and keeps more
@@ -296,6 +342,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `gofy-adapter` nacos resolver: the local-development fallback the PHP SDK already
+  had. When `discovery_service_client.group_name` (the local group) answers "no
+  instances" **and** `LOCAL_NACOS_SERVICE_AUTO_SWITCH=true`, the lookup is
+  retried in `service_register.group_name` (the deployment group) and the
+  instance's `inner_external_base_uri` metadata is used when it is a valid
+  http(s) URL. A caller can therefore reach a service in the environment its
+  configuration came from, without a per-downstream address table. The switch is
+  off by default and lives only in the environment: it answers "where am I
+  running", not "what is deployed". Only an explicitly empty group switches — a
+  Nacos failure or an all-zero-weight list does not — and the cache, round-robin
+  cursor and singleflight table are now keyed by `service@group`, otherwise a
+  fallback result would keep answering for the local group and a returning local
+  instance would never be noticed. `SetOnFallback` reports one event per refresh,
+  and `support/nacos` gained `DiscoveryConfig.LocalAutoSwitch` (env-only).
 - CLI: `status` reports the HTTP instance from its pid file and `worker status`
   reports every worker process that left one, or the selected group. Both are
   read-only — no signal, no database, no Nacos — so they answer while the

@@ -177,7 +177,53 @@ type DiscoveryConfig struct {
 	// Clusters 把发现范围限制在列出的集群内。
 	Clusters []string
 
+	// LocalAutoSwitch enables the local-development fallback: a client whose
+	// own group has no instance resolves in the deployment group instead, and
+	// prefers the instance's inner_external_base_uri metadata. It is read from
+	// LOCAL_NACOS_SERVICE_AUTO_SWITCH only — like the PHP stack, this switch
+	// belongs to the process environment rather than to the shared config file,
+	// because it answers "where am I running", not "what is deployed". Default
+	// false: a cluster caller must never silently borrow another environment.
+	// LocalAutoSwitch 打开本地开发兜底：本分组没有实例的客户端改在部署分组解析，并优先
+	// 使用实例的 inner_external_base_uri 元数据。它只从环境变量
+	// LOCAL_NACOS_SERVICE_AUTO_SWITCH 读取——与 PHP 栈一致，这个开关属于进程环境而不是
+	// 共享配置文件，因为它回答的是"我在哪运行"，不是"部署了什么"。默认 false：集群内的
+	// 调用方绝不能悄悄借用另一个环境。
+	LocalAutoSwitch bool
+
+	// healthyOnlySet records that HealthyOnly was set explicitly — by YAML or
+	// by SetHealthyOnly — as opposed to being the zero value of a hand-built
+	// config. Without it, false cannot be told apart from "unset", and a caller
+	// outside this package would read the zero value as "include unhealthy".
+	// healthyOnlySet 记录 HealthyOnly 是被显式设置过（YAML 或 SetHealthyOnly），
+	// 而不是手工构造配置的零值。没有它，false 与"未设置"无法区分，包外调用方就会把
+	// 零值读成"包含不健康实例"。
 	healthyOnlySet bool
+}
+
+// HealthyOnlyEnabled reports whether unhealthy instances are dropped. It is the
+// only correct way to read the setting from outside this package: a zero-value
+// DiscoveryConfig means "unset" and therefore enables the filter, while an
+// explicit false means the caller really wants unhealthy instances.
+// HealthyOnlyEnabled 表示是否剔除不健康实例。包外只有通过它读取才是正确的：零值
+// DiscoveryConfig 表示"未设置"，因此启用过滤；显式 false 才表示调用方确实要包含
+// 不健康实例。
+func (c DiscoveryConfig) HealthyOnlyEnabled() bool {
+	if !c.healthyOnlySet {
+		return true
+	}
+	return c.HealthyOnly
+}
+
+// SetHealthyOnly sets the value and marks it explicit, so a later normalize
+// leaves it alone. A hand-built config that wants unhealthy instances must call
+// SetHealthyOnly(false); assigning the field alone is the same as leaving the
+// zero value, and the filter stays on.
+// SetHealthyOnly 设置值并标记为显式，后续 normalize 不再改动它。手工构造的配置若要
+// 包含不健康实例，必须调用 SetHealthyOnly(false)；只赋值字段等同于留零值，过滤仍然开着。
+func (c *DiscoveryConfig) SetHealthyOnly(enabled bool) {
+	c.HealthyOnly = enabled
+	c.healthyOnlySet = true
 }
 
 func (c DiscoveryConfig) normalize(reg RegisterConfig) DiscoveryConfig {
@@ -208,17 +254,24 @@ func (c DiscoveryConfig) normalize(reg RegisterConfig) DiscoveryConfig {
 	}
 	if !c.healthyOnlySet {
 		if v, ok := lookupEnv("NACOS_DISCOVERY_HEALTHY_ONLY"); ok {
-			c.HealthyOnly, _ = strconv.ParseBool(v)
-			c.healthyOnlySet = true
+			enabled, _ := strconv.ParseBool(v)
+			c.SetHealthyOnly(enabled)
 		}
 	}
 	if !c.healthyOnlySet {
-		c.HealthyOnly = true
+		c.SetHealthyOnly(true)
 	}
 	if len(c.Clusters) == 0 {
 		if v := envValue("NACOS_DISCOVERY_CLUSTERS"); v != "" {
 			c.Clusters = splitList(v)
 		}
+	}
+	// Presence-based, like HealthyOnly: an explicit value in a hand-built
+	// config survives, and only the environment can turn it on or off.
+	// 与 HealthyOnly 一样按"是否存在"处理：手工构造的配置里显式值会保留，只有环境变量
+	// 能开关它。
+	if v, ok := lookupEnv("LOCAL_NACOS_SERVICE_AUTO_SWITCH"); ok {
+		c.LocalAutoSwitch, _ = strconv.ParseBool(v)
 	}
 	return c
 }
@@ -645,8 +698,7 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 		cfg.Discovery.Timeout = time.Duration(disc.TimeoutMS) * time.Millisecond
 	}
 	if disc.HealthyOnly != nil {
-		cfg.Discovery.HealthyOnly = *disc.HealthyOnly
-		cfg.Discovery.healthyOnlySet = true
+		cfg.Discovery.SetHealthyOnly(*disc.HealthyOnly)
 	}
 
 	// The connection file wins: service_config.tenant is only a fallback when

@@ -137,6 +137,24 @@ func New(cfg config.ClientConfig, nacosCfg nacosconfig.Config) (*Clients, error)
 	if err != nil {
 		return nil, fmt.Errorf("serviceclients: demoservice resolver: %w", err)
 	}
+	// A lookup answered by the deployment group is the one event nobody can see
+	// afterwards: the call succeeds, but against another environment. The
+	// resolver reports it once per refresh; without this line it would be silent.
+	// 由部署分组作答的解析是事后唯一看不见的事件：调用成功了，但打的是另一个环境。resolver
+	// 每次刷新上报一次；没有这一行，它就是静默的。
+	resolver.SetOnFallback(func(ev nacosadapter.FallbackEvent) {
+		lg := clients.logger()
+		if lg == nil {
+			return
+		}
+		lg.Warn("demoservice resolved in the deployment group",
+			zap.String("service", ev.Service),
+			zap.String("local_group", ev.LocalGroup),
+			zap.String("fallback_group", ev.FallbackGroup),
+			zap.String("base_url", ev.BaseURL),
+			zap.Bool("from_metadata", ev.FromMetadata),
+		)
+	})
 	primary, raw, err := newTyped(resolver, "", timeout)
 	if err != nil {
 		_ = resolver.Close()
@@ -291,28 +309,51 @@ func (d *degradable) GetConfig(ctx context.Context, req *orderrequest.GetConfigR
 }
 
 // shouldDegrade decides whether a failure is worth a second attempt somewhere
-// else. The rule is negative on purpose: a response that arrived — even a 500 —
-// proves the target is up and answered, so repeating the request elsewhere
-// would only produce a second opinion nobody asked for. Caller cancellation is
-// excluded too, but a timeout from this client's own deadline is not: that is
-// exactly the blackholed-pod case the fallback is for.
-// shouldDegrade 判断一次失败是否值得换个地址再试。规则刻意写成否定的：响应已经到达，
-// 哪怕是 500，也说明目标活着并答复了，换地址重发只会多出一个没人要的结论。调用方取消
-// 也排除在外；但本客户端自己超时导致的不排除——那正是"Pod 被黑洞"这种需要兜底的情形。
+// else. The rule is a whitelist, not "anything that is not an HTTP answer":
+// only a transport failure or a failed lookup can be fixed by another address.
+// A request that never left the process — encoding, validation, credential
+// errors — fails the same way twice and only turns the error into a two-layer
+// join, so it is deliberately excluded. A response that arrived, even a 500, is
+// excluded too: the target is up and answered, another opinion is not wanted.
+// shouldDegrade 判断一次失败是否值得换个地址再试。规则是白名单，而不是"凡不是 HTTP
+// 答复就算"：只有传输失败或寻址失败可能被另一个地址解决。根本没发出进程的失败——编码、
+// 校验、凭据错误——第二次会以同样方式失败，只会把错误变成两层 Join，因此刻意排除。
+// 已经到达的响应（哪怕是 500）同样排除：目标活着并答复了，不需要第二个结论。
 func shouldDegrade(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
+	// A cancelled caller is not a reason to spend another timeout: the work is
+	// already unwanted. This check comes first because cancellation surfaces
+	// through the transport error below.
+	// 调用方已取消不是再花一个超时的理由：这次工作已经没人要了。这个判断必须在前，
+	// 因为取消会以传输错误的形式冒出来。
 	if ctx.Err() != nil {
 		return false
 	}
-	var apiErr *gclient.APIError
-	var httpErr *gclient.HTTPError
-	var protoErr *gclient.ProtocolError
-	if errors.As(err, &apiErr) || errors.As(err, &httpErr) || errors.As(err, &protoErr) {
-		return false
+	// Connection refused, DNS failure, connect/read/write timeout. *url.Error
+	// satisfies net.Error, so it covers the client's own deadline as well.
+	// 连接拒绝、DNS 失败、连接/读写超时。*url.Error 满足 net.Error，因此客户端自身
+	// 的 deadline 也在其中。
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
 	}
-	return true
+	// A deadline that surfaced without a net.Error (for example a resolver
+	// timeout wrapped by the caller's context).
+	// 没有以 net.Error 形式出现的 deadline（例如被调用方 context 包装的寻址超时）。
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Discovery failed: wrong namespace/group, every instance offline, or the
+	// stale window ran out. This is the local-development path the fallback
+	// exists for, so it must stay in the set.
+	// 寻址失败：namespace/group 配错、实例全下线、或 stale 窗口用尽。这正是兜底存在的
+	// 本地开发场景，必须留在集合里。
+	if errors.Is(err, nacosadapter.ErrNoInstances) || errors.Is(err, nacosadapter.ErrStaleExpired) {
+		return true
+	}
+	return false
 }
 
 // nacosSource renders the connection and discovery scope actually used. The
@@ -329,5 +370,16 @@ func nacosSource(cfg nacosconfig.Config) string {
 	if namespace == "" {
 		namespace = "public"
 	}
-	return fmt.Sprintf("nacos %s namespace=%s group=%s", addr, namespace, cfg.Discovery.Group)
+	source := fmt.Sprintf("nacos %s namespace=%s group=%s", addr, namespace, cfg.Discovery.Group)
+	// The fallback group is only reachable when the switch is on and the two
+	// groups differ; showing it otherwise would suggest a fallback that cannot
+	// happen.
+	// 只有开关打开且两个分组不同时才可能兜底；其它情况把它写出来，会让人以为存在一条
+	// 走不到的兜底路径。
+	if cfg.Discovery.LocalAutoSwitch &&
+		cfg.Register.Group != "" &&
+		cfg.Register.Group != cfg.Discovery.Group {
+		source += " fallback_group=" + cfg.Register.Group
+	}
+	return source
 }

@@ -240,9 +240,26 @@ func NewRunner(db *gorm.DB, cfg RunnerConfig) (*Runner, error) {
 	}, nil
 }
 
+// idle runs the empty-round callback. It shares HandlerTimeout with the real
+// path on purpose: both are user code on the polling goroutine, and a callback
+// that blocks in one path must not be allowed to block forever in the other.
+// The deadline is cooperative — a callback that ignores ctx still holds the
+// goroutine until it returns.
+// idle 执行空轮回调。它刻意与真实路径共用 HandlerTimeout：两者都是跑在轮询 goroutine 上的
+// 用户代码，不能一条路径有超时、另一条没有。这个 deadline 是协作式的——忽略 ctx 的回调仍会
+// 占住 goroutine 直到自己返回。
+func (r *Runner) idle(ctx context.Context) {
+	idleCtx, cancel := context.WithTimeout(ctx, r.handlerTimeout)
+	defer cancel()
+	_, _ = r.handler(idleCtx, nil)
+}
+
 // Run performs one poll round: reap expired leases, claim a batch, then run the
 // Handler over every claimed row and persist each outcome. Call it from a ticker;
-// an empty result is normal and calls the Handler once with nil data.
+// an empty result is normal and calls the Handler once with nil data, under the
+// same HandlerTimeout as a real row — a heartbeating callback that blocks must
+// not stall the polling loop. The return values of that idle call are ignored:
+// there is no row to settle.
 //
 // Errors from individual rows are joined and returned, so one failed bookkeeping
 // write does not stop the rest of the batch. A lease loss is not returned as an
@@ -250,7 +267,9 @@ func NewRunner(db *gorm.DB, cfg RunnerConfig) (*Runner, error) {
 // through OnFailure with LeaseLost set.
 //
 // Run 执行一轮轮询：回收过期租约、认领一批、对每条认领行运行 Handler 并持久化结果。请从 ticker
-// 里调用它；空结果是常态，此时用 nil data 调一次 Handler。
+// 里调用它；空结果是常态，此时用 nil data 调一次 Handler，并和真实任务使用同一个
+// HandlerTimeout——打心跳的回调一旦阻塞，不能把轮询循环卡住。这次空闲调用的返回值被忽略：
+// 没有行可以收尾。
 //
 // 单行错误会合并返回，因此一条收尾写失败不会拖住批次里其余任务。租约丢失不作为错误上抛给
 // ticker——重试会重复副作用——而是通过 OnFailure 并置 LeaseLost 来上报。
@@ -270,7 +289,7 @@ func (r *Runner) Run(ctx context.Context, owner string) error {
 		// No due row: give the worker one callback with nil data for heartbeats,
 		// ignore its return values, and still surface a reap failure if any.
 		// 没有到期行：用 nil data 调一次回调供打点，忽略返回值；若回收失败仍上抛。
-		_, _ = r.handler(ctx, nil)
+		r.idle(ctx)
 		return reapErr
 	}
 

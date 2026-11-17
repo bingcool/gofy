@@ -113,6 +113,39 @@ func TestNewReportsDiscoveryAndFallback(t *testing.T) {
 	}
 }
 
+// A lookup answered by the deployment group is a different environment, so the
+// startup line has to name it — but only when that path is actually reachable.
+// 由部署分组作答意味着打到了另一个环境，启动日志必须点名；但也只在那条路径真的可达时
+// 才写出来。
+func TestNewReportsDeploymentGroupFallback(t *testing.T) {
+	newClients := func(t *testing.T, switchOn bool) string {
+		t.Helper()
+		clients, err := serviceclients.New(config.ClientConfig{}, nacosconfig.Config{
+			Enabled:  true,
+			Host:     "127.0.0.1",
+			Port:     8848,
+			Register: nacosconfig.RegisterConfig{Group: "GO_GROUP"},
+			Discovery: nacosconfig.DiscoveryConfig{
+				Namespace:       "dev",
+				Group:           "local-bingcool",
+				LocalAutoSwitch: switchOn,
+			},
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(func() { _ = clients.Close() })
+		return clients.Source()
+	}
+
+	if source := newClients(t, true); !strings.Contains(source, "fallback_group=GO_GROUP") {
+		t.Fatalf("Source = %q, want the deployment group when the switch is on", source)
+	}
+	if source := newClients(t, false); strings.Contains(source, "fallback_group") {
+		t.Fatalf("Source = %q, want no fallback group when the switch is off", source)
+	}
+}
+
 // A nil Clients is a legal state for a process without downstream calls; every
 // method has to stay callable.
 // nil Clients 是没有下游调用的进程的合法状态；每个方法都必须仍可调用。

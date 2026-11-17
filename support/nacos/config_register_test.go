@@ -242,3 +242,73 @@ func TestSetInnerExternalBaseURINilSafe(t *testing.T) {
 	var reg *RegisterConfig
 	reg.SetInnerExternalBaseURI("http://demo:8080")
 }
+
+// The local-development switch is environment-only on purpose: it answers
+// "where am I running", so it must not ride along in a shared application.yaml
+// where a deployment could inherit it by accident.
+// 本地开发开关刻意只走环境变量：它回答"我在哪运行"，不能跟着共享的 application.yaml
+// 走——那样一次部署就可能顺手把它继承过去。
+func TestLocalAutoSwitchComesFromEnvOnly(t *testing.T) {
+	clearNacosEnv(t)
+	reg := RegisterConfig{Group: "GO_GROUP"}
+
+	if got := (DiscoveryConfig{}).normalize(reg); got.LocalAutoSwitch {
+		t.Fatal("LocalAutoSwitch defaults to true")
+	}
+
+	t.Setenv("LOCAL_NACOS_SERVICE_AUTO_SWITCH", "true")
+	if got := (DiscoveryConfig{}).normalize(reg); !got.LocalAutoSwitch {
+		t.Fatal("LOCAL_NACOS_SERVICE_AUTO_SWITCH=true did not reach the config")
+	}
+
+	// A hand-built config keeps an explicit value when the environment is silent.
+	// 环境没有设置时，手工构造的显式值必须保留。
+	clearNacosEnv(t)
+	if got := (DiscoveryConfig{LocalAutoSwitch: true}).normalize(reg); !got.LocalAutoSwitch {
+		t.Fatal("normalize dropped an explicitly set LocalAutoSwitch")
+	}
+}
+
+// HealthyOnly is a three-state setting: unset (zero value), explicit true, and
+// explicit false. The zero value must mean "filter unhealthy instances", which
+// is why the field alone is not readable outside this package. Adapter code
+// goes through HealthyOnlyEnabled.
+// HealthyOnly 是三态配置：未设置（零值）、显式 true、显式 false。零值必须表示
+// "过滤不健康实例"，所以包外不能只读字段，adapter 一律走 HealthyOnlyEnabled。
+func TestHealthyOnlyThreeState(t *testing.T) {
+	clearNacosEnv(t)
+
+	var zero DiscoveryConfig
+	if !zero.HealthyOnlyEnabled() {
+		t.Fatal("zero-value DiscoveryConfig reports healthy-only off")
+	}
+	if zero.HealthyOnly {
+		t.Fatal("zero-value field changed; HealthyOnlyEnabled exists to hide this")
+	}
+
+	var explicitFalse DiscoveryConfig
+	explicitFalse.SetHealthyOnly(false)
+	if explicitFalse.HealthyOnlyEnabled() {
+		t.Fatal("SetHealthyOnly(false) did not survive")
+	}
+
+	// normalize must not overwrite an explicit false with the default.
+	// normalize 不能用默认值覆盖显式 false。
+	if got := explicitFalse.normalize(RegisterConfig{}); got.HealthyOnlyEnabled() {
+		t.Fatal("normalize overwrote an explicit healthy_only: false")
+	}
+
+	// A zero value normalized from a config file ends up enabled.
+	// 来自配置文件的零值归一化后启用过滤。
+	cfg := Config{Host: "10.0.0.2"}.normalize()
+	if !cfg.Discovery.HealthyOnlyEnabled() {
+		t.Fatal("normalize left healthy-only off for an unset value")
+	}
+
+	// NACOS_DISCOVERY_HEALTHY_ONLY=false is an explicit choice.
+	// NACOS_DISCOVERY_HEALTHY_ONLY=false 属于显式选择。
+	t.Setenv("NACOS_DISCOVERY_HEALTHY_ONLY", "false")
+	if got := (DiscoveryConfig{}).normalize(RegisterConfig{}); got.HealthyOnlyEnabled() {
+		t.Fatal("NACOS_DISCOVERY_HEALTHY_ONLY=false was ignored")
+	}
+}
