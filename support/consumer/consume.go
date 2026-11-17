@@ -581,14 +581,31 @@ const (
 // handler 很快时才应调小。
 const DefaultProcessingLease = 5 * time.Minute
 
+// inFlightError is the concrete type behind ErrInFlight. It implements the
+// queues package's InFlightError marker structurally, which lets a Redis queue
+// defer the copy for the processing lease instead of charging the retry budget.
+// inFlightError 是 ErrInFlight 的具体类型。它以结构化方式实现 queues 包的
+// InFlightError 标记，Redis 队列因此能把副本延后到处理租约之后，而不消耗重试
+// 预算。
+type inFlightError struct{}
+
+func (inFlightError) Error() string {
+	return "consumer: message is being handled by another instance"
+}
+
+func (inFlightError) InFlight() {}
+
 var (
 	// ErrInFlight reports that another instance holds a valid processing lease
 	// for this message. It is deliberately an error: the caller must ask the
 	// broker for a redelivery instead of acknowledging, because the copy being
-	// handled elsewhere may still fail.
+	// handled elsewhere may still fail. A Redis queue recognizes the marker and
+	// re-queues the copy after its processing lease without consuming the retry
+	// budget.
 	// ErrInFlight 表示另一个实例持有该消息有效的 processing 租约。它刻意是错误：
 	// 调用方必须请求 broker 重投而不是确认，因为别处正在处理的副本仍可能失败。
-	ErrInFlight = errors.New("consumer: message is being handled by another instance")
+	// Redis 队列会识别这个标记，在处理租约之后重新入队，且不消耗重试预算。
+	ErrInFlight = inFlightError{}
 
 	// ErrStaleClaim reports that a completion found the row owned by a different
 	// attempt. The handler's side effects (if any) already happened, so the

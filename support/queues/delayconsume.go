@@ -12,16 +12,18 @@ import (
 //
 // Pop already deletes the messages from the ZSET, so in-flight work is
 // at-most-once: a crash between Pop and a successful handler loses that batch.
-// Retry writes a failed message back with a fresh due time, up to MaxRetries.
-// ConsumeOptions.PopLimit bounds one batch; IdleDelay is the pause when nothing
-// is due, and can be short without hammering Redis because a poll is one Lua
-// range query.
+// Retry writes a failed message back with a fresh due time, up to MaxRetries;
+// an InFlightError writes it back after InFlightDelay without touching the
+// retry budget. ConsumeOptions.PopLimit bounds one batch; IdleDelay is the pause
+// when nothing is due, and can be short without hammering Redis because a poll
+// is one Lua range query.
 //
 // Consume 持续处理到期消息直到 ctx 被取消。它与 Queue.Consume 签名相同，因此两者
 // 可以共用同一个 worker 适配器（support/worker/consumer/queuesconsumer）。
 //
 // Pop 已经把消息从 ZSET 删除，在途消息因此是"至多一次"：Pop 到 handler 成功之间
-// 进程崩溃会丢这一批。失败消息由 Retry 以新的到期时间写回，受 MaxRetries 限制。
+// 进程崩溃会丢这一批。失败消息由 Retry 以新的到期时间写回，受 MaxRetries 限制；
+// InFlightError 则在 InFlightDelay 之后写回且不消耗重试预算。
 // ConsumeOptions.PopLimit 限制单批条数；没有到期消息时按 IdleDelay 暂停，一次轮询
 // 只是一次 Lua range 查询，间隔可以设得较短。
 func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
@@ -79,6 +81,17 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 			if err := callHandler(ctx, handler, msg); err != nil {
 				if ctx.Err() != nil {
 					return nil
+				}
+				if isInFlight(err) {
+					// Another instance still owns the message. Re-queue it
+					// without touching RetryNum; DiscardOnError must not apply
+					// either.
+					// 另一实例仍持有这条消息。重新入队但不改 RetryNum；
+					// DiscardOnError 同样不适用。
+					if err := q.RetryInFlight(ctx, msg, opts.InFlightDelay); err != nil {
+						report(opts, err)
+					}
+					continue
 				}
 				report(opts, err)
 				if opts.DiscardOnError {

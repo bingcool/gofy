@@ -135,6 +135,61 @@ func TestDelayConsumeRetriesFailedMessage(t *testing.T) {
 	}
 }
 
+// TestDelayConsumeDefersInFlightWithoutRetryBudget is the delayed-queue twin of
+// the B1 fix: an in-flight error writes the message back with the same RetryNum
+// and ignores MaxRetries, so the copy survives until the other handler settles.
+// TestDelayConsumeDefersInFlightWithoutRetryBudget 是 B1 修复在延迟队列上的同款
+// 用例：在途错误以相同 RetryNum 写回且不受 MaxRetries 限制，副本因此能活到另一个
+// handler 收尾。
+func TestDelayConsumeDefersInFlightWithoutRetryBudget(t *testing.T) {
+	q, _ := newDelayQueue(t, queues.Config{Key: "orders:delay", MaxRetries: 1})
+	if err := q.Add(context.Background(), map[string]any{"n": 7}, 0); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deliveries := make(chan int, 3)
+	retryNums := make(chan int, 3)
+	done := make(chan error, 1)
+	calls := 0
+	go func() {
+		done <- q.Consume(runCtx, func(_ context.Context, msg *queues.Message) error {
+			calls++
+			deliveries <- calls
+			retryNums <- msg.RetryNum
+			if calls <= 2 {
+				return inFlightTestError{}
+			}
+			return nil
+		}, queues.ConsumeOptions{
+			IdleDelay:     5 * time.Millisecond,
+			InFlightDelay: 10 * time.Millisecond,
+		})
+	}()
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-deliveries:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out after %d deliveries", i)
+		}
+		select {
+		case retryNum := <-retryNums:
+			if retryNum != 0 {
+				t.Fatalf("delivery %d RetryNum = %d, want 0 (in-flight must not consume the budget)", i+1, retryNum)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("delivery %d carried no RetryNum", i+1)
+		}
+	}
+	cancel()
+	<-done
+	if calls != 3 {
+		t.Fatalf("handler calls = %d, want 3", calls)
+	}
+}
+
 // TestDelayConsumeReportsReadyOnceAfterFirstPop is the delayed-queue twin: the
 // first range query that returns defines readiness, and a handled batch must not
 // repeat it.

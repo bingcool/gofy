@@ -106,6 +106,17 @@ func (q *DelayQueue) Retry(ctx context.Context, msg *Message, delay time.Duratio
 	return scheduleRetry(ctx, q.client, q.key, q.maxRetries, msg, delay)
 }
 
+// RetryInFlight writes a message back into the delayed ZSET without changing
+// RetryNum or applying MaxRetries: the delivery is not a failure yet. Use it
+// when another instance still holds the processing lease and this copy must not
+// be dropped, and make delay cover that lease.
+// RetryInFlight 把消息重新写回延迟 ZSET，不改 RetryNum，也不受 MaxRetries 限制：
+// 这次投递尚未失败。它用于另一实例仍持有处理租约、这份副本不能丢的场景，
+// delay 应覆盖该租约。
+func (q *DelayQueue) RetryInFlight(ctx context.Context, msg *Message, delay time.Duration) error {
+	return scheduleDeferred(ctx, q.client, q.key, msg, delay)
+}
+
 // Len returns the total number of messages in the delayed queue, including those
 // that are not due yet.
 // Len 返回延迟队列中的消息总数（包含尚未到期的消息）。

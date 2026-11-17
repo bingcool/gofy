@@ -52,11 +52,12 @@
 
 ### 2.1 P0
 
-#### B1 · Redis 队列把 `ErrInFlight` 当成普通失败，耗尽重试后永久丢消息（P0 · 已复核）
+#### B1 · Redis 队列把 `ErrInFlight` 当成普通失败，耗尽重试后永久丢消息（P0 · 已复核 · 已修复）
 
 - **证据**：`gofy/support/consumer/consume.go:423-435` 在另一实例持有有效 `processing` 租约时返回 `ErrInFlight` 且明确「不 ACK，等待稍后重投」；`gofy/support/queues/consume.go:145-161` 对任意非 nil 错误都调 `q.Retry`；`gofy/support/queues/message.go:75-81` 在 `RetryNum >= maxRetries` 返回 `false` 且不再入队；`gofy/support/consumer/queues.go:208-216` 默认 `MaxRetries=3`、`RetryDelay=3s`、租约 5min。
 - **风险**：租约有效期内，本副本每 3s 重投一次、约 9s 耗尽 3 次预算后队列直接丢弃消息。若首个 handler 随后失败，broker 已无副本、台账停在 `processing`，消息彻底消失——幂等台账最该防的场景反而丢了消息。
 - **建议**：`ErrInFlight` 单独识别：重新入队但**不递增 RetryNum**，且延迟不小于 `ProcessingLease`；或交给延迟队列并冻结重试预算。
+- **修复（2026-11-18）**：`consumer.ErrInFlight` 改为实现 `queues.InFlightError` 标记（结构化接口，不引入反向依赖）；`Queue.Consume` 在 `DiscardOnError` 与普通重试之前识别该标记，调用新增的 `Queue.RetryInFlight` 按 `ConsumeOptions.InFlightDelay` 重新入队。该路径不改 `RetryNum`、不受 `MaxRetries` 限制；`consumer/queues.go` 把延迟设为 `DefaultProcessingLease`（5 分钟），确保副本不会与仍持有租约的 handler 抢跑。回归测试覆盖两条规则：`MaxRetries=1` 下两次在途重投后仍能成功、`DiscardOnError=true` 时在途消息不被丢弃。
 
 ### 2.2 P1
 
@@ -317,9 +318,9 @@
 
 ---
 
-## 5. 修复优先级建议（不在本轮实现）
+## 5. 修复优先级建议（B1 已于 2026-11-18 修复，其余不在本轮实现）
 
-1. **第一批（数据正确性）**：B1 → B6 → B4/B5 → D2/D3。先堵住「消息被丢」和「流被当成功」，再统一租约精度。（B3 原列于此，复核后撤销，见 §1 X-5。）
+1. **第一批（数据正确性）**：~~B1~~ → B6 → B4/B5 → D2/D3。先堵住「消息被丢」和「流被当成功」，再统一租约精度。（B1 已修复，见 §2.1；B3 原列于此，复核后撤销，见 §1 X-5。）
 2. **第二批（生命周期与资源）**：A1/A2 → C1/C2 → E3/D8 → A7。这一批都是「Close/取消顺序」，改动小但回归面广，需要配套停机测试。
 3. **第三批（契约一致性）**：D1（已知遗留）、D4、F2/F3/F4/F5、E5/E8、D11/E10。以守卫与断言为主，避免行为突变。
 4. **第四批（P3）**：按模块顺手清理，不单独排期。
@@ -342,11 +343,11 @@
 
 ## 7. 问题索引（按严重度排序）
 
-按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」是 **2026-11-18 生成本报告时** 的快照：本轮只做审计、未改动任何业务代码，因此全部为「否」；后续修复可直接在表中更新该列。§1 的 X-1 ~ X-7 是复核后撤销/降级/修正的结论，不计入本索引。
+按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」是 **2026-11-18 生成本报告时** 的快照：B1 已在同日修复并更新该列，其余条目本轮只做审计、未改动业务代码，因此仍为「否」；后续修复可直接在表中更新该列。§1 的 X-1 ~ X-7 是复核后撤销/降级/修正的结论，不计入本索引。
 
 | 编号 | 严重度 | 问题 | 是否已修复 |
 |---|---|---|---|
-| B1 | P0 | Redis 队列把 `ErrInFlight` 当成普通失败，耗尽重试后永久丢消息 | 否 |
+| B1 | P0 | Redis 队列把 `ErrInFlight` 当成普通失败，耗尽重试后永久丢消息 | 是（2026-11-18） |
 | A1 | P1 | `start --daemon` 没有父子握手，父进程无条件报成功 | 否 |
 | A2 | P1 | `Shutdown()` 停机时 runCtx 取消排在 DB 关闭之后 | 否 |
 | B4 | P1 | 消费台账列类型硬编码 MySQL `datetime(3)`，PG/SQLite 方言分支形同虚设 | 否 |

@@ -144,6 +144,7 @@ err = dq.Consume(ctx, func(ctx context.Context, msg *queues.Message) error {
 | `PushPriority(ctx, payloads...)` | 写入优先队列，`Pop` 时优先取出 |
 | `Pop(ctx, timeout)` | 取出下一条消息；`timeout <= 0` 立即返回 |
 | `Retry(ctx, msg, delay)` | 失败消息写入重试 ZSET；返回 false 表示已达上限 |
+| `RetryInFlight(ctx, msg, delay)` | 在途消息写入重试 ZSET；不改 `RetryNum`，不受 `MaxRetries` 限制 |
 | `Len(ctx)` | 主队列长度（不含优先队列和重试队列） |
 | `Key()` / `PriorityKey()` / `RetryKey()` / `MaxRetries()` | 键与配置 |
 
@@ -155,6 +156,7 @@ err = dq.Consume(ctx, func(ctx context.Context, msg *queues.Message) error {
 | `Add(ctx, payload, delay)` | 写入延迟消息，`delay` 之后才可取出 |
 | `Pop(ctx, limit)` | 原子取出并删除至多 `limit` 条到期消息 |
 | `Retry(ctx, msg, delay)` | 以新的到期时间重新写回 ZSET |
+| `RetryInFlight(ctx, msg, delay)` | 在途消息写回 ZSET；不改 `RetryNum`，不受 `MaxRetries` 限制 |
 | `Consume(ctx, handler, opts)` | 常驻消费到期消息；与 `Queue.Consume` 同签名，可共用 worker 适配器；`opts.PopLimit` 控制单批条数 |
 | `Len(ctx)` | 队列中的消息总数（包含未到期消息） |
 | `Key()` / `MaxRetries()` | 键与配置 |
@@ -166,6 +168,11 @@ err = dq.Consume(ctx, func(ctx context.Context, msg *queues.Message) error {
   需要 at-least-once 语义时应改用 Redis Streams，本包不提供消费确认。
 - **重试次数**：`MaxRetries` 是失败后额外投递的次数，因此一条消息最多被投递
   `MaxRetries + 1` 次；`Retry` 返回 `false` 时消息被丢弃，由业务决定是否记录。
+- **在途重投不消耗重试预算**：`Consume` 的 handler 返回实现 `queues.InFlightError`
+  的错误时（`consumer.ErrInFlight` 就是），消息按 `ConsumeOptions.InFlightDelay`
+  重新入队，`RetryNum` 不变，`MaxRetries` 与 `DiscardOnError` 都不生效。延迟默认
+  5 分钟，用于覆盖 `consumer.DefaultProcessingLease`：另一实例仍在处理时，这份
+  副本既不能丢，也不能提前抢跑。
 - **重试回流发生在 `Pop` 时**：每次 `Pop` 前用 Lua 原子地把最多 100 条到期重试
   消息搬回主队列，没有独立的后台定时器。
 - **延迟弹出是原子的**：`DelayQueue.Pop` 用 Lua 一次完成 `ZRANGEBYSCORE` +

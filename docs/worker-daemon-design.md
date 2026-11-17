@@ -501,6 +501,7 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 | --- | --- |
 | 队列为空 | 等待 `IdleDelay`（默认 200ms）再轮询，不空转 |
 | handler 返回错误 | 上报 `OnError`，再 `Retry(msg, RetryDelay)` 写入重试 ZSET；到期后由 `Pop` 自动回流 |
+| handler 返回 `queues.InFlightError` | 不消耗重试预算：按 `InFlightDelay`（默认 5 分钟）重新入队，`DiscardOnError` 不生效 |
 | 达到 `MaxRetries` | 丢弃并上报 `ErrRetryExhausted`（带消息 ID 与上限），不无限重投 |
 | `DiscardOnError` | 只上报不重试，用于幂等且可丢弃的消息 |
 | handler panic | `recover` 后按错误处理，一条坏消息不会拖垮消费者 |

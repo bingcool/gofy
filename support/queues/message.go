@@ -79,15 +79,33 @@ func scheduleRetry(ctx context.Context, client goredis.Cmdable, key string, maxR
 		msg.ID = uuid.NewString()
 	}
 	msg.RetryNum++
+	if err := scheduleDeferred(ctx, client, key, msg, delay); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// scheduleDeferred writes a message into the retry ZSET without consuming the
+// retry budget. RetryNum is preserved because the deferred delivery is not a
+// failure of this attempt; only a handler error may charge the budget.
+// scheduleDeferred 把消息写入重试 ZSET，但不消耗重试预算。RetryNum 保持不变，
+// 因为这次延后重投不是本次投递的失败；只有 handler 出错才能消耗预算。
+func scheduleDeferred(ctx context.Context, client goredis.Cmdable, key string, msg *Message, delay time.Duration) error {
+	if msg == nil {
+		return errors.New("queues: message is nil")
+	}
+	if msg.ID == "" {
+		msg.ID = uuid.NewString()
+	}
 	raw, err := encodeMessage(msg)
 	if err != nil {
-		return false, err
+		return err
 	}
 	at := time.Now().Add(normalizeDelay(delay))
 	if err := client.ZAdd(contextOrBackground(ctx), key, goredis.Z{Score: score(at), Member: raw}).Err(); err != nil {
-		return false, fmt.Errorf("queues: retry %q: %w", key, err)
+		return fmt.Errorf("queues: defer %q: %w", key, err)
 	}
-	return true, nil
+	return nil
 }
 
 // score uses Unix seconds with a fractional part as the ZSET score, which is

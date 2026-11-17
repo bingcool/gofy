@@ -46,8 +46,10 @@ type QueuesConfig struct {
 	// Key 是队列名，也是 Redis 键。必填。
 	Key string
 	// MaxRetries is how often a failed message re-enters the main queue before
-	// the queue drops it.
-	// MaxRetries 是失败消息重新进入主队列的次数，超过后队列会丢弃它。
+	// the queue drops it. Duplicates deferred as in flight do not consume this
+	// budget.
+	// MaxRetries 是失败消息重新进入主队列的次数，超过后队列会丢弃它。在途延后的
+	// 重复投递不消耗这个预算。
 	MaxRetries int
 	// IdleDelay is the pause after an empty pop.
 	// IdleDelay 是空弹出后的等待时间。
@@ -56,8 +58,9 @@ type QueuesConfig struct {
 	// RetryDelay 是失败消息重新入队前的等待时间。
 	RetryDelay time.Duration
 	// DiscardOnError, when set, drops a failed message instead of re-queueing
-	// it.
-	// DiscardOnError 打开后，失败消息会被丢弃而不是重新入队。
+	// it. In-flight duplicates are still deferred, never discarded.
+	// DiscardOnError 打开后，失败消息会被丢弃而不是重新入队。在途重复投递仍会
+	// 延后重投，不会被丢弃。
 	DiscardOnError bool
 	// Handler runs the business branch. Required.
 	// Handler 执行业务分支。必填。
@@ -101,6 +104,12 @@ type QueuesConsumer struct {
 	cfg  QueuesConfig
 	conn gofyredis.Config
 }
+
+// ErrInFlight must stay recognizable as a queues in-flight error; that marker
+// is what defers the copy instead of consuming its retry budget.
+// ErrInFlight 必须始终满足 queues 的在途错误标记；正是这个标记让副本延后重投，
+// 而不是消耗重试预算。
+var _ queues.InFlightError = ErrInFlight
 
 // NewQueues validates cfg, resolves its connection block and returns the
 // consumer. It does not connect; Run does.
@@ -161,8 +170,12 @@ func (c *QueuesConsumer) Run(ctx context.Context) error {
 			return proc.Handle(ctx, queuesMessage(c.cfg.Key, msg))
 		},
 		Options: queues.ConsumeOptions{
-			IdleDelay:      c.cfg.IdleDelay,
-			RetryDelay:     c.cfg.RetryDelay,
+			IdleDelay:  c.cfg.IdleDelay,
+			RetryDelay: c.cfg.RetryDelay,
+			// A duplicate delivery that is still being processed elsewhere
+			// re-enters the queue only after the processing lease expires.
+			// 另一实例仍在处理的重复投递，要等处理租约到期后才重新入队。
+			InFlightDelay:  DefaultProcessingLease,
 			DiscardOnError: c.cfg.DiscardOnError,
 			OnError: func(err error) {
 				lg.Error("queues consume error", zap.Error(err))

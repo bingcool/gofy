@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/queues` + `support/consumer`: an in-flight duplicate is no longer
+  dropped. `consumer.ErrInFlight` is returned while another instance holds the
+  processing lease, but the Redis queue adapter charged it as an ordinary
+  failure: each redelivery incremented `RetryNum`, and after `MaxRetries`
+  copies (default three, about nine seconds) the queue dropped the only
+  remaining copy while the first handler might still fail. `ErrInFlight` now
+  satisfies the new `queues.InFlightError` marker; `Queue.Consume` re-queues it
+  after `InFlightDelay` with `RetryNum` unchanged and `MaxRetries` /
+  `DiscardOnError` bypassed. The consumer wiring uses
+  `DefaultProcessingLease` (five minutes), so the copy cannot race the handler
+  that still owns it; `Queue.RetryInFlight` exposes the same
+  non-budget-consuming re-queue.
+
 - `support/nacos` + `gofy-adapter` resolver: `healthy_only` is now readable
   outside the package. The setting has three states — unset, explicit true,
   explicit false — carried by a private `healthyOnlySet` flag, but only

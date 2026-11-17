@@ -223,6 +223,105 @@ func TestQueueConsumeRecoversHandlerPanic(t *testing.T) {
 	stop()
 }
 
+type inFlightTestError struct{}
+
+func (inFlightTestError) Error() string { return "another instance still owns the message" }
+func (inFlightTestError) InFlight()     {}
+
+// TestQueueConsumeDefersInFlightWithoutRetryBudget pins the B1 fix: an
+// in-flight error re-queues the message with the same RetryNum and ignores
+// MaxRetries. With MaxRetries=1, charging the budget would drop the second
+// delivery, so the test requires two deferrals followed by a success.
+// TestQueueConsumeDefersInFlightWithoutRetryBudget 固定 B1 的修复：在途错误以相同
+// RetryNum 重新入队，且不受 MaxRetries 限制。MaxRetries=1 时若消耗预算，第二次投递
+// 就会被丢弃，因此测试要求两次延后重投之后仍能成功。
+func TestQueueConsumeDefersInFlightWithoutRetryBudget(t *testing.T) {
+	q, _ := newQueue(t, queues.Config{Key: "jobs", MaxRetries: 1})
+	if _, err := q.Push(context.Background(), map[string]string{"id": "a"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	var calls int32
+	retryNums := make(chan int, 3)
+	exhausted := make(chan error, 1)
+	stop := startConsume(t, q, func(_ context.Context, msg *queues.Message) error {
+		retryNums <- msg.RetryNum
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			return inFlightTestError{}
+		}
+		return nil
+	}, queues.ConsumeOptions{
+		IdleDelay:     5 * time.Millisecond,
+		InFlightDelay: 10 * time.Millisecond,
+		OnError: func(err error) {
+			if errors.Is(err, queues.ErrRetryExhausted) {
+				select {
+				case exhausted <- err:
+				default:
+				}
+			}
+		},
+	})
+
+	for i := 0; i < 3; i++ {
+		select {
+		case retryNum := <-retryNums:
+			if retryNum != 0 {
+				t.Fatalf("delivery %d RetryNum = %d, want 0 (in-flight must not consume the budget)", i+1, retryNum)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out after %d deliveries", i)
+		}
+	}
+	stop()
+	select {
+	case err := <-exhausted:
+		t.Fatalf("retry budget was exhausted: %v", err)
+	default:
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("handler calls = %d, want 3", got)
+	}
+}
+
+// TestQueueConsumeInFlightBypassesDiscardOnError pins the other half of the
+// rule: DiscardOnError drops failures, never a message another instance still
+// owns.
+// TestQueueConsumeInFlightBypassesDiscardOnError 固定规则的另一半：DiscardOnError
+// 只丢弃失败消息，绝不丢弃另一实例仍持有的消息。
+func TestQueueConsumeInFlightBypassesDiscardOnError(t *testing.T) {
+	q, _ := newQueue(t, queues.Config{Key: "jobs"})
+	if _, err := q.Push(context.Background(), map[string]string{"id": "a"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	var calls int32
+	handled := make(chan struct{}, 2)
+	stop := startConsume(t, q, func(context.Context, *queues.Message) error {
+		handled <- struct{}{}
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return inFlightTestError{}
+		}
+		return nil
+	}, queues.ConsumeOptions{
+		IdleDelay:      5 * time.Millisecond,
+		InFlightDelay:  10 * time.Millisecond,
+		DiscardOnError: true,
+	})
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-handled:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out after %d deliveries", i)
+		}
+	}
+	stop()
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("handler calls = %d, want 2", got)
+	}
+}
+
 func TestQueueConsumeRequiresHandler(t *testing.T) {
 	q, _ := newQueue(t, queues.Config{Key: "jobs"})
 	err := q.Consume(context.Background(), nil, queues.ConsumeOptions{})

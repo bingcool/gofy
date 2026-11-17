@@ -18,6 +18,15 @@ const (
 	// queue when RetryDelay is not configured.
 	// DefaultRetryDelay 是未配置 RetryDelay 时失败消息重新进入主队列前的延迟。
 	DefaultRetryDelay = 3 * time.Second
+
+	// DefaultInFlightDelay is the delay before a message reported as in flight
+	// re-enters the main queue when InFlightDelay is not configured. It matches
+	// consumer.DefaultProcessingLease: the other instance's lease must expire
+	// before this copy may be claimed again.
+	// DefaultInFlightDelay 是未配置 InFlightDelay 时，在途消息重新进入主队列前的
+	// 延迟。它与 consumer.DefaultProcessingLease 一致：另一个实例的租约到期后，
+	// 这份副本才能再次被认领。
+	DefaultInFlightDelay = 5 * time.Minute
 )
 
 var (
@@ -33,11 +42,26 @@ var (
 )
 
 // HandlerFunc handles one message. A non-nil error schedules a retry unless
-// ConsumeOptions.DiscardOnError is set; a panic is recovered and treated the
-// same way as an error.
+// ConsumeOptions.DiscardOnError is set; an InFlightError is re-queued after
+// ConsumeOptions.InFlightDelay without consuming the retry budget; a panic is
+// recovered and treated the same way as an error.
 // HandlerFunc 处理一条消息。返回非 nil 时按重试处理，除非设置了
-// ConsumeOptions.DiscardOnError；panic 会被捕获并按错误处理。
+// ConsumeOptions.DiscardOnError；InFlightError 会在
+// ConsumeOptions.InFlightDelay 之后重新入队且不消耗重试预算；panic 会被捕获并
+// 按错误处理。
 type HandlerFunc func(ctx context.Context, msg *Message) error
+
+// InFlightError marks a handler error that asks Consume to re-queue the message
+// for a later delivery without consuming the retry budget. Use it when another
+// instance still holds the processing lease: the copy being handled elsewhere
+// may yet fail, so this delivery must neither be acknowledged nor dropped.
+// InFlightError 标记一种 handler 错误：要求 Consume 延后重新入队且不消耗重试
+// 预算。另一实例仍持有处理租约时使用它：别处的副本仍可能失败，因此这次投递既
+// 不能确认，也不能丢弃。
+type InFlightError interface {
+	error
+	InFlight()
+}
 
 // ConsumeOptions controls one Consume call.
 // ConsumeOptions 控制单次 Consume 调用。
@@ -54,6 +78,14 @@ type ConsumeOptions struct {
 	// zero means DefaultRetryDelay.
 	// RetryDelay 是失败消息重新进入主队列前的延迟，0 表示 DefaultRetryDelay。
 	RetryDelay time.Duration
+	// InFlightDelay is the delay before an InFlightError message re-enters the
+	// main queue; zero means DefaultInFlightDelay. It must not be shorter than
+	// the consumer's processing lease, or the redelivery races the handler that
+	// still holds it.
+	// InFlightDelay 是 InFlightError 消息重新进入主队列前的延迟，0 表示
+	// DefaultInFlightDelay。它不能短于消费者的处理租约，否则重投会与仍持有租约的
+	// handler 抢跑。
+	InFlightDelay time.Duration
 	// DiscardOnError drops a failed message instead of retrying it.
 	// DiscardOnError 丢弃失败消息，不安排重试。
 	DiscardOnError bool
@@ -81,6 +113,9 @@ func (o ConsumeOptions) withDefaults() ConsumeOptions {
 	}
 	if o.RetryDelay <= 0 {
 		o.RetryDelay = DefaultRetryDelay
+	}
+	if o.InFlightDelay <= 0 {
+		o.InFlightDelay = DefaultInFlightDelay
 	}
 	return o
 }
@@ -146,6 +181,19 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 			if ctx.Err() != nil {
 				return nil
 			}
+			if isInFlight(err) {
+				// Another instance still owns the message. Re-queue it without
+				// touching RetryNum: this delivery has not failed, and charging
+				// the budget could drop the last copy while the other handler
+				// may still fail. DiscardOnError must not apply either.
+				// 另一实例仍持有这条消息。重新入队但不改 RetryNum：这次投递尚未
+				// 失败，消耗预算可能在另一个 handler 仍会失败时丢掉最后一份副本。
+				// DiscardOnError 同样不适用。
+				if err := q.RetryInFlight(ctx, msg, opts.InFlightDelay); err != nil {
+					report(opts, err)
+				}
+				continue
+			}
 			report(opts, err)
 			if opts.DiscardOnError {
 				continue
@@ -173,6 +221,15 @@ func callHandler(ctx context.Context, handler HandlerFunc, msg *Message) (err er
 		}
 	}()
 	return handler(ctx, msg)
+}
+
+// isInFlight reports whether err asks for a deferred redelivery. errors.As
+// keeps the marker discoverable through the wrapping consumers add.
+// isInFlight 判断 err 是否要求延后重投。errors.As 让消费者加上的包装不影响标记
+// 的识别。
+func isInFlight(err error) bool {
+	var marker InFlightError
+	return errors.As(err, &marker)
 }
 
 func report(opts ConsumeOptions, err error) {

@@ -2,6 +2,8 @@ package consumer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,22 @@ func queuesConns() Connections {
 }
 
 func noopQueuesHandler(context.Context, QueuesConfig, QueuesMessage) error { return nil }
+
+// TestErrInFlightIsQueueInFlightError pins the cross-package contract the
+// queue adapter relies on: ErrInFlight, even wrapped, must satisfy
+// queues.InFlightError so a duplicate delivery is deferred instead of charging
+// the retry budget.
+// TestErrInFlightIsQueueInFlightError 固定队列适配器依赖的跨包约定：ErrInFlight
+// 即使被包装也必须满足 queues.InFlightError，重复投递才会延后而不是消耗重试预算。
+func TestErrInFlightIsQueueInFlightError(t *testing.T) {
+	var marker queues.InFlightError
+	if !errors.As(fmt.Errorf("message q-1: %w", ErrInFlight), &marker) {
+		t.Fatal("wrapped ErrInFlight must satisfy queues.InFlightError")
+	}
+	if errors.As(errors.New("boom"), &marker) {
+		t.Fatal("an ordinary error must not satisfy queues.InFlightError")
+	}
+}
 
 // TestNewQueuesAppliesDefaults pins the queue defaults: one pop at a time, a
 // short idle wait and a retry that does not spin.

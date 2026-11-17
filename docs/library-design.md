@@ -4477,6 +4477,7 @@ func (*Queue) Push(context.Context, ...any) (int, error)
 func (*Queue) PushPriority(context.Context, ...any) (int, error)
 func (*Queue) Pop(context.Context, time.Duration) (*Message, bool, error)
 func (*Queue) Retry(context.Context, *Message, time.Duration) (bool, error)
+func (*Queue) RetryInFlight(context.Context, *Message, time.Duration) error
 func (*Queue) Len(context.Context) (int64, error)
 func (*Queue) Key() string
 func (*Queue) PriorityKey() string
@@ -4488,6 +4489,7 @@ func NewDelayQueue(goredis.Cmdable, Config) (*DelayQueue, error)
 func (*DelayQueue) Add(context.Context, any, time.Duration) error
 func (*DelayQueue) Pop(context.Context, int) ([]*Message, error)
 func (*DelayQueue) Retry(context.Context, *Message, time.Duration) (bool, error)
+func (*DelayQueue) RetryInFlight(context.Context, *Message, time.Duration) error
 func (*DelayQueue) Len(context.Context) (int64, error)
 func (*DelayQueue) Key() string
 func (*DelayQueue) MaxRetries() int
@@ -4499,6 +4501,10 @@ func (*DelayQueue) MaxRetries() int
   `DelayQueue.Pop` 用 Lua 一次完成取消息与删除，多消费者不会重复拿到同一条。
 - 消息已删除后才交给业务，因此是 at-most-once：失败必须显式 `Retry`，
   `MaxRetries` 是额外投递次数，达到上限后 `Retry` 返回 `false`。
+- `Consume` 识别实现 `InFlightError` 的 handler 错误（`consumer.ErrInFlight`
+  即是）：按 `InFlightDelay`（默认 5 分钟）重新入队，`RetryNum` 保持不变，
+  `MaxRetries` 与 `DiscardOnError` 都不生效。它用于另一实例仍持有 processing
+  租约的重复投递，避免副本耗尽重试预算后被丢弃；`RetryInFlight` 暴露同一语义。
 - `Queue.Pop` 的阻塞超时以秒为单位，非整秒向上取整；`timeout <= 0` 不阻塞。
 - 不接管客户端生命周期；`Config.Key` 为空返回 `ErrKeyRequired`，负数
   `MaxRetries` 返回错误，`0` 归一为 `DefaultMaxRetries`。

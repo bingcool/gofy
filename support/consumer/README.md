@@ -178,7 +178,9 @@ handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕
 | 数据库不可用 | 按可重试错误上报，让 broker 重投，不丢消息 |
 
 「处理中」不能当成「可以重跑」：第一个 handler 可能还活着，确认掉重投的副本就等于在它
-崩溃时丢掉唯一的备份。`ErrInFlight` 就是为此存在的可重试错误。
+崩溃时丢掉唯一的备份。`ErrInFlight` 就是为此存在的可重试错误。Redis 队列会识别这个标记：
+按 `ProcessingLease`（默认 5 分钟）延后重新入队，`RetryNum` 保持不变，`MaxRetries` 与
+`DiscardOnError` 都不生效；其它 broker 依赖自身的重投机制。
 
 `ProcessingLease`（默认 5 分钟，`ProcessorConfig.ProcessingLease`）决定一条 `processing`
 记录多久后允许接管。它复用 `updated_at` 作为隐式租约，不新增列；接管用
@@ -212,7 +214,7 @@ DDL（`examples/demo-service` 提供）。
 | `nil` | 台账 `done`（带 attempts 围栏），确认 | 分区继续推进 |
 | `consumer.Permanent(err)` | 台账 `dead`，确认 | 毒消息不再重投；dead 写失败则按可重试错误处理，不确认 |
 | 其它 `error` | 台账 `failed`，不确认 | broker 重投，直到 `max_attempts` |
-| 另一实例仍在处理 | 不改台账，返回 `ErrInFlight` | broker 稍后重投，副本不丢 |
+| 另一实例仍在处理 | 不改台账，返回 `ErrInFlight` | broker 稍后重投，副本不丢；Redis 队列延后租约时长且不耗重试预算 |
 
 `Permanent(nil)` 返回 `nil`，可以直接写 `return consumer.Permanent(check())`。
 
