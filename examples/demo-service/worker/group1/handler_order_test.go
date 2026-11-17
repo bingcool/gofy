@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/glebarez/sqlite"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
+	gofysqlite "github.com/bingcool/gofy/support/sqlite"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
 	"github.com/bingcool/gofy/core"
@@ -20,24 +19,32 @@ import (
 
 // newOrderHandlerContext builds the runtime the handler reads its database from.
 // One in-memory SQLite is enough: the transition rules are single UPDATE
-// statements, and their order is what these tests are about.
+// statements, and their order is what these tests are about. The connection
+// goes through support/sqlite rather than opening the driver by hand, so this
+// module never carries its own database driver: the pool defaults (one
+// connection, ping on open, silent log level) are the framework's.
 // newOrderHandlerContext 构造 handler 读取数据库所需的 runtime。一个内存 SQLite 就够：
-// 迁移规则都是单条 UPDATE，测试关心的是它们的约束。
+// 迁移规则都是单条 UPDATE，测试关心的是它们的约束。连接走 support/sqlite 而不是自己
+// 打开驱动，因此本模块不必单独依赖数据库驱动：单连接、开库即 ping、静默日志这些
+// pool 默认值都来自框架。
 func newOrderHandlerContext(t *testing.T) (context.Context, *gorm.DB) {
 	t.Helper()
-	dsn := "file:order_handler?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
-	})
+	db, err := gofysqlite.New(context.Background(), gofysqlite.Config{
+		// shared cache so every pooled connection sees the same in-memory
+		// database; without it :memory: gives each connection its own.
+		// shared cache 让池里的每个连接看到同一个内存库；否则 :memory: 会给每个连接
+		// 各自一个库。
+		DSN:      "file:order_handler?mode=memory&cache=shared",
+		LogLevel: "silent",
+	}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatalf("sql db: %v", err)
-	}
-	sqlDB.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	t.Cleanup(func() {
+		if err := gofysqlite.Close(db); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
 	if err := db.AutoMigrate(&model.Order{}); err != nil {
 		t.Fatalf("migrate orders: %v", err)
 	}
