@@ -173,6 +173,10 @@ func (c *RocketMQConsumer) Run(ctx context.Context) error {
 		},
 		Options: gofyrocketmq.ConsumeOptions{
 			DiscardOnError: c.cfg.DiscardOnError,
+			// An in-flight duplicate keeps its unacknowledged state and gets its
+			// invisible duration extended to the processing lease.
+			// 在途重复消息保持未确认，并把不可见时长延长到处理租约。
+			InFlightDelay: DefaultProcessingLease,
 			OnError: func(err error) {
 				lg.Error("rocketmq consume error", zap.Error(err))
 			},

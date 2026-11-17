@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
 func TestConsumerConfigValidate(t *testing.T) {
@@ -169,5 +171,8 @@ func TestConsumeOptionsDefaults(t *testing.T) {
 	opts := ConsumeOptions{}.withDefaults()
 	if opts.RetryDelay != time.Second {
 		t.Fatalf("retry delay = %s", opts.RetryDelay)
+	}
+	if opts.InFlightDelay != inflight.DefaultDelay {
+		t.Fatalf("in-flight delay = %s, want %s", opts.InFlightDelay, inflight.DefaultDelay)
 	}
 }

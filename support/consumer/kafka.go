@@ -234,8 +234,12 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 		},
 		Options: gofykafka.ConsumeOptions{
 			DiscardOnError: c.cfg.DiscardOnError,
-			MaxRecords:     c.cfg.MaxRecords,
-			RetryDelay:     c.cfg.RetryDelay,
+			// The consumer seeks back to the in-flight record after the
+			// processing lease instead of restarting the whole loop.
+			// 消费者在处理租约之后回退到在途记录，而不是重启整个循环。
+			InFlightDelay: DefaultProcessingLease,
+			MaxRecords:    c.cfg.MaxRecords,
+			RetryDelay:    c.cfg.RetryDelay,
 			OnError: func(err error) {
 				lg.Error("kafka consume error", zap.Error(err))
 			},

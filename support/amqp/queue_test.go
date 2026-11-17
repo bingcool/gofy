@@ -7,6 +7,8 @@ import (
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+
+	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
 func TestNewQueueRequiresClientAndValidTopology(t *testing.T) {
@@ -88,6 +90,9 @@ func TestConsumeOptionsDefaults(t *testing.T) {
 	}
 	if opts.ReconnectDelay != 3*time.Second {
 		t.Fatalf("reconnect delay = %s", opts.ReconnectDelay)
+	}
+	if opts.InFlightDelay != inflight.DefaultDelay {
+		t.Fatalf("in-flight delay = %s, want %s", opts.InFlightDelay, inflight.DefaultDelay)
 	}
 
 	explicit := ConsumeOptions{PrefetchCount: 20, ReconnectDelay: time.Second}.withDefaults()

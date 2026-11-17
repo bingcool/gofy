@@ -196,6 +196,10 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 			PrefetchCount:  c.cfg.PrefetchCount,
 			AutoAck:        c.cfg.AutoAck,
 			DiscardOnError: c.cfg.DiscardOnError,
+			// A duplicate still being processed elsewhere is held back for the
+			// processing lease instead of being nacked in a tight loop.
+			// 另一实例仍在处理的重复投递会延后到处理租约之后，而不是紧循环 nack。
+			InFlightDelay:  DefaultProcessingLease,
 			ReconnectDelay: c.cfg.ReconnectDelay,
 			OnError: func(err error) {
 				lg.Error("amqp consume error", zap.Error(err))

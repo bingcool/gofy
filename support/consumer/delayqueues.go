@@ -152,8 +152,11 @@ func (c *DelayQueuesConsumer) Run(ctx context.Context) error {
 			return proc.Handle(ctx, delayQueuesMessage(c.cfg.Key, msg))
 		},
 		Options: queues.ConsumeOptions{
-			IdleDelay:      c.cfg.IdleDelay,
-			RetryDelay:     c.cfg.RetryDelay,
+			IdleDelay:  c.cfg.IdleDelay,
+			RetryDelay: c.cfg.RetryDelay,
+			// Same in-flight rule as the immediate Redis queue.
+			// 与立即 Redis 队列相同的在途规则。
+			InFlightDelay:  DefaultProcessingLease,
 			PopLimit:       c.cfg.PopLimit,
 			DiscardOnError: c.cfg.DiscardOnError,
 			OnError: func(err error) {

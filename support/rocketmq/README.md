@@ -252,6 +252,10 @@ err = consumer.Consume(ctx, func(ctx context.Context, message *rocketmq.Message)
   不 ack，同批其它消息继续处理。
 - `DiscardOnError: true` 时上报错误后 ack 失败消息并继续，适合病态消息
   （poison message）需要人工介入的场景。
+- 返回的错误实现 `InFlight()` 标记时（`consumer.ErrInFlight` 就是），消息不
+  ack，并调用 `ChangeInvisibleDuration` 把不可见时间延长到
+  `ConsumeOptions.InFlightDelay`（默认 5 分钟）。这样副本不会按 30 秒的
+  `InvisibleDuration` 反复重投，也不会被 `DiscardOnError` 确认掉。
 - 处理函数 panic 会被恢复成错误，并按上面的策略重投，堆栈通过 `OnError`
   上报。
 - `ctx` 取消或调用 `Close` 时 `Consume` 返回 `nil`，可以直接作为常驻

@@ -212,6 +212,11 @@ Java 客户端的 `max.poll.interval.ms` 在这里没有对应项：它存在是
   加入组后会从最后提交的位点重新投递。适合“宁可重复、不可丢失”的业务。
 - `DiscardOnError: true` 时上报错误后跳过该条消息，并提交其位点，用于病态消息
   （poison message）需要人工介入的场景；该条消息按 at-most-once 处理。
+- 返回的错误实现 `InFlight()` 标记时（`consumer.ErrInFlight` 就是），说明这份
+  副本的位点仍由另一实例处理：先提交它之前的记录，把分区位点回退到这条记录，
+  等待 `ConsumeOptions.InFlightDelay`（默认 5 分钟）后重新拉取。消费组不退出也
+  不重入；`DiscardOnError` 对它不生效。回退发生在 `BlockRebalanceOnPoll` 的闸门
+  内，避免分区易主后对已不持有的分区 `SetOffsets`。
 - 处理函数 panic 会被恢复成错误，并按上面的策略处理，堆栈通过 `OnError`
   上报。
 - `commit_mode: auto` 必须显式配置：franz-go 会周期性提交**已拉取**的位点，

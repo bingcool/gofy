@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
 var (
@@ -215,6 +217,17 @@ type ConsumeOptions struct {
 	// 同时提交失败记录的位点。默认行为是返回错误：失败记录及其之后的记录会
 	// 从最后提交的位点重新投递。
 	DiscardOnError bool
+	// InFlightDelay is how long an in-flight duplicate pauses this consumer
+	// before seeking back to the same record; zero means inflight.DefaultDelay.
+	// The record's offset is not committed, and DiscardOnError does not apply:
+	// another instance still owns the processing lease, so the copy must be
+	// redelivered after that lease expires instead of being skipped or
+	// restarting the whole consumer.
+	// InFlightDelay 是在途重复投递暂停消费者、再回退到同一条记录前的时长，0 表示
+	// inflight.DefaultDelay。该记录的位点不提交，DiscardOnError 对它不生效：另一
+	// 实例仍持有处理租约，这份副本必须在租约到期后重投，既不能跳过，也不该重启
+	// 整个消费者。
+	InFlightDelay time.Duration
 	// MaxRecords limits records returned by one poll; zero uses every buffered
 	// record.
 	// MaxRecords 限制单次拉取返回的记录数，0 表示取回全部已缓冲记录。
@@ -247,6 +260,9 @@ type ConsumeOptions struct {
 func (o ConsumeOptions) withDefaults() ConsumeOptions {
 	if o.RetryDelay <= 0 {
 		o.RetryDelay = time.Second
+	}
+	if o.InFlightDelay <= 0 {
+		o.InFlightDelay = inflight.DefaultDelay
 	}
 	return o
 }
@@ -374,8 +390,24 @@ func (c *Consumer) Consume(ctx context.Context, handler HandlerFunc, opts Consum
 		// BlockRebalanceOnPoll.
 		// 在这一批处理完、位点提交之后再放行，绝不提前——这个顺序正是
 		// BlockRebalanceOnPoll 的意义。
-		err := c.process(ctx, fetches, handler, opts)
+		inFlight, err := c.process(ctx, fetches, handler, opts)
+		if inFlight != nil && ctx.Err() == nil {
+			// Seek while a possible rebalance is still blocked, then release the
+			// gate: SetOffsets is only safe on partitions the group still owns.
+			// 在重平衡仍被挡住时回退位点，再放行闸门：只有消费组仍持有的分区才能
+			// 安全地 SetOffsets。
+			c.rewind(inFlight)
+		}
 		c.allowRebalance()
+		if inFlight != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if !wait(ctx, inflight.Delay(opts.InFlightDelay)) {
+				return nil
+			}
+			continue
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -414,10 +446,18 @@ func (c *Consumer) Close() error {
 	return nil
 }
 
-func (c *Consumer) process(ctx context.Context, fetches kgo.Fetches, handler HandlerFunc, opts ConsumeOptions) error {
+// process handles one polled batch. The returned record, when non-nil, is the
+// in-flight duplicate the caller must seek back to after InFlightDelay; the
+// remaining records in that partition and batch are deliberately left
+// unprocessed so the rewind redelivers them too.
+// process 处理一批拉取结果。返回的记录非 nil 时，是调用方必须在 InFlightDelay
+// 之后回退到的在途重复记录；该分区与本批中其余记录被刻意留待重投，回退后一并
+// 重新处理。
+func (c *Consumer) process(ctx context.Context, fetches kgo.Fetches, handler HandlerFunc, opts ConsumeOptions) (*kgo.Record, error) {
 	var handlerErr error
+	var inFlight *kgo.Record
 	fetches.EachPartition(func(partition kgo.FetchTopicPartition) {
-		if handlerErr != nil {
+		if handlerErr != nil || inFlight != nil {
 			return
 		}
 		var last *kgo.Record
@@ -432,6 +472,17 @@ func (c *Consumer) process(ctx context.Context, fetches kgo.Fetches, handler Han
 			}
 			report(opts, fmt.Errorf("kafka: handle %s/%d@%d: %w",
 				record.Topic, record.Partition, record.Offset, err))
+			if inflight.Is(err) {
+				// Another instance still holds the processing lease. Commit only
+				// the records before this one, then let the caller pause and seek
+				// back; consuming on would commit past a message that may still
+				// fail on the other instance.
+				// 另一实例仍持有处理租约。只提交它之前的记录，然后由调用方暂停并
+				// 回退；继续消费会越过一条仍可能在别处失败的消息。
+				c.commit(ctx, last, opts)
+				inFlight = record
+				return
+			}
 			if opts.DiscardOnError {
 				// Committing the offset together with a discarded record keeps the
 				// next start from retrying the same poison record.
@@ -450,7 +501,23 @@ func (c *Consumer) process(ctx context.Context, fetches kgo.Fetches, handler Han
 		}
 		c.commit(ctx, last, opts)
 	})
-	return handlerErr
+	return inFlight, handlerErr
+}
+
+// rewind moves the partition back to the in-flight record so its next poll
+// returns that record again. The group stays intact: this is a seek through
+// franz-go, not a consumer restart and rejoin.
+// rewind 把分区位点退回在途记录，下一次拉取会再次返回它。消费组保持不变：这是
+// franz-go 内的位点回退，不是消费者重启再入组。
+func (c *Consumer) rewind(record *kgo.Record) {
+	if record == nil || c.raw == nil {
+		return
+	}
+	c.raw.SetOffsets(map[string]map[int32]kgo.EpochOffset{
+		record.Topic: {
+			record.Partition: {Epoch: record.LeaderEpoch, Offset: record.Offset},
+		},
+	})
 }
 
 func (c *Consumer) commit(ctx context.Context, record *kgo.Record, opts ConsumeOptions) {

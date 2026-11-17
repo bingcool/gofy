@@ -193,6 +193,7 @@ type fakeConsumer struct {
 	acked      []string
 	stops      int
 	ackCh      chan deliveredMessage
+	changed    map[string]time.Duration
 }
 
 func (f *fakeConsumer) Start() error { return f.startErr }
@@ -242,10 +243,27 @@ func (f *fakeConsumer) Ack(_ context.Context, delivery deliveredMessage) error {
 	return nil
 }
 
+func (f *fakeConsumer) ChangeInvisibleDuration(delivery deliveredMessage, duration time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.changed == nil {
+		f.changed = make(map[string]time.Duration)
+	}
+	f.changed[delivery.message.MessageID] = duration
+	return nil
+}
+
 func (f *fakeConsumer) callsSeen() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeConsumer) changedDelay(id string) (time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delay, ok := f.changed[id]
+	return delay, ok
 }
 
 func (f *fakeConsumer) ackedIDs() []string {
@@ -348,6 +366,68 @@ func TestConsumerLeavesFailedMessageUnacked(t *testing.T) {
 	}
 	if got := fake.ackedIDs(); len(got) != 0 {
 		t.Fatalf("failed message was acknowledged: %v", got)
+	}
+}
+
+// inFlightTestError implements the structural marker without importing the
+// consumer package, just like consumer.ErrInFlight does.
+// inFlightTestError 以结构方式实现标记，且不导入 consumer 包，与
+// consumer.ErrInFlight 相同。
+type inFlightTestError struct{}
+
+func (inFlightTestError) Error() string { return "being handled elsewhere" }
+func (inFlightTestError) InFlight()     {}
+
+// TestConsumerDefersInFlightWithInvisibleDuration pins the RocketMQ branch:
+// an in-flight duplicate is not acknowledged and not discarded, and its
+// invisible duration is extended to the configured delay.
+// TestConsumerDefersInFlightWithInvisibleDuration 固定 RocketMQ 分支：在途重复消息
+// 不确认、不丢弃，并把不可见时长延长到配置值。
+func TestConsumerDefersInFlightWithInvisibleDuration(t *testing.T) {
+	fake := &fakeConsumer{batches: [][]deliveredMessage{{delivery("1")}}}
+	reported := make(chan error, 4)
+	c := newPullConsumer(ConsumerConfig{Topic: "orders", Group: "g"}, fake)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Consume(ctx, func(context.Context, *Message) error {
+			return inFlightTestError{}
+		}, ConsumeOptions{
+			DiscardOnError: true,
+			InFlightDelay:  2 * time.Minute,
+			OnError:        func(err error) { reported <- err },
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if delay, ok := fake.changedDelay("1"); ok {
+			if delay != 2*time.Minute {
+				t.Fatalf("invisible duration = %v, want 2m", delay)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("in-flight message did not extend its invisible duration")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case err := <-reported:
+		if !strings.Contains(err.Error(), "in flight") {
+			t.Fatalf("report = %v, want an in-flight error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight deferral was not reported")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if got := fake.ackedIDs(); len(got) != 0 {
+		t.Fatalf("in-flight duplicate was acknowledged: %v", got)
 	}
 }
 

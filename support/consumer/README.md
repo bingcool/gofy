@@ -187,7 +187,8 @@ handler 可以被多个订阅复用，靠参数区分，而不是靠闭包去捕
 `id + status + attempts` 做 CAS，两个并发重投只有一个能进入 handler，`processing` 行还在
 UPDATE 里复核一次租约（读到这里之间可能已有别的投递接管并推后了时间戳）。
 
-**租约的写入与比较都用数据库时钟。** `updated_at` 由 `CURRENT_TIMESTAMP` 写入，过期判断也
+**租约的写入与比较都用数据库时钟。** `updated_at` 由数据库时钟写入（MySQL 用
+`CURRENT_TIMESTAMP(3)` 保留毫秒精度，PostgreSQL / SQLite 用 `CURRENT_TIMESTAMP`），过期判断也
 在 SQL 里用数据库时钟做（MySQL / PostgreSQL / SQLite 各一种写法，见
 `leaseExpiredPredicate`）。这样做的原因很直接：只把比较换成 `NOW()` 而写入仍用应用时钟，
 等于把偏差从"比较"挪到"写入"，列里存的还是那台机器的时钟。两边同源之后，节点时钟偏差不再
@@ -214,9 +215,21 @@ DDL（`examples/demo-service` 提供）。
 | `nil` | 台账 `done`（带 attempts 围栏），确认 | 分区继续推进 |
 | `consumer.Permanent(err)` | 台账 `dead`，确认 | 毒消息不再重投；dead 写失败则按可重试错误处理，不确认 |
 | 其它 `error` | 台账 `failed`，不确认 | broker 重投，直到 `max_attempts` |
-| 另一实例仍在处理 | 不改台账，返回 `ErrInFlight` | broker 稍后重投，副本不丢；Redis 队列延后租约时长且不耗重试预算 |
+| 另一实例仍在处理 | 不改台账，返回 `ErrInFlight` | broker 按 `InFlightDelay` 延后重投，副本不丢，也不耗普通重试预算 |
 
 `Permanent(nil)` 返回 `nil`，可以直接写 `return consumer.Permanent(check())`。
+
+`ErrInFlight` 走的是每个传输各自的延后通道，`DiscardOnError` 对它一律不生效：
+
+| 传输 | 延后方式 |
+| --- | --- |
+| Redis 队列 / 延迟队列 | `Retry` 写回 ZSET，`RetryNum` 不变 |
+| AMQP | 保持未 ack，`InFlightDelay` 后 `Nack` 回队 |
+| Kafka | 提交之前的位点，回退到该记录，等待后重新拉取；不退出消费组 |
+| RocketMQ | 不 ack，用 `ChangeInvisibleDuration` 延长不可见时间 |
+
+`InFlightDelay` 由消费者适配器统一设为 `DefaultProcessingLease`（5 分钟），因此副本
+不会在原 handler 仍持有租约时提前重投。
 
 ## 只跑其中一个
 

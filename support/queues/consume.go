@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 	// DefaultInFlightDelay 是未配置 InFlightDelay 时，在途消息重新进入主队列前的
 	// 延迟。它与 consumer.DefaultProcessingLease 一致：另一个实例的租约到期后，
 	// 这份副本才能再次被认领。
-	DefaultInFlightDelay = 5 * time.Minute
+	DefaultInFlightDelay = inflight.DefaultDelay
 )
 
 var (
@@ -58,10 +60,7 @@ type HandlerFunc func(ctx context.Context, msg *Message) error
 // InFlightError 标记一种 handler 错误：要求 Consume 延后重新入队且不消耗重试
 // 预算。另一实例仍持有处理租约时使用它：别处的副本仍可能失败，因此这次投递既
 // 不能确认，也不能丢弃。
-type InFlightError interface {
-	error
-	InFlight()
-}
+type InFlightError = inflight.Error
 
 // ConsumeOptions controls one Consume call.
 // ConsumeOptions 控制单次 Consume 调用。
@@ -228,8 +227,7 @@ func callHandler(ctx context.Context, handler HandlerFunc, msg *Message) (err er
 // isInFlight 判断 err 是否要求延后重投。errors.As 让消费者加上的包装不影响标记
 // 的识别。
 func isInFlight(err error) bool {
-	var marker InFlightError
-	return errors.As(err, &marker)
+	return inflight.Is(err)
 }
 
 func report(opts ConsumeOptions, err error) {

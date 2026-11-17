@@ -175,6 +175,10 @@ err = queue.Consume(ctx, func(ctx context.Context, msg amqp091.Delivery) error {
 
 - 处理函数返回 `nil` 自动 `Ack`；返回错误自动 `Nack`，默认重新入队，设置
   `DiscardOnError: true` 则丢弃或转死信交换机。
+- 返回的错误实现 `InFlight()` 标记时（`consumer.ErrInFlight` 就是），这份副本
+  仍被另一实例持有：投递保持未确认，直到 `ConsumeOptions.InFlightDelay`（默认
+  5 分钟）后才 `Nack` 回队；`DiscardOnError` 不生效，也不占用 broker 的普通重投
+  预算。延迟期间由 `PrefetchCount` 限制住等待中的副本数量。
 - 处理函数 panic 会被恢复成错误，仍按上面的 ack/nack 规则处理，并通过
   `OnError` 上报堆栈。
 - `Consume` 在连接或 channel 断开后按 `ReconnectDelay`（默认 `3s`）重连，

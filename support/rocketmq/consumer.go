@@ -12,6 +12,8 @@ import (
 
 	rmq "github.com/apache/rocketmq-clients/golang/v5"
 	rmqv2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
+
+	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
 const (
@@ -211,6 +213,15 @@ type ConsumeOptions struct {
 	// DiscardOnError 对失败消息也 ack，并继续处理批次内其余消息。默认不 ack，
 	// 留待重投。
 	DiscardOnError bool
+	// InFlightDelay extends a message's invisible duration when another
+	// instance still holds the processing lease; zero means
+	// inflight.DefaultDelay. The message is not acknowledged,
+	// DiscardOnError does not apply, and the broker redelivers it only after
+	// the new invisible duration instead of every InvisibleDuration.
+	// InFlightDelay 在另一实例仍持有处理租约时延长消息的不可见时长，0 表示
+	// inflight.DefaultDelay。消息不确认，DiscardOnError 对它不生效；broker 只会在
+	// 新的不可见时长之后重投，而不是每个 InvisibleDuration 都重投一次。
+	InFlightDelay time.Duration
 	// OnError receives handler, panic, receive and acknowledgement errors. It
 	// is called from pull-worker goroutines.
 	// OnError 接收 handler、panic、拉取与 ack 错误，回调在拉取 worker 的
@@ -258,6 +269,7 @@ type consumerClient interface {
 	Stop() error
 	Receive(ctx context.Context, maxMessageNum int32, invisibleDuration time.Duration) ([]deliveredMessage, error)
 	Ack(ctx context.Context, delivery deliveredMessage) error
+	ChangeInvisibleDuration(delivery deliveredMessage, invisibleDuration time.Duration) error
 }
 
 // deliveredMessage pairs the SDK view needed by Ack with the mapped message.
@@ -300,6 +312,10 @@ func (c *simpleConsumer) Receive(ctx context.Context, maxMessageNum int32, invis
 
 func (c *simpleConsumer) Ack(ctx context.Context, delivery deliveredMessage) error {
 	return c.raw.Ack(ctx, delivery.view)
+}
+
+func (c *simpleConsumer) ChangeInvisibleDuration(delivery deliveredMessage, invisibleDuration time.Duration) error {
+	return c.raw.ChangeInvisibleDuration(delivery.view, invisibleDuration)
 }
 
 // NewConsumer validates the connection and subscription, and builds the pull
@@ -476,6 +492,18 @@ func (c *Consumer) process(ctx context.Context, delivery deliveredMessage, handl
 	switch {
 	case err == nil:
 		c.ack(ctx, delivery, "ack", opts)
+	case inflight.Is(err):
+		// Do not ack and do not fall through to DiscardOnError: another instance
+		// still owns the message. Extend its invisibility to the processing lease
+		// so the broker does not redeliver every InvisibleDuration while the
+		// first handler may still be running.
+		// 不 ack，也不进入 DiscardOnError：另一实例仍持有这条消息。把不可见时长
+		// 延长到处理租约，broker 才不会在第一个 handler 仍可能运行时每个
+		// InvisibleDuration 都重投一次。
+		report(opts, fmt.Errorf("rocketmq: in flight %s@%s: %w", message.Topic, message.MessageID, err))
+		if changeErr := c.raw.ChangeInvisibleDuration(delivery, inflight.Delay(opts.InFlightDelay)); changeErr != nil {
+			report(opts, fmt.Errorf("rocketmq: defer in-flight %s@%s: %w", message.Topic, message.MessageID, changeErr))
+		}
 	case opts.DiscardOnError:
 		report(opts, fmt.Errorf("rocketmq: discard %s@%s: %w", message.Topic, message.MessageID, err))
 		c.ack(ctx, delivery, "discard", opts)

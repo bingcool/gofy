@@ -256,6 +256,9 @@ func (c *DelayAMQPConsumer) Run(ctx context.Context) error {
 			PrefetchCount:  c.cfg.PrefetchCount,
 			AutoAck:        c.cfg.AutoAck,
 			DiscardOnError: c.cfg.DiscardOnError,
+			// Same in-flight rule as the immediate AMQP consumer.
+			// 与立即 AMQP 消费者相同的在途规则。
+			InFlightDelay:  DefaultProcessingLease,
 			ReconnectDelay: c.cfg.ReconnectDelay,
 			OnError: func(err error) {
 				lg.Error("delay amqp consume error", zap.Error(err))

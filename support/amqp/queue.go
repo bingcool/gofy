@@ -11,6 +11,8 @@ import (
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+
+	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
 var (
@@ -229,6 +231,14 @@ type ConsumeOptions struct {
 	// DiscardOnError 让失败消息以不重新入队的方式 nack，即丢弃或转入死信
 	// exchange。默认重新入队。
 	DiscardOnError bool
+	// InFlightDelay is how long an in-flight duplicate waits before it is nacked
+	// back to the broker; zero means inflight.DefaultDelay. The delivery stays
+	// unacknowledged while it waits, so prefetch applies backpressure instead of
+	// a tight requeue loop. DiscardOnError does not apply to it.
+	// InFlightDelay 是在途重复投递以 nack 退回 broker 前的等待时长，0 表示
+	// inflight.DefaultDelay。等待期间投递保持未确认，背压由 prefetch 承担，而不是
+	// 空转重投。DiscardOnError 对它不生效。
+	InFlightDelay time.Duration
 	// ReconnectDelay is the pause before rebuilding a lost consumer; zero means
 	// 3s.
 	// ReconnectDelay 是重建丢失的消费者前的等待时间，0 表示 3s。
@@ -375,6 +385,17 @@ func (q *Queue) consumeOnce(ctx context.Context, handler HandlerFunc, opts Consu
 
 func (q *Queue) handle(ctx context.Context, delivery amqp091.Delivery, handler HandlerFunc, opts ConsumeOptions) {
 	err := callHandler(ctx, handler, delivery)
+	if err != nil && inflight.Is(err) && !opts.AutoAck {
+		// Acknowledge nothing and do not requeue immediately: another instance
+		// still owns the processing lease, so an instant Nack would spin for the
+		// whole lease. Holding the delivery unacknowledged lets prefetch bound
+		// the number of duplicates parked here.
+		// 不确认也不立即重投：另一实例仍持有处理租约，立刻 Nack 会在整个租约期间
+		// 空转。保持未确认，由 prefetch 限制同时滞留的副本数量。
+		requeueInFlight(ctx, delivery, opts)
+		report(opts, err)
+		return
+	}
 	if !opts.AutoAck {
 		if err == nil {
 			if ackErr := delivery.Ack(false); ackErr != nil {
@@ -406,12 +427,40 @@ func report(opts ConsumeOptions, err error) {
 	}
 }
 
+// requeueInFlight returns a delivery to the broker after the in-flight delay.
+// The wait runs on its own goroutine so the consumer keeps handling other
+// deliveries; prefetch (not a sleep in the dispatch loop) is what bounds how
+// many parked duplicates exist. On shutdown the goroutine exits without a Nack:
+// closing the channel makes the broker requeue every unacknowledged delivery.
+// requeueInFlight 在延迟结束后把投递退回 broker。等待放在独立 goroutine 里，消费者
+// 可以继续处理其它投递；限制滞留副本数量的是 prefetch，而不是在分发循环里睡眠。
+// 停机时 goroutine 直接退出、不发 Nack：关闭 channel 会让 broker 重新入队所有未确认
+// 投递。
+func requeueInFlight(ctx context.Context, delivery amqp091.Delivery, opts ConsumeOptions) {
+	delay := inflight.Delay(opts.InFlightDelay)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if err := delivery.Nack(false, true); err != nil {
+			report(opts, fmt.Errorf("amqp: requeue in-flight message: %w", err))
+		}
+	}()
+}
+
 func (o ConsumeOptions) withDefaults() ConsumeOptions {
 	if o.PrefetchCount == 0 {
 		o.PrefetchCount = 1
 	}
 	if o.ReconnectDelay <= 0 {
 		o.ReconnectDelay = 3 * time.Second
+	}
+	if o.InFlightDelay <= 0 {
+		o.InFlightDelay = inflight.DefaultDelay
 	}
 	return o
 }
