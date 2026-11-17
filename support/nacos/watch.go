@@ -190,6 +190,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		listenStart := time.Now()
 		changed, err := w.client.Listen(ctx, current)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -202,6 +203,19 @@ func (w *Watcher) Run(ctx context.Context) error {
 			continue
 		}
 		if !changed {
+			// A correct server answers "no change" only after holding the
+			// request for the full listen timeout. An answer at less than half
+			// of it means the hold was cut short — proxy, error page, server
+			// misconfiguration — and retrying at once would spin. Back off for
+			// RetryDelay in that case.
+			// 正常服务端只有在挂满监听超时之后才会回答"没有变更"。不足一半就回答
+			// 说明挂起被中途截断——代理、错误页、服务端配置错误——立刻重试会紧循环。
+			// 这种情况按 RetryDelay 退避。
+			if time.Since(listenStart) < w.client.listenHold()/2 {
+				if !sleep(ctx, cfg.RetryDelay) {
+					return ctx.Err()
+				}
+			}
 			continue
 		}
 

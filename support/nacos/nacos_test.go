@@ -112,6 +112,12 @@ func (f *fakeServer) set(content string, changed bool) {
 	f.mu.Unlock()
 }
 
+func (f *fakeServer) listens() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listenCount
+}
+
 func testConfig(t *testing.T, serverURL, file string) Config {
 	t.Helper()
 	return Config{
@@ -517,8 +523,12 @@ func TestListenEncodesRequest(t *testing.T) {
 	if fake.lastListen != want {
 		t.Fatalf("Listening-Configs = %q, want %q", fake.lastListen, want)
 	}
-	if fake.lastHoldTime != "100" {
-		t.Fatalf("Long-Pulling-Timeout = %q, want 100", fake.lastHoldTime)
+	// PollTimeout is 100ms, below the Nacos minimum, so the announced hold is
+	// raised to 30s and must match what the client actually waits for.
+	// PollTimeout 为 100ms，低于 Nacos 最小值，因此声明的挂起时长提升为 30s，
+	// 并与客户端实际等待的时长一致。
+	if fake.lastHoldTime != "30000" {
+		t.Fatalf("Long-Pulling-Timeout = %q, want 30000", fake.lastHoldTime)
 	}
 
 	changed, err = client.Listen(context.Background(), "abc123")
@@ -527,6 +537,44 @@ func TestListenEncodesRequest(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("changed = true without a remote change")
+	}
+}
+
+// TestWatcherBacksOffOnFastNoChange pins the second half of C3: a server that
+// answers "no change" without holding the request must not turn the watcher
+// into a busy loop.
+// TestWatcherBacksOffOnFastNoChange 固定 C3 的另一半：服务端不挂起就回答"没有变更"
+// 时，watcher 不得退化成紧循环。
+func TestWatcherBacksOffOnFastNoChange(t *testing.T) {
+	fake := &fakeServer{content: "env: dev\n"}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := testConfig(t, server.URL, file)
+	cfg.RetryDelay = 150 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, cfg) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	waitFor(t, 5*time.Second, func() bool {
+		data, err := os.ReadFile(file)
+		return err == nil && string(data) == "env: dev\n"
+	}, "initial config written")
+
+	before := fake.listens()
+	time.Sleep(350 * time.Millisecond)
+	after := fake.listens()
+	// With a 150ms backoff the window fits two or three requests; a spinning
+	// watcher issues dozens.
+	// 150ms 退避下该窗口只容得下两三次请求；紧循环会发出几十次。
+	if got := after - before; got > 5 {
+		t.Fatalf("watcher issued %d no-change listens in 350ms, want backoff", got)
 	}
 }
 

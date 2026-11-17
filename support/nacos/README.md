@@ -220,8 +220,10 @@ go nacos.Watch(ctx, nx,
 ```
 
 - 启动时先 `Sync` 一次；失败时用本地文件的摘要继续轮询；
-- 通过 `configs/listener` 长轮询检查变化，服务端挂起最短 30 秒；
-- 监听失败按 `RetryDelay` 重试；远端内容非法时只记录错误，不替换文件；
+- 通过 `configs/listener` 长轮询检查变化，服务端挂起最短 30 秒；`Long-Pulling-Timeout`
+  头与客户端实际等待时长一致（`PollTimeout` 低于 30s 时按 30s 发送）；
+- 监听失败按 `RetryDelay` 重试；`changed=false` 却在不足挂起时长一半就返回（代理或错误页
+  提前截断）时同样按 `RetryDelay` 退避，避免紧循环；远端内容非法时只记录错误，不替换文件；
 - `WithOnChange` 在文件写入后执行，返回的错误只记录日志；只在 `reload` 策略下调用；
 - `WithDrain` 只在 `restart` / `exit` 策略下、动作执行前调用，用于停止接受新请求；
   错误只记录日志，不取消动作。钩子内不要调用 `App.Shutdown`（会与 watcher 自等待）；

@@ -123,28 +123,40 @@ func (c *Client) Listen(ctx context.Context, digest string) (bool, error) {
 	if !c.cfg.Enabled {
 		return false, ErrDisabled
 	}
-	// The server holds the request for PollTimeout. Nacos enforces a minimum
-	// hold (10s on 2.x, 30s by default), so never undercut it; leave room for
-	// the response round trip.
-	// 服务端会按 PollTimeout 挂起请求。Nacos 有最小挂起时长（2.x 为 10s，
-	// 默认 30s），不要低于该值，并额外留出响应往返时间。
-	hold := c.cfg.PollTimeout
-	if hold < 30*time.Second {
-		hold = 30 * time.Second
-	}
+	// The server holds the request for the effective hold. Nacos enforces a
+	// minimum hold (10s on 2.x, 30s by default), so never undercut it; leave
+	// room for the response round trip. The header carries the same value as
+	// the context deadline: announcing the raw PollTimeout while waiting longer
+	// made the two disagree.
+	// 服务端按生效的挂起时长挂起请求。Nacos 有最小挂起时长（2.x 为 10s，默认
+	// 30s），不要低于该值，并额外留出响应往返时间。请求头与 ctx 截止时间使用同一
+	// 数值：此前头里报原始 PollTimeout、实际却等得更久，两者不一致。
+	hold := c.listenHold()
 	ctx, cancel := context.WithTimeout(ctx, hold+c.cfg.Timeout)
 	defer cancel()
 
 	listening := c.cfg.DataID + "\x02" + c.cfg.Group + "\x02" + digest + "\x02" + c.cfg.Namespace + "\x01"
 	form := url.Values{"Listening-Configs": {listening}}
 	header := http.Header{}
-	header.Set("Long-Pulling-Timeout", strconv.FormatInt(c.cfg.PollTimeout.Milliseconds(), 10))
+	header.Set("Long-Pulling-Timeout", strconv.FormatInt(hold.Milliseconds(), 10))
 
 	data, err := c.do(ctx, http.MethodPost, listenerPath, nil, form, header)
 	if err != nil {
 		return false, err
 	}
 	return len(bytes.TrimSpace(data)) > 0, nil
+}
+
+// listenHold is the server hold time Listen announces and waits for: the
+// configured PollTimeout raised to the Nacos minimum. The watcher also uses it
+// to tell a normal "no change" answer from a hold that was cut short.
+// listenHold 是 Listen 声明并等待的服务端挂起时长：配置的 PollTimeout 提升到
+// Nacos 的最小值。watcher 也用它区分正常的"没有变更"与提前中断的挂起。
+func (c *Client) listenHold() time.Duration {
+	if c.cfg.PollTimeout < 30*time.Second {
+		return 30 * time.Second
+	}
+	return c.cfg.PollTimeout
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query, form url.Values, header http.Header) ([]byte, error) {
