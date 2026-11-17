@@ -838,6 +838,8 @@ orders, err := demoserviceclient.NewWithBaseURL("https://orders.example.com")
 | `./service start --daemon=1` | 派生后台子进程后父进程退出，日志与标准输出重定向到 `/dev/null`；Windows 不支持，启动时直接 panic |
 | `./service stop [--pid-file path] [--timeout 10s] [--force=1]` | 发送 SIGTERM，超时后可发送 SIGKILL；默认要求输入 `yes` 确认 |
 | `./service restart [--force=1]` | 先停止 pid 文件对应的实例（如有），再前台启动；默认要求输入 `yes` 确认 |
+| `./service status [--pid-file path] [--json]` | 只读 pid 文件报告 HTTP 实例：状态、PID、已运行时长、监听地址、健康检查；未运行时退出码 1 |
+| `./service worker status [--group=g] [--json]` | 报告本机每个 worker 进程（分组、PID、状态、已运行时长），或只报告选中的分组 |
 | `./service script <name> [flags]` | 执行维护脚本 |
 | `./service script --list` | 列出已注册脚本 |
 | `./service version [--json]` | 输出构建信息 |
@@ -846,6 +848,10 @@ orders, err := demoserviceclient.NewWithBaseURL("https://orders.example.com")
 退出码：`0` 成功，`1` 运行错误，`2` 用法错误。
 
 `start`/`stop`/`restart` 会在终端输出彩色的状态信息和启动信息表格（非 TTY 或设置了 `NO_COLOR` 时自动关闭颜色）。`stop`/`restart` 默认要求输入 `yes` 才继续；非交互环境（systemd、容器、CI）请显式传入 `--force=1`，否则 stdin 读到 EOF 会按放弃处理。
+
+`status` 只读 pid 文件：不发信号、不连数据库、不访问 Nacos，因此服务停着、数据库挂着、配置中心不可达时都能回答"在跑什么"。四个状态分别是 `running`（pid 活着）、`stopped`（pid 已退出，文件是残留）、`stale`（pid 已被内核分配给别的进程）、`missing`（没有 pid 文件）。`identity_verified` 为假时显示 `running (unverified)`：旧格式 pid 文件或平台不支持，进程活着但无法证明是本进程。`--json` 输出同一份数据（`processes[]` 里带 `group`、`pid`、`status`、`uptime_seconds`、`health`、`pid_file`），字段固定，供脚本与探针消费；没有任何进程在运行时退出码仍为 1，所以 `if ./service status; then ...` 可以直接用。
+
+健康检查列只有在目标配置了 `/healthz` 时才有意义：HTTP 实例看 `WithHealthEndpoints`，worker 看 `WithWorkerHealth`；未配置时显示 `disabled`（worker 表格里整列省略，避免一排 `--` 被读成故障）。探测走本机回环且不走环境代理——经 `HTTP_PROXY` 发出的本机健康检查拿到的是代理的答复。
 
 ## 测试
 

@@ -73,6 +73,11 @@ type WorkerOptions struct {
 	// first readiness report before giving up on confirming the start.
 	// StartupTimeout 限制后台父进程等待子进程首次就绪上报的时长，超时后不再确认启动结果。
 	StartupTimeout time.Duration
+	// JSON makes `worker status` emit machine-readable output. It has no meaning
+	// for the run form, which is why it is not a persistent flag.
+	// JSON 让 `worker status` 输出机器可读的结果。它对运行形态没有意义，因此不是
+	// 持久旗标。
+	JSON bool
 }
 
 // WorkerStartArgs rebuilds the argv that starts a worker group. The daemon
@@ -163,6 +168,7 @@ func newWorkerCmd(d Deps) *cobra.Command {
 		"how long the daemon parent waits for the child to report ready before giving up")
 	cmd.AddCommand(newWorkerStopCmd(d, &opts.Group))
 	cmd.AddCommand(newWorkerRestartCmd(d, &opts.Group))
+	cmd.AddCommand(newWorkerStatusCmd(d, &opts.Group))
 	return cmd
 }
 

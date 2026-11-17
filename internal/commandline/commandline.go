@@ -76,7 +76,15 @@ type Deps struct {
 	// 带着分组选择符，因此 Group 为空表示本机所有 worker 进程，而不是 HTTP 实例。
 	StopWorker    func(ctx context.Context, opts WorkerOptions) error
 	RestartWorker func(ctx context.Context, opts WorkerOptions) error
-	Version       func(ctx context.Context, jsonOutput bool) error
+	// Status reports the HTTP instance; StatusWorker reports the worker
+	// processes. They are separate callbacks because the two read different pid
+	// files and answer different questions, and because a binary without worker
+	// groups still has status.
+	// Status 报告 HTTP 实例，StatusWorker 报告 worker 进程。两者分开是因为读不同的 pid
+	// 文件、回答不同的问题，而且一个没有 worker 分组的二进制仍然有 status。
+	Status       func(ctx context.Context, opts StatusOptions) error
+	StatusWorker func(ctx context.Context, opts WorkerOptions) error
+	Version      func(ctx context.Context, jsonOutput bool) error
 
 	Scripts  []Script
 	Commands []Command
@@ -126,6 +134,7 @@ func Build(d Deps) *cobra.Command {
 	root.AddCommand(newStartCmd(d))
 	root.AddCommand(newStopCmd(d))
 	root.AddCommand(newRestartCmd(d))
+	root.AddCommand(newStatusCmd(d))
 	root.AddCommand(newScriptCmd(d))
 	root.AddCommand(newWorkerCmd(d))
 	root.AddCommand(newVersionCmd(d))

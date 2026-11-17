@@ -368,3 +368,51 @@ func TestWorkerStopUsesTheDefaultTimeout(t *testing.T) {
 		t.Fatalf("timeout = %v, want 3s", got.Timeout)
 	}
 }
+
+// `status` is a subcommand of the root, and its flags reach the callback. It
+// must never fall through to the root RunE: that one starts the server.
+// `status` 是根命令的子命令，旗标要传到回调。它绝不能落到根命令的 RunE 上——那是启动。
+func TestStatusCommandCallsBack(t *testing.T) {
+	var got commandline.StatusOptions
+	d := commandline.Deps{
+		Name:           "app",
+		DefaultPIDFile: "custom.pid",
+		Status: func(_ context.Context, opts commandline.StatusOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"status", "--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !got.JSON {
+		t.Fatal("--json did not reach StatusOptions")
+	}
+	if got.PIDFile != "custom.pid" {
+		t.Fatalf("pid file = %q, want the configured default", got.PIDFile)
+	}
+}
+
+// `worker status` inherits --group, so both positions work and the selector
+// reaches the callback unchanged.
+// `worker status` 继承 --group，两种位置都可用，选择符原样传到回调。
+func TestWorkerStatusUsesGroupFlag(t *testing.T) {
+	var got commandline.WorkerOptions
+	d := commandline.Deps{
+		Name: "app",
+		StatusWorker: func(_ context.Context, opts commandline.WorkerOptions) error {
+			got = opts
+			return nil
+		},
+	}
+	cmd := commandline.Build(d)
+	cmd.SetArgs([]string{"worker", "status", "--group=order", "--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("worker status: %v", err)
+	}
+	if got.Group != "order" || !got.JSON {
+		t.Fatalf("options = %+v", got)
+	}
+}
