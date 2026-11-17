@@ -64,17 +64,17 @@ import (
 // demo-service，从而把注册、发现与真实 HTTP 串成一条可独立运行的检查。传 nil 时
 // DemoService() 返回 ErrNotConfigured 占位实现，分组仍可构造。
 func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients) ([]*gofyworker.Group, error) {
-	first, err := group1.NewGroup(conns)
+	workerGroup1, err := group1.NewGroup(conns)
 	if err != nil {
 		return nil, err
 	}
-	second, err := group2.NewGroup()
+	workerGroup2, err := group2.NewGroup()
 	if err != nil {
 		return nil, err
 	}
-	third, err := group3.NewGroup(clients)
+	workerGroup3, err := group3.NewGroup(clients)
 	if err != nil {
 		return nil, err
 	}
-	return []*gofyworker.Group{first, second, third}, nil
+	return []*gofyworker.Group{workerGroup1, workerGroup2, workerGroup3}, nil
 }
