@@ -22,12 +22,14 @@ func TestValidateAcceptsValidCommands(t *testing.T) {
 
 func TestValidateRejectsInvalidCommands(t *testing.T) {
 	cases := map[string][]command.Command{
-		"two words":      {{Use: "db migrate", Run: run}},
-		"reserved":       {{Use: "start", Run: run}},
-		"invalid name":   {{Use: "Migrate", Run: run}},
-		"duplicate":      {{Use: "migrate", Run: run}, {Use: "migrate", Run: run}},
-		"nil run":        {{Use: "migrate"}},
-		"extra reserved": {{Use: "custom", Run: run}},
+		"two words":        {{Use: "db migrate", Run: run}},
+		"reserved":         {{Use: "start", Run: run}},
+		"reserved restart": {{Use: "restart", Run: run}},
+		"reserved status":  {{Use: "status", Run: run}},
+		"invalid name":     {{Use: "Migrate", Run: run}},
+		"duplicate":        {{Use: "migrate", Run: run}, {Use: "migrate", Run: run}},
+		"nil run":          {{Use: "migrate"}},
+		"extra reserved":   {{Use: "custom", Run: run}},
 	}
 	for name, cmds := range cases {
 		t.Run(name, func(t *testing.T) {

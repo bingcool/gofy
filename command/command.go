@@ -28,9 +28,17 @@ type Command struct {
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
+// reservedNames mirrors the built-in subcommands registered by
+// internal/commandline. A custom command with one of these names would be
+// shadowed by the built-in: cobra keeps the command that was added first, and
+// the built-ins are added before custom ones.
+// reservedNames 对应 internal/commandline 注册的内建子命令。同名自定义命令会被
+// 内建命令遮蔽：cobra 保留先加入的命令，而内建命令先于自定义命令注册。
 var reservedNames = map[string]struct{}{
 	"start":      {},
 	"stop":       {},
+	"restart":    {},
+	"status":     {},
 	"script":     {},
 	"worker":     {},
 	"version":    {},
