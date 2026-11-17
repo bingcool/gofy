@@ -556,12 +556,41 @@ func (a *App) startModules(rt *core.Runtime) error {
 		if !ok {
 			continue
 		}
-		if err := starter.Start(rt.Context()); err != nil {
+		if err := startModule(starter, rt.Context()); err != nil {
 			return fmt.Errorf("gofy: module %q start: %w", m.Name(), err)
 		}
 		a.started = append(a.started, m)
 	}
 	return nil
+}
+
+// startModule calls Start with panic recovery. A panicking module must become a
+// startup error: the abort path stops the modules that did start and releases
+// the pid file, database and logger, which a panic unwinding past startModules
+// would skip.
+// startModule 带 panic 恢复地调用 Start。模块 panic 必须变成启动错误：abort 路径要
+// 停止已启动的模块并释放 pid 文件、数据库与日志，而 panic 穿过 startModules 会跳过
+// 这些清理。
+func startModule(starter support.Starter, ctx context.Context) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic: %v", rec)
+		}
+	}()
+	return starter.Start(ctx)
+}
+
+// stopModule calls Stop with panic recovery. One panicking module must not skip
+// the remaining Stop calls, the database close or the pid file removal.
+// stopModule 带 panic 恢复地调用 Stop。一个模块 panic 不能跳过其余 Stop、数据库
+// 关闭或 pid 文件删除。
+func stopModule(stopper support.Stopper, ctx context.Context) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic: %v", rec)
+		}
+	}()
+	return stopper.Stop(ctx)
 }
 
 // factoryStarted returns the started modules Reload owns, excluding instances
@@ -952,7 +981,7 @@ func (a *App) cleanup() error {
 			if !ok {
 				continue
 			}
-			if err := stopper.Stop(ctx); err != nil {
+			if err := stopModule(stopper, ctx); err != nil {
 				lg.Error("module stop failed", zap.String("module", m.Name()), zap.Error(err))
 				errs = append(errs, fmt.Errorf("gofy: module %q stop: %w", m.Name(), err))
 			}

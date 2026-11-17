@@ -17,6 +17,7 @@ import (
 
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/pidfile"
+	"github.com/bingcool/gofy/support"
 	"go.uber.org/zap"
 )
 
@@ -56,6 +57,59 @@ func TestDuplicatePID(t *testing.T) {
 	}
 	if got, ok := duplicatePID(path, self); !ok || got != os.Getppid() {
 		t.Fatalf("duplicatePID = (%d, %v), want the live parent pid", got, ok)
+	}
+}
+
+// panicModule panics from Start or Stop on purpose.
+// panicModule 故意在 Start 或 Stop 里 panic。
+type panicModule struct {
+	name      string
+	panicOn   string // "start", "stop" or ""
+	stopCalls int
+}
+
+func (m *panicModule) Name() string                   { return m.name }
+func (m *panicModule) Register(*support.Router) error { return nil }
+func (m *panicModule) Stop(context.Context) error {
+	m.stopCalls++
+	if m.panicOn == "stop" {
+		panic("stop boom")
+	}
+	return nil
+}
+func (m *panicModule) Start(context.Context) error {
+	if m.panicOn == "start" {
+		panic("start boom")
+	}
+	return nil
+}
+
+// A panicking module must become an error, not unwind past the startup path
+// that stops the already-started modules and removes the pid file.
+// 模块 panic 必须转成错误，而不是穿过启动路径：那条路径负责停止已启动模块并删除
+// pid 文件。
+func TestModulePanicsBecomeErrors(t *testing.T) {
+	if err := startModule(&panicModule{name: "boom", panicOn: "start"}, context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "panic") {
+		t.Fatalf("startModule = %v, want a panic error", err)
+	}
+	if err := stopModule(&panicModule{name: "boom", panicOn: "stop"}, context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "panic") {
+		t.Fatalf("stopModule = %v, want a panic error", err)
+	}
+}
+
+// One panicking Stop must not skip the remaining modules.
+// 一个模块 Stop panic 不能跳过其余模块。
+func TestStopModuleListContinuesAfterPanic(t *testing.T) {
+	first := &panicModule{name: "first", panicOn: "stop"}
+	second := &panicModule{name: "second"}
+	errs := stopModuleList(context.Background(), []support.Module{first, second}, time.Second)
+	if second.stopCalls != 1 {
+		t.Fatalf("second module stop calls = %d, want 1", second.stopCalls)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "panic") {
+		t.Fatalf("errs = %v, want one panic error", errs)
 	}
 }
 

@@ -355,7 +355,7 @@ func stopModuleList(ctx context.Context, modules []support.Module, timeout time.
 			continue
 		}
 		stopCtx, cancel := context.WithTimeout(ctx, timeout)
-		err := stopper.Stop(stopCtx)
+		err := stopModule(stopper, stopCtx)
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("gofy: module %q stop: %w", modules[i].Name(), err))
