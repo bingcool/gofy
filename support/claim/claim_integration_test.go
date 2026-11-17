@@ -610,3 +610,78 @@ func trimQuotes(quoted string) string {
 	}
 	return string(out)
 }
+
+// TestIntegrationPruneRemovesOnlySettledRows pins the maintenance contract:
+// Prune deletes this job's old done and dead rows, keeps fresh ones and pending
+// ones, and never reaches into another job. updated_at is the age column, so a
+// row settled long ago is collected while one settled moments ago survives.
+// TestIntegrationPruneRemovesOnlySettledRows 固定维护契约：Prune 只删除本 job 中旧的 done
+// 与 dead 行，保留新收尾的和 pending 的行，也绝不碰别的 job。年龄列是 updated_at，因此很早
+// 收尾的行被回收，刚刚收尾的行保留。
+func TestIntegrationPruneRemovesOnlySettledRows(t *testing.T) {
+	q, db := newIntegrationQueue(t, Config{
+		Job:         "orders",
+		Lease:       30 * time.Second,
+		MaxAttempts: 3,
+	})
+	table := q.tableName()
+	seed(t, db, table, "orders", 4)
+	seed(t, db, table, "other", 1)
+
+	var ids []uint64
+	if err := db.Raw("SELECT id FROM `" + table + "` WHERE job_type = 'orders' ORDER BY id").
+		Scan(&ids).Error; err != nil {
+		t.Fatalf("read seeded ids: %v", err)
+	}
+	if len(ids) != 4 {
+		t.Fatalf("seeded ids = %v, want 4", ids)
+	}
+	oldDone, oldDead, freshDone, pending := ids[0], ids[1], ids[2], ids[3]
+
+	var otherDone uint64
+	if err := db.Raw("SELECT id FROM `" + table + "` WHERE job_type = 'other'").
+		Scan(&otherDone).Error; err != nil {
+		t.Fatalf("read other job id: %v", err)
+	}
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if err := db.Exec(query, args...).Error; err != nil {
+			t.Fatalf("exec %q: %v", query, err)
+		}
+	}
+	exec("UPDATE `"+table+"` SET status = ?, updated_at = DATE_SUB(NOW(3), INTERVAL 3 DAY) WHERE id = ?", StatusDone, oldDone)
+	exec("UPDATE `"+table+"` SET status = ?, updated_at = DATE_SUB(NOW(3), INTERVAL 3 DAY) WHERE id = ?", StatusDead, oldDead)
+	exec("UPDATE `"+table+"` SET status = ? WHERE id = ?", StatusDone, freshDone)
+	exec("UPDATE `"+table+"` SET status = ?, updated_at = DATE_SUB(NOW(3), INTERVAL 3 DAY) WHERE id = ?", StatusDone, otherDone)
+
+	if _, err := q.Prune(context.Background(), 0); !errors.Is(err, ErrInvalidPruneWindow) {
+		t.Fatalf("Prune(0) = %v, want ErrInvalidPruneWindow", err)
+	}
+
+	deleted, err := q.Prune(context.Background(), 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("Prune deleted %d rows, want 2 (the old done and old dead of this job)", deleted)
+	}
+	for _, id := range []uint64{oldDone, oldDead} {
+		var n int64
+		if err := db.Raw("SELECT COUNT(*) FROM `"+table+"` WHERE id = ?", id).Scan(&n).Error; err != nil {
+			t.Fatalf("count row %d: %v", id, err)
+		}
+		if n != 0 {
+			t.Fatalf("settled row %d survived the prune", id)
+		}
+	}
+	if got := q.statusOf(t, freshDone); got != StatusDone {
+		t.Fatalf("fresh done row status = %d, want %d", got, StatusDone)
+	}
+	if got := q.statusOf(t, pending); got != StatusPending {
+		t.Fatalf("pending row status = %d, want %d", got, StatusPending)
+	}
+	if got := q.statusOf(t, otherDone); got != StatusDone {
+		t.Fatalf("other job row status = %d, want %d (prune must stay inside one job)", got, StatusDone)
+	}
+}

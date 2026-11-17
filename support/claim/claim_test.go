@@ -335,3 +335,20 @@ func TestCompletionRequiresFencingPair(t *testing.T) {
 		t.Fatalf("Succeed without owner = %v, want ErrOwnerRequired", err)
 	}
 }
+
+// TestPruneRejectsNonPositiveWindow pins the one guard a caller can trip: a
+// zero or negative window would delete every settled row at once, and pruning
+// is not reversible.
+// TestPruneRejectsNonPositiveWindow 固定调用方唯一能踩到的护栏：零或负数窗口会一次删光所有
+// 终态行，而清理不可逆。
+func TestPruneRejectsNonPositiveWindow(t *testing.T) {
+	q, err := New(new(gorm.DB), Config{Table: "job_task", Job: "order"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, window := range []time.Duration{0, -time.Hour} {
+		if _, err := q.Prune(context.Background(), window); !errors.Is(err, ErrInvalidPruneWindow) {
+			t.Fatalf("Prune(%v) = %v, want ErrInvalidPruneWindow", window, err)
+		}
+	}
+}

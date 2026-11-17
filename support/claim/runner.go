@@ -305,6 +305,17 @@ func (r *Runner) Run(ctx context.Context, owner string) error {
 	return errors.Join(errs...)
 }
 
+// Prune deletes this job's done and dead rows whose settlement is older than
+// olderThan. It is the maintenance half of an ever-growing task table; the
+// call is exposed here so a worker that owns a Runner does not need to keep its
+// own *gorm.DB just to reach the queue.
+// Prune 删除本 job 中收尾时间早于 olderThan 的 done 与 dead 行。这是"任务表只增
+// 不减"的维护另一半；在 Runner 上暴露该调用，持有 Runner 的 worker 不必为够到队列
+// 而自己再留一份 *gorm.DB。
+func (r *Runner) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
+	return r.queue.Prune(ctx, olderThan)
+}
+
 // process runs one handler under a timeout and records its outcome. The timeout
 // applies only to the handler; Succeed/Fail use the caller's context so a slow
 // business call cannot abort the very write that records its failure.

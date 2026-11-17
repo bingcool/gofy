@@ -106,6 +106,11 @@ var (
 	// ErrInvalidStatus means Succeed or Fail saw a row in an unexpected state.
 	// ErrInvalidStatus 表示 Succeed 或 Fail 遇到非预期状态的行。
 	ErrInvalidStatus = errors.New("claim: task is not in the claimed state")
+
+	// ErrInvalidPruneWindow means Prune received a non-positive window, which
+	// would delete every settled row immediately.
+	// ErrInvalidPruneWindow 表示 Prune 收到的窗口不是正数，那会立刻删除全部终态行。
+	ErrInvalidPruneWindow = errors.New("claim: prune window must be positive")
 )
 
 // identifierPattern keeps table names from carrying SQL. Only the table name is
@@ -269,6 +274,7 @@ type Queue struct {
 	reapSQL        string
 	reapDeadSQL    string
 	reapNoRerunSQL string
+	pruneSQL       string
 }
 
 // New validates the config and builds the queue.
@@ -419,6 +425,16 @@ func New(db *gorm.DB, cfg Config) (*Queue, error) {
        fail_handle_time = CURRENT_TIMESTAMP
  WHERE job_type = ? AND status = %d AND lease_until IS NOT NULL AND lease_until < NOW(3)
    AND rerun_allowed = 0`, table, StatusDead, StatusClaimed)
+	// A settled row's updated_at is its settlement time: Succeed/Fail change
+	// status, and the ON UPDATE column follows. The age comparison therefore
+	// stays in the database clock, and a row that becomes settled again later
+	// is judged by the new moment. Pending and claimed rows are never targeted.
+	// 终态行的 updated_at 就是收尾时刻：Succeed/Fail 改状态时会刷新 ON UPDATE 列。
+	// 年龄比较因此留在数据库时钟里；之后又被重新收尾的行按新时刻判断。pending 与
+	// claimed 行永远不会被选中。
+	q.pruneSQL = fmt.Sprintf(`DELETE FROM %s
+ WHERE job_type = ? AND status IN (%d, %d)
+   AND updated_at < DATE_SUB(NOW(3), INTERVAL ? SECOND)`, table, StatusDone, StatusDead)
 	return q, nil
 }
 
@@ -712,6 +728,29 @@ func (q *Queue) Reap(ctx context.Context) (reaped, dead int64, err error) {
 		q.hooks.OnReap(q.job, reaped, dead)
 	}
 	return reaped, dead, nil
+}
+
+// Prune deletes this job's settled rows — done or dead — whose settlement is
+// older than olderThan, and reports how many disappeared. Pending and claimed
+// rows are never touched: they are still somebody's work.
+//
+// Call it from a scheduled maintenance loop, not from the claim path. Without
+// it the table only grows and idx_claim keeps widening; a dead row is worth
+// keeping until a human has looked at it, which is what the window is for.
+// Prune 删除本 job 中收尾时间早于 olderThan 的终态行（done 或 dead），并返回删除条数。
+// pending 与 claimed 行永不触碰：它们仍是某个人的活。
+//
+// 请从定时维护任务调用，不要放进认领路径。没有它表只增不减，idx_claim 也越来越宽；
+// dead 行在人工看过之前值得保留，这正是窗口的用途。
+func (q *Queue) Prune(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		return 0, ErrInvalidPruneWindow
+	}
+	res := q.db.WithContext(ctx).Exec(q.pruneSQL, q.job, ceilSeconds(olderThan))
+	if res.Error != nil {
+		return 0, fmt.Errorf("claim: prune: %w", res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 func (q *Queue) claimHook(claimed int) {
