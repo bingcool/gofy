@@ -266,9 +266,12 @@ func TestStopWorkersWithoutPIDFiles(t *testing.T) {
 
 // TestDaemonWorkerRefusesWhenAlreadyRunning checks the pre-flight that the
 // daemon path needs: the child's stdio goes to /dev/null, so a duplicate has to
-// be refused while the parent can still print why.
+// be refused while the parent can still print why. The record must carry this
+// process's identity token: a bare pid number is unverifiable and therefore
+// treated as stale, so only an IdentityMatch blocks the start.
 // TestDaemonWorkerRefusesWhenAlreadyRunning 校验 daemon 路径需要的前置检查：子进程的
-// stdio 指向 /dev/null，重复实例必须在父进程还能说明原因时就挡住。
+// stdio 指向 /dev/null，重复实例必须在父进程还能说明原因时就挡住。记录必须带本进程的
+// 身份 token：裸 pid 数字无法验证，会被当作陈旧记录覆盖，只有 IdentityMatch 才挡住启动。
 func TestDaemonWorkerRefusesWhenAlreadyRunning(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("daemonizing a worker is not supported on windows")
@@ -278,7 +281,7 @@ func TestDaemonWorkerRefusesWhenAlreadyRunning(t *testing.T) {
 		t.Fatalf("NewGroup: %v", err)
 	}
 	pidPath := filepath.Join(t.TempDir(), "demo.pid")
-	if err := os.WriteFile(workerPIDPath(pidPath, "order"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+	if err := pidfile.WriteRecord(workerPIDPath(pidPath, "order"), pidfile.NewRecord(os.Getpid()), 0o644); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
 

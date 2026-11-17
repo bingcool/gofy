@@ -656,12 +656,16 @@ func (a *App) newServer(handler http.Handler, lg *zap.Logger) *http.Server {
 // duplicatePID reports a live pid recorded in pidPath that belongs to another
 // process. A pid equal to self means this process re-executed itself (the
 // restart strategy): the previous image is gone by definition, so the file is
-// simply refreshed rather than treated as a second instance. A record whose
-// identity no longer matches its pid is a recycled number and does not count as
-// a duplicate either.
+// simply refreshed rather than treated as a second instance. Only an
+// IdentityMatch counts as a duplicate: a mismatch is a recycled number, and an
+// unknown verdict means the record or the platform has no token, so pid reuse
+// cannot be ruled out. Treating "alive but unverifiable" as a duplicate would
+// refuse startup against an unrelated process that inherited the number.
 // duplicatePID 返回 pidPath 中记录的、属于其它进程且仍然存活的 pid。pid 等于 self
 // 表示本进程刚 re-exec 自重启（restart 策略）：旧映像按定义已不存在，只需刷新
-// 文件，不应判为第二个实例。身份与 pid 已不匹配的记录同样不算重复——那是被复用的号。
+// 文件，不应判为第二个实例。只有 IdentityMatch 才算重复：不匹配说明 pid 被复用；
+// 未知表示记录或平台没有 token，无法排除复用。把"活着但无法验证"当作重复，会让
+// 继承了该号的无辜进程挡住启动。
 func duplicatePID(pidPath string, self int) (int, bool) {
 	if pidPath == "" {
 		return 0, false
@@ -670,7 +674,7 @@ func duplicatePID(pidPath string, self int) (int, bool) {
 	if err != nil || record.PID == self {
 		return 0, false
 	}
-	if record.Verify() == pidfile.IdentityMismatch {
+	if record.Verify() != pidfile.IdentityMatch {
 		return 0, false
 	}
 	return record.PID, process.Alive(record.PID)

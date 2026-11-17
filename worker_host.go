@@ -353,12 +353,14 @@ func (a *App) claimWorkerPID(pidPath string) (func(), error) {
 
 	// The lock above already excludes another instance of this binary, so this
 	// check only matters for a pid file left by an older build that never took
-	// the lock. A mismatched identity is a recycled pid, not an owner, and gets
-	// overwritten instead of blocking the start.
+	// the lock. Only an IdentityMatch proves the recorded owner is still that
+	// process: a mismatch is a recycled pid, and an unknown verdict cannot rule
+	// reuse out, so both are overwritten instead of blocking the start.
 	// 上面的锁已经排除了同一二进制的另一个实例，因此这次检查只对旧版本留下的、从未加锁的
-	// pid 文件有意义。身份不匹配说明 pid 被复用、并非所有者，此时覆盖它而不是挡住启动。
+	// pid 文件有意义。只有 IdentityMatch 能证明记录的进程仍占用该 pid：不匹配说明 pid
+	// 被复用，未知则无法排除复用，两者都覆盖文件而不是挡住启动。
 	if existing, readErr := pidfile.ReadRecord(pidPath); readErr == nil &&
-		process.Alive(existing.PID) && existing.Verify() != pidfile.IdentityMismatch {
+		process.Alive(existing.PID) && existing.Verify() == pidfile.IdentityMatch {
 		release()
 		return nil, fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing.PID, pidPath)
 	}
@@ -382,11 +384,14 @@ func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts comma
 	}
 	// Refuse before detaching. The child's stdout and stderr go to /dev/null, so a
 	// duplicate instance would die silently while the parent reported success.
+	// Only an IdentityMatch proves the owner is still that process; a recycled
+	// pid and an unverifiable record are overwritten by the child.
 	// 脱离之前先挡住重复实例：子进程的 stdout / stderr 都指向 /dev/null，重复实例
-	// 会静默退出，而父进程已经报了成功。
+	// 会静默退出，而父进程已经报了成功。只有 IdentityMatch 能证明所有者仍是记录的
+	// 进程；被复用的 pid 与无法验证的记录都由子进程覆盖。
 	if pidPath != "" {
 		if existing, err := pidfile.ReadRecord(pidPath); err == nil &&
-			process.Alive(existing.PID) && existing.Verify() != pidfile.IdentityMismatch {
+			process.Alive(existing.PID) && existing.Verify() == pidfile.IdentityMatch {
 			return fmt.Errorf("%w: pid %d (%s)", ErrAlreadyRunning, existing.PID, pidPath)
 		}
 	}

@@ -39,11 +39,23 @@ func TestDuplicatePID(t *testing.T) {
 		t.Fatal("own pid reported a duplicate after a self re-exec")
 	}
 
+	// A legacy bare pid is an honest "unknown": the live pid may be a recycled
+	// number, so it must not block a start.
+	// 旧格式的裸 pid 是诚实的"未知"：这个存活的 pid 可能是被复用的号，不能挡住启动。
 	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getppid())), 0o600); err != nil {
 		t.Fatalf("write parent pid: %v", err)
 	}
-	if _, ok := duplicatePID(path, self); !ok {
-		t.Fatal("a live pid belonging to another process was not reported")
+	if _, ok := duplicatePID(path, self); ok {
+		t.Fatal("an unverifiable legacy record blocked the start")
+	}
+
+	// A record whose token still matches the live process is a real duplicate.
+	// 记录中的 token 仍匹配存活进程时，才是真正的重复实例。
+	if err := pidfile.WriteRecord(path, pidfile.NewRecord(os.Getppid()), 0o600); err != nil {
+		t.Fatalf("write parent record: %v", err)
+	}
+	if got, ok := duplicatePID(path, self); !ok || got != os.Getppid() {
+		t.Fatalf("duplicatePID = (%d, %v), want the live parent pid", got, ok)
 	}
 }
 
