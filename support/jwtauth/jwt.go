@@ -21,8 +21,10 @@ import (
 )
 
 var (
-	// ErrMalformed means the token is not a three-part compact JWS.
-	// ErrMalformed 表示 token 不是三段式 compact JWS。
+	// ErrMalformed means the token is not a three-part compact JWS, or a claim
+	// that must parse (exp) is not a numeric date.
+	// ErrMalformed 表示 token 不是三段式 compact JWS，或必须解析的声明（exp）不是
+	// 数字日期。
 	ErrMalformed = errors.New("jwtauth: malformed token")
 	// ErrUnsupportedAlgorithm means the header algorithm is unknown or not
 	// allowed by the parser configuration.
@@ -68,8 +70,13 @@ type Config struct {
 	// Leeway tolerates small clock differences for exp and nbf.
 	// Leeway 用于容忍 exp 与 nbf 的小幅时钟偏差。
 	Leeway time.Duration
-	// RequireExpiry rejects tokens without an exp claim.
-	// RequireExpiry 为 true 时拒绝没有 exp 声明的 token。
+	// RequireExpiry rejects tokens without an exp claim. An exp that is present
+	// but not a numeric date is always rejected as malformed, whatever this flag
+	// says. The zero value accepts tokens without exp; deployments that need a
+	// bounded token lifetime should set it explicitly.
+	// RequireExpiry 为 true 时拒绝没有 exp 声明的 token。exp 存在但不是数字日期时
+	// 一律按 malformed 拒绝，与本开关无关。零值接受没有 exp 的 token；需要限定 token
+	// 有效期的部署应显式开启。
 	RequireExpiry bool
 	// Clock overrides time.Now; tests use it to make expiry deterministic.
 	// Clock 覆盖 time.Now，测试用它让过期判断可复现。
@@ -222,7 +229,16 @@ func (p *Parser) Parse(token string) (*Claims, error) {
 	claims.Audience = audienceOf(raw["aud"])
 
 	now := p.clock()
-	if exp, ok := numericDate(raw["exp"]); ok {
+	if rawExp, present := raw["exp"]; present {
+		// A present exp must parse: treating a string or null as "no expiry"
+		// would silently turn RequireExpiry off for exactly the tokens an
+		// issuer mangled.
+		// 存在的 exp 必须可解析：把字符串或 null 当成"没有过期时间"，等于对签发方
+		// 写错的 token 悄悄关掉了 RequireExpiry。
+		exp, ok := numericDate(rawExp)
+		if !ok {
+			return nil, fmt.Errorf("%w: exp is not a numeric date", ErrMalformed)
+		}
 		claims.ExpiresAt = exp
 		if now.After(exp.Add(p.leeway)) {
 			return nil, fmt.Errorf("%w: expired at %s", ErrExpired, exp.UTC().Format(time.RFC3339))

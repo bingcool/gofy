@@ -140,6 +140,20 @@ func TestParseRejections(t *testing.T) {
 			}),
 			want: nil,
 		},
+		{
+			name: "string expiry",
+			token: sign(t, "HS256", secret, map[string]any{
+				"iss": "gofy", "aud": "orders", "exp": "1700000000",
+			}),
+			want: jwtauth.ErrMalformed,
+		},
+		{
+			name: "null expiry",
+			token: sign(t, "HS256", secret, map[string]any{
+				"iss": "gofy", "aud": "orders", "exp": nil,
+			}),
+			want: jwtauth.ErrMalformed,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,6 +194,13 @@ func TestParseExpiryLeewayAndRequirement(t *testing.T) {
 	}
 	if _, err := strict.Parse(sign(t, "HS256", secret, map[string]any{"sub": "x"})); !errors.Is(err, jwtauth.ErrMissingExpiry) {
 		t.Fatalf("Parse without exp = %v, want ErrMissingExpiry", err)
+	}
+	// A present but unparseable exp is malformed, not missing: RequireExpiry
+	// must not downgrade it to the "absent" branch.
+	// 存在但无法解析的 exp 属于 malformed 而非缺失：RequireExpiry 不能把它降级成
+	// "没有 exp"的分支。
+	if _, err := strict.Parse(sign(t, "HS256", secret, map[string]any{"exp": "soon"})); !errors.Is(err, jwtauth.ErrMalformed) {
+		t.Fatalf("Parse with string exp = %v, want ErrMalformed", err)
 	}
 }
 
