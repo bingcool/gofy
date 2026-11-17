@@ -38,7 +38,7 @@ func TestNewWithBaseURLUsesFixedAddress(t *testing.T) {
 			if res.Order == nil || res.Order.ID != 7 {
 				t.Fatalf("order = %+v", res.Order)
 			}
-			if gotPath != "/orders/7" {
+			if gotPath != "/api/v1/order/orders/7" {
 				t.Fatalf("path = %q", gotPath)
 			}
 		})

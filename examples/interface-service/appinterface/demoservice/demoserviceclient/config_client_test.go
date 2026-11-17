@@ -32,7 +32,7 @@ func TestGetConfigUsesConfigRoute(t *testing.T) {
 	if res.AuthRequired {
 		t.Fatalf("config = %+v", res)
 	}
-	if gotPath != "/config" {
+	if gotPath != "/api/v1/order/config" {
 		t.Fatalf("path = %q", gotPath)
 	}
 }

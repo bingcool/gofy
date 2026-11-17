@@ -15,10 +15,12 @@
 package demoserviceclient
 
 import (
+	"context"
 	"errors"
 	"strings"
 
 	"github.com/bingcool/gofy-interface-api/client"
+	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 	"github.com/yourorg/interface-service/appinterface/demoservice"
 )
 
@@ -123,4 +125,24 @@ func NewWithBaseURLSSl(baseURL string) (*Client, error) {
 		return nil, err
 	}
 	return New(c), nil
+}
+
+// call runs one grouped route. A contract keeps only the in-group path in
+// Spec.Path and the deployment prefix on endpoint.Group, so the prefix has to
+// travel with the call: without it the request lands on /config instead of
+// /api/v1/order/config and the server answers 404. The prefix option goes
+// first so a caller-supplied option can still override it.
+// call 执行一条分组路由。契约只在 Spec.Path 里保留组内路径、把部署前缀放在
+// endpoint.Group 上，因此前缀必须随调用一起传递：缺少它，请求会打到 /config 而不是
+// /api/v1/order/config，服务端回 404。前缀选项放在最前面，调用方传入的同名选项
+// 仍然可以覆盖它。
+func call[Req, Res any](
+	ctx context.Context,
+	c *client.Client,
+	rt *endpoint.Route[Req, Res],
+	prefix string,
+	req *Req,
+	opts []client.CallOption,
+) (*Res, error) {
+	return client.Call(ctx, c, rt, req, append([]client.CallOption{client.WithPathPrefix(prefix)}, opts...)...)
 }

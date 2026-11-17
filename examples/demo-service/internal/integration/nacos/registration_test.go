@@ -33,7 +33,7 @@ func TestRegistrarAndResolverEndToEnd(t *testing.T) {
 	defer nacosServer.Close()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/orders/7" {
+		if r.URL.Path != "/api/v1/order/orders/7" {
 			http.NotFound(w, r)
 			return
 		}

@@ -31,7 +31,7 @@ func TestGetProductUsesProductRoute(t *testing.T) {
 	if res.Product == nil || res.Product.ID.Uint64() != 90001 || !res.Product.OnSale {
 		t.Fatalf("product = %+v", res.Product)
 	}
-	if gotPath != "/products/90001" {
+	if gotPath != "/api/v1/product/products/90001" {
 		t.Fatalf("path = %q", gotPath)
 	}
 }
