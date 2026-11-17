@@ -36,6 +36,7 @@ type Config struct {
 	UUIDInt  appuuidint.Config              `yaml:"uuidint"`
 	Lock     gofylock.Config                `yaml:"lock"`
 	Order    OrderConfig                    `yaml:"order"`
+	Clients  ClientsConfig                  `yaml:"clients"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
 	JWT      middleware.JWTConfig           `yaml:"jwt"`

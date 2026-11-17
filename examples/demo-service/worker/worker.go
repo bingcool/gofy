@@ -38,8 +38,10 @@ package worker
 import (
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyworker "github.com/bingcool/gofy/support/worker"
+	"github.com/yourorg/demo-service/serviceclients"
 	"github.com/yourorg/demo-service/worker/group1"
 	"github.com/yourorg/demo-service/worker/group2"
+	"github.com/yourorg/demo-service/worker/group3"
 )
 
 // Register builds every group the binary knows about, in the order `worker
@@ -57,7 +59,11 @@ import (
 // 唯一的参数是 broker 连接表：消费者自己的设置——topic、消费组、并发——就在 group1 里
 // 紧挨它的 handler，因此没有第二份来源需要传入。连接表本身来自应用配置，那里的
 // kafka/amqp/rocketmq/redis 段已经被 HTTP 进程解码过一次。
-func Register(conns gofyconsumer.Connections) ([]*gofyworker.Group, error) {
+//
+// clients 是进程级的下游客户端，与 broker 连接表并列传入：group3 用它按服务名调用
+// demo-service，从而把注册、发现与真实 HTTP 串成一条可独立运行的检查。传 nil 时
+// DemoService() 返回 ErrNotConfigured 占位实现，分组仍可构造。
+func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients) ([]*gofyworker.Group, error) {
 	first, err := group1.NewGroup(conns)
 	if err != nil {
 		return nil, err
@@ -66,5 +72,9 @@ func Register(conns gofyconsumer.Connections) ([]*gofyworker.Group, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []*gofyworker.Group{first, second}, nil
+	third, err := group3.NewGroup(clients)
+	if err != nil {
+		return nil, err
+	}
+	return []*gofyworker.Group{first, second, third}, nil
 }

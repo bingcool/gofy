@@ -80,6 +80,31 @@ db:
 	}
 }
 
+// clients 段决定下游服务的寻址方式。Load 走 strict 模式，因此这条用例同时证明该段
+// 已映射到结构体，而不是被静默忽略。
+func TestLoadClientsSection(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+clients:
+  demoservice:
+    base_url: http://10.0.0.5:8080
+    timeout: 3s
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Clients.DemoService.BaseURL != "http://10.0.0.5:8080" {
+		t.Fatalf("base_url = %q", cfg.Clients.DemoService.BaseURL)
+	}
+	if cfg.Clients.DemoService.Timeout != 3*time.Second {
+		t.Fatalf("timeout = %s", cfg.Clients.DemoService.Timeout)
+	}
+}
+
 func TestLoadRedisInstancesByInstanceName(t *testing.T) {
 	path := writeConfig(t, `
 db:

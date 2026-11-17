@@ -1,7 +1,7 @@
 # 应用 Nacos 行为配置（服务注册 / 服务发现 / 配置变更监听）
 nacos:
   # 是否启用 Nacos 注册
-  enable_nacos_register: false
+  enable_nacos_register: true
   # Nacos 配置中心 dataId / group / tenant（按项目区分，与 nacos.yaml 连接配置分离）
   service_config:
     data_id: gofy-service
@@ -28,6 +28,9 @@ nacos:
     load_balancer: random   # random | round_robin | weight
     cache_ttl: 60
     stale_ttl: 180
+    # 单次实例列表请求的超时，默认 2000ms。发现位于请求路径上，不能沿用配置中心的
+    # timeout_ms（那是给 Sync/Listen 用的，默认 10s）。
+    timeout_ms: 2000
     healthy_only: true
     namespace_id: dev
     group_name: GO_GROUP

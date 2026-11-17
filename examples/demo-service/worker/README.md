@@ -51,9 +51,12 @@ worker/
 │   ├── rocketmq_delay_order.go  # order-rocketmq-delay-consumer（DELAY topic）
 │   ├── delay_amqp_direct_order.go # order-amqp-delay-consumer（发布端定延迟 + 死信，direct）
 │   └── delay_amqp_topic_order.go  # order-amqp-delay-topic-consumer（同上，topic）
-└── group2/
-    ├── abc_register.go    # group2 的 NewGroup
-    └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
+├── group2/
+│   ├── abc_register.go    # group2 的 NewGroup
+│   └── summary.go         # report-summary：小时级汇总 + 它的 Defaults
+└── group3/
+    ├── abc_register.go    # group3 的 NewGroup
+    └── discovery_check.go # discovery-check：每 5s 按服务名调一次 demo-service
 ```
 
 没有 `worker.yaml`：每个订阅的设置就在它自己的文件里，和 `scanDefaults` 一样是代码。
@@ -71,7 +74,7 @@ worker/
 每个分组自成一个包，参数、构造、成员都在包内。给 group1 加一个 worker，不需要
 碰 group2 的任何文件。
 
-## 两个分组各做什么
+## 三个分组各做什么
 
 | 分组 | worker | 实例数 | 节奏 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -93,8 +96,14 @@ worker/
 | group1 | `order-amqp-delay-topic-consumer` | 1 | 常驻 | RabbitMQ topic 延迟：两半都是 `topic` + `order.*`，死信保留原 routing key |
 | group1 | `order-heartbeat` | 1 | 10s | 不依赖数据库，留一行可 grep 的存活日志 |
 | group2 | `report-summary` | 1 | 1h | 按状态聚合订单，多实例会重复写同一份报表 |
+| group3 | `discovery-check` | 1 | 5s | 通过 Nacos 服务发现调用 `GET /api/v1/order/config`，把注册 → 解析 → HTTP 串成一条可独立运行的检查 |
 
-拆两个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份。
+拆三个分组不是为了好看：group1 是秒级、随订单量扩缩；group2 是小时级、只要一份；
+group3 是运维探针，独立进程启动才能证明"别的进程能发现我"。
+
+group3 的调用方不是注册自己的那个 HTTP 进程，因此它成功一次就同时验证了四件事：注册写入
+了 Nacos、resolver 用对了 namespace/group、类型化客户端拼对了路由、HTTP 服务真的可达。
+失败只记 `warn` 不退出：注册中心故障时，负责报告故障的进程不该先死。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
 十一个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
@@ -840,11 +849,11 @@ panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 
 
 ## 新增分组
 
-1. 新建子包 `worker/group3/`，加 `abc_register.go`（只含 `NewGroup`）与成员文件（含各自的参数结构体与 defaults）；
-2. `worker/worker.go` 的 `Register` 里构造该分组并加进返回列表；
-3. `go run . worker --list` 核对，`worker --group=group3` 即可启动。
+1. 新建子包，例如 `worker/group4/`，加 `abc_register.go`（只含 `NewGroup`）与成员文件（含各自的参数结构体与 defaults）；
+2. `worker/worker.go` 的 `Register` 里构造该分组并加进返回列表；分组需要进程级依赖（如下游客户端）时，从 `Register` 的参数往下传，不要在里面 new；
+3. `go run . worker --list` 核对，`worker --group=group4` 即可启动。
 
-`main.go` 与部署清单不用改结构：复制一份 Deployment，改 `--group=group3` 和副本数即可。
+`main.go` 与部署清单不用改结构：复制一份 Deployment，改 `--group=group4` 和副本数即可。
 同一个镜像服务所有分组，因此不必为每个分组单独出一个二进制。
 
 ## 排障

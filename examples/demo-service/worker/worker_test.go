@@ -33,7 +33,7 @@ func testConnections() gofyconsumer.Connections {
 // TestRegisterBuildsEveryGroup 固定注册清单与每个 worker 自带的实例数。分组的成员与
 // 实例数现在是代码，因此与文档不一致时，会在这一条测试里暴露。
 func TestRegisterBuildsEveryGroup(t *testing.T) {
-	groups, err := appworker.Register(testConnections())
+	groups, err := appworker.Register(testConnections(), nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -68,6 +68,7 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 			"order-heartbeat",
 		},
 		"group2": {"report-summary"},
+		"group3": {"discovery-check"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("groups = %v, want %v", got, want)
@@ -105,6 +106,7 @@ func TestRegisterBuildsEveryGroup(t *testing.T) {
 		"group1/order-settle-consumer":           2,
 		"group1/order-heartbeat":                 1,
 		"group2/report-summary":                  1,
+		"group3/discovery-check":                 1,
 	}
 	for key, want := range wantDeclared {
 		if declared[key] != want {
@@ -122,7 +124,7 @@ func TestRegisterRejectsUnknownInstance(t *testing.T) {
 	conns := testConnections()
 	delete(conns.Kafka, "default")
 
-	_, err := appworker.Register(conns)
+	_, err := appworker.Register(conns, nil)
 	if err == nil {
 		t.Fatal("Register succeeded without the kafka instance the consumer names")
 	}

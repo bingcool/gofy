@@ -20,6 +20,10 @@ import (
 
 // Container 持有本次服务的仓库、service 构造槽、业务配置与 logger。它不是包级全局：
 // 装配方每代新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
+//
+// 下游客户端不在这里：它由 main 建一次、按进程存活，交给真正的消费者（worker 与
+// 未来的 service）。把它塞进每代新建的容器，会让人误以为它跟着 Reload 重建，而
+// resolver 的缓存与轮询游标恰恰不能重建。
 type Container struct {
 	cfg      *config.Config
 	repos    RepositoryDeclare

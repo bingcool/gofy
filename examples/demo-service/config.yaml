@@ -248,3 +248,15 @@ pid_file: app/demo-service.pid
 # 改这一段需要重启或触发热更新（配置变更按整代重建，在途请求继续用旧值）。
 order:
   auth_required: false
+
+# 下游服务寻址。base_url 留空表示按契约里的服务名（demo-service）走 Nacos 发现；
+# 填上地址则钉死该地址、完全不碰注册中心——本地开发连不上 Nacos 时用它兜底，
+# 与 swoolefy 的 inner_external_base_uri 是同一个用途。
+# timeout 包含寻址耗时，默认 5s；服务发现自身的超时在 application.yaml 的
+# nacos.discovery_service_client.timeout_ms 里配（默认 2s）。
+# 客户端由 main 构造一次、进程内共享，reload 不重建（resolver 的缓存与游标要跨代存活）。
+clients:
+  demoservice:
+    base_url: ''
+    timeout: 5s
+

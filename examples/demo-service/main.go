@@ -11,6 +11,7 @@ import (
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/app/config"
+	"github.com/yourorg/demo-service/serviceclients"
 	appworker "github.com/yourorg/demo-service/worker"
 )
 
@@ -83,6 +84,23 @@ func main() {
 		}
 	}
 
+	// Downstream clients are built once per process, after the config is known
+	// and before any module starts. They are deliberately outside the reload
+	// path: the resolver's cache, cursor and singleflight table must survive a
+	// config change, and the Nacos connection itself only changes on restart.
+	// 下游客户端每个进程构造一次，位置在配置就绪之后、模块启动之前。它刻意不在 Reload
+	// 路径上：resolver 的缓存、游标与单飞表必须跨配置变更存活，而 Nacos 连接本身只有
+	// 重启才会变。
+	var clients *serviceclients.Clients
+	if plan.BuildServices && plan.LoadNacos {
+		built, err := serviceclients.New(cfg.Clients, nacosCfg)
+		if err != nil {
+			fatalf("init service clients: %v", err)
+		}
+		clients = built
+		defer func() { _ = clients.Close() }()
+	}
+
 	reload := &reloader{
 		nacosCfg:       nacosCfg,
 		watch:          watchEnabled,
@@ -99,7 +117,7 @@ func main() {
 	// 文件中，改它们意味着重新编译——这是"一个订阅一个文件"换来的代价。
 	var groups []*worker.Group
 	if plan.RegisterGroups {
-		built, err := appworker.Register(appworker.ConnectionsFrom(cfg))
+		built, err := appworker.Register(appworker.ConnectionsFrom(cfg), clients)
 		if err != nil {
 			fatalf("build worker groups: %v", err)
 		}
