@@ -163,6 +163,12 @@ type DiscoveryConfig struct {
 	// StaleTTL 允许在 Nacos 不可达时继续使用过期列表。
 	StaleTTL time.Duration
 
+	// Timeout bounds one instance-list request. Discovery sits on the request
+	// path, so it is deliberately shorter than the config-center Timeout.
+	// Timeout 限制单次实例列表请求；服务发现位于请求路径上，因此刻意比配置中心
+	// 的超时短。
+	Timeout time.Duration
+
 	// HealthyOnly drops unhealthy instances. Default true.
 	// HealthyOnly 表示是否剔除不健康实例，默认 true。
 	HealthyOnly bool
@@ -192,8 +198,13 @@ func (c DiscoveryConfig) normalize(reg RegisterConfig) DiscoveryConfig {
 	if c.StaleTTL <= 0 {
 		c.StaleTTL = envSeconds("NACOS_DISCOVERY_STALE_TTL", max(3*c.CacheTTL, 180*time.Second))
 	}
-	if c.StaleTTL < c.CacheTTL {
-		c.StaleTTL = max(3*c.CacheTTL, 180*time.Second)
+	// A stale window shorter than the cache would make every cache hit fail
+	// closed; Validate rejects it instead of silently widening it here, so an
+	// operator who typed the wrong number sees the error.
+	// stale 窗口比缓存还短会让每次缓存命中都 fail-closed；这里不再悄悄放大，
+	// 交给 Validate 报错，让写错数字的人看到错误。
+	if c.Timeout <= 0 {
+		c.Timeout = envDurationMS("NACOS_DISCOVERY_TIMEOUT_MS", 2*time.Second)
 	}
 	if !c.healthyOnlySet {
 		if v, ok := lookupEnv("NACOS_DISCOVERY_HEALTHY_ONLY"); ok {
@@ -210,6 +221,29 @@ func (c DiscoveryConfig) normalize(reg RegisterConfig) DiscoveryConfig {
 		}
 	}
 	return c
+}
+
+// Validate rejects discovery settings that would otherwise fail much later, at
+// the first lookup: an unknown load balancer, a non-positive cache, or a stale
+// window shorter than the cache. Call it on a normalized config.
+// Validate 拒绝那些要等到第一次寻址才暴露的发现配置：未知的负载均衡策略、非正的
+// 缓存时长，或比缓存还短的 stale 窗口。只对已归一化的配置调用。
+func (c DiscoveryConfig) Validate() error {
+	switch c.LoadBalancer {
+	case "random", "round_robin", "weight":
+	default:
+		return fmt.Errorf("load_balancer %q is not supported (random, round_robin, weight)", c.LoadBalancer)
+	}
+	if c.CacheTTL <= 0 {
+		return fmt.Errorf("cache_ttl must be positive, got %s", c.CacheTTL)
+	}
+	if c.StaleTTL < c.CacheTTL {
+		return fmt.Errorf("stale_ttl (%s) must not be shorter than cache_ttl (%s)", c.StaleTTL, c.CacheTTL)
+	}
+	if c.Timeout <= 0 {
+		return fmt.Errorf("timeout_ms must be positive, got %s", c.Timeout)
+	}
+	return nil
 }
 
 func splitList(value string) []string {
@@ -407,6 +441,16 @@ func Load(nacosPath, appPath string) (Config, error) {
 	if _, err := ParseChangeStrategy(string(cfg.ChangeStrategy)); err != nil {
 		return cfg, err
 	}
+	// Discovery is validated here rather than in validate(): validate() exits
+	// early when Nacos is disabled, and a worker or script never builds a
+	// Client, so a typo in discovery_service_client would otherwise wait for
+	// the first lookup — or never surface at all.
+	// 发现配置在这里校验而不是放进 validate()：Nacos 停用时 validate() 会提前返回，
+	// worker 与 script 又不构造 Client，拼错 discovery_service_client 就要等到第一次
+	// 寻址才暴露——甚至永远不暴露。
+	if err := cfg.Discovery.Validate(); err != nil {
+		return cfg, fmt.Errorf("nacos: discovery_service_client: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -495,6 +539,7 @@ type rawApplication struct {
 			LoadBalancer string `yaml:"load_balancer"`
 			CacheTTL     int    `yaml:"cache_ttl"`
 			StaleTTL     int    `yaml:"stale_ttl"`
+			TimeoutMS    int    `yaml:"timeout_ms"`
 			HealthyOnly  *bool  `yaml:"healthy_only"`
 			NamespaceID  string `yaml:"namespace_id"`
 			GroupName    string `yaml:"group_name"`
@@ -595,6 +640,9 @@ func applyApplicationFile(cfg *Config, n rawConfig, app rawApplication) {
 	}
 	if disc.StaleTTL > 0 {
 		cfg.Discovery.StaleTTL = time.Duration(disc.StaleTTL) * time.Second
+	}
+	if disc.TimeoutMS > 0 {
+		cfg.Discovery.Timeout = time.Duration(disc.TimeoutMS) * time.Millisecond
 	}
 	if disc.HealthyOnly != nil {
 		cfg.Discovery.HealthyOnly = *disc.HealthyOnly

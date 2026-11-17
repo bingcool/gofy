@@ -71,7 +71,7 @@ func NewNamingClient(cfg Config) (*Client, error) {
 			return nil, fmt.Errorf("nacos: invalid addr %q", cfg.Addr)
 		}
 	}
-	return &Client{cfg: cfg, http: &http.Client{}}, nil
+	return &Client{cfg: cfg, http: newHTTPClient()}, nil
 }
 
 // RegisterInstance creates or updates inst. Nacos treats repeated calls for

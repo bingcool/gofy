@@ -95,6 +95,9 @@ func TestDiscoveryDefaultsFollowRegister(t *testing.T) {
 	if disc.CacheTTL != 60*time.Second || disc.StaleTTL != 180*time.Second {
 		t.Fatalf("cache/stale = %s/%s", disc.CacheTTL, disc.StaleTTL)
 	}
+	if disc.Timeout != 2*time.Second {
+		t.Fatalf("Timeout = %s, want the 2s discovery default", disc.Timeout)
+	}
 	if !disc.HealthyOnly {
 		t.Fatal("HealthyOnly = false, want default true")
 	}
@@ -132,5 +135,71 @@ func TestRegisterEnvOverrides(t *testing.T) {
 	reg := RegisterConfig{ServiceName: "demo-service"}.normalize("dev")
 	if reg.Namespace != "test" || reg.Group != "ENV_GROUP" {
 		t.Fatalf("namespace/group = %q/%q", reg.Namespace, reg.Group)
+	}
+}
+
+// A typo in load_balancer must fail at Load, not at the first lookup: a worker
+// or script never builds a resolver, so the later error would never surface.
+// load_balancer 拼错必须在 Load 就失败，而不是等到第一次寻址：worker 与 script 根本
+// 不构造 resolver，后面那个错误永远不会出现。
+func TestDiscoveryRejectsUnknownLoadBalancer(t *testing.T) {
+	clearNacosEnv(t)
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  discovery_service_client:
+    load_balancer: round-robiin
+`)
+
+	if _, err := Load(nacosPath, appPath); err == nil {
+		t.Fatal("Load accepted an unknown load_balancer")
+	}
+}
+
+// stale_ttl shorter than cache_ttl used to be widened silently. It is a real
+// mistake — every cache hit after the stale window would fail closed — so it is
+// reported instead.
+// stale_ttl 短于 cache_ttl 过去会被悄悄放大。那是真错误——stale 窗口之后每次缓存命中
+// 都会 fail-closed——因此改为报错。
+func TestDiscoveryRejectsStaleShorterThanCache(t *testing.T) {
+	clearNacosEnv(t)
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  discovery_service_client:
+    cache_ttl: 60
+    stale_ttl: 30
+`)
+
+	if _, err := Load(nacosPath, appPath); err == nil {
+		t.Fatal("Load accepted stale_ttl shorter than cache_ttl")
+	}
+}
+
+func TestDiscoveryParsesTimeoutMS(t *testing.T) {
+	clearNacosEnv(t)
+	dir := t.TempDir()
+	nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	appPath := writeTestFile(t, dir, "application.yaml", `nacos:
+  discovery_service_client:
+    timeout_ms: 1500
+`)
+
+	cfg, err := Load(nacosPath, appPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Discovery.Timeout != 1500*time.Millisecond {
+		t.Fatalf("Timeout = %s, want 1.5s", cfg.Discovery.Timeout)
+	}
+}
+
+func TestDiscoveryTimeoutEnvOverride(t *testing.T) {
+	clearNacosEnv(t)
+	t.Setenv("NACOS_DISCOVERY_TIMEOUT_MS", "800")
+
+	cfg := Config{Host: "10.0.0.2"}.normalize()
+	if cfg.Discovery.Timeout != 800*time.Millisecond {
+		t.Fatalf("Timeout = %s, want 800ms", cfg.Discovery.Timeout)
 	}
 }

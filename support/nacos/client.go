@@ -54,12 +54,39 @@ func NewClient(cfg Config) (*Client, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	return &Client{cfg: cfg, http: &http.Client{}}, nil
+	return &Client{cfg: cfg, http: newHTTPClient()}, nil
+}
+
+// newHTTPClient returns a client that ignores the environment proxy. Nacos is
+// reached by host or service address (often a pod IP or an intranet name), and
+// routing those through HTTP_PROXY turns "registry unreachable" into the
+// proxy's own error — or, worse, into a timeout that the discovery throttle
+// then caches for a whole window.
+// newHTTPClient 返回一个忽略环境代理的客户端。Nacos 用主机名或服务地址访问（常常是
+// Pod IP 或内网域名），经 HTTP_PROXY 转发会把"注册中心不可达"变成代理自己的错误——
+// 更糟的是变成一次超时，再被发现的节流窗口缓存下来。
+func newHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{Transport: transport}
 }
 
 // Config returns the normalized config used by the client.
 // Config 返回客户端实际使用的归一化配置。
 func (c *Client) Config() Config { return c.cfg }
+
+// Close releases idle connections held by the client. The next request opens a
+// new one, so it is only useful at shutdown — or at the end of a test that
+// built its own client.
+// Close 释放客户端持有的空闲连接；下一次请求会新建连接，因此它只在停机或测试结束
+// 时才有意义。
+func (c *Client) Close() error {
+	if c == nil || c.http == nil {
+		return nil
+	}
+	c.http.CloseIdleConnections()
+	return nil
+}
 
 // Get fetches the configuration identified by the client config.
 // Get 拉取客户端配置所指的 data_id/group/namespace 下的配置内容。
