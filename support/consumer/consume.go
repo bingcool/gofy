@@ -642,14 +642,20 @@ type messageClaim struct {
 // 唯一索引就是全部机制。认领一条消息是一次插入：要么拿到这行，要么得知它已存在；
 // 没有锁，两个副本之间也没有读改写窗口。
 type consumedMessage struct {
-	ID        uint64    `gorm:"primaryKey;autoIncrement"`
-	Consumer  string    `gorm:"size:64;not null;uniqueIndex:uk_worker_consumed,priority:1"`
-	MessageID string    `gorm:"size:128;not null;uniqueIndex:uk_worker_consumed,priority:2"`
-	Status    string    `gorm:"size:16;not null;index:idx_worker_consumed_status"`
-	Attempts  int       `gorm:"not null"`
-	LastError string    `gorm:"size:512"`
-	CreatedAt time.Time `gorm:"type:datetime(3)"`
-	UpdatedAt time.Time `gorm:"type:datetime(3)"`
+	ID        uint64 `gorm:"primaryKey;autoIncrement"`
+	Consumer  string `gorm:"size:64;not null;uniqueIndex:uk_worker_consumed,priority:1"`
+	MessageID string `gorm:"size:128;not null;uniqueIndex:uk_worker_consumed,priority:2"`
+	Status    string `gorm:"size:16;not null;index:idx_worker_consumed_status"`
+	Attempts  int    `gorm:"not null"`
+	LastError string `gorm:"size:512"`
+	// No explicit SQL type: GORM maps time.Time per dialect. MySQL keeps its
+	// millisecond datetime(3) default, PostgreSQL gets timestamptz and SQLite
+	// gets datetime; hardcoding datetime(3) made AutoMigrate fail on PostgreSQL.
+	// 不写显式 SQL 类型：GORM 按方言映射 time.Time。MySQL 保持默认的毫秒
+	// datetime(3)，PostgreSQL 得到 timestamptz，SQLite 得到 datetime；写死
+	// datetime(3) 会让 PostgreSQL 上的 AutoMigrate 直接失败。
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // TableName returns the ledger table name.
@@ -887,9 +893,24 @@ func (d *deduper) leaseExpired(ctx context.Context, row consumedMessage) (bool, 
 }
 
 // dbNow is the database clock as a SQL expression, used wherever this package
-// writes a timestamp the lease later depends on.
-// dbNow 是数据库时钟的 SQL 表达式，本包写入租约依赖的时间戳时都用它。
+// writes a timestamp the lease later depends on. MySQL must keep millisecond
+// precision: the lease predicate compares against CURRENT_TIMESTAMP(3), and a
+// second-precision write would look up to 999ms older than it is.
+// dbNow 是数据库时钟的 SQL 表达式，本包写入租约依赖的时间戳时都用它。MySQL 必须保留
+// 毫秒精度：租约判断按 CURRENT_TIMESTAMP(3) 比较，秒精度的写入会让时间戳最多提前
+// 0.999 秒，短租约下会被提前判定过期。
 func (d *deduper) dbNow() clause.Expr {
+	return dbNowExpr(d.db.Dialector.Name())
+}
+
+// dbNowExpr builds the clock expression for a dialect. It is separate from
+// deduper so the precision rule can be tested without a database connection.
+// dbNowExpr 按方言构造时钟表达式。它与 deduper 分离，精度规则因此不需要数据库连接
+// 也能测试。
+func dbNowExpr(dialect string) clause.Expr {
+	if dialect == "mysql" {
+		return gorm.Expr("CURRENT_TIMESTAMP(3)")
+	}
 	return gorm.Expr("CURRENT_TIMESTAMP")
 }
 
