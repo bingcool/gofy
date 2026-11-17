@@ -8,6 +8,67 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy` CLI + module lifecycle: three startup/stop holes.
+  `restart` and `status` joined the reserved command names, so a custom command
+  can no longer shadow a built-in subcommand (cobra keeps the first
+  registration). The pid-file duplicate check now treats `IdentityUnknown` as a
+  stale record: only `IdentityMatch` counts as "another instance is running",
+  so a surviving pid with a legacy or uninspectable record no longer blocks
+  startup on a machine where pid reuse is routine. Module `Start`/`Stop` calls
+  are wrapped in panic recovery at every call site (`startModules`, the reload
+  stop list and `cleanup`), so one panicking module becomes an error instead of
+  skipping the remaining stops, the database close and the pid-file removal.
+
+- `support/consumer`: the processing lease is renewed while the handler runs.
+  `NewProcessor` ticks every third of `ProcessingLease` (floor 10ms) and
+  refreshes `updated_at` under the `consumer+message_id+attempts` fence,
+  stopping on `ErrStaleClaim`; the ticker goroutine is cancelled and joined when
+  the handler returns, panics included. A lease no longer has to span the whole
+  handler, but the handler must stay idempotent and the lease must not be
+  shorter than the broker's redelivery interval — `ProcessingLease` documents
+  this. Ledger write failures after the handler are no longer just a Warn:
+  `ProcessorConfig.OnLedgerError` hooks them for metrics/alerting, and the docs
+  state that acknowledgement follows the handler result (the done path relies
+  on business idempotency; only the dead row is guaranteed to land). The ledger
+  can also be pruned: `Processor.Prune`, `claim.Queue.Prune` and
+  `claim.Runner.Prune` delete only `done`/`dead` rows older than a window
+  compared on the database clock (Go clock fallback for unknown dialects) and
+  reject a non-positive window; pending/processing/claimed rows are never
+  touched. AMQP and delayed-AMQP consumers warn once per consumer when
+  idempotency is on but the delivery has no stable id (`MessageId`,
+  `message_id` header or `X-Correlation-Id`), because a random per-delivery id
+  disables deduplication — producers that need it must set `MessageId`.
+
+- `support/db` + `pg` + `sqlite` + `redis` + `amqp` + `kafka` + `rocketmq`:
+  `Registry.Install` now returns the generation it displaced, and `Configure`
+  closes it. Configure used to swap the package-level pointer and leave the old
+  pools unreachable with no owner, so every reload leaked its connections.
+  Callers that keep per-generation handles (the demo's IO snapshot) keep using
+  `NewRegistry` + `Install` and own the close themselves.
+  `TestConfigureClosesDisplacedGeneration` pins that the displaced SQLite pool
+  is both unreachable and closed.
+
+- `support/nacos`: the listener sends the effective hold in
+  `Long-Pulling-Timeout`. The client raises `PollTimeout` to the Nacos minimum
+  (30s) for the context deadline but used to announce the raw configured value,
+  so a short PollTimeout told the server to answer while the client kept
+  waiting. The watcher now backs off `RetryDelay` when a `changed=false` answer
+  arrives in less than half of that hold; a proxy or error page returning at
+  once used to turn the loop into a busy poll.
+
+- `support/uuidint`: `WithRetry(0, delay)` now means the default three attempts
+  instead of zero, which skipped the primary source entirely and handed every
+  id to a fallback. When no attempt produced an error (or the final
+  `errors.Join` was empty), `generate` returned `%!w(<nil>)` and called the
+  error handler with nil; it now returns the bare `ErrUnavailable`.
+
+- `support/jwtauth`: an `exp` claim that is present but not a numeric date
+  (string, null, bool) is now `ErrMalformed` instead of "no expiry". With
+  `RequireExpiry` false by default, a mangled exp was silently accepted
+  forever. The zero value of `RequireExpiry` still accepts tokens without exp,
+  documented explicitly; deployments that need a bounded lifetime must enable
+  it.
+
 - `gofy` CLI: `start --daemon` now shares the worker daemon's fd 3 startup
   channel. The detached child writes `ready` only after the listener accepts
   connections, every module started and Nacos registration succeeded, and names
@@ -420,6 +481,11 @@ All notable changes to this project are documented here. The format follows
   recently created order, and the old name implied the latter.
 
 ### Added
+
+- `support/consumer`: `ProcessorConfig.OnLedgerError` (done/failed ledger
+  write failure hook) and `Processor.Prune`; `support/claim`: `Queue.Prune` and
+  `Runner.Prune`, with `claim.ErrInvalidPruneWindow`. See the fixes above for
+  the retention rules.
 
 - Version: the framework now reports its own version. `gofy.Version` (currently
   `1.0.0`) is the single source of truth, and `App.Version()` uses it as the

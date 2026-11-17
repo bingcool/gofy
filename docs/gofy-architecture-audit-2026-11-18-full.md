@@ -58,6 +58,7 @@
 - **证据**：`gofy/support/consumer/consume.go:423-435` 在另一实例持有有效 `processing` 租约时返回 `ErrInFlight` 且明确「不 ACK，等待稍后重投」；`gofy/support/queues/consume.go:145-161` 对任意非 nil 错误都调 `q.Retry`；`gofy/support/queues/message.go:75-81` 在 `RetryNum >= maxRetries` 返回 `false` 且不再入队；`gofy/support/consumer/queues.go:208-216` 默认 `MaxRetries=3`、`RetryDelay=3s`、租约 5min。
 - **风险**：租约有效期内，本副本每 3s 重投一次、约 9s 耗尽 3 次预算后队列直接丢弃消息。若首个 handler 随后失败，broker 已无副本、台账停在 `processing`，消息彻底消失——幂等台账最该防的场景反而丢了消息。
 - **建议**：`ErrInFlight` 单独识别：重新入队但**不递增 RetryNum**，且延迟不小于 `ProcessingLease`；或交给延迟队列并冻结重试预算。
+
 - **修复（2026-11-18）**：`consumer.ErrInFlight` 改为实现 `queues.InFlightError` 标记（结构化接口，不引入反向依赖）；`Queue.Consume` 在 `DiscardOnError` 与普通重试之前识别该标记，调用新增的 `Queue.RetryInFlight` 按 `ConsumeOptions.InFlightDelay` 重新入队。该路径不改 `RetryNum`、不受 `MaxRetries` 限制；`consumer/queues.go` 把延迟设为 `DefaultProcessingLease`（5 分钟），确保副本不会与仍持有租约的 handler 抢跑。回归测试覆盖两条规则：`MaxRetries=1` 下两次在途重投后仍能成功、`DiscardOnError=true` 时在途消息不被丢弃。
 
 ### 2.2 P1
@@ -67,6 +68,7 @@
 - **证据**：`gofy/daemon.go:31-37` 用 `process.Detach(executable, args)`（不带 NotifyEnv/ExtraFiles），随即 `c.Success("已在后台启动")`；`gofy/start.go:222` 的 `markReady()` 从不调用 `notifier.ready()`（唯一调用在 `gofy/worker_host.go:247`）；`gofy/start.go:875` 的 `a.notifier.failed(err)` 因 `notifierFromEnv()` 为 nil 而 no-op。
 - **风险**：端口被占、pid 判重失败、Nacos 注册失败或模块 Start 失败时子进程静默退出，父进程仍打印成功；worker 的 daemon 路径却有完整 fd 3 握手（`worker_host.go:409-416`），两条路径不对称。
 - **建议**：`start` 复用 worker 的 `DetachWithNotify` + `awaitWorkerStartup`，并在 HTTP `run()` 就绪后发 `notifier.ready()`。
+
 - **修复（2026-11-18）**：`start` 改用 `detachProcessNotify`（`process.DetachWithNotify`），父进程在 `--startup-timeout`（默认 30s，新增同名旗标）内等待 fd 3 上的就绪行；`run()` 在 listener 可用、模块启动、Nacos 注册完成后调用 `notifier.ready()`，失败路径由 `abort()` 写 `error: ...`。回归测试覆盖父进程收到 ready、子进程报错、子进程静默退出，以及 HTTP 启动失败上报。
 
 #### A2 · `Shutdown()` 停机时 runCtx 取消排在 DB 关闭之后（P1 · 已复核 · 已修复）
@@ -74,6 +76,7 @@
 - **证据**：`gofy/start.go:101` `run` 用 `context.WithCancelCause(parent)` 建 runCtx 并存入 `a.cancel`；`gofy/start.go:846-850` 的 `Shutdown()` 只 `close(a.stopCh)`；`gofy/start.go:930-956` 的 cleanup 顺序为模块 Stop → `gofydb.Close` → telemetry Shutdown → `a.cancel(nil)`。
 - **风险**：凡按 `core/runtime.go:115-117` 监听 `rt.Context().Done()` 的后台 goroutine，直到 DB/logger 释放后才收到信号，期间可能 use-after-close；模块 Stop 若等待该 ctx，会卡满 shutdown 预算。
 - **建议**：把 `a.cancel(nil)` 提到 cleanup 开头（registrar.Stop 之前），保留末尾的幂等取消。
+
 - **修复（2026-11-18）**：`cleanup()` 在获取 Reload 锁、注销 Nacos、停模块、关 DB 之前先调用 `a.cancel(nil)`，末尾保留幂等的第二次取消；回归测试断言模块 `Stop` 执行时 `Runtime.Context()` 已经取消。
 
 #### B4 · 消费台账列类型硬编码 MySQL `datetime(3)`，PG/SQLite 方言分支形同虚设（P1 · 已复核）
@@ -99,6 +102,7 @@
 - **证据**：`gofy/support/nacos/sync.go:33-39` 顶层 `Sync` 每次 `NewClient(cfg)` 后直接返回 `client.Sync(ctx)`；`gofy/support/nacos/watch.go:116-207` 的 `NewWatcher/Watch/Run` 全程无 `client.Close()`，Watcher 也没有 Close；`gofy/support/nacos/client.go:83` 定义了 `Close()`，包内无调用点。
 - **风险**：`client.go:69` 每次 `http.DefaultTransport.Clone()` 生成独立连接池，频繁 Sync 或 Watch 退出后，空闲连接与读 goroutine 滞留累积。
 - **建议**：`Sync` 内 `defer client.Close()`；Watcher 加 `Close()`，或在 `Run` 开头 `defer w.client.Close()`。
+
 - **修复（2026-11-18）**：顶层 `Sync` 在返回前 `defer client.Close()`；`Watcher` 新增 `Close()`，`Run` 在入口 `defer w.Close()`，覆盖每个返回路径（exec 策略除外，进程映像已被替换）。回归测试用服务端 `ConnState` 断言 `Sync` 返回后连接关闭，并用记录型 transport 断言 `Run` 退出时调用 `CloseIdleConnections`。
 
 #### D1 · `validate:required` 零值被编码器静默丢弃，与 docgen required 漂移（P1 · 已知遗留 P2-01 · 已修复）
@@ -106,6 +110,7 @@
 - **证据**：`interface-api/client/encode.go:395,424,450` 的 collectForm/collectHeaders/collectCookies 均忽略 tag options，靠 `isZero` 跳过；`interface-api/docgen/schema.go:243-260` `fieldRequired` 对 `required` / 非指针字段返回 true，`docgen/operation.go:140,155,169` 直接写进 required。另 `docgen/operation.go:105-107` 跳过 uri+form 双 tag 的 form 字段，而 `client/encode.go:393` 不跳过（`ItemRequest` 会多发 `?id=7`）。
 - **风险**：文档标必填，GET/上传在零值时漏发 query/header/cookie/form；JSON body 走 `json.Marshal` 不受影响，同一字段跨方法表现不一。
 - **建议**：抽 `endpoint.FieldRequired` 作为 docgen 与编码器的唯一判定源；顺带对齐双 tag 跳过规则。该项在 2026-11-17 复核中列为暂缓，本轮不实现。
+
 - **修复（2026-11-18）**：
   - 新增 `contracts/common/endpoint/fields.go`：`endpoint.FieldRequired(field, tag)` 是 docgen 与编码器的唯一判定源，优先级为 omitempty 选项/tag → default tag → `validate:"required"` → `validate:"omitempty"` → 非指针默认必填；`endpoint.PathParamName(field)` 统一 uri 名（`uri:"-"` 视为无）。
   - docgen 删除本地 `fieldRequired` 与 `parseTagOptions`，schema/operation 的 required 标记与 form 分组全部改走 `endpoint.FieldRequired` / `endpoint.PathParamName`。
@@ -129,6 +134,7 @@
 - **证据**：`interface-api/docgen/openapi.go:59` 用 `cfg.prefixFor(spec.Tags)+spec.Path`，`Build` 读不到 `Group.Prefix`；`interface-api/client/encode.go:49` 只拼 `opts.pathPrefix`（默认空），`client/options.go:71-74` 把责任交给调用方。
 - **风险**：文档路径带部署前缀、client 默认不带 → 404；两套来源（Tags / Config.Prefixes vs 手传）之间没有守卫。
 - **建议**：让描述符自身携带前缀，client 自动拼接，docgen 复用同一来源；过渡期加启动期一致性断言。
+
 - **修复（2026-11-18）**：
   - `endpoint.Spec.Prefix` 由 `Group.Add` 在声明阶段写入（未分组路由保持空）；`endpoint.JoinPath` 按段边界拼接并去重重叠，同时兼容「分组前缀 + 相对路径」与「分组名 + 完整路径」两种既有形态。
   - client 的 `buildRequest` 自动拼接描述符前缀，`WithPathPrefix` 改为更外层的挂载前缀；生成的 demo client 与模板不再逐调用传 `orderroute.X.Prefix`。
@@ -141,6 +147,7 @@
 - **证据**：`adapter/client/nacos/resolver.go:194-195` `cache/rr` 按 `service@group` 永驻（`inflight` 每次刷新结束即删，见 `:488,514`，不在此列）；`:296-301` `Close()` 仅 `r.client.Close()`，不清 map、不置 closed；`:362` 键拼接无转义。
 - **风险**：高基数服务名内存单调增长；Close 后 `Resolve` 仍会打已关闭的连接且缓存不释放；服务名含 `@` 时键可能碰撞。
 - **建议**：Close 加锁清 `cache/rr` 并置 `closed`，入口拒绝已关闭调用；键改用结构化分隔（含长度或 JSON 编码）。
+
 - **修复（2026-11-18）**：
   - `Close()` 加锁置 `closed`、清空 `cache` 与 `rr`，再关闭客户端；幂等，之后 `Resolve` 返回 `ErrClosed`。
   - 回源完成的 leader 重新取锁后先查 `closed`：若 `Close` 已发生则不回填 `cache/rr`，把 `ErrClosed` 发布给等待者并从 `inflight` 移除，避免结算后重新长回来。
@@ -154,45 +161,65 @@
 
 `gofy/stop.go:146-158` 发出 SIGKILL 后直接返回，不删文件。正常 `SIGTERM` 停止时被停进程自己的 cleanup（`gofy/start.go:961-965` 的 `RemoveIfOwner`）会删除 pid 文件，`stop.go:134-138` 不重复删是正确的；残留只发生在进程来不及执行清理的场景（SIGKILL、OOM kill、`-9` 后立刻断电）。→ `stop` 在确认退出后统一 `pidfile.RemoveIfOwner`。
 
-#### A4 · 自定义命令保留字漏 `restart` / `status`
+#### A4 · 自定义命令保留字漏 `restart` / `status` · 已修复（2026-11-18）
 
 `gofy/command/command.go:31-39` 的 `reservedNames` 缺这两个；`gofy/internal/commandline/commandline.go:134-143` 先注册内建命令再追加自定义，cobra 同名取先加入者。→ 补齐保留字，或改为从 commandline 常量表生成。
 
-#### A5 · 去重路径把 `IdentityUnknown` 当成「确有其它实例」
+- **修复（2026-11-18）**：`reservedNames` 补齐 `restart`、`status`；`command/command_test.go` 增加同名拒绝用例，自定义命令不能再占用这两个内建子命令名。
+
+#### A5 · 去重路径把 `IdentityUnknown` 当成「确有其它实例」 · 已修复（2026-11-18）
 
 `gofy/start.go:667-670`、`gofy/worker_host.go:360-364` 只在 `IdentityMismatch` 时放行，其余（含 Unknown）按 `process.Alive` 判重——token 校验失败但 pid 存活就拒绝启动，而本机 pid 复用是常态。`stop.go:107-116` 对 Unknown 只 Warn 后照常发信号，不做判重，不属此问题。→ start/worker 两处：Unknown 视为无效记录直接覆盖。
 
-#### A6 · 模块 Start/Stop 缺 panic 恢复
+- **修复（2026-11-18）**：`start.go:706` 与 `worker_host.go:363,394` 的判重条件改为只有 `IdentityMatch` 才视为「确有其它实例」，`IdentityUnknown` 按无效记录覆盖。`TestStalePIDFileIsOverwritten` 覆盖无 token 的旧记录在 pid 存活时被覆盖。
+
+#### A6 · 模块 Start/Stop 缺 panic 恢复 · 已修复（2026-11-18）
 
 `gofy/start.go:492-499,535-545` 的 factory/register 有 recover，但 `startModules`（`:553`）、`reload.go:358` 的 stopModuleList、cleanup（`:934`）没有。→ 每处 Start/Stop 包一层 recover 转 error，避免 cleanup 半途中断漏清 pid/DB/logger。
 
-#### B2 · `succeed` 台账失败只有一行 Warn（X-1 的真实残留）
+- **修复（2026-11-18）**：`startModule` / `stopModule` 用 `recover` 把 panic 转成 error，`startModules`、`stopModuleList` 与 `cleanup` 都经它们调用。回归测试 `TestModulePanicsBecomeErrors`、`TestStopModuleListContinuesAfterPanic` 覆盖启动与停止两个方向。
+
+#### B2 · `succeed` 台账失败只有一行 Warn（X-1 的真实残留） · 已修复（2026-11-18）
 
 `gofy/support/consumer/consume.go:468-485`。→ 加指标/告警，并在文档里明确「done 路径依赖业务幂等，dead 路径才保证落库」。
 
-#### B8 · `processing` 租约不续期，且 `NewProcessor` 不约束 handler 耗时
+- **修复（2026-11-18）**：新增 `ProcessorConfig.OnLedgerError func(messageID string, err error)`，done/failed 台账写失败时与 Warn 一并触发，调用方可接指标或告警。`ProcessingLease` 文档明确 ACK 跟随 handler 结果而非台账：done 路径依赖业务幂等，只有 dead 台账保证落库。`TestLedgerSurfacesFailedDoneMarker` 用改名表制造写失败，断言 handler 仍返回成功且钩子收到 messageID。
+
+#### B8 · `processing` 租约不续期，且 `NewProcessor` 不约束 handler 耗时 · 已修复（2026-11-18）
 
 `gofy/support/consumer/consume.go:727-828` 进入时写一次 `updated_at`；`:324-363` 不校验 `ProcessingLease` 与 handler 超时（对比 `support/claim/runner.go:220-223` 有强制校验）。→ 执行期按 attempts CAS 刷新 `updated_at`，或在构造期强制 lease ≥ handler 超时。
 
-#### B9 · 台账只增不删；AMQP 无稳定 ID 时幂等形同虚设
+- **修复（2026-11-18）**：`NewProcessor` 在 lease 生效后设置 `renewInterval = lease/3`（下限 10ms）；`runHandler` 在 handler 执行期间按 ticker 以 `consumer+message_id+attempts` 围栏刷新 `updated_at`，`ErrStaleClaim` 时停止，handler 返回时 cancel 并 join 协程（panic 也不泄漏）。`ProcessingLease` 不再需要覆盖整个 handler 时长，文档改为「每三分之一窗口续期、handler 仍需幂等、lease 不短于 broker 重投间隔」。`TestRunHandlerRenewsLeaseWhileRunning`、`TestDeduperRenewFencesStaleAttempt` 覆盖续期与围栏。
+
+#### B9 · 台账只增不删；AMQP 无稳定 ID 时幂等形同虚设 · 已修复（2026-11-18）
 
 `gofy/support/consumer/consume.go:929-992` 全是 `Updates`，无 Delete/归档；`support/claim/claim.go:773-793` 的 done/dead 行同样保留；`consume.go:377-382` 空 ID 补 `uuid.NewString()`，`support/consumer/amqp.go:298-338` 无 MessageId 时返回空串并自承「disables deduplication」。→ 加 `Prune`/TTL 分区；无稳定 ID 时启动告警或用 body hash 兜底键。
 
-#### C2 · `Configure` 换代泄漏旧代连接池
+- **修复（2026-11-18）**：新增 `Processor.Prune(ctx, olderThan)`、`Queue.Prune` 与 `Runner.Prune`，只删除 done/dead 终态行，窗口按数据库时钟比较（未知方言回退 Go 时钟），非正窗口返回 `ErrInvalidPruneWindow`；`elapsedPredicate` 由租约判定与清理共用。AMQP 与延迟 AMQP 消费者在 `Idempotency=true` 且投递无稳定 ID 时按消费者 Warn 一次，说明该队列无法去重、生产端必须设置 MessageId；不使用 body hash 兜底（会合并合法重复内容）。回归测试覆盖终态清理边界（`TestLedgerPruneRemovesOnlyOldTerminalRows`、`TestPruneRejectsNonPositiveWindow` 及 MySQL 集成用例）与无幂等时 `Prune` 不做事。
+
+#### C2 · `Configure` 换代泄漏旧代连接池 · 已修复（2026-11-18）
 
 `gofy/support/db/io.go:57-64,101-106` 的 `Install()` 无条件 `current.Store(r)`；`redis/io.go:97-102`、`sqlite/io.go:98-103`、`pg/io.go` 同构，`Close()` 只在 `current==r` 时 CAS 清 nil。→ `Install` 返回 `Swap` 出来的旧代并由 Configure 关闭，或 API 强制调用方持有并 Close。
 
-#### C3 · Nacos 长轮询两端都缺保护
+- **修复（2026-11-18）**：七个命名实例注册表（db/redis/sqlite/pg/amqp/kafka/rocketmq）的 `Install()` 改为返回 `current.Swap` 换下的旧代，`Configure` 负责关闭它（关闭失败返回 `close displaced generation` 包装错误）；直接 `Install` 的调用方自己负责关闭，demo 的按代句柄仍走 `NewRegistry + Install`。`TestConfigureClosesDisplacedGeneration` 用 SQLite 池断言旧代在换代后既不可用（`ErrNotConfigured`）也已关闭。
+
+#### C3 · Nacos 长轮询两端都缺保护 · 已修复（2026-11-18）
 
 `gofy/support/nacos/client.go:131-141` 把 ctx 超时抬到 `hold=max(PollTimeout,30s)+Timeout`，但 `Long-Pulling-Timeout` 头仍发未抬升的 `PollTimeout`；`watch.go:186-188` 在 `changed==false` 时直接 `continue`，无退避（Listen 本身阻塞，仅服务端异常立即返回时才接近忙循环）。→ header 改用 `hold`，并对过快返回加 `RetryDelay` 休眠。
 
-#### C5 · `uuidint.WithRetry(0)` 让主连接零次尝试
+- **修复（2026-11-18）**：`Long-Pulling-Timeout` 头改用与 ctx 截止时间相同的 `listenHold()`（`max(PollTimeout, 30s)`）；`Watcher.Run` 记录 Listen 耗时，`changed==false` 且耗时不足 `hold/2` 时按 `RetryDelay` 退避，避免服务端/代理提前返回造成的紧循环，正常挂满超时的空响应不额外等待。`TestListenEncodesRequest` 断言头部为 30000，新增 `TestWatcherBacksOffOnFastNoChange` 断言快速空响应下请求数受限。
+
+#### C5 · `uuidint.WithRetry(0)` 让主连接零次尝试 · 已修复（2026-11-18）
 
 `gofy/support/uuidint/uuidint.go:163-175` 只拒绝负数；`:367` 使 `for attempt < 0` 一次不执行（主源零次尝试；有 fallback 时仍会试一次 fallback）；无 fallback 且全程无错误时 `errors.Join()` 空参返回 nil，`:401` 末尾拼出 `%!w(<nil>)` 且 `onError(nil)`。→ `times==0` 回落默认 3，且无 errs 时返回干净的 `ErrUnavailable`。
 
-#### C6 · JWT 非数字 `exp` 被当作「无过期」放行（默认配置下）
+- **修复（2026-11-18）**：`WithRetry(0, d)` 回落到默认 3 次（负数仍报错），`New` 与 Option 共用 `defaultRetryTimes`；`generate` 在主连接没有任何错误可报（或 fallback 后 `errors.Join` 为空）时直接返回 `ErrUnavailable`，不再拼出 `%!w(<nil>)`，也不会以 `nil` 调用 `onError`。`TestWithRetryZeroUsesDefaultAttempts` 用不可达 Redis 断言错误链、错误文本与告警参数。
+
+#### C6 · JWT 非数字 `exp` 被当作「无过期」放行（默认配置下） · 已修复（2026-11-18）
 
 `gofy/support/jwtauth/jwt.go:225-232` 仅当 `numericDate` 返回 ok 才校验过期；`:230-231` 在 `RequireExpiry=true` 时缺失会报 `ErrMissingExpiry`，但默认 `RequireExpiry=false`，且 `:268-285` 只接受 `json.Number`/`float64`——字符串/null/bool 形式的 `exp` 存在却按「无过期」放行。→ `exp` 存在但不可解析时报 `ErrMalformed`，并考虑默认要求 expiry。
+
+- **修复（2026-11-18）**：`exp` 存在但 `numericDate` 解析失败（字符串、`null`、bool 等）一律返回 `ErrMalformed`，不再落入「没有 exp」分支；`RequireExpiry` 的零值语义保持为「接受无 exp 的 token」，但文档明确表示存在但不可解析的 exp 与本开关无关，需要限定有效期的部署应显式开启。`TestParseRejections` 新增字符串/null 用例，`TestParseExpiryLeewayAndRequirement` 断言 `RequireExpiry=true` 下字符串 exp 报 `ErrMalformed` 而非 `ErrMissingExpiry`。
 
 #### D5 · `data` 缺失或为 `null` 一律返回 `(nil, nil)`
 
@@ -375,16 +402,16 @@
 | D4 | P1 | Group Prefix 在文档与请求之间没有一致性保证 | 是（2026-11-18） |
 | E3 | P1 | Resolver 的 `cache` / `rr` 无上限，`Close` 只关连接不清状态 | 是（2026-11-18） |
 | A3 | P2 | SIGKILL / 进程无法执行清理时 pid 文件残留 | 否 |
-| A4 | P2 | 自定义命令保留字漏 `restart` / `status` | 否 |
-| A5 | P2 | 去重路径把 `IdentityUnknown` 当成「确有其它实例」 | 否 |
-| A6 | P2 | 模块 Start/Stop 缺 panic 恢复 | 否 |
-| B2 | P2 | `succeed` 台账失败只有一行 Warn（X-1 的真实残留） | 否 |
-| B8 | P2 | `processing` 租约不续期，且 `NewProcessor` 不约束 handler 耗时 | 否 |
-| B9 | P2 | 台账只增不删；AMQP 无稳定 ID 时幂等形同虚设 | 否 |
-| C2 | P2 | `Configure` 换代泄漏旧代连接池 | 否 |
-| C3 | P2 | Nacos 长轮询两端都缺保护 | 否 |
-| C5 | P2 | `uuidint.WithRetry(0)` 让主连接零次尝试 | 否 |
-| C6 | P2 | JWT 非数字 `exp` 被当作「无过期」放行（默认配置下） | 否 |
+| A4 | P2 | 自定义命令保留字漏 `restart` / `status` | 是（2026-11-18） |
+| A5 | P2 | 去重路径把 `IdentityUnknown` 当成「确有其它实例」 | 是（2026-11-18） |
+| A6 | P2 | 模块 Start/Stop 缺 panic 恢复 | 是（2026-11-18） |
+| B2 | P2 | `succeed` 台账失败只有一行 Warn（X-1 的真实残留） | 是（2026-11-18） |
+| B8 | P2 | `processing` 租约不续期，且 `NewProcessor` 不约束 handler 耗时 | 是（2026-11-18） |
+| B9 | P2 | 台账只增不删；AMQP 无稳定 ID 时幂等形同虚设 | 是（2026-11-18） |
+| C2 | P2 | `Configure` 换代泄漏旧代连接池 | 是（2026-11-18） |
+| C3 | P2 | Nacos 长轮询两端都缺保护 | 是（2026-11-18） |
+| C5 | P2 | `uuidint.WithRetry(0)` 让主连接零次尝试 | 是（2026-11-18） |
+| C6 | P2 | JWT 非数字 `exp` 被当作「无过期」放行（默认配置下） | 是（2026-11-18） |
 | D5 | P2 | `data` 缺失或为 `null` 一律返回 `(nil, nil)` | 否 |
 | D6 | P2 | `Retry:0` / `Timeout:0` 无法表达「显式禁用」 | 否 |
 | D7 | P2 | BaseURL 带 query 时路径被拼进 query 串 | 否 |

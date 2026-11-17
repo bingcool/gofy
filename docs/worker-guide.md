@@ -215,6 +215,8 @@ func scanLoop(ctx context.Context, q *claim.Queue) error {
 
 `Succeed`/`Fail` 返回 `claim.ErrLeaseLost` 时，说明租约过期后行被别人接走了。**这时不要重放副作用**：短信可能已经发过两次。
 
+终态行不会自动消失：`Queue.Prune(ctx, olderThan)` / `Runner.Prune` 删除窗口之外的 `Done` / `Dead` 行，`Pending` / `Claimed` 永不删除；窗口按数据库时钟比较，非正值返回 `ErrInvalidPruneWindow`。清理不内置调度，按日或按周的维护 worker/脚本调用即可，窗口要大于最长重试链与排查所需时间。
+
 ### 4.2 MQ 消费
 
 ```go
