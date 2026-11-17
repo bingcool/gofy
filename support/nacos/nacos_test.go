@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -608,5 +610,95 @@ func TestSnippetTruncates(t *testing.T) {
 	}
 	if snippet(nil) != "empty response" {
 		t.Fatal("empty snippet")
+	}
+}
+
+// TestSyncClosesItsClient pins C1: the one-shot Sync builds a client with its
+// own transport, so it must close its idle connections when the call ends. The
+// server-side connection count is the observable part: an unclosed connection
+// stays ESTABLISHED after Sync returns.
+// TestSyncClosesItsClient 固定 C1：一次性 Sync 会构建持有独立 transport 的客户端，调用
+// 结束时必须关闭其空闲连接。服务端连接数是可观察的证据：未关闭的连接在 Sync 返回后仍保持
+// ESTABLISHED。
+func TestSyncClosesItsClient(t *testing.T) {
+	fake := &fakeServer{content: "env: dev\n"}
+	server := httptest.NewUnstartedServer(fake)
+	var open atomic.Int32
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	cfg := testConfig(t, server.URL, filepath.Join(t.TempDir(), "config.yaml"))
+	if _, err := Sync(context.Background(), cfg); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return open.Load() == 0 }, "client connection closed")
+}
+
+// closeTrackingTransport records CloseIdleConnections calls without changing
+// how requests are sent.
+// closeTrackingTransport 记录 CloseIdleConnections 的调用次数，不改变请求发送方式。
+type closeTrackingTransport struct {
+	base   http.RoundTripper
+	closed atomic.Int32
+}
+
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(req)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.closed.Add(1)
+}
+
+// TestWatcherRunClosesItsClient pins the other C1 call site: Run owns the
+// client created by NewWatcher, so every return path closes its idle
+// connections. The explicit Close stays available for a watcher that is built
+// but never run.
+// TestWatcherRunClosesItsClient 固定 C1 的另一处调用点：Run 拥有 NewWatcher 创建的
+// 客户端，每个返回路径都关闭其空闲连接；构建后从未启动的 watcher 仍可显式 Close。
+func TestWatcherRunClosesItsClient(t *testing.T) {
+	fake := &fakeServer{content: "env: dev\n"}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	cfg := testConfig(t, server.URL, filepath.Join(t.TempDir(), "config.yaml"))
+	w, err := NewWatcher(cfg)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	tracker := &closeTrackingTransport{base: http.DefaultTransport}
+	w.client.http.Transport = tracker
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	waitFor(t, 5*time.Second, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return fake.getCount > 0
+	}, "initial sync")
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop after cancel")
+	}
+	if tracker.closed.Load() == 0 {
+		t.Fatal("Run returned without closing its client")
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("explicit Close: %v", err)
 	}
 }

@@ -141,11 +141,29 @@ func Watch(ctx context.Context, cfg Config, opts ...WatchOption) error {
 	return w.Run(ctx)
 }
 
+// Close releases the idle connections of the client the watcher created. Run
+// calls it on return, so the explicit call is only needed when a Watcher was
+// built but never started.
+// Close 释放 watcher 自建客户端的空闲连接。Run 返回时会调用它，因此只有构建了
+// Watcher 却从未启动时才需要显式调用。
+func (w *Watcher) Close() error {
+	if w == nil {
+		return nil
+	}
+	return w.client.Close()
+}
+
 // Run blocks until ctx is cancelled. Listener and apply failures are logged
 // and retried after RetryDelay; a bad remote config never replaces the file.
 // Run 阻塞直到 ctx 被取消。监听或应用失败会记录日志并在 RetryDelay 后重试；
 // 远端配置非法时不会替换本地文件。
 func (w *Watcher) Run(ctx context.Context) error {
+	// The watcher builds its own client in NewWatcher; close its idle
+	// connections on every return path. Exec skips defers, but the process
+	// image replaces the transport then anyway.
+	// watcher 在 NewWatcher 里自建客户端；每个返回路径都要关闭它的空闲连接。
+	// exec 会跳过 defer，但那时进程映像已经连同 transport 一起被替换。
+	defer w.Close()
 	if ctx == nil {
 		ctx = context.Background()
 	}

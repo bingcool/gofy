@@ -204,6 +204,9 @@ nacos:
 
 返回 `Result{File, Digest, Changed}`，`Digest` 是远端内容的 MD5。
 
+顶层 `Sync(ctx, cfg)` 为这次调用自建客户端，返回前会关闭它的空闲连接；需要反复调用时
+用 `NewClient` 复用同一个 `*Client`，并在结束时调用 `Close`。
+
 ### Watch
 
 ```go
@@ -223,7 +226,9 @@ go nacos.Watch(ctx, nx,
 - `WithDrain` 只在 `restart` / `exit` 策略下、动作执行前调用，用于停止接受新请求；
   错误只记录日志，不取消动作。钩子内不要调用 `App.Shutdown`（会与 watcher 自等待）；
 - `WithRestartOnChange(pidFile)` 是 `config_change_strategy: exit` 的兼容写法，
-  强制发送 SIGTERM 交给 supervisor 重启；推荐改用配置化策略。
+  强制发送 SIGTERM 交给 supervisor 重启；推荐改用配置化策略；
+- `Watcher` 自建的客户端归 `Run` 所有：退出时关闭空闲连接。只构建、不启动的
+  `Watcher` 用 `Close()` 释放。
 
 **命令边界**：
 

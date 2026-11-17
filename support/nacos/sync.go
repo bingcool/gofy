@@ -35,6 +35,11 @@ func Sync(ctx context.Context, cfg Config) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// The client owns a dedicated transport; without Close its idle
+	// connections and read goroutines outlive this one-shot call.
+	// 客户端持有独立的 transport；不 Close 的话，它的空闲连接与读 goroutine
+	// 会比这次一次性调用活得更久。
+	defer client.Close()
 	return client.Sync(ctx)
 }
 
