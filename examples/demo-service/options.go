@@ -55,6 +55,14 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		// 全部分组，`worker --group=<分组>` 只运行其中一个。
 		opts = append(opts, gofy.WithWorkerGroups(groups...))
 	}
+	// Health endpoints are a property of this deployment's configuration, not of
+	// the process asking: `status` runs in another process and has to know
+	// whether probing the target's /healthz is meaningful. Registering them has
+	// no effect outside a server, so the control commands can carry the flag.
+	// 健康端点是这套部署的配置属性，不是"发问的那个进程"的属性：`status` 跑在另一个
+	// 进程里，它需要知道探测目标的 /healthz 是否有意义。注册路由在服务之外没有副作用，
+	// 因此控制类命令也带着这个开关。
+	opts = append(opts, gofy.WithHealthEndpoints(true))
 	if !plan.BuildServices {
 		return opts
 	}
@@ -63,7 +71,6 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		gofy.WithHTTP(cfg.HTTP),
 		gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
 		gofy.WithNacosRegistration(nacosCfg),
-		gofy.WithHealthEndpoints(true),
 		// 把入口请求的白名单 Header 注入上下文，供 demoserviceclient 转发到下游；
 		// 身份头只有在 WithTrustedProxies 命中的代理转发时才采信。
 		gofy.WithHeaderPropagation(true),

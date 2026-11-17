@@ -643,6 +643,8 @@ $ go run . worker --list
 │ group1 │ order-heartbeat                 │ 1           │
 ├────────┼─────────────────────────────────┼─────────────┤
 │ group2 │ report-summary                  │ 1           │
+├────────┼─────────────────────────────────┼─────────────┤
+│ group3 │ discovery-check                 │ 1           │
 └────────┴─────────────────────────────────┴─────────────┘
 run every group: worker --group=all (an unquoted * is expanded by the shell)
 ```
@@ -658,6 +660,31 @@ $ go run . worker --group=group1
 
 `workers:17` 是这个分组的成员数（扫描 1 + 四个生产者 + 十一个消费者 + 心跳 1），不是实例数；
 `order-scan` 起了 2 个 goroutine，靠日志里的 `worker` 字段区分（`#0`、`#1`）。
+
+## 查看与停止
+
+`worker status` 读 pid 文件报告本机每个 worker 进程，不发信号、不连数据库、不访问 Nacos：
+
+```bash
+$ ./demo-service worker status
+┌────────┬───────┬─────────┬────────┬────────────────────────────────────┐
+│ GROUP  │ PID   │ STATUS  │ UPTIME │ PID FILE                           │
+├────────┼───────┼─────────┼────────┼────────────────────────────────────┤
+│ group3 │ 60960 │ running │ 3s     │ app/demo-service-worker-group3.pid │
+└────────┴───────┴─────────┴────────┴────────────────────────────────────┘
+```
+
+分组分别启动时各写一个 pid 文件，因此不带 `--group` 会列出全部，`--group=group3` 只查那一份。
+进程已经死掉（强杀、OOM）时 pid 文件还在，状态显示 `stopped`；pid 被内核分配给别的进程时
+显示 `stale`，此时 `stop` 会删掉这个文件而不是对着它发信号。两者都以退出码 1 结束，脚本
+可以直接判断。`--json` 输出同一份数据，字段固定。
+
+停止与重启：
+
+```bash
+$ ./demo-service worker stop --group=group3          # 需输入 yes 确认
+$ ./demo-service worker restart --group=group3 --force=1
+```
 
 整组启动意味着四个 broker 都要在。本地只有数据库与 Redis 时，用 `--name` 挑一个跑：
 

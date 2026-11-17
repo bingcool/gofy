@@ -76,6 +76,16 @@ func TestPlanCommand(t *testing.T) {
 			want: commandPlan{Kind: "worker-stop", LoadConfig: true},
 		},
 		{
+			name: "worker status only needs the pid path",
+			args: []string{"worker", "status", "--group=group1"},
+			want: commandPlan{Kind: "worker-status", LoadConfig: true},
+		},
+		{
+			name: "status reads the config it reports on",
+			args: []string{"status"},
+			want: commandPlan{Kind: "status", LoadConfig: true},
+		},
+		{
 			name: "worker restart pulls the config it will start on",
 			args: []string{"worker", "restart", "--group=group1"},
 			want: commandPlan{Kind: "worker-restart", LoadNacos: true, Sync: true, LoadConfig: true, RegisterGroups: true, BuildServices: true},

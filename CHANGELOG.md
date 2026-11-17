@@ -296,6 +296,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- CLI: `status` reports the HTTP instance from its pid file and `worker status`
+  reports every worker process that left one, or the selected group. Both are
+  read-only — no signal, no database, no Nacos — so they answer while the
+  service is down and the config center is unreachable. Four states are kept
+  apart: `running`, `stopped` (the pid exited, the file is a leftover), `stale`
+  (the kernel handed the pid to another process) and `missing`; when the
+  platform cannot prove the pid is still ours the row says
+  `running (unverified)` instead of claiming a match. Uptime comes from the pid
+  file's claim time, so it needs no platform-specific process inspection.
+  `--json` emits the same document for scripts, and "nothing is running" still
+  exits 1. The health field probes `/healthz` over loopback without the
+  environment proxy, and reports `disabled` when the target does not expose it.
+- `examples/demo-service`: `status` and `worker status` are classified as
+  read-only commands — config only, no services, no Nacos, no broker — so an
+  operator can inspect a host whose dependencies are down. Health endpoints are
+  registered for every plan, because `status` runs in another process and has to
+  know whether probing the target's `/healthz` is meaningful.
 - `support/nacos`: `discovery_service_client.timeout_ms` (default 2000) bounds one
   instance-list request. Discovery sits on the request path, so it no longer
   inherits the config-center `Timeout` (10s). `DiscoveryConfig.Validate` checks

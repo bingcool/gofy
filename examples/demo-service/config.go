@@ -90,6 +90,14 @@ func planCommand(args []string) commandPlan {
 		// read.
 		// 只发信号：pid 路径来自 config.yaml，其余文件一概不读。
 		return commandPlan{Kind: "stop", LoadConfig: true}
+	case "status":
+		// Read-only: the pid path and the listen address come from config.yaml,
+		// and neither the database nor Nacos is touched. Asking what is running
+		// must work while the service is down, and must not block on a config
+		// center the process may have lost.
+		// 只读：pid 路径与监听地址来自 config.yaml，数据库与 Nacos 都不碰。询问"在跑什么"
+		// 必须在服务停着时可用，也不能被那个进程可能已经连不上的配置中心挡住。
+		return commandPlan{Kind: "status", LoadConfig: true}
 	case "restart":
 		return commandPlan{Kind: "http-restart", LoadNacos: true, Sync: true, LoadConfig: true, BuildServices: true}
 	case "script":
@@ -142,9 +150,14 @@ func planWorker(args []string) commandPlan {
 	if index < 0 {
 		return commandPlan{Kind: "worker-run", LoadConfig: true, RegisterGroups: true, BuildServices: true}
 	}
-	switch workerSubcommand(args[index+1:]) {
-	case "stop":
-		return commandPlan{Kind: "worker-stop", LoadConfig: true}
+	sub := workerSubcommand(args[index+1:])
+	switch sub {
+	case "stop", "status":
+		// Both only read pid files: no broker connections and no Nacos, so a
+		// worker can be inspected and stopped while its dependencies are down.
+		// 两者都只读 pid 文件：不建 broker 连接也不碰 Nacos，因此依赖挂着时仍能查看和
+		// 停止 worker。
+		return commandPlan{Kind: "worker-" + sub, LoadConfig: true}
 	case "restart":
 		return commandPlan{Kind: "worker-restart", LoadNacos: true, Sync: true, LoadConfig: true, RegisterGroups: true, BuildServices: true}
 	default:
