@@ -36,7 +36,7 @@ type Config struct {
 	UUIDInt  appuuidint.Config              `yaml:"uuidint"`
 	Lock     gofylock.Config                `yaml:"lock"`
 	Order    OrderConfig                    `yaml:"order"`
-	Clients  ClientsConfig                  `yaml:"clients"`
+	Client   ClientConfig                   `yaml:"client"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
 	PIDFile  string                         `yaml:"pid_file"`
 	JWT      middleware.JWTConfig           `yaml:"jwt"`
@@ -114,6 +114,7 @@ func Load(ctx context.Context, path string) (*Config, error) {
 	if err := cfg.OTel.Validate(); err != nil {
 		return nil, fmt.Errorf("config: otel: %w", err)
 	}
+	cfg.Client.Normalize()
 	applyLogPaths(cfg)
 	return cfg, nil
 }

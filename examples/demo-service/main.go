@@ -84,6 +84,18 @@ func main() {
 		}
 	}
 
+	// The same address does double duty: registration publishes it as instance
+	// metadata, so a caller resolving this instance can use it instead of the pod
+	// IP, and the client falls back to it when a discovered instance is
+	// unreachable. It lives in config.yaml (pulled from the config center), which
+	// is exactly what makes a local process see dev's address.
+	// 同一个地址有两个用途：注册时作为实例 metadata 发布，解析到本实例的调用方可以用它
+	// 替代 Pod IP；客户端在解析到的实例不可达时用它兜底。它放在 config.yaml（从配置
+	// 中心拉取），本地进程因此拿到的正是 dev 的地址。
+	if plan.LoadConfig && nacosCfg.Register.Enabled {
+		nacosCfg.Register.SetInnerExternalBaseURI(cfg.Client.InnerExternalBaseURI)
+	}
+
 	// Downstream clients are built once per process, after the config is known
 	// and before any module starts. They are deliberately outside the reload
 	// path: the resolver's cache, cursor and singleflight table must survive a
@@ -93,7 +105,7 @@ func main() {
 	// 重启才会变。
 	var clients *serviceclients.Clients
 	if plan.BuildServices && plan.LoadNacos {
-		built, err := serviceclients.New(cfg.Clients, nacosCfg)
+		built, err := serviceclients.New(cfg.Client, nacosCfg)
 		if err != nil {
 			fatalf("init service clients: %v", err)
 		}
@@ -133,6 +145,20 @@ func main() {
 	// 必须在 Execute 启动监听之前发布 app：监听首次轮询就可能带来配置变更，
 	// 回调需要立刻能找到运行中的应用。
 	reload.app.Store(app)
+
+	// The clients report a degraded call through the application's logger, so
+	// they need a way to reach it. A getter, not a logger: App.Logger() answers
+	// a no-op until Execute builds the real one, and this line runs before that.
+	// The addressing line itself comes from the consumer (group3 logs the same
+	// Source() string at startup), because a log emitted here would be dropped
+	// by that no-op logger.
+	// 客户端通过 application 的 logger 报告降级，因此需要一条能拿到它的路径。给的是
+	// getter 而不是 logger：Execute 之前 App.Logger() 是 no-op，而这一行就发生在之前。
+	// 寻址信息由使用方打印（group3 启动时输出同一个 Source() 字符串）——在这里打会
+	// 被那个 no-op logger 丢掉。
+	if clients != nil {
+		clients.SetLogger(app.Logger)
+	}
 
 	if err := app.Execute(ctx); err != nil {
 		app.Logger().Error("demo-service exit", zap.Error(err))

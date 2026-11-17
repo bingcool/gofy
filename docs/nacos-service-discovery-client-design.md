@@ -24,6 +24,10 @@
    再被发现的节流窗口缓存）。两者都改为默认不走代理，确实需要时由调用方注入
    `*http.Client`。
 
+寻址配置随后按实际用法收敛了一次：原来的 `clients.demoservice.base_url`（每个下游一条）
+改成 `client.inner_external_base_uri` + `client.timeout`。语义从"钉死下游地址"变成"本服务
+自己在配置来源那套环境里的地址"：注册时写进实例 metadata，调用失败时作为降级目标（§4.7）。
+
 
 ## 1. 背景与结论
 
@@ -310,16 +314,34 @@ main.go: nacosCfg 加载后
    空闲连接，`serviceclients.Clients.Close()` 统一关闭，`main` 在 `app.Execute` 返回后
    defer 调用。
 
-#### 4.7 三种寻址方式的优先级
+#### 4.7 三种寻址方式
 
 `gclient.New` 已经保证 BaseURL 与 Resolver 二选一（`client/client.go:129-149`），接线层
 不要再判断，但**要在建 client 之前决定用哪种**：
 
 | 条件 | 构造 | 用途 |
 |---|---|---|
-| `clients.<name>.base_url` 非空 | `NewWithBaseURL` | 本地开发、联调、灰度直连 |
-| 否则 `nacos.enabled` 为真 | `NewWithResolver` | 生产按服务名寻址 |
-| 都不成立（显式 `nacos.enabled: false`） | 不建 client，注入 `ErrNotConfigured` 占位实现 | 无注册中心的单机跑法 |
+| `nacos.enabled` 为真 | `NewWithResolver`，另按需加一个指向 `inner_external_base_uri` 的降级 client | 生产按服务名寻址；本地开发靠降级 |
+| 否则 `client.inner_external_base_uri` 非空 | `NewWithBaseURL` | 离线、CI、灰度直连 |
+| 都不成立 | 不建 client，注入 `ErrNotConfigured` 占位实现 | 无注册中心的单机跑法 |
+
+`client.inner_external_base_uri` 是**本服务自己**在"配置来源那套环境"里的地址，不是
+下游地址表。它有两个使用方：
+
+- **注册**：写进实例 metadata 的 `inner_external_base_uri`
+  （`support/nacos.RegisterConfig.SetInnerExternalBaseURI`，会补 scheme、去尾斜杠），
+  解析到本实例的调用方可以拿它替代 Pod IP——办公网连不上 Pod IP，但连得上这个地址；
+- **本进程的客户端**：按服务名调用失败时改打它，重试一次。本地开发因此不必启动本地
+  服务：拉 dev 的 `config.yaml`（里面就是 dev 的地址），打没起的本地实例失败后降级到
+  dev 的部署。
+
+降级的判定是"**没有响应到达**"：`APIError` / `HTTPError` / `ProtocolError` 说明服务端
+答复了（哪怕是 500），不重试；调用方自己取消（`ctx.Err() != nil`）也不重试；但本客户端
+自己的 deadline 到期**会**重试，那正是 Pod IP 被黑洞的情形。只包读操作——把写重试到另一
+个实例不是兜底，是写两次。
+
+一个值够用，是因为 demo 只按一个服务名调用，而那个服务名就是它自己。一个服务调多个下游
+时兜底必须按下游分别配置，不能共用这一个值。
 
 `nacos.enabled` 是框架既有的总开关（`support/nacos/config.go` 的 `Load`：显式 false 才关，
 否则默认开），关掉它等于同时关掉拉取、注册与发现，不需要为发现再加一个开关。
@@ -335,12 +357,12 @@ IP；`nacos.New` 只校验端口，空地址会被 `normalize()` 补成 `127.0.0
 
 #### 4.9 怎么证明链路通了
 
-原稿的 `order → product` 不经过 HTTP（§3.4），证明不了任何事。可执行的验证是：
+原稿的 `order → product` 不经过 HTTP（§3.4），证明不了任何事。实际采用的验证是：
 
-- 新增 `script call-demo`（`--service`、`--base-url`、`--path`），走
-  `NewWithResolver` → `Resolve` → 真实 HTTP 调用 `/api/v1/order/config`；
+- `worker/group3`（`worker --group=group3`，每 5s）作为**独立进程**，用
+  `demoserviceclient` 走 resolver 调 `GET /api/v1/order/config`；
 - 需要自发现时打开 `enable_nacos_register: true`，本进程注册后由 resolver 解析回自己；
-- 补充 `internal/integration/nacos` 的 `yaml → Resolve` 用例（§4.10）。
+- `internal/integration/nacos` 已有 `注册 → 发现 → 类型化调用 → 注销后不可发现` 的用例（§4.10）。
 
 ### 阶段二（P2）：adapter 提供入口，不新增 gofy Option
 
@@ -362,7 +384,7 @@ IP；`nacos.New` 只校验端口，空地址会被 `normalize()` 补成 `127.0.0
 4. `load_balancer` 非法值：在 `config.Load` 层断言错误信息带键名。
 5. 文档：七个键 + `timeout_ms` 的含义、默认值、0 值语义、env 覆盖名（
    `NACOS_DISCOVERY_LOAD_BALANCER` / `_CACHE_TTL` / `_STALE_TTL` / `_HEALTHY_ONLY` /
-   `_CLUSTERS`），以及"本地用 `base_url` 绕过 Nacos"的做法。
+   `_CLUSTERS`），以及"本地用 `client.inner_external_base_uri` 绕过/兜底 Nacos"的做法。
 
 ## 5. 关键设计取舍（校正）
 

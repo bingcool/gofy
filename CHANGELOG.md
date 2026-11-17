@@ -305,14 +305,21 @@ All notable changes to this project are documented here. The format follows
   `nacos.Config`, and `ConfigFromNacos` falls back to the connection
   namespace/group so a hand-built config no longer queries `public`.
 - `examples/demo-service`: a process-scoped `serviceclients` package owns the
-  typed downstream clients and their lifetime. Addressing has three explicit
-  modes — `clients.demoservice.base_url` pins an address, an enabled Nacos
-  resolves `demoservice.ServiceName`, otherwise the client reports
-  `ErrNotConfigured` at call time instead of pretending to work. The clients are
-  built once in `main` and injected into worker groups, not rebuilt on Reload.
-  New `group3` (`worker --group=group3`, every 5s) calls
-  `GET /api/v1/order/config` through Nacos discovery from a **separate process**,
-  which is the only way to prove registration → resolution → HTTP end to end.
+  typed downstream clients and their lifetime. `client.inner_external_base_uri`
+  is this service's own address in the environment the configuration came from,
+  and it has two consumers: registration publishes it as instance metadata
+  (`inner_external_base_uri`), so a caller resolving this instance can use it
+  instead of a pod IP, and the client retries a failed read against it once — a
+  local process pulls dev's configuration, cannot reach the unstarted local
+  instance, and is served by dev's deployment. Without Nacos the same value is
+  the only address there is, and with neither the client reports
+  `ErrNotConfigured` at call time instead of pretending to work. Only failures
+  where no response arrived are retried: an answered 4xx/5xx is the server's own
+  verdict, and a caller cancellation is the caller's. The clients are built once
+  in `main` and handed to the worker groups, not rebuilt on Reload. New `group3`
+  (`worker --group=group3`, every 5s) calls `GET /api/v1/order/config` through
+  Nacos discovery from a **separate process**, which is the only way to prove
+  registration → resolution → HTTP end to end.
 
 - `support/claim`: a per-row `rerun_allowed` TINYINT column (default 1) switches
   a task between at-least-once and at-most-once. With 0, claim refuses to

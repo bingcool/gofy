@@ -13,29 +13,35 @@ import (
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
 )
 
-// A configured base_url must win over Nacos: the local-development path cannot
-// depend on the registry being reachable.
-// 配置了 base_url 就必须优先于 Nacos：本地开发路径不能依赖注册中心可达。
-func TestNewPinsBaseURL(t *testing.T) {
-	clients, err := serviceclients.New(config.ClientsConfig{
-		DemoService: config.DownstreamConfig{BaseURL: "10.0.0.5:8080", Timeout: time.Second},
-	}, nacosconfig.Config{Enabled: true, Host: "127.0.0.1", Port: 8848})
+// Without Nacos the base URL is the only address there is, so it must be used
+// directly rather than treated as a fallback that never gets a primary.
+// 没有 Nacos 时这个地址就是唯一地址，因此必须直接使用，而不是当成一个永远等不到
+// primary 的兜底。
+func TestNewUsesBaseURIWithoutNacos(t *testing.T) {
+	clients, err := serviceclients.New(config.ClientConfig{
+		InnerExternalBaseURI: "10.0.0.5:8080",
+		Timeout:              time.Second,
+	}, nacosconfig.Config{Enabled: false})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = clients.Close() })
 
-	if got := clients.Source(); !strings.Contains(got, "base_url http://10.0.0.5:8080") {
+	// The scheme is added by ClientConfig.Normalize, so the source line doubles
+	// as proof that the constructor normalized its input.
+	// scheme 由 ClientConfig.Normalize 补上，因此这行 source 同时证明构造函数对入参
+	// 做了归一化。
+	if got := clients.Source(); !strings.Contains(got, "inner_external_base_uri http://10.0.0.5:8080") {
 		t.Fatalf("Source = %q", got)
 	}
 }
 
-// Without a base_url and without Nacos the client must still be usable: a call
+// Without Nacos and without a base URL the client must still be usable: a call
 // reports a configuration error instead of looking like a transport failure.
-// 没有 base_url 也没有 Nacos 时客户端仍要可用：调用返回配置错误，而不是看起来像传输
-// 失败。
+// 既没有 Nacos 也没有 base URL 时客户端仍要可用：调用返回配置错误，而不是看起来像
+// 传输失败。
 func TestNewWithoutNacosIsNotConfigured(t *testing.T) {
-	clients, err := serviceclients.New(config.ClientsConfig{}, nacosconfig.Config{Enabled: false})
+	clients, err := serviceclients.New(config.ClientConfig{}, nacosconfig.Config{Enabled: false})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -56,7 +62,7 @@ func TestNewWithoutNacosIsNotConfigured(t *testing.T) {
 // Nacos 启用时客户端按 demoservice.ServiceName 做发现；Source 必须带上 namespace 与
 // group——这两个值写错时唯一症状就是"查不到实例"。
 func TestNewUsesDiscoveryWhenNacosEnabled(t *testing.T) {
-	clients, err := serviceclients.New(config.ClientsConfig{}, nacosconfig.Config{
+	clients, err := serviceclients.New(config.ClientConfig{}, nacosconfig.Config{
 		Enabled:   true,
 		Host:      "127.0.0.1",
 		Port:      8848,
@@ -73,6 +79,37 @@ func TestNewUsesDiscoveryWhenNacosEnabled(t *testing.T) {
 	}
 	if !strings.Contains(source, "127.0.0.1:8848") {
 		t.Fatalf("Source = %q, want the connection address", source)
+	}
+	if strings.Contains(source, "fallback") {
+		t.Fatalf("Source = %q, want no fallback when the base URI is empty", source)
+	}
+}
+
+// When both addresses exist the source line has to name them both: the point of
+// the fallback is that a request may reach a different environment than the
+// resolver selected, and that must be visible without reading code.
+// 两个地址都在时 source 必须都点名：兜底的意义就是请求可能落到 resolver 选的之外
+// 那套环境，这必须不读代码就能看见。
+func TestNewReportsDiscoveryAndFallback(t *testing.T) {
+	clients, err := serviceclients.New(config.ClientConfig{
+		InnerExternalBaseURI: "http://demo-service-dev.example.com:8080/",
+	}, nacosconfig.Config{
+		Enabled:   true,
+		Host:      "127.0.0.1",
+		Port:      8848,
+		Discovery: nacosconfig.DiscoveryConfig{Namespace: "dev", Group: "GO_GROUP"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = clients.Close() })
+
+	source := clients.Source()
+	if !strings.Contains(source, "namespace=dev") {
+		t.Fatalf("Source = %q, want the discovery scope", source)
+	}
+	if !strings.Contains(source, "fallback http://demo-service-dev.example.com:8080") {
+		t.Fatalf("Source = %q, want the normalized fallback", source)
 	}
 }
 

@@ -249,14 +249,18 @@ pid_file: app/demo-service.pid
 order:
   auth_required: false
 
-# 下游服务寻址。base_url 留空表示按契约里的服务名（demo-service）走 Nacos 发现；
-# 填上地址则钉死该地址、完全不碰注册中心——本地开发连不上 Nacos 时用它兜底，
-# 与 swoolefy 的 inner_external_base_uri 是同一个用途。
-# timeout 包含寻址耗时，默认 5s；服务发现自身的超时在 application.yaml 的
-# nacos.discovery_service_client.timeout_ms 里配（默认 2s）。
+# 本服务自己的内网部署地址（不是下游地址表）。两个用途：
+#   1. 服务注册时写入 Nacos 实例 metadata 的 inner_external_base_uri——Pod IP 在办公网
+#      路由不到，解析到本实例的调用方可以改用这个地址；
+#   2. 本进程按服务名调用自己失败时，用它再试一次。本地调试因此不必启动本地服务：拉 dev
+#      的这份配置，打没起的本地实例失败后自动降级到 dev 的部署（需要本地能访问该地址）。
+# demo 只按一个服务名（demo-service）调用，所以一个值够用；调多个下游时兜底要按下游分别
+# 配置，不能共用这一个。留空表示不写 metadata、也不降级。
+# 生产环境必须填本环境自己的地址，填成别的环境等于把故障流量导过去。
+# timeout 是单次调用上限（含寻址），默认 5s；降级那一次是第二次调用，最坏约两倍。
+# 服务发现自身的超时在 application.yaml 的 timeout_ms，与它无关。
 # 客户端由 main 构造一次、进程内共享，reload 不重建（resolver 的缓存与游标要跨代存活）。
-clients:
-  demoservice:
-    base_url: ''
-    timeout: 5s
+client:
+  inner_external_base_uri: ''
+  timeout: 5s
 

@@ -80,28 +80,51 @@ db:
 	}
 }
 
-// clients 段决定下游服务的寻址方式。Load 走 strict 模式，因此这条用例同时证明该段
-// 已映射到结构体，而不是被静默忽略。
-func TestLoadClientsSection(t *testing.T) {
+// client 段决定本服务自己的部署地址与调用超时。Load 走 strict 模式，因此这条用例
+// 同时证明该段已映射到结构体，而不是被静默忽略；归一化也在这里完成，注册器与客户端
+// 读到的才不会是两个不同的值。
+func TestLoadClientSection(t *testing.T) {
 	path := writeConfig(t, `
 db:
   default:
     dsn: user:pass@tcp(127.0.0.1:3306)/main
-clients:
-  demoservice:
-    base_url: http://10.0.0.5:8080
-    timeout: 3s
+client:
+  inner_external_base_uri: 10.0.0.5:8080/
+  timeout: 3s
 `)
 
 	cfg, err := Load(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Clients.DemoService.BaseURL != "http://10.0.0.5:8080" {
-		t.Fatalf("base_url = %q", cfg.Clients.DemoService.BaseURL)
+	if cfg.Client.InnerExternalBaseURI != "http://10.0.0.5:8080" {
+		t.Fatalf("inner_external_base_uri = %q", cfg.Client.InnerExternalBaseURI)
 	}
-	if cfg.Clients.DemoService.Timeout != 3*time.Second {
-		t.Fatalf("timeout = %s", cfg.Clients.DemoService.Timeout)
+	if cfg.Client.Timeout != 3*time.Second {
+		t.Fatalf("timeout = %s", cfg.Client.Timeout)
+	}
+}
+
+// An empty section must still produce a usable timeout: config.yaml is written
+// by hand and by templates, so "not set" cannot mean "zero deadline".
+// 空段也必须给出可用的超时：config.yaml 由人手写、也可能由模板生成，"没配"不能
+// 变成"零超时"。
+func TestClientSectionDefaultsTimeout(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: user:pass@tcp(127.0.0.1:3306)/main
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Client.InnerExternalBaseURI != "" {
+		t.Fatalf("inner_external_base_uri = %q, want empty", cfg.Client.InnerExternalBaseURI)
+	}
+	if cfg.Client.Timeout != DefaultClientTimeout {
+		t.Fatalf("timeout = %s, want %s", cfg.Client.Timeout, DefaultClientTimeout)
 	}
 }
 
