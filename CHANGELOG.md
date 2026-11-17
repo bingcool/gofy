@@ -8,6 +8,39 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy-adapter` nacos resolver: a failed lookup is now cached for `cache_ttl`,
+  like a successful one. Previously only successes carried a timestamp, so once
+  the cache expired while Nacos was unreachable **every** `Resolve` became a
+  leader, paid the full discovery timeout, and only then fell back to stale —
+  turning a registry outage into a per-request stall. `entry` now keeps
+  `lastAttempt` (throttle) apart from `lastSuccess` (stale window), stale serving
+  still fails closed once `lastSuccess` is older than `stale_ttl`, an empty
+  successful list is negatively cached instead of deleted (a deploy window no
+  longer turns every call into a Nacos query), and a refresh cancelled by its own
+  caller is no longer written to the cache. New `ErrStaleExpired` separates
+  "registry says no instances" from "registry unreachable and cache too old";
+  `New` rejects `stale_ttl` shorter than `cache_ttl` with
+  `ErrStaleTTLShorterThanCache` instead of silently widening it. Added tests for
+  the throttle (100 calls → 1 lookup), the negative cache, cancellation and the
+  invariant, plus `Resolver.Close`.
+- `gofy-interface-api` client: a grouped contract keeps the deployment prefix on
+  `endpoint.Group` and only the in-group path in `Spec.Path`, so a typed client
+  called `/config` instead of `/api/v1/order/config` and the server answered 404
+  for every grouped route. Added `client.WithPathPrefix`, applied in the one
+  place that builds URLs (so `Call`, SSE, download and chunked all get it), and
+  the demo clients now pass `orderroute.Config.Prefix` /
+  `productroute.Products.Prefix`. Tests assert the prefixed paths.
+- `gofy-interface-api` client and `support/nacos`: internal service calls no
+  longer go through `HTTP_PROXY`. Both used the environment proxy, so a resolved
+  pod/LAN address was sent to the proxy and a dead target came back as the
+  proxy's 502 instead of a connection error — which the resolver's throttle then
+  cached. Inject `Config.HTTPClient` if a proxy is really required.
+- `support/nacos`: `discovery_service_client.stale_ttl` shorter than `cache_ttl`
+  is now a load error instead of being silently widened to
+  `max(3×cache_ttl, 180s)`, and an unknown `load_balancer` fails at `Load`
+  instead of at the first lookup (a worker or script may never build a client,
+  so the later error would never surface).
+
 - `support/claim`: fixed a batch-lease race (P1). Claim stamped every row in a
   batch with the same `lease_until`, but Runner processed them serially, so a
   row near the back could have its lease expire while queued, be reaped and run
@@ -262,6 +295,24 @@ All notable changes to this project are documented here. The format follows
   recently created order, and the old name implied the latter.
 
 ### Added
+
+- `support/nacos`: `discovery_service_client.timeout_ms` (default 2000) bounds one
+  instance-list request. Discovery sits on the request path, so it no longer
+  inherits the config-center `Timeout` (10s). `DiscoveryConfig.Validate` checks
+  the load balancer, the cache and the stale window; `Client.Close` releases idle
+  connections.
+- `gofy-adapter` nacos: `NewFromConfig` builds a resolver straight from a loaded
+  `nacos.Config`, and `ConfigFromNacos` falls back to the connection
+  namespace/group so a hand-built config no longer queries `public`.
+- `examples/demo-service`: a process-scoped `serviceclients` package owns the
+  typed downstream clients and their lifetime. Addressing has three explicit
+  modes — `clients.demoservice.base_url` pins an address, an enabled Nacos
+  resolves `demoservice.ServiceName`, otherwise the client reports
+  `ErrNotConfigured` at call time instead of pretending to work. The clients are
+  built once in `main` and injected into worker groups, not rebuilt on Reload.
+  New `group3` (`worker --group=group3`, every 5s) calls
+  `GET /api/v1/order/config` through Nacos discovery from a **separate process**,
+  which is the only way to prove registration → resolution → HTTP end to end.
 
 - `support/claim`: a per-row `rerun_allowed` TINYINT column (default 1) switches
   a task between at-least-once and at-most-once. With 0, claim refuses to
