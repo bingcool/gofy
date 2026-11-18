@@ -144,6 +144,20 @@ uuidint:
   pool_size: 200
   pool_interval: 1s
 
+# 分布式锁：app/appio 用 support/lock（redsync）构建，绑定本代 Redis 客户端。
+# redis_instance_name 指向上面已启用的实例；留空即使用 support/redis 的 default 实例。
+# prefix 是键命名空间，实际键为 "<prefix>:<业务键>"，两个应用共用一个库时用它隔离。
+# expiry 必须长于临界区：锁在持有者仍在工作时过期就不再互斥；耗时不确定时在临界区里
+# 调 Extend 续租。tries / retry_delay 只影响阻塞式 Lock，TryLock 永远只尝试一次。
+# 开两个终端跑 `script lock-check --hold 30s` 与 `script lock-check --try` 可验证互斥
+lock:
+  enabled: true
+  redis_instance_name: ratelimit
+  prefix: demo:lock
+  expiry: 10s
+  tries: 3
+  retry_delay: 100ms
+
 # 多实例 AMQP（RabbitMQ）：按名字分组，由 app/io 建连和关闭。
 # default 对应业务句柄 amqp.Default，其它实例用 amqp.Get("名字") 取用。
 # 本机 dev-rabbitmq 的凭据来自 dockerfiles/docker-compose.yml
@@ -226,4 +240,27 @@ pid_file: app/demo-service.pid
 #   audience: demoservice
 #   require_expiry: true
 
-#22
+# 业务配置：订单模块自己的一段配置。装配根 app/container 把它翻译成
+# orderservice.Settings 后注入，service 不 import app/config，也不读文件；
+# 因此加字段只改这里、app/config 与装配根，不牵动其它模块。
+# auth_required 决定 GET /api/v1/order/config 的响应，默认 false 与旧样例一致。
+# 改这一段需要重启或触发热更新（配置变更按整代重建，在途请求继续用旧值）。
+order:
+  auth_required: false
+
+# 本服务自己的内网部署地址（不是下游地址表）。两个用途：
+#   1. 服务注册时写入 Nacos 实例 metadata 的 inner_external_base_uri——Pod IP 在办公网
+#      路由不到，解析到本实例的调用方可以改用这个地址；
+#   2. 本进程按服务名调用自己失败时，用它再试一次。本地调试因此不必启动本地服务：拉 dev
+#      的这份配置，打没起的本地实例失败后自动降级到 dev 的部署（需要本地能访问该地址）。
+# demo 只按一个服务名（demo-service）调用，所以一个值够用；调多个下游时兜底要按下游分别
+# 配置，不能共用这一个。留空表示不写 metadata、也不降级。
+# 生产环境必须填本环境自己的地址，填成别的环境等于把故障流量导过去。
+# timeout 是**每次尝试**的上限（含寻址），默认 5s。降级是第二次尝试，所以同一次逻辑调用
+# 最坏耗时是 2×timeout：本地配 5s，打不通本地实例再打部署地址，最坏 10s。两次尝试共用
+# 调用方的 context，调用方自己的 deadline 仍然是硬上限。
+# 服务发现自身的超时在 application.yaml 的 timeout_ms，与它无关。
+# 客户端由 main 构造一次、进程内共享，reload 不重建（resolver 的缓存与游标要跨代存活）。
+client:
+  inner_external_base_uri: ''
+  timeout: 5s
