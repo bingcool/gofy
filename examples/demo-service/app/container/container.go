@@ -71,6 +71,8 @@ func (c *Container) orderConfig() config.OrderConfig {
 // 这里只交出回调，不持有 Store 或连接：adapter 在绑定路由时逐条调用回调，
 // 中间件在首次请求时按别名自行解析连接（路由绑定早于 app/appio 模块打开
 // Redis）。每个模块工厂各调用一次本方法，得到的都是同一个无状态回调。
+// adapter 调用回调时同时注入 Router 的 Responder，限流的 429/503 与其它
+// 错误共用同一信封。
 //
 // AuthValidator 让“契约声明需要认证、实际没有安装认证”在启动期就失败，
 // 而不是上线后才发现；它只检查声明，不创建中间件。

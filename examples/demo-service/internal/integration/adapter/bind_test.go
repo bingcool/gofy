@@ -167,7 +167,7 @@ func TestBindAllGroupMiddlewareOrder(t *testing.T) {
 		Routes: map[string][]support.Middleware{
 			"ListOrders": {record("route")},
 		},
-		RateLimit: func(endpoint.Spec) support.Middleware {
+		RateLimit: func(endpoint.Spec, support.Responder) support.Middleware {
 			return record("rate")
 		},
 	})
@@ -230,7 +230,7 @@ func TestBindGroupMiddlewareNames(t *testing.T) {
 			"ListOrders":  {record("route")},
 			"CreateOrder": {record("route")},
 		},
-		RateLimit: func(endpoint.Spec) support.Middleware {
+		RateLimit: func(endpoint.Spec, support.Responder) support.Middleware {
 			return record("rate")
 		},
 	})

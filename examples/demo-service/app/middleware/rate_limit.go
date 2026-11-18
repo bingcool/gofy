@@ -27,7 +27,7 @@ const (
 //
 // 一条路由的完整链路：
 //
-//	adapter.BindGroup → BindOptions.RateLimit(spec) → RateLimiter.middleware
+//	adapter.BindGroup → BindOptions.RateLimit(spec, responder) → RateLimiter.middleware
 //	  → RateKey 选择计数主体 → redisLimiter（首次请求解析 Redis 连接）
 //	  → support/middleware.RateLimit（滑窗统计、429 响应、限流响应头）
 //
@@ -40,8 +40,8 @@ const (
 // 客户端，见 redisLimiter。要换计数存储，只需替换 redisLimiter 或注入不同的
 // RedisClient，契约与路由绑定都不用改。
 type RateLimiter struct {
-	// Responder 渲染 429 / 503；nil 时使用框架默认响应。App 装配根传入的
-	// Responder 与全局错误信封一致，限流响应才能带同样的 code/msg/req_id。
+	// Responder 显式覆盖限流响应的渲染器；nil 时使用 adapter 注入的 Router
+	// Responder（与全局错误信封一致），只有直接调用回调的测试才需要设置。
 	Responder support.Responder
 	// RedisClient 按别名解析 Redis 客户端，默认取请求固定的 app/appio 快照
 	// （appio.WithContext(ctx).RedisIO）：解析不会跨 Reload 换到下一代。
@@ -56,7 +56,10 @@ type RateLimiter struct {
 // spec.Middleware 名字和 Routes[OperationID] 之前），超额请求在这些中间件和
 // handler 执行前就被拒绝。回调本身不做 I/O：Redis 连接在首次请求时才解析，
 // 因此模块工厂可以在 app/appio 打开 Redis 之前完成路由绑定。
-func (r RateLimiter) Callback() func(endpoint.Spec) support.Middleware {
+//
+// adapter 把 Router 的 Responder 作为第二个参数传入，限流的 429/503 因此与
+// App 的其它错误共用同一信封；RateLimiter.Responder 非空时显式覆盖注入值。
+func (r RateLimiter) Callback() func(endpoint.Spec, support.Responder) support.Middleware {
 	return r.middleware
 }
 
@@ -66,9 +69,12 @@ func (r RateLimiter) Callback() func(endpoint.Spec) support.Middleware {
 // Redis；store 与框架限流中间件由 redisLimiter 在第一次请求时构建并缓存。
 // 没有声明 RateLimit 时返回 nil；adapter 本不会调用到这里，这里判空是为了
 // 防御直接调用回调的场景（例如测试）。
-func (r RateLimiter) middleware(spec endpoint.Spec) support.Middleware {
+func (r RateLimiter) middleware(spec endpoint.Spec, responder support.Responder) support.Middleware {
 	if spec.RateLimit == nil {
 		return nil
+	}
+	if r.Responder != nil {
+		responder = r.Responder
 	}
 	limit := spec.RateLimit
 	return (&redisLimiter{
@@ -78,7 +84,7 @@ func (r RateLimiter) middleware(spec endpoint.Spec) support.Middleware {
 			KeyFunc: rateLimitKeyFunc(limit.Key),
 		},
 		alias:     redisAlias(limit.RedisAlias),
-		responder: r.Responder,
+		responder: responder,
 		redis:     r.redisClient(),
 	}).handle
 }
@@ -177,7 +183,9 @@ type redisLimiter struct {
 	config support.RateLimitConfig
 	// alias 是契约的 RateLimit.RedisAlias，缺省为 ratelimit。
 	alias string
-	// responder 渲染 429 / 503；nil 时使用框架默认响应。
+	// responder 渲染 429 / 503：装配链上由 adapter 注入 Router 的 Responder，
+	// RateLimiter.Responder 非空时覆盖它；nil 只在直接调用回调的测试里出现，
+	// 此时退回框架默认响应。
 	responder support.Responder
 	// redis 按别名解析客户端，默认从请求固定的 app/appio 快照解析。
 	redis func(ctx context.Context, alias string) (*goredis.Client, error)

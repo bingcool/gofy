@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
+	"github.com/bingcool/gofy/support"
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
 )
@@ -38,21 +39,22 @@ func TestOrderAccessBuildsProductDependency(t *testing.T) {
 }
 
 // 装配根给出按契约生成限流中间件的回调：契约声明了 RateLimit 的路由拿到实例，
-// 没有声明的路由（如 GetConfig）不挂限流。
+// 没有声明的路由（如 GetConfig）不挂限流；adapter 调用时注入 Router 的 Responder。
 func TestBindOptionsRateLimitFollowsContract(t *testing.T) {
 	opts := NewContainer(nil).BindOptions()
 	if opts.RateLimit == nil {
 		t.Fatal("BindOptions returned no rate limit callback")
 	}
+	responder := support.NewResponder(support.ResponderConfig{})
 	declared := endpoint.Spec{
 		OperationID: "ListOrders",
 		Method:      http.MethodGet,
 		RateLimit:   &endpoint.RateLimit{Limit: 100, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 	}
-	if opts.RateLimit(declared) == nil {
+	if opts.RateLimit(declared, responder) == nil {
 		t.Fatal("declared rate limit produced no middleware")
 	}
-	if mw := opts.RateLimit(endpoint.Spec{OperationID: "GetConfig", Method: http.MethodGet}); mw != nil {
+	if mw := opts.RateLimit(endpoint.Spec{OperationID: "GetConfig", Method: http.MethodGet}, responder); mw != nil {
 		t.Fatal("route without RateLimit got a limiter")
 	}
 }

@@ -153,7 +153,7 @@ func TestRateLimiterResolvesDeclaredRedisAlias(t *testing.T) {
 				Method:      http.MethodGet,
 				Path:        "/orders",
 				RateLimit:   &endpoint.RateLimit{Limit: 1, WindowSeconds: 60, RedisAlias: tc.alias},
-			}), http.MethodGet, "/orders")
+			}, testResponder()), http.MethodGet, "/orders")
 
 			if rec := call(engine, http.MethodGet, "/orders"); rec.Code != http.StatusOK {
 				t.Fatalf("status = %d", rec.Code)
@@ -168,8 +168,77 @@ func TestRateLimiterResolvesDeclaredRedisAlias(t *testing.T) {
 // 契约没有声明 Spec.RateLimit 的路由不挂限流（adapter 也不会调用回调）。
 func TestRateLimiterWithoutContractDeclaration(t *testing.T) {
 	callback := newRateLimiter(t).Callback()
-	if limiter := callback(endpoint.Spec{OperationID: "GetConfig", Method: http.MethodGet}); limiter != nil {
+	if limiter := callback(endpoint.Spec{OperationID: "GetConfig", Method: http.MethodGet}, testResponder()); limiter != nil {
 		t.Fatal("route without RateLimit got a limiter")
+	}
+}
+
+// countingResponder 记录 Error 调用次数并转发给默认渲染器，用来证明限流响应
+// 走的是注入的 Responder 而不是库内默认值。
+type countingResponder struct {
+	inner  support.Responder
+	errors int
+}
+
+func (r *countingResponder) Success(c *gin.Context, data any) { r.inner.Success(c, data) }
+
+func (r *countingResponder) Error(c *gin.Context, err error) {
+	r.errors++
+	r.inner.Error(c, err)
+}
+
+// F6 回归：adapter 把 Router 的 Responder 注入回调后，429（超额）与 503
+// （契约数值非法、限流不可用）都由它渲染，与 App 的其它错误共用同一信封。
+func TestRateLimiterRendersRejectionsWithInjectedResponder(t *testing.T) {
+	injected := &countingResponder{inner: testResponder()}
+	limiter := newRateLimiter(t).Callback()(spec(http.MethodGet, 1, endpoint.RateKeyIP), injected)
+	engine := newEngine(limiter, http.MethodGet, "/orders")
+
+	if rec := call(engine, http.MethodGet, "/orders"); rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d", rec.Code)
+	}
+	if rec := call(engine, http.MethodGet, "/orders"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429", rec.Code)
+	}
+	if injected.errors != 1 {
+		t.Fatalf("injected responder rendered %d errors, want 1 (the 429)", injected.errors)
+	}
+
+	broken := newRateLimiter(t).Callback()(endpoint.Spec{
+		OperationID: "Broken",
+		Method:      http.MethodGet,
+		RateLimit:   &endpoint.RateLimit{Limit: -1, WindowSeconds: 60, Key: endpoint.RateKeyIP},
+	}, injected)
+	brokenEngine := newEngine(broken, http.MethodGet, "/broken")
+	if rec := call(brokenEngine, http.MethodGet, "/broken"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if injected.errors != 2 {
+		t.Fatalf("injected responder rendered %d errors, want 2 (429 + 503)", injected.errors)
+	}
+}
+
+// RateLimiter.Responder 非空时覆盖 adapter 注入的 Responder，用于独立信封的场景。
+func TestRateLimiterResponderOverrideWins(t *testing.T) {
+	injected := &countingResponder{inner: testResponder()}
+	override := &countingResponder{inner: testResponder()}
+	client := testClient(t)
+	limiter := middleware.RateLimiter{
+		Responder: override,
+		RedisClient: func(context.Context, string) (*goredis.Client, error) {
+			return client, nil
+		},
+	}.Callback()(spec(http.MethodGet, 1, endpoint.RateKeyIP), injected)
+	engine := newEngine(limiter, http.MethodGet, "/orders")
+
+	if rec := call(engine, http.MethodGet, "/orders"); rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d", rec.Code)
+	}
+	if rec := call(engine, http.MethodGet, "/orders"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429", rec.Code)
+	}
+	if injected.errors != 0 || override.errors != 1 {
+		t.Fatalf("injected rendered %d, override rendered %d; want 0 and 1", injected.errors, override.errors)
 	}
 }
 
@@ -202,7 +271,7 @@ func TestRateLimiterFailsClosedUntilRedisResolves(t *testing.T) {
 		}
 		return client, nil
 	}}
-	engine := newEngine(limiter.Callback()(spec(http.MethodGet, 1, endpoint.RateKeyIP)), http.MethodGet, "/orders")
+	engine := newEngine(limiter.Callback()(spec(http.MethodGet, 1, endpoint.RateKeyIP), testResponder()), http.MethodGet, "/orders")
 
 	if rec := call(engine, http.MethodGet, "/orders"); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
@@ -229,11 +298,17 @@ func spec(method string, limit int, key endpoint.RateKey) endpoint.Spec {
 // buildLimiter 用契约声明构造一条路由的限流中间件，要求回调返回非 nil。
 func buildLimiter(t *testing.T, spec endpoint.Spec) support.Middleware {
 	t.Helper()
-	limiter := newRateLimiter(t).Callback()(spec)
+	limiter := newRateLimiter(t).Callback()(spec, testResponder())
 	if limiter == nil {
 		t.Fatal("callback returned no limiter")
 	}
 	return limiter
+}
+
+// testResponder 是 App 经 adapter 注入 Router 的 Responder 的等价物；测试用它
+// 验证限流响应确实经过注入的渲染器，而不是库内默认值。
+func testResponder() support.Responder {
+	return support.NewResponder(support.ResponderConfig{})
 }
 
 // newRateLimiter 返回注入 miniredis 的限流器，与真实装配根一样在首次请求时
