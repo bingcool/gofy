@@ -69,8 +69,12 @@ const (
 )
 
 // Locker acquires leases by key. Implementations must be safe across
-// processes and across hosts.
-// Locker 按 key 获取租约，实现必须跨进程、跨主机安全。
+// processes and across hosts. Callers must Release every acquired Lease:
+// implementations may keep an in-process reservation per key, and dropping a
+// handle without Release can leave that key blocked inside the process.
+// Locker 按 key 获取租约，实现必须跨进程、跨主机安全。调用方必须 Release 每个已
+// 获取的 Lease：实现可能按 key 保留进程内占用，丢弃句柄而不 Release 会让该 key 在
+// 本进程内一直处于占用状态。
 type Locker interface {
 	// Acquire takes the lease for key. It returns ErrHeld when another holder
 	// owns it, and a Lease with a strictly larger token on success.
