@@ -10,12 +10,15 @@ fail() {
 
 module="github.com/yourorg/demo-service"
 module_prefix="$module/app/module/"
+appconfig_prefix="$module/app/config"
 appio_prefix="$module/app/appio"
 contract_prefix="github.com/yourorg/interface-service"
 api_contracts_prefix="github.com/bingcool/gofy-interface-api/contracts"
 api_client_prefix="github.com/bingcool/gofy-interface-api/client"
+adapter_gofy_prefix="github.com/bingcool/gofy-adapter/adapter/gofy"
 adapter_prefix="github.com/bingcool/gofy-adapter/adapter"
 adapter_client_prefix="github.com/bingcool/gofy-adapter/client"
+apperr_prefix="github.com/bingcool/gofy/apperr"
 support_prefix="github.com/bingcool/gofy/support"
 framework_prefix="github.com/bingcool/gofy"
 
@@ -48,73 +51,84 @@ while IFS='|' read -r pkg imports; do
   [ -n "$layer" ] || continue
 
   for imp in $imports; do
-    # 业务配置只能以「本模块那一段」的构造参数形式进入 service：其它层 import
-    # app/config 会顺手拿到整份文件，接着就会有人从 repository 里读 cfg.DB、
-    # 从 controller 里读 cfg.Nacos。service 是唯一允许的入口，且只收自己那段。
-    case "$imp" in
-      "$module/app/config" | "$module/app/config/"*)
-        if [ "$layer" != "service" ]; then
-          fail "$pkg must not import $imp: only service takes its own config section as a constructor argument"
-        fi
-        ;;
-    esac
-
-    cat=""
+    # 每个 import 先归类，再由各层的显式白名单决定取舍。各层没有 default 放行：
+    # 未列出的类别（client、adapter 的其它包、HTTP 契约、其他模块…）一律失败。
+    # 归类顺序有讲究：更具体的 adapter/gofy 与 apperr 必须排在其大类之前。
+    token=""
     dep_owner=""
     dep_layer=""
     case "$imp" in
       "$module_prefix"*)
-        cat="module"
+        token="module"
         d=${imp#"$module_prefix"}
         dep_owner=${d%%/*}
         dl=${d#"$dep_owner"}
         dl=${dl#/}
         dep_layer=${dl%%/*}
         ;;
-      "$contract_prefix"* | "$api_contracts_prefix"*) cat="contract" ;;
-      "$api_client_prefix"* | "$adapter_client_prefix"*) cat="client" ;;
-      "$adapter_prefix"*) cat="adapter" ;;
-      "$appio_prefix"*) cat="appio" ;;
-      "$support_prefix"*) cat="support" ;;
-      "$framework_prefix"*) cat="framework" ;;
+      "$appconfig_prefix" | "$appconfig_prefix/"*) token="appconfig" ;;
+      "$appio_prefix"*) token="appio" ;;
+      "$contract_prefix"*) token="contract" ;;
+      "$api_contracts_prefix"*) token="apicontract" ;;
+      "$api_client_prefix"* | "$adapter_client_prefix"*) token="client" ;;
+      "$adapter_gofy_prefix"*) token="adapter_gofy" ;;
+      "$adapter_prefix"*) token="adapter" ;;
+      "$apperr_prefix") token="apperr" ;;
+      "$support_prefix"*) token="support" ;;
+      "$framework_prefix"*) token="framework" ;;
+      "go.uber.org/zap" | "go.uber.org/zap/"*) token="logging" ;;
+      "gorm.io/gorm" | "gorm.io/gorm/"*) token="gorm" ;;
       *)
-        if is_stdlib "$imp"; then cat="stdlib"; else cat="other"; fi
+        if is_stdlib "$imp"; then token="stdlib"; else token="other"; fi
         ;;
     esac
 
     case "$layer" in
       controller)
-        # 只依赖本模块 service 与 HTTP 契约；不碰 model/repository/innerapi/
-        # 其他模块，也不直接取 app/appio 句柄。
-        case "$cat" in
+        # 白名单：本模块 service、HTTP 契约、adapter/gofy 的错误映射、gofy/apperr
+        # 与日志。controller 负责把契约错误码映射成业务错误，因此 adapter/gofy
+        # 与 apperr 是职责的一部分，不是泄漏；model/repository/innerapi/appio、
+        # client 与 adapter 的其它包都不在名单里。
+        case "$token" in
+          stdlib | contract | apicontract | adapter_gofy | apperr | logging) ;;
           module)
             if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "service" ]; then
               fail "$pkg must not import $imp: controllers depend on their own service only"
             fi
             ;;
-          appio)
-            fail "$pkg must not import $imp: controllers must not reach app/appio handles"
+          *)
+            fail "$pkg must not import $imp: controllers may import own service, HTTP contracts, adapter/gofy, apperr and logging only"
             ;;
         esac
         ;;
       service)
-        # 不依赖 HTTP 契约；跨模块只走对方 innerapi，不碰其他模块
-        # service/repository/model；本模块各层与 app/appio（开事务）允许。
-        case "$cat" in
-          contract)
-            fail "$pkg must not import $imp: services must not depend on HTTP contracts"
-            ;;
+        # 白名单：本模块 model/repository/innerapi、其他模块 innerapi、app/appio、
+        # support、本模块配置段与日志。HTTP 契约、adapter、client、controller 与
+        # query 都不在名单里。
+        case "$token" in
+          stdlib | appio | support | appconfig | logging) ;;
           module)
-            if [ "$dep_owner" != "$owner" ] && [ "$dep_layer" != "innerapi" ]; then
-              fail "$pkg must not import $imp: cross-module calls go through innerapi only"
+            if [ "$dep_owner" = "$owner" ]; then
+              case "$dep_layer" in
+                model | repository | innerapi) ;;
+                *)
+                  fail "$pkg must not import $imp: services may import their own model, repository and innerapi only"
+                  ;;
+              esac
+            else
+              [ "$dep_layer" = "innerapi" ] || \
+                fail "$pkg must not import $imp: cross-module calls go through innerapi only"
             fi
+            ;;
+          *)
+            fail "$pkg must not import $imp: services may import own model/repository/innerapi, other modules' innerapi, app/appio, support, their config section and logging"
             ;;
         esac
         ;;
       innerapi)
         # 纯契约：只允许标准库与 support 纯类型，禁止任何 app/module、契约、
         # app/appio、框架与第三方依赖。
-        case "$cat" in
+        case "$token" in
           stdlib | support) ;;
           *)
             fail "$pkg must not import $imp: innerapi is a pure contract (stdlib/support only)"
@@ -122,38 +136,41 @@ while IFS='|' read -r pkg imports; do
         esac
         ;;
       repository)
-        # 只依赖本模块 model + app/appio + support；不碰 service/innerapi/契约/
-        # 其他模块。
-        case "$cat" in
+        # 白名单：本模块 model、app/appio、support 与 ORM。不碰 service/
+        # innerapi/契约/其他模块，也不在这里打日志。
+        case "$token" in
+          stdlib | appio | support | gorm) ;;
           module)
             if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "model" ]; then
               fail "$pkg must not import $imp: repositories depend on their own model only"
             fi
             ;;
-          contract)
-            fail "$pkg must not import $imp: repositories must not depend on HTTP contracts"
+          *)
+            fail "$pkg must not import $imp: repositories may import own model, app/appio, support and gorm only"
             ;;
         esac
         ;;
       model)
-        # 表结构不依赖任何 app/module、契约或 app/appio。
-        case "$cat" in
-          module | contract | appio)
-            fail "$pkg must not import $imp: models must not depend on app/module, contracts or app/appio"
+        # 表结构只用标准库：不依赖 app/module、契约、app/appio、框架或第三方。
+        case "$token" in
+          stdlib) ;;
+          *)
+            fail "$pkg must not import $imp: models must not depend on anything but the standard library"
             ;;
         esac
         ;;
       query)
-        # 只读查询层：允许本模块 model + app/appio + support；不碰 service/
-        # controller/innerapi/repository，也不碰其他模块、契约与 adapter。
-        case "$cat" in
+        # 只读查询层：本模块 model、app/appio、support、框架与第三方库；不碰
+        # service/controller/innerapi/repository、其他模块、契约、client 与 adapter。
+        case "$token" in
+          stdlib | appio | support | framework | gorm | logging | other) ;;
           module)
             if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "model" ]; then
               fail "$pkg must not import $imp: query depends on its own model only"
             fi
             ;;
-          contract)
-            fail "$pkg must not import $imp: query must not depend on HTTP contracts"
+          *)
+            fail "$pkg must not import $imp: query may import own model, app/appio, support, framework and third-party libraries only"
             ;;
         esac
         ;;

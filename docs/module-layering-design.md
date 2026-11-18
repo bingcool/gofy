@@ -574,18 +574,23 @@ HTTP POST /api/v1/order/orders
 ## 10. import guard 规则（替换现有 §8）
 
 `examples/demo-service/shell/check-imports.sh` 改为按层校验（仍只查非测试文件），
-取用规则由 `examples/demo-service/shell/check-io-access.sh` 单独校验：
+取用规则由 `examples/demo-service/shell/check-io-access.sh` 单独校验。每层是一份
+**显式白名单**：import 先归类，凡不在本层名单里的类别一律失败，没有 default 放行。
 
-1. `controller`：只允许 import 本模块 `service` 与 HTTP 契约包
-   （`github.com/bingcool/gofy-interface-service/...`）；禁止任何 `model` / `repository` / `innerapi` /
-   其他模块包；
-2. `service`：禁止 import HTTP 契约包；禁止 import 其他模块 `service` / `repository` /
-   `model`；允许本模块 `innerapi`（实现）与其他模块 `innerapi`（调用）；
+1. `controller`：只允许标准库、本模块 `service`、HTTP 契约
+   （`github.com/yourorg/interface-service/...` 与
+   `github.com/bingcool/gofy-interface-api/contracts/...`）、
+   `github.com/bingcool/gofy-adapter/adapter/gofy`（错误码映射）、
+   `github.com/bingcool/gofy/apperr` 与日志；禁止 `model` / `repository` /
+   `innerapi` / `app/appio`、其他模块包，以及 `client` 与 `adapter` 的其它包；
+2. `service`：允许标准库、本模块 `model` / `repository` / `innerapi`、其他模块
+   `innerapi`、`app/appio`、`support`、本模块配置段（`app/config`）与日志；禁止
+   HTTP 契约、`client`、`adapter`，以及本模块 `controller` / `query`；
 3. `innerapi`：纯契约，禁止 import 任何 `app/module/*/...`（含本模块 service/repository/
    model）、HTTP 契约、`app/appio`；只允许标准库（必要时 `support` 的纯类型）；
-4. `repository`：禁止 import 任何 `service` / `innerapi` / 契约 / 其他模块包；只允许
-   本模块 `model` + `app/appio` + `support`；
-5. `model`：禁止任何 `app/module` / 契约 / `app/appio` 依赖；
+4. `repository`：只允许标准库、本模块 `model`、`app/appio`、`support` 与 ORM
+   （`gorm.io/gorm`）；禁止 `service` / `innerapi` / 契约 / 其他模块包；
+5. `model`：只允许标准库；禁止任何 `app/module` / 契约 / `app/appio` / 框架或第三方依赖；
 6. 删除「一个包最多 import 一个其他模块 repository」旧规则，由规则 2 取代；
 7. 包依赖成环仍由 `go build` 兜底（innerapi 无回边，天然无环）；
 8. `service`、`repository` 与 `query` 只允许经 `appio.WithContext(ctx)` 取本代句柄：
