@@ -309,10 +309,12 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 
 	// Requests already in flight on the old generation keep their lease; new
 	// requests enter the new one. The old modules and resources are released
-	// only after those requests finish (or the drain timeout expires).
+	// only after those requests finish (or the drain timeout expires). The drain
+	// honors the run context, so a concurrent shutdown is not delayed by a slow
+	// reload.
 	// 已在旧代上处理的请求保留其 lease，新请求进入新代。旧模块和资源要等这些请求
-	// 结束（或排空超时）后才释放。
-	errs := retireGeneration(context.Background(), oldGen, newGen, timeout, lg)
+	// 结束（或排空超时）后才释放。排空受 run context 约束，停机不会被慢 Reload 拖住。
+	errs := retireGeneration(runCtx, oldGen, newGen, timeout, lg)
 
 	lg.Info("application reloaded",
 		zap.String("env", env),

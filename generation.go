@@ -252,8 +252,11 @@ func (s *handlerSwap) serve(w http.ResponseWriter, r *http.Request, gen *generat
 
 // retireGeneration drains gen and then releases the resources it owns. It is
 // called with the successor already published, so new requests never enter gen.
+// ctx bounds both the drain wait and the module stops; callers pass the App run
+// context, so a shutdown aborts the drain instead of waiting out the timeout.
 // retireGeneration 先排空 gen，再释放它持有的资源。调用时后继代已经发布，因此
-// 新请求不会进入 gen。
+// 新请求不会进入 gen。ctx 同时约束排空等待与模块停止；调用方传入 App 的 run
+// context，停机时才能中断排空，而不是等满超时。
 func retireGeneration(ctx context.Context, gen, successor *generation, timeout time.Duration, lg *zap.Logger) []error {
 	if gen == nil {
 		return nil
@@ -261,17 +264,18 @@ func retireGeneration(ctx context.Context, gen, successor *generation, timeout t
 	gen.lease.retire()
 	if !gen.lease.wait(ctx, timeout) {
 		// The deadline is a safety valve: a stuck handler must not keep the
-		// process from completing a reload forever. The error is reported so
-		// operators can see requests were still running when resources closed.
-		// 截止时间是安全阀：卡住的 handler 不能让进程永远完不成 Reload。这里
-		// 记录告警，运维才能知道资源关闭时仍有请求在跑。
-		lg.Warn("reload drain timed out: releasing the previous generation with requests in flight",
+		// process from completing a reload forever. A shutdown cancels ctx and
+		// takes the same path. The warning is reported so operators can see
+		// requests were still running when resources closed.
+		// 截止时间是安全阀：卡住的 handler 不能让进程永远完不成 Reload；停机取消 ctx
+		// 时也走这条路径。这里记录告警，运维才能知道资源关闭时仍有请求在跑。
+		lg.Warn("reload drain did not finish: releasing the previous generation with requests in flight",
 			zap.Uint64("generation", gen.id),
 			zap.Duration("timeout", timeout),
 		)
 	}
 
-	stopCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	stopCtx, cancel := context.WithTimeout(ctx, timeout)
 	errs := stopModuleList(stopCtx, gen.started, timeout)
 	cancel()
 	for _, err := range errs {

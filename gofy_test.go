@@ -1319,6 +1319,127 @@ func TestReloadDrainsInFlightRequests(t *testing.T) {
 	}
 }
 
+// TestShutdownAbortsReloadDrain proves the old generation's drain is bound to
+// the app run context: once Shutdown starts, Reload must stop waiting for the
+// in-flight request instead of blocking the shutdown for the whole drain
+// timeout.
+// TestShutdownAbortsReloadDrain 证明旧代排空受 App run context 约束：Shutdown 开始
+// 后，Reload 必须停止等待在途请求，而不是把停机拖满整个排空超时。
+func TestShutdownAbortsReloadDrain(t *testing.T) {
+	port := freePort(t)
+	events := &recorder{}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	slow := func(*gofy.Runtime) (support.Module, error) {
+		return &testModule{
+			name:  "drain",
+			order: events,
+			reg: func(r *support.Router) error {
+				r.GET("/slow", func(c *gin.Context) {
+					close(entered)
+					<-release
+					c.String(http.StatusOK, "old")
+				})
+				return nil
+			},
+		}, nil
+	}
+	app, err := gofy.New(
+		gofy.WithName("reload-shutdown"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(slow),
+		gofy.WithShutdownTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	respCh := make(chan string, 1)
+	go func() {
+		resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/drain/slow")
+		if err != nil {
+			respCh <- "error: " + err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		respCh <- string(body)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the handler")
+	}
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- app.Reload(context.Background(), gofy.ReloadSpec{
+			ModuleFactories: []gofy.ModuleFactory{reloadFactory("v2", events)},
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for getText(t, port, "/reload/ping") != "v2" {
+		if time.Now().After(deadline) {
+			t.Fatal("reload did not publish the new routes")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-reloadDone:
+		t.Fatalf("Reload returned before the drain: %v", err)
+	default:
+	}
+
+	started := time.Now()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- app.Shutdown(context.Background()) }()
+
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not abort the reload drain")
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("reload drain took %s after shutdown", elapsed)
+	}
+	// The request is still blocked: the drain was aborted, not completed.
+	// 请求仍然阻塞：排空是被中断的，不是自然完成。
+	select {
+	case got := <-respCh:
+		t.Fatalf("in-flight request finished early: %q", got)
+	default:
+	}
+
+	close(release)
+	if got := <-respCh; got != "old" {
+		t.Fatalf("in-flight response = %q", got)
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not finish")
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
 // TestReloadStartFailureKeepsOldGeneration proves the old generation keeps serving
 // when a new module fails to start, and the failed generation neither enters the
 // started list nor triggers Stop.
