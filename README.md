@@ -890,6 +890,9 @@ app, err := gofy.New(
   `NACOS_SERVICE_REGISTER_PORT` > `service_register.port` > 实际监听端口；
 - 实例固定为临时实例（ephemeral），按 `heartbeat_interval` 发送心跳，Nacos 可在
   心跳响应里调整间隔（限制在 1s–30s）；连续失败后先补一次完整心跳，仍失败则重新注册；
+- 注册、切到运行态、启动心跳是一个临界区：`Start` 返回时实例已注册且心跳已在跑，
+  并发进来的 `Stop` 会等它结束（等待受自己的 ctx 约束），因此不会出现"注销已经返回、
+  心跳随后才启动"的实例；
 - `App.Shutdown` / `stop` 先注销实例再关闭监听，注销失败只记录警告；
 - 注册对象挂在 `App` 上，`App.Reload` 不会重复注册或注销，热更新期间服务发现保持连续；
 - `WithNacosRegistration` 在 `service_register.service_name` 为空时直接返回错误。

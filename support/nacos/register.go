@@ -7,7 +7,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -142,18 +141,47 @@ func (c RegisterConfig) validate() error {
 }
 
 // Registrar publishes one instance and renews its lease until stopped.
+//
+// Start and Stop are serialised through op. Registering, flipping the state to
+// running and starting the heartbeat are one critical section, so a Stop can
+// never observe a registrar that is "started" but not yet registered — that
+// intermediate state is what used to let a heartbeat start after Stop had
+// already deregistered and returned, leaving an instance renewing itself with
+// nothing left to stop it.
 // Registrar 发布一个实例并持续续约，直到被停止。
+//
+// Start 与 Stop 通过 op 串行化。注册、切到 running、启动心跳是一个临界区，Stop 因此
+// 不会看到"已标记启动但还没注册完"的中间态——正是那个中间态让心跳在 Stop 已经注销并
+// 返回之后才启动，留下一个还在自我续约、却没有东西能停掉它的实例。
 type Registrar struct {
 	client   *Client
 	cfg      RegisterConfig
 	logger   *zap.Logger
 	instance Instance
 
-	mu      sync.Mutex
-	started bool
-	cancel  context.CancelFunc
-	done    chan struct{}
+	// op is the lifecycle slot: a buffered channel rather than a mutex, so a
+	// caller whose context expires can give up instead of blocking past its
+	// deadline. It guards every field below.
+	// op 是生命周期操作位：用带缓冲的 channel 而不是 mutex，调用方 ctx 到期时可以放弃
+	// 等待，而不是越过自己的 deadline 继续阻塞。它保护下面的所有字段。
+	op chan struct{}
+
+	state  registrarState
+	cancel context.CancelFunc
+	done   chan struct{}
 }
+
+// registrarState is the registrar's lifecycle state. There is no "starting"
+// value: registration happens inside the op critical section, so no other
+// goroutine can see a half-started registrar.
+// registrarState 是注册器的生命周期状态。没有 "starting"：注册发生在 op 临界区内部，
+// 其他 goroutine 看不到半启动状态。
+type registrarState int
+
+const (
+	registrarStopped registrarState = iota
+	registrarRunning
+)
 
 // NewRegistrar builds a registrar from the Nacos connection config and the
 // service_register block. The instance is not registered until Start.
@@ -187,6 +215,7 @@ func NewRegistrar(cfg Config, logger *zap.Logger) (*Registrar, error) {
 		client: client,
 		cfg:    reg,
 		logger: logger,
+		op:     make(chan struct{}, 1),
 		instance: Instance{
 			IP:          ip,
 			Port:        reg.Port,
@@ -209,34 +238,33 @@ func (r *Registrar) Instance() Instance { return r.instance }
 
 // Start registers the instance and starts the heartbeat loop. It is
 // idempotent: a second call while running returns nil without re-registering.
+// When it returns nil the instance is registered and the heartbeat is running;
+// a concurrent Stop waits for this call instead of interleaving with it.
 // Start 注册实例并启动心跳循环。它是幂等的：运行期间重复调用直接返回 nil，
-// 不会重复注册。
+// 不会重复注册。返回 nil 时实例已经注册、心跳已经在跑；并发的 Stop 会等这次调用结束，
+// 而不是插进它的中间。
 func (r *Registrar) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !r.acquire(ctx) {
+		return fmt.Errorf("nacos: register %s: %w", r.instance.ServiceName, ctx.Err())
+	}
+	defer r.release()
 
-	r.mu.Lock()
-	if r.started {
-		r.mu.Unlock()
+	if r.state == registrarRunning {
 		return nil
 	}
-	r.started = true
-	r.mu.Unlock()
 
 	if err := r.client.RegisterInstance(ctx, r.instance); err != nil {
-		r.mu.Lock()
-		r.started = false
-		r.mu.Unlock()
 		return fmt.Errorf("nacos: register %s: %w", r.instance.ServiceName, err)
 	}
 
 	hbCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	r.mu.Lock()
+	r.state = registrarRunning
 	r.cancel = cancel
 	r.done = done
-	r.mu.Unlock()
 
 	r.logger.Info("nacos service registered",
 		zap.String("service", r.instance.ServiceName),
@@ -251,21 +279,25 @@ func (r *Registrar) Start(ctx context.Context) error {
 }
 
 // Stop cancels the heartbeat and deregisters the instance. It is idempotent.
-// Stop 取消心跳并注销实例；该调用是幂等的。
+// It waits for an in-flight Start to finish, so "Stop returned" always means the
+// instance is deregistered and no heartbeat is running.
+// Stop 取消心跳并注销实例；该调用是幂等的。它会等待在途的 Start 结束，因此"Stop 返回"
+// 永远意味着实例已注销、也没有心跳在跑。
 func (r *Registrar) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !r.acquire(ctx) {
+		return fmt.Errorf("nacos: deregister %s: %w", r.instance.ServiceName, ctx.Err())
+	}
+	defer r.release()
 
-	r.mu.Lock()
-	if !r.started {
-		r.mu.Unlock()
+	if r.state != registrarRunning {
 		return nil
 	}
-	r.started = false
+	r.state = registrarStopped
 	cancel, done := r.cancel, r.done
 	r.cancel, r.done = nil, nil
-	r.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
@@ -293,6 +325,35 @@ func (r *Registrar) Stop(ctx context.Context) error {
 	)
 	return nil
 }
+
+// acquire takes the lifecycle slot, giving up when ctx expires. The first,
+// non-blocking attempt matters: with an idle registrar both arms of a select
+// would be ready for an already-cancelled context — the send because the slot is
+// free, the receive because ctx is done — and Go would pick one at random, so
+// Stop with a cancelled context would fail half the time. Taking the free slot
+// first keeps "shutdown already cancelled my context, still deregister" working;
+// only a busy slot waits, and that wait honours the deadline instead of blocking
+// past it.
+// acquire 取得生命周期操作位，ctx 到期就放弃。第一次非阻塞尝试是关键：注册器空闲时，
+// 对一个已经取消的 ctx，select 的两个分支都就绪（发送因为槽位空，接收因为 ctx 已结束），
+// Go 会随机选一个——Stop 用已取消的 ctx 调用就会一半概率失败。先抢空槽位，保住"关闭
+// 流程已经取消了 ctx，注销仍要执行"这条行为；只有槽位被占用时才等待，而那个等待尊重
+// deadline，不会越过它继续阻塞。
+func (r *Registrar) acquire(ctx context.Context) bool {
+	select {
+	case r.op <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case r.op <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (r *Registrar) release() { <-r.op }
 
 func (r *Registrar) heartbeat(ctx context.Context, done chan struct{}) {
 	defer close(done)

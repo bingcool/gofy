@@ -75,6 +75,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/nacos`: the registrar can no longer be stopped halfway through
+  starting. `Start` used to set its started flag before the network call, so a
+  `Stop` arriving in that window saw "started", flipped it back, returned success
+  — and then `Start` finished, started the heartbeat, and kept renewing an
+  instance that had already been deregistered, with the flag saying it was
+  stopped. Registration, the transition to running and the start of the heartbeat
+  are now one critical section behind a single lifecycle slot, so `Stop` waits
+  for an in-flight `Start` instead of interleaving with it; "Stop returned" now
+  means the instance is deregistered and no heartbeat is running. The slot is a
+  buffered channel rather than a mutex, so a shutdown whose context expires gives
+  up with `context.DeadlineExceeded` instead of blocking past its deadline, and
+  concurrent `Start` callers join the one in flight rather than registering a
+  second time.
 - `support/ratelimit`: `MemoryStore` sweeps each key against the window that key
   was counted in, instead of the window of whichever rule happened to call last.
   `Store` is an exported interface and nothing said a store must serve only one

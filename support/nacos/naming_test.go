@@ -24,12 +24,30 @@ type fakeNaming struct {
 
 	beatReply string
 	listFail  bool
+
+	// registerGate, when non-nil, holds POST /instance until it is closed, and
+	// registerStarted, when non-nil, is closed once that request arrives. Together
+	// they let a test drive "Stop arrives while Start is still registering".
+	// registerGate 非 nil 时，POST /instance 会一直等到它被关闭；registerStarted
+	// 非 nil 时，该请求到达后立即关闭。两者配合可以构造"Start 还在注册、Stop 已经
+	// 进来"的时序。
+	registerGate    chan struct{}
+	registerStarted chan struct{}
+	registerOnce    sync.Once
 }
 
 func (f *fakeNaming) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	switch r.URL.Path {
 	case instancePath:
+		if r.Method == http.MethodPost {
+			if f.registerStarted != nil {
+				f.registerOnce.Do(func() { close(f.registerStarted) })
+			}
+			if f.registerGate != nil {
+				<-f.registerGate
+			}
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		switch r.Method {
