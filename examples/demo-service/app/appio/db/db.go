@@ -21,6 +21,7 @@ import (
 	"github.com/bingcool/gofy"
 	gofydb "github.com/bingcool/gofy/support/db"
 	gofyotel "github.com/bingcool/gofy/support/otel"
+	"github.com/bingcool/gofy/support/tenant"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -99,13 +100,72 @@ func (s *Set) Instance(name string) *gorm.DB {
 // When rt enables tracing, the eager pools also get the GORM span plugin;
 // db.default is instrumented by the framework that owns it. Lazy instances are
 // not instrumented automatically: 业务取到连接后可自行 db.Use(gofyotel.NewGORMPlugin(...))。
-func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, rt *gofy.Runtime) (*Set, error) {
+//
+// Tenant isolation is opt-in via WithTenant. It is installed after the tracing
+// plugin, because that plugin replaces Statement.Context in its before callback
+// and the tenant handler must read the final context. Tenant isolation is off
+// by default so a project without multi-tenancy keeps ordinary GORM behaviour.
+// 租户隔离通过 WithTenant 显式启用。它在链路插件之后安装——后者会在自己的 before
+// 回调里替换 Statement.Context，租户 Handler 必须读到最终 context。默认关闭，
+// 不需要多租户的项目保持普通 GORM 行为。
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	tenant *tenant.Options
+}
+
+// WithTenant installs the tenant plugin on every pool this generation opens.
+// A nil option (or not calling WithTenant) leaves tenant isolation disabled.
+// WithTenant 给本代打开的每个池安装租户插件。不传该选项时租户隔离保持关闭。
+func WithTenant(opts tenant.Options) OpenOption {
+	return func(o *openOptions) { o.tenant = &opts }
+}
+
+// callbackInspector is the exported part of GORM's unexported processor type
+// used to check whether our callbacks are already installed.
+// callbackInspector 是 GORM 未导出 processor 类型中已导出的部分，用来判断插件是否已安装。
+type callbackInspector interface {
+	Get(name string) func(*gorm.DB)
+}
+
+// installTenant is idempotent: db.default is owned by the framework and shared
+// across Reload generations, so Open may see the same *gorm.DB more than once.
+// Calling db.Use twice on it would fail with a duplicate-callback error.
+// installTenant 是幂等的：db.default 由框架持有、跨 Reload 代复用，Open 因此可能
+// 多次看到同一个 *gorm.DB；对它重复 db.Use 会因回调重复注册而失败。
+func installTenant(pool *gorm.DB, opts tenant.Options) error {
+	if pool == nil {
+		return nil
+	}
+	if inspector, ok := any(pool.Callback().Query()).(callbackInspector); ok &&
+		inspector.Get("gofy:tenant:before_query") != nil {
+		return nil
+	}
+	return tenant.Instrument(pool, opts)
+}
+
+func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, rt *gofy.Runtime, opts ...OpenOption) (*Set, error) {
 	if defaultDB == nil {
 		return nil, errors.New("db: default database is required")
+	}
+	var o openOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
 	}
 	logger := zap.NewNop()
 	if rt != nil && rt.Logger != nil {
 		logger = rt.Logger
+	}
+
+	// db.default: tracing was installed by the framework before the io module
+	// starts, so the tenant plugin naturally comes after it.
+	// db.default 的链路插件由框架在 io 模块启动前装好，租户插件因此天然排在其后。
+	if o.tenant != nil {
+		if err := installTenant(defaultDB, *o.tenant); err != nil {
+			return nil, fmt.Errorf("db default tenant: %w", err)
+		}
 	}
 
 	extra := make(map[string]gofydb.Config, len(cfg))
@@ -136,6 +196,11 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 		if rt != nil && rt.Tracing {
 			if err := pool.Use(gofyotel.NewGORMPlugin(rt.TracerProvider)); err != nil {
 				return nil, fmt.Errorf("db instance %q tracing: %w", name, err)
+			}
+		}
+		if o.tenant != nil {
+			if err := installTenant(pool, *o.tenant); err != nil {
+				return nil, fmt.Errorf("db instance %q tenant: %w", name, err)
 			}
 		}
 		logger.Info("db instance connected", zap.String("instance", name))

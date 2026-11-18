@@ -7,8 +7,22 @@ import (
 	gofyscript "github.com/bingcool/gofy/script"
 	"github.com/spf13/pflag"
 	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/config"
 )
+
+// tenantOpenOptions mirrors the HTTP entry so scripts see the same isolation
+// policy as requests. Both entries build the same generation; differing here
+// would let a script read rows a request cannot.
+// tenantOpenOptions 与 HTTP 入口一致，脚本因此和请求看到同样的隔离策略。两个入口
+// 构建的是同一代，若这里不一致，脚本就能读到请求读不到的行。
+func tenantOpenOptions(cfg *config.Config) []appdb.OpenOption {
+	opts, enabled := cfg.Tenant.Options()
+	if !enabled {
+		return nil
+	}
+	return []appdb.OpenOption{appdb.WithTenant(opts)}
+}
 
 // Register returns the demo scripts with the app/appio generation wrapped around
 // the ones that share the service layer.
@@ -47,7 +61,7 @@ func withIO(cfg *config.Config, s gofyscript.Script) gofyscript.Script {
 		if rt.DB == nil {
 			return apperr.Internal("database is not configured")
 		}
-		module := appio.NewModule(rt, cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock)
+		module := appio.NewModule(rt, cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock, tenantOpenOptions(cfg)...)
 		if err := module.Start(ctx); err != nil {
 			return apperr.Internal("start io module").WithCause(err)
 		}

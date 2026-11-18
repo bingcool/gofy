@@ -17,9 +17,23 @@ import (
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/container"
 )
+
+// tenantOpenOptions turns the llm_ai-style tenant switch into the open option
+// for the io generation. A disabled section returns no options at all, which
+// is what keeps GORM behaviour unchanged for projects without multi-tenancy.
+// tenantOpenOptions 把租户开关转成 io 装配代的 Open 选项。关闭时返回空，
+// 这正是"没有多租户的项目保持普通 GORM 行为"的实现。
+func tenantOpenOptions(cfg *config.Config) []appdb.OpenOption {
+	opts, enabled := cfg.Tenant.Options()
+	if !enabled {
+		return nil
+	}
+	return []appdb.OpenOption{appdb.WithTenant(opts)}
+}
 
 // reloader rebuilds the modules from a freshly loaded config and applies them
 // to the running application without restarting the process.
@@ -60,8 +74,12 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	// 旧的模块实例继续服务在途请求。容器内部固定按 产品 → 订单 构建，模块
 	// 工厂的排列顺序不再承载依赖顺序。
 	ctr := container.NewContainer(cfg)
+	// Tenant isolation is opt-in. When enabled the plugin is installed on each
+	// generation's pools, after the framework's tracing plugin.
+	// 租户隔离显式开启；启用时插件会装到每一代的连接池上，排在框架的链路插件之后。
+	dbOpts := tenantOpenOptions(cfg)
 	factories := []gofy.ModuleFactory{
-		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock),
+		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock, dbOpts...),
 	}
 	factories = append(factories, ctr.ModuleFactories()...)
 	if r.watch {

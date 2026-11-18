@@ -275,6 +275,16 @@ client:
   inner_external_base_uri: ''
   timeout: 5s
 
+# 行级租户隔离（support/tenant）。默认关闭：装上插件后，只有声明了 tenant_id 列的
+# 模型会被自动追加 WHERE 条件 / 填充 INSERT 列，其它表保持普通 GORM 行为。
+# 租户 ID 来自 frameworkcontext（本地 JWT 身份优先，其次可信上游的 X-Tenant-Id 透传），
+# 因此业务代码不用把租户号一层层传进 repository。目标表需要隔离却没有租户 ID 时
+# 操作会被拒绝（失败关闭），不会退化成"不过滤"。运维脚本要跨租户请用 tenant.Without(ctx)。
+tenant:
+  enabled: false
+  column: tenant_id          # 与模型的 gorm column 标签一致
+  overwrite_explicit: false  # true 时 INSERT 强制使用当前租户，忽略调用方显式赋值
+
 # LLM 接入（support/ai）。alias 是业务代码使用的名字，与 provider 的 wire model id
 # 解耦；模块按 alias 调用，不关心 base_url 与凭证来自哪里。
 #

@@ -443,3 +443,37 @@ func TestApplyLogPathsKeepsConfiguredOutputs(t *testing.T) {
 		t.Fatalf("access outputs = %v", cfg.Log.AccessOutputs)
 	}
 }
+
+func TestTenantConfigOptions(t *testing.T) {
+	// Disabled by default: a deployment without multi-tenancy must not install
+	// the plugin at all.
+	// 默认关闭：没有多租户的部署不应安装插件。
+	if _, ok := (TenantConfig{}).Options(); ok {
+		t.Fatal("zero TenantConfig enabled the tenant plugin")
+	}
+	if _, ok := (TenantConfig{Enabled: false, Column: "org_id"}).Options(); ok {
+		t.Fatal("disabled config enabled the tenant plugin")
+	}
+
+	opts, ok := (TenantConfig{Enabled: true}).Options()
+	if !ok {
+		t.Fatal("enabled config did not enable the plugin")
+	}
+	if opts.Handler != nil {
+		t.Fatal("default column must not need a custom Handler")
+	}
+	if opts.OverwriteExplicit {
+		t.Fatal("OverwriteExplicit must default to false")
+	}
+
+	custom, ok := (TenantConfig{Enabled: true, Column: "org_id", OverwriteExplicit: true}).Options()
+	if !ok {
+		t.Fatal("custom config disabled")
+	}
+	if custom.Handler == nil || custom.Handler.Column() != "org_id" {
+		t.Fatalf("custom column not propagated: %+v", custom.Handler)
+	}
+	if !custom.OverwriteExplicit {
+		t.Fatal("OverwriteExplicit not propagated")
+	}
+}

@@ -51,6 +51,7 @@ type Module struct {
 	rocketmqCfg approcketmq.Config
 	uuidintCfg  appuuidint.Config
 	lockCfg     gofylock.Config
+	dbOpts      []appdb.OpenOption
 
 	dbSet       *appdb.Set
 	redisSet    *appredis.Set
@@ -65,16 +66,16 @@ type Module struct {
 
 // NewModuleFactory builds the module from the application runtime.
 // NewModuleFactory 把实例配置封进模块工厂；每次装配由框架传入当代的 Runtime。
-func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config, lockCfg gofylock.Config) gofy.ModuleFactory {
+func NewModuleFactory(dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config, lockCfg gofylock.Config, dbOpts ...appdb.OpenOption) gofy.ModuleFactory {
 	return func(rt *gofy.Runtime) (support.Module, error) {
-		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg, uuidintCfg, lockCfg), nil
+		return NewModule(rt, dbCfg, redisCfg, amqpCfg, kafkaCfg, rocketmqCfg, uuidintCfg, lockCfg, dbOpts...), nil
 	}
 }
 
 // NewModule builds a module around rt and the instance configuration.
 // NewModule 用本代 Runtime 与实例配置构造模块；构造函数不建连，连接要到 Start
 // 才建立，因此装配失败不会留下半开的连接。
-func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config, lockCfg gofylock.Config) *Module {
+func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg appredis.Config, amqpCfg appamqp.Config, kafkaCfg appkafka.Config, rocketmqCfg approcketmq.Config, uuidintCfg appuuidint.Config, lockCfg gofylock.Config, dbOpts ...appdb.OpenOption) *Module {
 	return &Module{
 		rt:          rt,
 		dbCfg:       dbCfg,
@@ -84,6 +85,7 @@ func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg 
 		rocketmqCfg: rocketmqCfg,
 		uuidintCfg:  uuidintCfg,
 		lockCfg:     lockCfg,
+		dbOpts:      dbOpts,
 	}
 }
 
@@ -102,7 +104,7 @@ func (m *Module) Start(ctx context.Context) error {
 	if m.rt == nil {
 		return errors.New("io: runtime is required")
 	}
-	dbSet, err := appdb.Open(ctx, m.rt.DB, m.dbCfg, m.rt)
+	dbSet, err := appdb.Open(ctx, m.rt.DB, m.dbCfg, m.rt, m.dbOpts...)
 	if err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/bingcool/gofy/logger"
 	supportai "github.com/bingcool/gofy/support/ai"
 	gofylock "github.com/bingcool/gofy/support/lock"
+	"github.com/bingcool/gofy/support/tenant"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
 	"github.com/yourorg/demo-service/app/appio/redis"
@@ -51,8 +52,37 @@ type Config struct {
 	// unaffected. The demo exercises it from worker/group3/ai_check.go instead
 	// of exposing routes.
 	LLMAI   supportai.Config     `yaml:"llm_ai"`
+	Tenant  TenantConfig         `yaml:"tenant"`
 	PIDFile string               `yaml:"pid_file"`
 	JWT     middleware.JWTConfig `yaml:"jwt"`
+}
+
+// TenantConfig controls row-level tenant isolation on the demo's GORM pools.
+// It is off by default: enabling it without a tenant-aware table changes no
+// SQL, because the plugin skips models that do not declare the column.
+// TenantConfig 控制 demo 的 GORM 连接池是否启用行级租户隔离。默认关闭；即使打开，
+// 没有声明租户列的表也不会被改写，插件会跳过这类模型。
+type TenantConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	Column            string `yaml:"column"`
+	OverwriteExplicit bool   `yaml:"overwrite_explicit"`
+}
+
+// Options turns the YAML section into plugin options. The bool is false when
+// isolation is disabled, so the caller simply does not pass WithTenant.
+// Options 把 YAML 段转成插件选项；隔离关闭时 bool 为 false，调用方便不传 WithTenant。
+func (c TenantConfig) Options() (tenant.Options, bool) {
+	if !c.Enabled {
+		return tenant.Options{}, false
+	}
+	opts := tenant.Options{OverwriteExplicit: c.OverwriteExplicit}
+	if col := strings.TrimSpace(c.Column); col != "" && col != tenant.DefaultColumn {
+		opts.Handler = tenant.FuncHandler{
+			ColumnName:   col,
+			TenantIDFunc: (tenant.ContextHandler{}).TenantID,
+		}
+	}
+	return opts, true
 }
 
 // Database returns the named instance; the caller must have checked it exists.
