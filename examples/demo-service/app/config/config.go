@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/bingcool/gofy"
@@ -60,8 +61,20 @@ func (c *Config) Database(name string) gofy.DatabaseConfig {
 	return c.DB[name]
 }
 
+// warnMissingEnv writes the missing-variable warning. It is a variable so tests
+// can capture it; both the startup load and the reload path go through Load,
+// so one place covers both. Config loading happens before the logger exists, so
+// the warning goes to stderr rather than through the application logger.
+var warnMissingEnv = func(names []string) {
+	fmt.Fprintf(os.Stderr, "warning: config: missing environment variables %s; expanded to empty strings\n", strings.Join(names, ", "))
+}
+
 func Load(ctx context.Context, path string) (*Config, error) {
-	cfg, err := gofyconfig.Load[Config](ctx, path, gofyconfig.WithStrict(true))
+	cfg, err := gofyconfig.Load[Config](ctx, path,
+		gofyconfig.WithStrict(true),
+		gofyconfig.WithAllowMissingEnv(true),
+		gofyconfig.WithEnvWarning(warnMissingEnv),
+	)
 	if err != nil {
 		return nil, err
 	}

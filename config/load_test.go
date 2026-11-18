@@ -87,6 +87,64 @@ func TestLoadAllowMissingEnvironmentVariable(t *testing.T) {
 	}
 }
 
+func TestLoadEnvWarningReportsDistinctMissingNames(t *testing.T) {
+	// The same variable appears twice, including in a comment; the warning
+	// should name it once.
+	path := writeFile(t, "dsn: ${GOFY_TEST_UNSET_A}\nother: ${GOFY_TEST_UNSET_B}\n# ${GOFY_TEST_UNSET_A}\n")
+
+	var warned []string
+	calls := 0
+	cfg, err := gofyconfig.Load[testConfig](context.Background(), path,
+		gofyconfig.WithAllowMissingEnv(true),
+		gofyconfig.WithEnvWarning(func(names []string) {
+			calls++
+			warned = append(warned, names...)
+		}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DSN != "" {
+		t.Fatalf("dsn = %q, want empty", cfg.DSN)
+	}
+	if calls != 1 {
+		t.Fatalf("warning calls = %d, want 1", calls)
+	}
+	if strings.Join(warned, ",") != "GOFY_TEST_UNSET_A,GOFY_TEST_UNSET_B" {
+		t.Fatalf("warned = %v, want both names once each", warned)
+	}
+}
+
+func TestLoadEnvWarningNotCalledWithoutMissingOrInStrictMode(t *testing.T) {
+	called := 0
+	warn := func([]string) { called++ }
+
+	setPath := writeFile(t, "dsn: ${GOFY_TEST_SET_DSN}\n")
+	t.Setenv("GOFY_TEST_SET_DSN", "present")
+	if _, err := gofyconfig.Load[testConfig](context.Background(), setPath,
+		gofyconfig.WithAllowMissingEnv(true), gofyconfig.WithEnvWarning(warn)); err != nil {
+		t.Fatalf("Load with all vars present: %v", err)
+	}
+	if called != 0 {
+		t.Fatalf("warning called %d times with no missing variable", called)
+	}
+
+	strictPath := writeFile(t, "dsn: ${GOFY_TEST_UNSET_STRICT}\n")
+	if _, err := gofyconfig.Load[testConfig](context.Background(), strictPath,
+		gofyconfig.WithEnvWarning(warn)); err == nil {
+		t.Fatal("strict Load accepted a missing variable")
+	}
+	if called != 0 {
+		t.Fatalf("warning called %d times in strict mode, want 0", called)
+	}
+}
+
+func TestLoadRejectsNilEnvWarning(t *testing.T) {
+	path := writeFile(t, "dsn: plain\n")
+	if _, err := gofyconfig.Load[testConfig](context.Background(), path, gofyconfig.WithEnvWarning(nil)); err == nil {
+		t.Fatal("WithEnvWarning(nil) accepted")
+	}
+}
+
 func TestLoadEscapedDollar(t *testing.T) {
 	path := writeFile(t, "dsn: '$${NOT_A_VAR}'\n")
 

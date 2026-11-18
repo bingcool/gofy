@@ -26,6 +26,7 @@ import (
 type options struct {
 	expandEnv     bool
 	allowMissing  bool
+	envWarning    func([]string)
 	strict        bool
 	applyDefaults bool
 	validate      bool
@@ -42,10 +43,30 @@ func WithExpandEnv(enabled bool) Option {
 }
 
 // WithAllowMissingEnv replaces missing ${VAR} with an empty string instead of
-// failing (disabled by default).
+// failing (disabled by default). Pair it with WithEnvWarning so the substitution
+// is visible rather than silent.
 // WithAllowMissingEnv 把缺失的 ${VAR} 替换成空串而不是报错（默认关闭）。
+// 建议配合 WithEnvWarning，让替换可见而不是静默发生。
 func WithAllowMissingEnv(enabled bool) Option {
 	return func(o *options) error { o.allowMissing = enabled; return nil }
+}
+
+// WithEnvWarning installs a callback notified when missing ${VAR} placeholders
+// are replaced by empty strings under WithAllowMissingEnv. It receives the
+// distinct variable names, once per load, so a caller can emit one warning.
+// Nothing is called in strict mode: there the load fails instead. The callback
+// runs on the caller's goroutine and must not be nil.
+// WithEnvWarning 注册一个回调：在 WithAllowMissingEnv 下缺失的 ${VAR} 被替换成空串时，
+// 回调收到去重后的变量名（每次加载一次），调用方便可输出一条警告。严格模式下不调用——
+// 那属于加载失败。回调在调用方 goroutine 上运行，不能为 nil。
+func WithEnvWarning(fn func([]string)) Option {
+	return func(o *options) error {
+		if fn == nil {
+			return fmt.Errorf("config: env warning callback must not be nil")
+		}
+		o.envWarning = fn
+		return nil
+	}
 }
 
 // WithStrict rejects YAML keys that do not map to a struct field.
@@ -136,7 +157,7 @@ func readConfig(ctx context.Context, path string, opts []Option) (options, []byt
 		return options{}, nil, fmt.Errorf("config: read %s: %w", path, err)
 	}
 	if o.expandEnv {
-		data, err = expandEnvVars(data, o.allowMissing)
+		data, err = expandEnvVars(data, o.allowMissing, o.envWarning)
 		if err != nil {
 			return options{}, nil, fmt.Errorf("config: %s: %w", path, err)
 		}
@@ -144,25 +165,39 @@ func readConfig(ctx context.Context, path string, opts []Option) (options, []byt
 	return o, data, nil
 }
 
-func expandEnvVars(data []byte, allowMissing bool) ([]byte, error) {
+func expandEnvVars(data []byte, allowMissing bool, warn func([]string)) ([]byte, error) {
 	const dollarSentinel = "\x00gofy-dollar\x00"
 	s := strings.ReplaceAll(string(data), "$$", dollarSentinel)
 
 	var missing []string
+	seen := make(map[string]bool)
 	out := envPattern.ReplaceAllStringFunc(s, func(match string) string {
 		name := match[2 : len(match)-1]
 		value, ok := os.LookupEnv(name)
-		if !ok {
-			if allowMissing {
-				return ""
-			}
-			missing = append(missing, name)
-			return match
+		if ok {
+			return value
 		}
-		return value
+		// Record each name once: the same variable can appear in several
+		// places (including comments), and a warning listing it twice — as the
+		// strict error did — reads like two different problems.
+		// 同名变量只记一次：它可能出现在多处（含注释），警告里列两遍会让人误以为
+		// 是两个不同的问题，严格模式下的错误正是如此。
+		if !seen[name] {
+			seen[name] = true
+			missing = append(missing, name)
+		}
+		if allowMissing {
+			return ""
+		}
+		return match
 	})
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing environment variables: %s", strings.Join(missing, ", "))
+		if !allowMissing {
+			return nil, fmt.Errorf("missing environment variables: %s", strings.Join(missing, ", "))
+		}
+		if warn != nil {
+			warn(missing)
+		}
 	}
 	return []byte(strings.ReplaceAll(out, dollarSentinel, "$")), nil
 }
