@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -41,6 +42,29 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read pipe: %v", err)
 	}
 	return string(data)
+}
+
+// A legacy pid file carries no token, so the process may be alive yet be a
+// different one. status must not report that as a healthy "running".
+// 旧格式 pid 文件没有 token，进程可能活着但已不是原来那个。status 不能把它报成健康的 running。
+func TestDescribePIDFileLegacyIsUnverified(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.pid")
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		t.Fatalf("write legacy pid file: %v", err)
+	}
+	got := describePIDFile(context.Background(), path, "")
+	if got.Status != statusUnverified {
+		t.Fatalf("status = %q, want %q", got.Status, statusUnverified)
+	}
+	if got.Verified {
+		t.Fatal("a tokenless pid file must not be marked verified")
+	}
+	if shown := displayStatus(got); shown != statusUnverified {
+		t.Fatalf("displayStatus = %q, want %q", shown, statusUnverified)
+	}
+	if reason := statusReason(got); !strings.Contains(reason, "--force") {
+		t.Fatalf("statusReason = %q, want it to mention --force", reason)
+	}
 }
 
 // A wildcard listener is not dialable as-is, and the probe runs on the same
@@ -147,18 +171,20 @@ func TestDescribePIDFileStates(t *testing.T) {
 		t.Fatalf("stale: status = %q", got.Status)
 	}
 
-	// No token means "unknown", never "matches": it must still be running, but
-	// the qualifier has to say so.
-	// 没有 token 表示"未知"，绝不是"匹配"：它仍然是 running，但必须带上限定语。
+	// No token means "unknown", never "matches": the process is alive but the
+	// file cannot prove its identity, so status reports a distinct state rather
+	// than a healthy "running".
+	// 没有 token 表示"未知"，绝不是"匹配"：进程活着但文件无法证明身份，因此 status 报独立状态，
+	// 而不是健康的 running。
 	unknownPath := filepath.Join(dir, "unknown.pid")
 	if err := pidfile.WriteRecord(unknownPath, pidfile.Record{PID: os.Getpid()}, 0o600); err != nil {
 		t.Fatalf("write unknown pid: %v", err)
 	}
 	unknown := describePIDFile(ctx, unknownPath, "")
-	if unknown.Status != statusRunning || unknown.Verified {
+	if unknown.Status != statusUnverified || unknown.Verified {
 		t.Fatalf("unknown: status/verified = %q/%v", unknown.Status, unknown.Verified)
 	}
-	if got := displayStatus(unknown); got != "running (unverified)" {
+	if got := displayStatus(unknown); got != statusUnverified {
 		t.Fatalf("displayStatus = %q", got)
 	}
 

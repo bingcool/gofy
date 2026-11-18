@@ -16,14 +16,18 @@ const (
 // Sentinel errors returned by the framework.
 // 框架返回的哨兵错误，调用方用 errors.Is 判断，不要比较错误字符串。
 var (
-	ErrAlreadyStarted  = errors.New("gofy: application already started")
-	ErrAlreadyRunning  = errors.New("gofy: another instance is running")
-	ErrNotRunning      = errors.New("gofy: process is not running")
-	ErrStopTimeout     = errors.New("gofy: stop timeout")
-	ErrPIDFileDisabled = errors.New("gofy: pid file is disabled")
-	ErrUnsupported     = errors.New("gofy: operation not supported on this platform")
-	ErrUnknownCommand  = errors.New("gofy: unknown command")
-	ErrScriptNotFound  = errors.New("gofy: script not found")
+	ErrAlreadyStarted = errors.New("gofy: application already started")
+	ErrAlreadyRunning = errors.New("gofy: another instance is running")
+	ErrNotRunning     = errors.New("gofy: process is not running")
+	// ErrIdentityUnverified means the pid file cannot prove the pid still
+	// belongs to the process that wrote it. Stopping then requires --force.
+	// ErrIdentityUnverified 表示 pid 文件无法证明该 pid 仍是写下它的进程，此时停止需要 --force。
+	ErrIdentityUnverified = errors.New("gofy: process identity cannot be verified")
+	ErrStopTimeout        = errors.New("gofy: stop timeout")
+	ErrPIDFileDisabled    = errors.New("gofy: pid file is disabled")
+	ErrUnsupported        = errors.New("gofy: operation not supported on this platform")
+	ErrUnknownCommand     = errors.New("gofy: unknown command")
+	ErrScriptNotFound     = errors.New("gofy: script not found")
 	// ErrWorkerGroupNotFound means `worker --group` named a group the
 	// application never registered.
 	// ErrWorkerGroupNotFound 表示 `worker --group` 指定的分组没有注册过。

@@ -20,6 +20,8 @@
 | P3 | 16 | 局部健壮性、可观测性、文档与实现偏差 |
 
 > 上表是**逐条回读复核后**的结果（初稿为 1/13/34/14）：2 条不成立已移入 §1（B3、F2；F2 经作者确认，worker 属于入口层，可直接使用 Runtime 注入的 DB 写原生 SQL），2 条因触发前提过窄降为 P3，另有 17 条修正了表述或前提。复核方法与结论见 §1。
+>
+> 2026-11-18 后续批次又修复了 P3 中的 **A8、A9、B7、C7、E9** 五条；E9b 实际已在 E3 批次修复。逐条状态见 §7。
 
 总体判断：
 
@@ -371,6 +373,10 @@
 | C11 | `otel` 导出失败只记录日志（设计取舍，记录备查） | `gofy/start.go:948-952` | 保持现状，但补一条计数器 |
 | F9 | demo 注释称 worker 复用 repository 级数据访问，实际直接使用 Runtime DB 写 SQL | `demo/worker/worker.go:19-23` | 修正注释：worker 是入口层，直接使用 Runtime/DB |
 
+> **修复状态（2026-11-18 后续批次）**：A8、A9、B7、C7、E9 已修复；E9b 已在 E3 批次修复（该行保留仅为追溯）。其余 10 条仍未修复。逐条状态见 §7。
+>
+> 复核时另有一条前提修正：B10 的三条 Reap UPDATE 虽不在事务内，但按 `rerun_allowed`/`attempts` 互斥且幂等，中途失败下次 Reap 重跑即可，不会产生状态不一致；B11 的阻塞只泄漏 goroutine，框架的 DrainTimeout 会放行进程；D9 可用调用方传入的 `context.WithTimeout` 获得流式整体 deadline；D10 在 HTTP 路径有 `min=1` 校验，仅直调受影响。
+
 ---
 
 ## 3. 按主题复核「已做对」的部分
@@ -430,7 +436,7 @@
 
 ## 7. 问题索引（按严重度排序）
 
-按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」按 2026-11-18 的修复批次更新：P0/P1 与全部 P2 已修复并标为「是（2026-11-18）」，P3 仍为「否」。§1 的 X-1 ~ X-8 是复核后撤销/降级/修正的结论，不计入本索引。
+按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」按 2026-11-18 的修复批次更新：P0/P1 与全部 P2 已修复并标为「是（2026-11-18）」；P3 中 A8、A9、B7、C7、E9 于同日后续批次修复，同样标为「是（2026-11-18）」，其余仍为「否」。E9b 实际已在 E3 批次修复（见 §1），清单保留仅为追溯。§1 的 X-1 ~ X-8 是复核后撤销/降级/修正的结论，不计入本索引。
 
 | 编号 | 严重度 | 问题 | 是否已修复 |
 |---|---|---|---|
@@ -478,19 +484,19 @@
 | C9 | P2 | `LoadConfig` 缺 Discovery 校验 | 是（2026-11-18） |
 | D11 | P2 | refcheck 的 `adapterModule` 定义了却没进 deny | 是（2026-11-18） |
 | E10 | P2 | adapter import 守卫的禁用前缀是占位符（冗余，非放行漏洞） | 是（2026-11-18） |
-| A8 | P3 | `IdentityUnknown` 时 status 仍报 running、stop 仍发信号 | 否 |
+| A8 | P3 | `IdentityUnknown` 时 status 仍报 running、stop 仍发信号 | 是（2026-11-18） |
 | B10 | P3 | Reap 三条 UPDATE 不在事务内、无分批 | 否 |
 | B11 | P3 | RocketMQ 停机 `wg.Wait()` 无超时，handler 忽略 ctx 时永久阻塞 | 否 |
-| B7 | P3 | `Runner.Run` 的 `fatal` 存在窄窗口数据竞争（X-6 降级：经 fatalCh / `wg.Wait` 有 happens-before，仅 `ctx.Done()` 分支与 `once.Do` 写入并发时无同步） | 否 |
+| B7 | P3 | `Runner.Run` 的 `fatal` 存在窄窗口数据竞争（X-6 降级：经 fatalCh / `wg.Wait` 有 happens-before，仅 `ctx.Done()` 分支与 `once.Do` 写入并发时无同步） | 是（2026-11-18） |
 | C4 | P3 | 限流 `hits` map 在 GC 周期内无硬上限（X-7 降级：默认 `SetTrustedProxies([]string{})` 下 XFF 不可伪造，「键可伪造」只在显式放宽信任代理后成立） | 否 |
-| C7 | P3 | `uuidint.WithTTL(0)` 覆盖默认值 | 否 |
+| C7 | P3 | `uuidint.WithTTL(0)` 覆盖默认值 | 是（2026-11-18） |
 | C8 | P3 | `SetInnerExternalBaseURI` 不校验 URL | 否 |
 | C10 | P3 | 访问日志默认记录 query，仅黑名单脱敏 | 否 |
 | D9 | P3 | 流式调用忽略 `WithTimeout`（非静默：`options.go:79-85` 已声明该行为；缺口是想要超时的调用方没有替代方案） | 否 |
 | D10 | P3 | `PageRequest` Offset 可为负（`default` tag 由 creasty/defaults 在 `gofy/support/bind.go:19` 应用、服务端生效；client 侧零值不发送与 D1 同源） | 否 |
-| E9 | P3 | 零值 `Resolver` 部分路径 panic | 否 |
+| E9 | P3 | 零值 `Resolver` 部分路径 panic | 是（2026-11-18） |
 | F8 | P3 | service 自算 offset，直调路径无下界保护 | 否 |
-| E9b | P3 | rr 键拼接无转义（并入 E3） | 否 |
-| A9 | P3 | `start --daemon` 在 Windows 直接 panic | 否 |
+| E9b | P3 | rr 键拼接无转义（并入 E3，已随 E3 修复） | 已在 E3 批次修复 |
+| A9 | P3 | `start --daemon` 在 Windows 直接 panic | 是（2026-11-18） |
 | C11 | P3 | `otel` 导出失败只记录日志（设计取舍，记录备查） | 否 |
 | F9 | P3 | demo 注释称 worker 复用 repository 级数据访问，实际直接使用 Runtime DB 写 SQL | 否 |

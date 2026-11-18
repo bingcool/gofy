@@ -105,11 +105,16 @@ func (a *App) stopPIDFile(ctx context.Context, fullPath, worker string, force bo
 
 	logger := a.Logger()
 	if verdict == pidfile.IdentityUnknown {
-		// Legacy files and uninspectable processes land here: the check cannot
-		// prove anything, so say so and keep the old behaviour.
-		// 旧格式文件与无法读取的进程会走到这里：校验证明不了什么，因此明确记录下来，并保留
-		// 原有行为。
-		logger.Warn("pid file has no process identity; stopping on liveness only",
+		// A recycled pid must not be signalled on liveness alone: the check
+		// cannot prove this process is the one that wrote the file. Let the
+		// operator opt in explicitly instead of warning and carrying on.
+		// pid 可能被复用，不能只凭存活就发信号：校验无法证明眼前进程就是写文件那个。
+		// 让运维用 --force 显式承担风险，而不是警告完照常执行。
+		if !force {
+			return fmt.Errorf("%w: pid %d (%s); pass --force to stop on liveness only",
+				ErrIdentityUnverified, pid, fullPath)
+		}
+		logger.Warn("pid file has no process identity; stopping on liveness only because --force was given",
 			zap.Int("pid", pid),
 			zap.String("pid_file", fullPath),
 		)

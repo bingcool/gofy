@@ -108,6 +108,28 @@ func TestGetReturnsIncreasingIDs(t *testing.T) {
 	}
 }
 
+// WithTTL(0) is the documented "keep the default" sentinel. Before the fix it
+// overwrote the 15s default with zero, and the Lua fallback silently turned
+// that into 20s — neither the caller's intent nor the documented behaviour.
+// WithTTL(0) 是文档约定的"沿用默认值"哨兵。修复前它会把 15s 默认值覆盖为 0，
+// Lua 兜底又悄悄改成 20s——既不是调用方的意图，也不是文档承诺的行为。
+func TestWithTTLZeroKeepsDefault(t *testing.T) {
+	mr := miniredis.RunT(t)
+	gen, err := uuidint.New("uuid-key",
+		uuidint.WithClient(testClient(t, mr)),
+		uuidint.WithTTL(0),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := gen.Get(context.Background()); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := mr.TTL("uuid-key"); got != 15*time.Second {
+		t.Fatalf("counter key ttl = %v, want the 15s default", got)
+	}
+}
+
 func TestGetBatchReturnsAscendingRange(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := testClient(t, mr)

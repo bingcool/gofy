@@ -17,7 +17,12 @@ func (a *App) start(ctx context.Context, opts commandline.StartOptions) error {
 		return a.Run(ctx)
 	}
 	if runtime.GOOS == "windows" {
-		panic("gofy: start --daemon=1 is not supported on windows")
+		// A command returning an error prints one actionable line. Panicking
+		// here dumped a stack trace instead, and on Windows there is no
+		// detached process implementation to fall back to.
+		// 命令返回错误只会打印一行可操作的信息。过去这里 panic 会吐一整段栈；
+		// Windows 上也没有可降级的脱离进程实现。
+		return fmt.Errorf("gofy: start --daemon is not supported on windows: %w", ErrUnsupported)
 	}
 
 	executable, err := os.Executable()

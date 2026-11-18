@@ -219,6 +219,60 @@ func TestRunnerExitsOnErrorInFatalMode(t *testing.T) {
 	}
 }
 
+// The fatal error used to live in a plain variable written from once.Do and
+// read after select picked ctx.Done(). Those two had no happens-before edge
+// when the drain also timed out. Drive that exact interleaving repeatedly so
+// -race exercises the handoff: one worker fails at once, another ignores the
+// shutdown context and keeps the drain from completing.
+// fatal 过去存在普通变量里，由 once.Do 写入、select 选中 ctx.Done() 后读取；当 drain 也超时时，
+// 两者之间没有 happens-before。这里反复驱动这个交错：一个 worker 立刻失败，另一个忽略停机 ctx
+// 让 drain 无法完成，从而让 -race 覆盖这次交接。
+func TestRunnerFatalRacesWithCancel(t *testing.T) {
+	// Each iteration waits for the runner's fixed one-second drain budget, so a
+	// handful of rounds is enough to exercise the interleaving without making
+	// the suite slow.
+	// 每轮都要等 runner 固定的一秒 drain 预算，几轮就足以覆盖这个交错，不让测试变慢。
+	for i := 0; i < 5; i++ {
+		release := make(chan struct{})
+		failer := worker.Func("failer", 1, func(context.Context) error {
+			return errors.New("boom")
+		})
+		blocker := worker.Func("blocker", 1, func(ctx context.Context) error {
+			<-ctx.Done()
+			<-release
+			return nil
+		})
+		runner, err := worker.NewRunner(mustGroup(t, "g", failer, blocker), worker.RunConfig{
+			Policy:       worker.Policy{Mode: worker.ExitOnError},
+			DrainTimeout: 10 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- runner.Run(ctx) }()
+		cancel()
+
+		select {
+		case err := <-done:
+			// Either result is correct: if select took ctx.Done() before the
+			// worker reported, cancellation wins by design. The value of this
+			// test is that -race sees the interleaving without a warning.
+			// 两种返回值都正确：select 若先选中 ctx.Done()，按设计取消优先。这个测试的价值
+			// 在于让 -race 看到这个交错而不报竞态，而不是规定返回值。
+			if err != nil && !strings.Contains(err.Error(), "boom") {
+				t.Fatalf("iteration %d: unexpected Run error = %v", i, err)
+			}
+		case <-time.After(2 * time.Second):
+			close(release)
+			t.Fatalf("iteration %d: Run did not return", i)
+		}
+		close(release)
+	}
+}
+
 func TestRunnerRejectsEarlyReturn(t *testing.T) {
 	w := worker.Func("quick", 1, func(context.Context) error { return nil })
 	runner, err := worker.NewRunner(mustGroup(t, "g", w), worker.RunConfig{

@@ -163,15 +163,21 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer stopDrain()
 
 	var (
-		wg      sync.WaitGroup
-		once    sync.Once
-		fatal   error
-		fatalCh = make(chan struct{})
+		wg   sync.WaitGroup
+		once sync.Once
+		// Carry the error in the channel instead of publishing it through a
+		// shared variable. When select takes ctx.Done(), the read of fatal used
+		// to have no happens-before edge with a concurrent write from fail,
+		// unless fatalCh was closed or wg.Wait returned. A buffered channel
+		// makes the handoff explicit and keeps the value in every branch.
+		// 用 channel 传递错误而不是共享变量。过去 select 选中 ctx.Done() 时，对 fatal 的读取
+		// 与 fail 的并发写入之间没有 happens-before（除非等到了 fatalCh 关闭或 wg.Wait 返回）。
+		// 带缓冲的 channel 把这次交接变成显式同步，各分支都能拿到值。
+		fatalCh = make(chan error, 1)
 	)
 	fail := func(err error) {
 		once.Do(func() {
-			fatal = err
-			close(fatalCh)
+			fatalCh <- err
 		})
 	}
 
@@ -241,9 +247,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		close(done)
 	}()
 
+	var fatal error
 	select {
 	case <-ctx.Done():
-	case <-fatalCh:
+	case fatal = <-fatalCh:
 	case <-done:
 	}
 
@@ -256,6 +263,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	drained := r.wait(done, cfg.DrainTimeout+time.Second)
 	stopDrain()
 
+	if fatal == nil {
+		// fail may have fired while we were draining, or while select was
+		// choosing ctx.Done(). Pick it up without blocking so a late failure is
+		// still returned instead of silently lost.
+		// fail 可能发生在 drain 期间，或与 select 选中 ctx.Done() 同时发生。这里非阻塞取一次，
+		// 迟到的失败不会被静默丢掉，也不会让返回路径卡住。
+		select {
+		case fatal = <-fatalCh:
+		default:
+		}
+	}
 	if fatal != nil {
 		return fatal
 	}

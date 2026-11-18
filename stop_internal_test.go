@@ -3,6 +3,7 @@ package gofy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,37 @@ import (
 	"github.com/bingcool/gofy/internal/pidfile"
 	"go.uber.org/zap"
 )
+
+// A legacy pid file cannot prove the pid still belongs to the process that
+// wrote it. Without --force, stop must refuse instead of signalling on
+// liveness alone — here the target is the test process itself, so a wrong
+// implementation would kill the test.
+// 旧格式 pid 文件无法证明该 pid 仍是写下它的进程。没有 --force 时 stop 必须拒绝，
+// 而不是只凭存活发信号——这里的目标就是测试进程本身，实现错了会把测试杀掉。
+func TestStopLegacyPIDFileRequiresForce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pid based stop is not supported on windows")
+	}
+	path := filepath.Join(t.TempDir(), "legacy.pid")
+	legacy := fmt.Sprintf("%d\n", os.Getpid())
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy pid file: %v", err)
+	}
+	app, err := New(
+		WithName("stop-legacy-test"),
+		WithPIDFile(path),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := app.stopPIDFile(context.Background(), path, "", false, time.Second); !errors.Is(err, ErrIdentityUnverified) {
+		t.Fatalf("stop without --force error = %v, want ErrIdentityUnverified", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("stop removed or damaged the pid file: %v", statErr)
+	}
+}
 
 // TestStopRemovesPIDFileAfterGracefulExit pins A3 on the ordinary path: a
 // process that exits on SIGTERM without cleaning up its own pid file must not

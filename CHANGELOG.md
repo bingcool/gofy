@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Audit P3 follow-up: five narrow edge cases fixed across the framework and
+  adapter. `status` now reports `unverified` when a pid file cannot prove the
+  process identity, and `stop` refuses to signal in that case without `--force`
+  instead of warning and carrying on. `start --daemon` returns
+  `ErrUnsupported` on Windows instead of panicking. `uuidint.WithTTL(0)` now
+  means "keep the 15s default" as documented — it used to overwrite the
+  default with zero and let the Lua fallback silently turn it into 20s.
+  `worker.Runner` carries the fatal error through a buffered channel, removing
+  the data race between `once.Do` and the `ctx.Done()` read path. The Nacos
+  resolver returns `ErrNotInitialized` for a zero or nil `Resolver` instead of
+  panicking on its nil client or inflight map.
 - `gofy` CLI: `stop` removes the pid file after a confirmed exit. A process
   killed with SIGKILL, by the OOM killer or by `kill -9` never runs its own
   cleanup, and the leftover file made the next `start` face a stale pid that

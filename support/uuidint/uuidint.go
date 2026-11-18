@@ -150,6 +150,15 @@ func WithTTL(ttl time.Duration) Option {
 		if ttl > 0 && ttl < time.Second {
 			return errors.New("uuidint: ttl must be at least 1s")
 		}
+		// Zero is the "keep the default" sentinel, not a request for an
+		// immediate expiry. New seeds settings.ttl with 15s; assigning zero
+		// here used to overwrite it, and the Lua script's <1 fallback then
+		// silently turned it into 20s.
+		// 0 是"沿用默认值"的哨兵，不是"立刻过期"。New 已把 settings.ttl 播种为 15s，
+		// 过去这里直接赋值 0 会把它覆盖，Lua 的 <1 兜底又悄悄变成 20s。
+		if ttl == 0 {
+			return nil
+		}
 		s.ttl = ttl
 		return nil
 	}

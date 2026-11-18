@@ -23,10 +23,11 @@ import (
 // status 报告的状态用字符串而不是数字：JSON 的消费方是 shell 脚本，
 // `[ "$(... | jq -r .status)" = running ]` 比解码一个枚举好读。
 const (
-	statusRunning = "running"
-	statusStopped = "stopped"
-	statusStale   = "stale"
-	statusMissing = "missing"
+	statusRunning    = "running"
+	statusUnverified = "unverified"
+	statusStopped    = "stopped"
+	statusStale      = "stale"
+	statusMissing    = "missing"
 )
 
 // statusHealthTimeout bounds the /healthz probe. A status command that hangs on
@@ -59,8 +60,11 @@ type processStatus struct {
 	// PID is the pid recorded in the file; zero when there is no usable file.
 	// PID 是文件里记录的进程号；没有可用文件时为零。
 	PID int `json:"pid"`
-	// Status is running, stopped, stale or missing.
-	// Status 取 running、stopped、stale 或 missing。
+	// Status is running, unverified, stopped, stale or missing. "unverified"
+	// means the process is alive but the pid file cannot prove it is still the
+	// same process — a script must not treat that as a healthy "running".
+	// Status 取 running、unverified、stopped、stale 或 missing。unverified 表示进程活着，
+	// 但 pid 文件无法证明它仍是原来那个进程，脚本不能把它当成健康的 running。
 	Status string `json:"status"`
 	// Verified reports whether the pid still belongs to the process that wrote
 	// the file. False with Status=running means "alive, but unproven".
@@ -121,7 +125,12 @@ func (a *App) status(ctx context.Context, opts commandline.StatusOptions) error 
 		if err := a.writeStatusJSON(doc); err != nil {
 			return err
 		}
-	} else if entry.Status == statusRunning {
+	} else if entry.Status == statusRunning || entry.Status == statusUnverified {
+		// Show the table for an unverified pid too; the non-nil return below
+		// still makes the command fail, so the operator sees both the details
+		// and the reason instead of only an error line.
+		// 身份未校验时也把表格打出来；下面仍返回非 nil 让命令失败，运维因此能同时看到
+		// 详情和原因，而不是只有一行错误。
 		c := a.con()
 		c.Success("应用【%s】运行中", a.opts.name)
 		c.Table([][]string{
@@ -262,6 +271,14 @@ func describePIDFile(ctx context.Context, file, healthAddr string) processStatus
 	switch record.Verify() {
 	case pidfile.IdentityMismatch:
 		entry.Status = statusStale
+		return entry
+	case pidfile.IdentityUnknown:
+		// The pid is alive but its identity cannot be proven: a legacy file,
+		// an unsupported platform or an uninspectable process. Reporting
+		// "running" here would let a monitoring script accept a recycled pid.
+		// pid 活着但身份无法证明：旧格式文件、平台不支持或进程不可读。此时报 running
+		// 会让监控脚本把一个被复用的 pid 当成正常进程。
+		entry.Status = statusUnverified
 		return entry
 	case pidfile.IdentityMatch:
 		entry.Verified = true
@@ -410,6 +427,8 @@ func statusReason(entry processStatus) string {
 		return fmt.Sprintf("pid %d 已退出", entry.PID)
 	case statusStale:
 		return fmt.Sprintf("pid %d 已被其他进程占用", entry.PID)
+	case statusUnverified:
+		return fmt.Sprintf("pid %d 的身份无法校验，需要 --force 才能停止", entry.PID)
 	}
 	return "未运行"
 }
