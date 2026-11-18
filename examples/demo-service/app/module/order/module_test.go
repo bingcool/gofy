@@ -65,6 +65,9 @@ func newTestDB(t *testing.T) *gorm.DB {
 	}
 	seeds := []any{
 		&model.Order{ID: 1, UserID: 100, Amount: 9900, Status: string(orderenum.OrderStatusPaid)},
+		// 用户 102 的两笔订单固定创建时间，供列表筛选用例断言时间窗。
+		&model.Order{ID: 2, UserID: 102, Amount: 1000, Status: string(orderenum.OrderStatusPaid), CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		&model.Order{ID: 3, UserID: 102, Amount: 2000, Status: string(orderenum.OrderStatusPending), CreatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
 		&productmodel.Product{ID: 90001, Name: "Gofy Demo SKU", Price: 1000, Stock: 999, Status: productrepo.StatusOnSale},
 		&productmodel.Product{ID: 90002, Name: "Retired SKU", Price: 500, Stock: 0, Status: 0},
 	}
@@ -411,6 +414,41 @@ func TestListOrderDefaultsAndPagination(t *testing.T) {
 	details, _ := gofytest.RawJSON(t, rr)["details"].(map[string]any)
 	if msg, _ := details["page_size"].(string); msg == "" {
 		t.Fatalf("details = %v", details)
+	}
+}
+
+func TestListOrderFilters(t *testing.T) {
+	app := newTestApp(t)
+
+	cases := []struct {
+		name  string
+		query string
+		total int
+		id    uint64
+	}{
+		{"status", "user_id=102&status=pending", 1, 3},
+		{"created from", "user_id=102&created_from=2026-01-15T00:00:00Z", 1, 3},
+		{"created to", "user_id=102&created_to=2026-01-15T00:00:00Z", 1, 2},
+		{"both bounds", "user_id=102&created_from=2026-01-01T00:00:00Z&created_to=2026-01-31T00:00:00Z", 1, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := app.GET("/api/v1/order/orders?" + tc.query)
+			gofytest.Status(t, rr, http.StatusOK)
+			list := gofytest.JSON[paging.ListData[orderdto.OrderDTO]](t, rr)
+			if list.Total != int64(tc.total) || len(list.List) != tc.total {
+				t.Fatalf("list = %+v, want total %d", list, tc.total)
+			}
+			if list.List[0].ID.Uint64() != tc.id {
+				t.Fatalf("first id = %d, want %d", list.List[0].ID.Uint64(), tc.id)
+			}
+		})
+	}
+
+	rr := app.GET("/api/v1/order/orders?user_id=102&created_from=2026-02-01T00:00:00Z&created_to=2026-01-01T00:00:00Z")
+	gofytest.Status(t, rr, http.StatusBadRequest)
+	if code := gofytest.RawJSON(t, rr)["code"]; code != float64(40000) {
+		t.Fatalf("inverted window code = %v, want 40000", code)
 	}
 }
 

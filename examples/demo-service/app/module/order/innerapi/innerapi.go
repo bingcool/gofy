@@ -28,6 +28,16 @@ type CreateItem struct {
 	Num   int32
 }
 
+// ListFilter narrows the order list. Status is a domain status string; the
+// CreatedFrom/CreatedTo strings are RFC3339 and empty means unbounded.
+// ListFilter 收窄订单列表条件：Status 是领域状态字符串；CreatedFrom/CreatedTo
+// 为 RFC3339 字符串，空串表示不限。
+type ListFilter struct {
+	Status      string
+	CreatedFrom string
+	CreatedTo   string
+}
+
 // ErrNotFound 表示订单不存在。
 var ErrNotFound = errors.New("order not found")
 
@@ -35,8 +45,9 @@ var ErrNotFound = errors.New("order not found")
 type OrderAPI interface {
 	// Get 返回单个订单视图，不存在时返回 ErrNotFound。
 	Get(ctx context.Context, id uint64) (*Order, error)
-	// List 按用户分页返回订单视图与总数。
-	List(ctx context.Context, userID uint64, page, size int) ([]Order, int64, error)
+	// List returns one page of order views plus the filtered total count.
+	// List 按用户与筛选条件分页返回订单视图与过滤后的总数。
+	List(ctx context.Context, userID uint64, filter ListFilter, page, size int) ([]Order, int64, error)
 	// Create 校验 SKU 并落单，返回创建后的订单视图。
 	Create(ctx context.Context, userID uint64, amount int64, items []CreateItem) (*Order, error)
 	// Cancel 取消订单，不存在时返回 ErrNotFound。

@@ -19,9 +19,16 @@ const (
 // controller 以 service.CreateItem 引用，同时保持 innerapi 不依赖 service。
 type CreateItem = orderapi.CreateItem
 
+// ListFilter is the innerapi filter with service-side timestamp parsing.
+// ListFilter 是 innerapi 筛选条件的别名；时间解析留在 service，调用方不必与
+// 数据库约定时区。
+type ListFilter = orderapi.ListFilter
+
 var (
 	// ErrOrderNotFound 表示订单不存在，映射为 HTTP 404。
 	ErrOrderNotFound = orderapi.ErrNotFound
+	// ErrInvalidTimeRange 表示 created_from 晚于 created_to，映射为 HTTP 400。
+	ErrInvalidTimeRange = errors.New("created_from must not be after created_to")
 	// ErrProductNotFound 表示请求的 SKU 不存在，映射为 HTTP 400。
 	ErrProductNotFound = errors.New("product not found")
 	// ErrProductUnavailable 表示请求的 SKU 已下架，映射为 HTTP 400。

@@ -60,12 +60,21 @@ func (c *OrderController) GetOrder(ctx context.Context, req *orderrequest.GetOrd
 	return &orderresponse.GetOrderResponse{Order: toOrderDTO(o.ID, o.UserID, o.Amount, o.Status, o.CreatedAt)}, nil
 }
 
-// ListOrders returns one page of orders.
-// ListOrders 按用户分页返回订单；页码与页大小原样透传，偏移量换算留在 service，
-// 因此 controller 不感知分页语义。
+// ListOrders returns one page of orders. Status and the RFC3339 window are
+// passed through as plain values; an inverted window is a client error.
+// ListOrders 按用户、状态与创建时间窗分页返回订单；筛选值以普通值透传，时间
+// 解析留在 service；起止时间先后颠倒返回 400。页码与页大小原样透传，偏移量
+// 换算留在 service，因此 controller 不感知分页语义。
 func (c *OrderController) ListOrders(ctx context.Context, req *orderrequest.ListOrdersRequest) (*paging.ListData[orderdto.OrderDTO], error) {
-	items, total, err := c.orderService.List(ctx, req.UserID.Uint64(), req.Page, req.PageSize)
+	items, total, err := c.orderService.List(ctx, req.UserID.Uint64(), service.ListFilter{
+		Status:      string(req.Status),
+		CreatedFrom: req.CreatedFrom,
+		CreatedTo:   req.CreatedTo,
+	}, req.Page, req.PageSize)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidTimeRange) {
+			return nil, apperr.BadRequest(err.Error())
+		}
 		c.logger.Error("list orders failed", zap.Uint64("user_id", req.UserID.Uint64()), zap.Error(err))
 		return nil, apperr.Internal("list orders failed").WithCause(err)
 	}

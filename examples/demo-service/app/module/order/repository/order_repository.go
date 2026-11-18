@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
@@ -72,10 +73,23 @@ func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Or
 	return o, nil
 }
 
-// ListByUser returns one page of orders plus the user's total count.
-// ListByUser 按用户分页返回订单与总数；计数与列表两条 SQL 都从同一个 ctx 连接
-// 发出，保证它们落在同一事务或同一代连接上。
-func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error) {
+// ListFilter narrows one order page. Nil CreatedFrom/CreatedTo mean unbounded;
+// the repository compares the values as given and never interprets timezones.
+// ListFilter 收窄订单分页条件；CreatedFrom/CreatedTo 为 nil 表示不限，仓库按
+// 调用方给的时间直接比较，不解释时区。
+type ListFilter struct {
+	UserID      uint64
+	Status      string
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
+}
+
+// List returns one page of orders plus the filtered total count. Both SQL
+// statements start from the same ctx connection, so they land in the same
+// transaction or connection generation.
+// List 按筛选条件分页返回订单与过滤后的总数；计数与列表两条 SQL 都从同一个
+// ctx 连接发出，保证它们落在同一事务或同一代连接上。
+func (r *OrderRepository) List(ctx context.Context, filter ListFilter, offset, limit int) ([]model.Order, int64, error) {
 	db, err := r.conn(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -85,7 +99,17 @@ func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset,
 		total int64
 	)
 	q := func() *gorm.DB {
-		return db.WithContext(ctx).Model(&model.Order{}).Where("user_id = ?", userID)
+		query := db.WithContext(ctx).Model(&model.Order{}).Where("user_id = ?", filter.UserID)
+		if filter.Status != "" {
+			query = query.Where("status = ?", filter.Status)
+		}
+		if filter.CreatedFrom != nil {
+			query = query.Where("created_at >= ?", *filter.CreatedFrom)
+		}
+		if filter.CreatedTo != nil {
+			query = query.Where("created_at <= ?", *filter.CreatedTo)
+		}
+		return query
 	}
 	if err := q().Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count orders: %w", err)

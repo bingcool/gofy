@@ -91,8 +91,9 @@ curl -X POST http://127.0.0.1:8080/api/v1/order/orders \
 curl 'http://127.0.0.1:8080/api/v1/order/orders?user_id=100&page=1&page_size=20'
 ```
 
-> 契约还声明了 `status`、`created_from`、`created_to` 三个查询参数，会参与
-> 参数校验，但当前 demo 的 `List` 只按 `user_id` 过滤，这三个条件尚未生效。
+> `status`、`created_from`、`created_to` 三个查询参数参与参数校验并实际过滤：
+> 状态精确匹配，时间按 RFC3339 解析后作为闭区间比较；`created_from` 晚于
+> `created_to` 返回 `400`。总数按同一组条件统计。
 
 ## 限流
 
@@ -597,8 +598,8 @@ CREATE TABLE IF NOT EXISTS orders (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 ```
 
-项目不使用 `AutoMigrate`，首次运行前需要手动执行迁移文件。`ListByUser`
-按 `id DESC` 排序，并先 `COUNT` 再分页，返回当前用户的总数。
+项目不使用 `AutoMigrate`，首次运行前需要手动执行迁移文件。`List`
+按 `id DESC` 排序，并先 `COUNT` 再分页，返回与列表同一组筛选条件下的总数。
 `UpdateStatus` 在 `RowsAffected == 0` 时返回 `ErrNotFound`，因此取消不存在的
 订单会得到 `40401`。
 
@@ -663,13 +664,16 @@ panic 用例由包装后的 `gorm.ConnPool`（`panicPool`）在驱动层对 `id 
 `examples/demo-service/shell/check-imports.sh`，按层强制 import 边界（规则见
 [`docs/module-layering-design.md`](../../../../docs/module-layering-design.md) §10）；
 
+每层都是显式白名单，不在名单里的 import 一律失败：
+
 | 层 | 允许的跨包 import | 禁止 |
 | --- | --- | --- |
-| controller | 本模块 `service`、HTTP 契约 | 任何 `model`/`repository`/`innerapi`、其他模块、`app/appio` |
-| service | 本模块各层、`app/appio`、其他模块 `innerapi` | HTTP 契约、其他模块 service/repository/model |
+| controller | 本模块 `service`、HTTP 契约、`adapter/gofy`、`gofy/apperr`、日志 | 任何 `model`/`repository`/`innerapi`、其他模块、`app/appio`、`client`、adapter 其它包 |
+| service | 本模块 `model`/`repository`/`innerapi`、其他模块 `innerapi`、`app/appio`、`support`、本模块配置段、日志 | HTTP 契约、`client`、`adapter`、本模块 controller/query |
 | innerapi | 标准库、`support` 纯类型 | 任何 `app/module`、契约、`app/appio`、框架、第三方 |
-| repository | 本模块 `model`、`app/appio`、`support` | service/innerapi、契约、其他模块 |
-| model | 标准库、`support`、第三方（如 gorm） | 任何 `app/module`、契约、`app/appio` |
+| repository | 本模块 `model`、`app/appio`、`support`、`gorm.io/gorm` | service/innerapi、契约、其他模块、日志 |
+| query | 本模块 `model`、`app/appio`、`support`、框架与第三方库 | service/controller/innerapi/repository、其他模块、契约、`client`、`adapter` |
+| model | 标准库 | 任何 `app/module`、契约、`app/appio`、框架、第三方 |
 
 模块根包（`module.go`）只做路由绑定，不受上表约束；装配根 `app/container`
 位于 `app/module` 之外，同样不在 guard 检查范围内，是唯一同时 import 多个模块

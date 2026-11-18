@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
@@ -138,11 +139,18 @@ func (s *OrderService) validateItems(ctx context.Context, items []CreateItem) ([
 	return names, nil
 }
 
-// List returns one page of order views plus the total count.
-// List 按用户分页返回订单视图与总数，偏移量由页码在这里换算；空页返回空切片
-// 而不是 nil，controller 可直接构造响应列表。
-func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) ([]orderapi.Order, int64, error) {
-	items, total, err := s.orderRepository.ListByUser(ctx, userID, (page-1)*size, size)
+// List returns one page of order views plus the filtered total count. The
+// status and time window reach the repository as plain values; the offset is
+// computed here. An inverted window is a client error.
+// List 按用户与筛选条件分页返回订单视图与过滤后的总数，偏移量由页码在这里
+// 换算；时间窗越过终点归为调用方错误；空页返回空切片而不是 nil，controller
+// 可直接构造响应列表。
+func (s *OrderService) List(ctx context.Context, userID uint64, filter ListFilter, page, size int) ([]orderapi.Order, int64, error) {
+	query, err := repositoryFilter(userID, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	items, total, err := s.orderRepository.List(ctx, query, (page-1)*size, size)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -152,11 +160,44 @@ func (s *OrderService) List(ctx context.Context, userID uint64, page, size int) 
 	}
 	s.logger.Debug("list orders",
 		zap.Uint64("user_id", userID),
+		zap.String("status", filter.Status),
 		zap.Int("page", page),
 		zap.Int("page_size", size),
 		zap.Int64("total", total),
 	)
 	return list, total, nil
+}
+
+// repositoryFilter translates the plain-value filter into repository terms.
+// Timestamps are parsed as RFC3339 so the caller's offset is honored instead
+// of guessed; an empty string means unbounded. Malformed timestamps are left
+// to the contract validator, so a parse failure here is an internal error.
+// repositoryFilter 把普通值筛选条件翻译成仓库入参：时间按 RFC3339 解析，保留
+// 调用方给定时区偏移，空串表示不限；格式由契约校验器负责，因此这里的解析失败
+// 属于内部错误。from 晚于 to 返回 ErrInvalidTimeRange。
+func repositoryFilter(userID uint64, f ListFilter) (repository.ListFilter, error) {
+	out := repository.ListFilter{UserID: userID, Status: f.Status}
+	var from, to time.Time
+	if f.CreatedFrom != "" {
+		t, err := time.Parse(time.RFC3339, f.CreatedFrom)
+		if err != nil {
+			return repository.ListFilter{}, fmt.Errorf("parse created_from: %w", err)
+		}
+		from = t
+		out.CreatedFrom = &from
+	}
+	if f.CreatedTo != "" {
+		t, err := time.Parse(time.RFC3339, f.CreatedTo)
+		if err != nil {
+			return repository.ListFilter{}, fmt.Errorf("parse created_to: %w", err)
+		}
+		to = t
+		out.CreatedTo = &to
+	}
+	if out.CreatedFrom != nil && out.CreatedTo != nil && from.After(to) {
+		return repository.ListFilter{}, ErrInvalidTimeRange
+	}
+	return out, nil
 }
 
 // Cancel marks an order as cancelled.
