@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Cross-platform build: the Windows build compiles again. `worker_notify.go`
+  referenced `process.NotifyEnv` and `process.NotifyFD`, which only exist in
+  `detach_unix.go`, so every Windows build failed on two undefined symbols while
+  local Unix builds stayed green. The child-side notifier lookup now lives in
+  `worker_notify_unix.go`, and the Windows counterpart returns nil — `os/exec`
+  ignores `ExtraFiles` there, so there is no inherited descriptor to write a
+  startup report to, and a stray `GOFY_DAEMON_NOTIFY` in the environment must not
+  make the process write into an unrelated handle. `worker --daemon` on Windows
+  now names the unsupported operation instead of surfacing a bare
+  `process: operation not supported on windows`. `make check` gains a `cross`
+  target (`GOOS=windows GOARCH=amd64 go vet ./...`) so a missing platform symbol
+  fails locally instead of waiting for someone to build on Windows; `go vet`
+  rather than `go build` because the platform tags also appear in test files.
 - Audit P3 follow-up: five narrow edge cases fixed across the framework and
   adapter. `status` now reports `unverified` when a pid file cannot prove the
   process identity, and `stop` refuses to signal in that case without `--force`

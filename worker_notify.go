@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bingcool/gofy/internal/commandline"
-	"github.com/bingcool/gofy/internal/process"
 )
 
 // The startup channel is one line in one direction. The detached child writes
@@ -25,35 +23,16 @@ import (
 // /dev/null，父进程唯一能知道的只有"进程被创建了"。
 
 // startupNotifier is the child side of the channel. A nil notifier is valid and
-// does nothing, which is what every non-daemon process gets.
-// startupNotifier 是通道的子进程一侧。nil 通知器是合法的且什么都不做，所有非后台进程都是
-// 这种情况。
+// does nothing, which is what every non-daemon process gets. It is also the whole
+// Windows implementation: the channel needs a descriptor inherited through
+// os/exec ExtraFiles, Windows ignores that field, so there is nothing to join and
+// notifierFromEnv returns nil there.
+// startupNotifier 是通道的子进程一侧。nil 通知器合法且什么都不做，所有非后台进程都是
+// 这种情况；它同时也是 Windows 上的全部实现：通道依赖 os/exec 的 ExtraFiles 继承来的
+// 描述符，而 Windows 忽略该字段，因此没有可加入的通道，notifierFromEnv 在那里返回 nil。
 type startupNotifier struct {
 	file *os.File
 	once sync.Once
-}
-
-// notifierFromEnv builds the child's notifier from the environment the parent
-// set. It validates the descriptor instead of trusting the number: an fd that is
-// not open makes os.NewFile return nil, and a process started by hand with a
-// stray variable set must not write into an unrelated descriptor.
-// notifierFromEnv 根据父进程设置的环境变量构造子进程的通知器。它校验描述符而不是盲信编号：
-// 没打开的 fd 会让 os.NewFile 返回 nil，而手工启动、环境里恰好有同名变量的进程也不该往无关
-// 描述符里写东西。
-func notifierFromEnv() *startupNotifier {
-	raw := strings.TrimSpace(os.Getenv(process.NotifyEnv))
-	if raw == "" {
-		return nil
-	}
-	fd, err := strconv.Atoi(raw)
-	if err != nil || fd < process.NotifyFD {
-		return nil
-	}
-	file := os.NewFile(uintptr(fd), "gofy-daemon-notify")
-	if file == nil {
-		return nil
-	}
-	return &startupNotifier{file: file}
 }
 
 // ready tells the parent the group accepts work.

@@ -380,7 +380,15 @@ const (
 
 func (a *App) daemonizeWorker(groups []*worker.Group, pidPath string, opts commandline.WorkerOptions) error {
 	if runtime.GOOS == "windows" {
-		return ErrUnsupported
+		// Name the operation, like `start --daemon` does. A bare ErrUnsupported
+		// reads as "process: operation not supported on windows", which points at
+		// the wrong package and gives the operator nothing to act on. Windows has
+		// no ExtraFiles, so the startup channel that makes a detached worker
+		// observable does not exist there either.
+		// 像 `start --daemon` 那样点名操作。裸 ErrUnsupported 读起来是
+		// "process: operation not supported on windows"，既指错了包，也没告诉运维该做什么。
+		// Windows 没有 ExtraFiles，让脱离后的 worker 可观测的启动通道在那里同样不存在。
+		return fmt.Errorf("gofy: worker --daemon is not supported on windows: %w", ErrUnsupported)
 	}
 	// Refuse before detaching. The child's stdout and stderr go to /dev/null, so a
 	// duplicate instance would die silently while the parent reported success.

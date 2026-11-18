@@ -375,6 +375,8 @@
 
 > **修复状态（2026-11-18 后续批次）**：A8、A9、B7、C7、E9 已修复；E9b 已在 E3 批次修复（该行保留仅为追溯）。其余 10 条仍未修复。逐条状态见 §7。
 >
+> A9 分两步完成。把 `panic` 改成返回 `ErrUnsupported` 之后，`worker_notify.go` 仍直接引用只在 `detach_unix.go` 定义的 `process.NotifyEnv` / `process.NotifyFD`，Windows 整体编译不过，那段代码实际走不到。现已把 `notifierFromEnv` 按平台拆到 `worker_notify_unix.go` / `worker_notify_windows.go`（后者返回 nil：`os/exec` 在 Windows 忽略 `ExtraFiles`，没有可继承的启动通道），`worker --daemon` 在 Windows 也改为点名操作的错误信息，并在 `make check` 中加入 `cross`（`GOOS=windows GOARCH=amd64 go vet ./...`）——`go build` 不编译测试文件，而平台标签同时存在于测试里。
+>
 > 复核时另有一条前提修正：B10 的三条 Reap UPDATE 虽不在事务内，但按 `rerun_allowed`/`attempts` 互斥且幂等，中途失败下次 Reap 重跑即可，不会产生状态不一致；B11 的阻塞只泄漏 goroutine，框架的 DrainTimeout 会放行进程；D9 可用调用方传入的 `context.WithTimeout` 获得流式整体 deadline；D10 在 HTTP 路径有 `min=1` 校验，仅直调受影响。
 
 ---

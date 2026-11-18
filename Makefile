@@ -6,7 +6,7 @@ EXAMPLE_CONTRACTS := examples/interface-service
 API_LIBRARY := ../gofy-interface-api
 ADAPTER_LIBRARY := ../gofy-adapter
 
-.PHONY: all fmt fmt-check vet test test-race example example-contracts sync-contract-template check-all guards cgo-free check build clean
+.PHONY: all fmt fmt-check vet test test-race example example-contracts sync-contract-template check-all guards cgo-free cross check build clean
 
 all: fmt-check vet test
 
@@ -61,7 +61,14 @@ cgo-free:
 	@cgo="$$($(GO) list -deps -test -f '{{if .CgoFiles}}{{.ImportPath}}{{end}}' $(PKGS) | grep -v '^$$' || true)"; \
 	if [ -n "$$cgo" ]; then echo "cgo is not allowed:"; echo "$$cgo"; exit 1; fi
 
-check: fmt-check vet test-race example guards cgo-free
+# Windows 交叉编译守卫：只在 Linux/macOS 开发时，平台相关的符号缺失不会在本地构建里暴露。
+# worker_notify.go 曾直接引用只在 detach_unix.go 定义的 process.NotifyEnv / NotifyFD，
+# 结果 Windows 整体编译不过而无人察觉。go vet 而不是 go build，因为测试文件里的构建标签
+# 同样需要被检查，而 go build 不编译测试。
+cross:
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) vet $(GOFLAGS) $(PKGS)
+
+check: fmt-check vet test-race example guards cgo-free cross
 
 build:
 	$(GO) build $(GOFLAGS) $(PKGS)
