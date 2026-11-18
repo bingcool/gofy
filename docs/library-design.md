@@ -2986,15 +2986,14 @@ func (c *Container) OrderService() *orderservice.OrderService {
 ```go
 func (c *Container) ProductModuleFactory() gofy.ModuleFactory {
     return func(rt *gofy.Runtime) (support.Module, error) {
-        if rt.DB == nil {
-            return nil, errors.New("product module requires database")
-        }
+        // 不检查 rt.DB：db 是可选配置段，缺少它的部署也要能启动。模块照常注册，
+        // 由使用处返回 db.ErrNotConfigured（请求错误），而不是进程拒绝启动。
         c.Init(rt.Logger)
         return product.NewModule(c.ProductService(), rt.Logger, c.BindOptions()), nil
     }
 }
 
-// OrderModuleFactory 同构：检查 rt.DB、Init，再返回 order.NewModule(...)。
+// OrderModuleFactory 同构：Init 后返回 order.NewModule(...)，不检查 rt.DB。
 // OrderService 取用时按依赖链先构造产品 service，订单工厂无需排在产品工厂之后。
 func (c *Container) OrderModuleFactory() gofy.ModuleFactory { ... }
 

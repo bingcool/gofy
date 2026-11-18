@@ -18,17 +18,17 @@ func TestPlanCommand(t *testing.T) {
 	}{
 		{
 			name: "no args starts HTTP",
-			want: commandPlan{Kind: "http-start", LoadNacos: true, Sync: true, Watch: true, LoadConfig: true, RegisterGroups: true, BuildServices: true},
+			want: commandPlan{Kind: "http-start", LoadNacos: true, Sync: true, Watch: true, LoadConfig: true, BuildServices: true},
 		},
 		{
 			name: "start",
 			args: []string{"start"},
-			want: commandPlan{Kind: "http-start", LoadNacos: true, Sync: true, Watch: true, LoadConfig: true, RegisterGroups: true, BuildServices: true},
+			want: commandPlan{Kind: "http-start", LoadNacos: true, Sync: true, Watch: true, LoadConfig: true, BuildServices: true},
 		},
 		{
 			name: "start after flags",
 			args: []string{"--env=dev", "start"},
-			want: commandPlan{Kind: "http-start", LoadNacos: true, Sync: true, Watch: true, LoadConfig: true, RegisterGroups: true, BuildServices: true},
+			want: commandPlan{Kind: "http-start", LoadNacos: true, Sync: true, Watch: true, LoadConfig: true, BuildServices: true},
 		},
 		{
 			name: "worker with group",

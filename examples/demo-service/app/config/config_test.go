@@ -23,23 +23,80 @@ db:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := cfg.Database(DefaultDatabase).DSN; got != "user:pass@tcp(127.0.0.1:3306)/main" {
-		t.Fatalf("default dsn = %q", got)
+	if got, ok := cfg.Database(DefaultDatabase); !ok || got.DSN != "user:pass@tcp(127.0.0.1:3306)/main" {
+		t.Fatalf("default dsn = %q, configured = %v", got.DSN, ok)
 	}
-	if got := cfg.Database("report").DSN; got != "user:pass@tcp(127.0.0.1:3306)/report" {
-		t.Fatalf("report dsn = %q", got)
+	if got, ok := cfg.Database("report"); !ok || got.DSN != "user:pass@tcp(127.0.0.1:3306)/report" {
+		t.Fatalf("report dsn = %q, configured = %v", got.DSN, ok)
 	}
 }
 
-func TestLoadRequiresDefaultDatabase(t *testing.T) {
+// Every top-level section is optional. A file that configures nothing but the
+// HTTP listener must load: the process then runs without a database, without
+// Redis, without brokers and without LLM access, and only the endpoints that
+// need one of them fail — at request time, with ErrNotConfigured.
+// 每一段顶层配置都是可选的。只配了 HTTP 监听的文件必须能加载：进程随后在没有数据库、
+// 没有 Redis、没有 broker、没有大模型的情况下运行，只有真正用到它们的端点失败——
+// 且是在请求时得到 ErrNotConfigured，而不是启动即拒绝。
+func TestLoadAllowsMissingOptionalSections(t *testing.T) {
+	path := writeConfig(t, `
+http:
+  host: 127.0.0.1
+  port: 8080
+`)
+
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Database(DefaultDatabase); ok {
+		t.Fatal("Database(default) reported configured for a file without a db section")
+	}
+	if len(cfg.Redis) != 0 || len(cfg.AMQP) != 0 || len(cfg.Kafka) != 0 || len(cfg.RocketMQ) != 0 {
+		t.Fatalf("optional IO sections decoded non-empty: redis=%v amqp=%v kafka=%v rocketmq=%v",
+			cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ)
+	}
+	if cfg.Tenant.Enabled || cfg.UUIDInt.Enabled || cfg.Lock.Enabled || cfg.LLMAI.Enabled {
+		t.Fatalf("optional switches enabled by default: tenant=%v uuidint=%v lock=%v llm=%v",
+			cfg.Tenant.Enabled, cfg.UUIDInt.Enabled, cfg.Lock.Enabled, cfg.LLMAI.Enabled)
+	}
+}
+
+// A db block with only named instances is also valid: the framework-managed
+// default is absent, the io generation still opens `db.report`.
+// 只有命名实例的 db 段同样合法：框架托管的 default 缺失，io 装配代仍然会打开
+// `db.report`。
+func TestLoadAllowsNamedDatabaseWithoutDefault(t *testing.T) {
 	path := writeConfig(t, `
 db:
   report:
     dsn: user:pass@tcp(127.0.0.1:3306)/report
 `)
 
+	cfg, err := Load(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := cfg.Database(DefaultDatabase); ok {
+		t.Fatal("Database(default) reported configured")
+	}
+	if got, ok := cfg.Database("report"); !ok || got.DSN == "" {
+		t.Fatalf("report instance = %+v, configured = %v", got, ok)
+	}
+}
+
+// A present-but-broken section is still a startup error: optional means "may be
+// absent", not "may be wrong".
+// 存在的段如果写错了仍然是启动错误：可选的意思是"可以没有"，不是"可以写错"。
+func TestLoadRejectsBrokenDatabase(t *testing.T) {
+	path := writeConfig(t, `
+db:
+  default:
+    dsn: ""
+`)
+
 	if _, err := Load(context.Background(), path); err == nil {
-		t.Fatal("Load accepted config without db.default")
+		t.Fatal("Load accepted an empty dsn")
 	}
 }
 

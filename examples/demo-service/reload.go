@@ -152,11 +152,21 @@ func (r *reloader) reload(ctx context.Context) error {
 		}
 		env = systemenv.GetEnv()
 	}
-	dbCfg := cfg.Database(config.DefaultDatabase)
+	// nil, not a zero-value config: ReloadSpec.Database non-nil means "reconnect
+	// the pool", and validation would reject an empty DSN with
+	// "db: dsn is required". A deployment without a db section reloads its
+	// modules while keeping Runtime.DB nil, exactly as it started.
+	// nil 而不是零值配置：ReloadSpec.Database 非 nil 表示"重连连接池"，校验会以
+	// "db: dsn is required" 拒绝空 DSN。没有 db 段的部署重载模块时保持 Runtime.DB
+	// 为 nil，与它启动时的状态一致。
+	var dbCfg *gofy.DatabaseConfig
+	if conf, ok := cfg.Database(config.DefaultDatabase); ok {
+		dbCfg = &conf
+	}
 	return app.Reload(ctx, gofy.ReloadSpec{
 		Env:                  env,
 		Log:                  &cfg.Log,
-		Database:             &dbCfg,
+		Database:             dbCfg,
 		ModuleFactories:      r.factories(cfg),
 		MiddlewareRegistrars: []gofy.MiddlewareRegistrar{middlewareRegistrar(cfg)},
 	})

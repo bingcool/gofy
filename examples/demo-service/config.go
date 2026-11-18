@@ -115,14 +115,23 @@ func planCommand(args []string) commandPlan {
 }
 
 func httpStartPlan(kind string) commandPlan {
+	// RegisterGroups stays false: groups are a worker-process concern, and
+	// building them in HTTP would make every broker section mandatory there —
+	// ConnectionsFrom + consumer constructors validate the instance names, so an
+	// API deployment with no kafka/amqp/rocketmq block could not boot, even
+	// though it never runs a consumer. HTTP still reads the same config file; it
+	// just does not construct what it does not run.
+	// RegisterGroups 保持 false：分组属于 worker 进程，在 HTTP 里构建会让每个 broker
+	// 段都变成必填——ConnectionsFrom 与消费者构造函数都会校验实例名，于是一个不跑消费者的
+	// API 部署只因没写 kafka/amqp/rocketmq 就起不来。HTTP 仍然读同一份配置，只是不构造
+	// 它不运行的东西。
 	return commandPlan{
-		Kind:           kind,
-		LoadNacos:      true,
-		Sync:           true,
-		Watch:          true,
-		LoadConfig:     true,
-		RegisterGroups: true,
-		BuildServices:  true,
+		Kind:          kind,
+		LoadNacos:     true,
+		Sync:          true,
+		Watch:         true,
+		LoadConfig:    true,
+		BuildServices: true,
 	}
 }
 

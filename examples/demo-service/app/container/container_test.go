@@ -48,11 +48,22 @@ func TestAccessorsAreIdempotent(t *testing.T) {
 	}
 }
 
-func TestModuleFactoriesRequireDatabase(t *testing.T) {
+// `db` is an optional config section: a deployment without it starts with a nil
+// Runtime.DB, and the factories must still produce their modules. The failure
+// belongs at the point of use (db.ErrNotConfigured), not at assembly — otherwise
+// an API that only serves non-database endpoints could not run at all.
+// `db` 是可选配置段：没有它的部署以 nil 的 Runtime.DB 启动，工厂仍须产出模块。失败
+// 应落在使用处（db.ErrNotConfigured），而不是装配期——否则一个只提供非数据库端点的
+// API 根本无法运行。
+func TestModuleFactoriesTolerateMissingDatabase(t *testing.T) {
 	ctr := container.NewContainer(nil)
 	for _, factory := range ctr.ModuleFactories() {
-		if _, err := factory(&gofy.Runtime{Logger: zap.NewNop()}); err == nil {
-			t.Fatal("module factory should fail without database")
+		module, err := factory(&gofy.Runtime{Logger: zap.NewNop()})
+		if err != nil {
+			t.Fatalf("module factory without database: %v", err)
+		}
+		if module == nil {
+			t.Fatal("module factory returned a nil module without error")
 		}
 	}
 }

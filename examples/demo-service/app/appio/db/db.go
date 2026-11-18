@@ -14,7 +14,6 @@ package db
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -158,10 +157,17 @@ func installTenant(pool *gorm.DB, opts tenant.Options) error {
 	return tenant.Instrument(pool, opts)
 }
 
+// Open builds this generation's Set. defaultDB may be nil: a deployment that
+// configures no `db.default` (or no `db` section at all) still builds a
+// generation, it simply has no framework-managed pool — Default() returns nil
+// and DBIO(ctx, "default") reports ErrNotConfigured. The named instances in cfg
+// are opened regardless, so a service can use only `db.order` if that is what
+// it declares.
+// Open 构建本代的 Set。defaultDB 允许为 nil：没有配 `db.default`（甚至整段 `db`
+// 都不存在）的部署同样有一代句柄，只是没有框架托管的连接池——Default() 返回 nil，
+// DBIO(ctx, "default") 报 ErrNotConfigured。cfg 里的命名实例照常打开，因此一个服务
+// 可以只声明 `db.order` 并使用它。
 func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, rt *gofy.Runtime, opts ...OpenOption) (*Set, error) {
-	if defaultDB == nil {
-		return nil, errors.New("db: default database is required")
-	}
 	var o openOptions
 	for _, opt := range opts {
 		if opt != nil {

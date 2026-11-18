@@ -102,10 +102,26 @@ func (c TenantConfig) OpenOptions() []appdb.OpenOption {
 	return []appdb.OpenOption{appdb.WithTenant(opts)}
 }
 
-// Database returns the named instance; the caller must have checked it exists.
-// Database 返回指定实例的配置；实例缺失时给回零值，存在性由调用方自行确认。
-func (c *Config) Database(name string) gofy.DatabaseConfig {
-	return c.DB[name]
+// Database returns the named instance and whether the section configures it.
+//
+// The bool is the point: every section in this file is optional, so a caller
+// must not read a zero-value config as "configured with empty DSN". `db` absent,
+// or a `db` block without `default`, means the deployment uses no
+// framework-managed database — the App then starts with a nil Runtime.DB and
+// requests that need one fail with ErrNotConfigured instead of the process
+// refusing to boot.
+// Database 返回指定实例，以及该段是否配置了它。
+//
+// 布尔返回值是关键：本文件每一段都是可选的，调用方不能把零值配置当成"已配置但
+// DSN 为空"。缺少 `db` 段、或 `db` 段里没有 `default`，表示这套部署不使用框架托管
+// 的数据库——App 会以 nil 的 Runtime.DB 启动，需要数据库的请求得到 ErrNotConfigured，
+// 而不是整个进程拒绝启动。
+func (c *Config) Database(name string) (gofy.DatabaseConfig, bool) {
+	if c == nil {
+		return gofy.DatabaseConfig{}, false
+	}
+	cfg, ok := c.DB[name]
+	return cfg, ok
 }
 
 // warnMissingEnv writes the missing-variable warning. It is a variable so tests
@@ -125,9 +141,16 @@ func Load(ctx context.Context, path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := cfg.DB[DefaultDatabase]; !ok {
-		return nil, fmt.Errorf("config: db.%s is required", DefaultDatabase)
-	}
+	// Every top-level section is optional: an absent `db`, `redis`, `amqp`,
+	// `kafka`, `rocketmq`, `uuidint`, `lock`, `otel`, `tenant` or `llm_ai`
+	// block means this deployment does not use it, not that the file is wrong.
+	// The loops below therefore validate what is present and skip what is not;
+	// a missing `db.default` leaves the App without a framework-managed pool,
+	// which the framework already supports (nil Runtime.DB, /readyz stays 200).
+	// 每一段顶层配置都是可选的：缺少 `db`、`redis`、`amqp`、`kafka`、`rocketmq`、
+	// `uuidint`、`lock`、`otel`、`tenant`、`llm_ai` 表示这套部署用不到它，而不是
+	// 文件有问题。因此下面只校验出现的段、跳过缺失的段；缺少 `db.default` 时 App 没有
+	// 框架托管的连接池，这一点框架本就支持（Runtime.DB 为 nil，/readyz 仍返回 200）。
 	for name, conf := range cfg.DB {
 		if err := conf.Validate(); err != nil {
 			return nil, fmt.Errorf("config: db.%s: %w", name, err)

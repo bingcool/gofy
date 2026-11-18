@@ -73,6 +73,17 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 	if !plan.BuildServices {
 		return opts
 	}
+	// The database is the one section that changes an option's presence rather
+	// than its value: WithDatabase validates the DSN, so passing a zero-value
+	// config for an absent section would fail startup with "db: dsn is
+	// required". A deployment without a db block simply has no
+	// framework-managed pool; the framework accepts a nil Runtime.DB.
+	// 数据库是唯一"要不要传"而非"传什么值"的段落：WithDatabase 会校验 DSN，为缺失
+	// 的段传零值配置会以 "db: dsn is required" 启动失败。没有 db 段的部署就是没有
+	// 框架托管的连接池，框架接受 nil 的 Runtime.DB。
+	if dbCfg, ok := cfg.Database(config.DefaultDatabase); ok {
+		opts = append(opts, gofy.WithDatabase(dbCfg))
+	}
 	return append(opts,
 		gofy.WithTelemetry(cfg.OTel),
 		// 运维端点跑独立端口：/metrics 给 Prometheus，/debug/pprof/ 给排障。
@@ -81,7 +92,6 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		// turns them on.
 		gofy.WithDiagnostics(cfg.Diagnostics),
 		gofy.WithHTTP(cfg.HTTP),
-		gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
 		gofy.WithNacosRegistration(nacosCfg),
 		// 把入口请求的白名单 Header 注入上下文，供 demoserviceclient 转发到下游；
 		// 身份头只有在 WithTrustedProxies 命中的代理转发时才采信。
