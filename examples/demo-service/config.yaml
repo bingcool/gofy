@@ -274,3 +274,51 @@ order:
 client:
   inner_external_base_uri: ''
   timeout: 5s
+
+# LLM 接入（support/ai）。alias 是业务代码使用的名字，与 provider 的 wire model id
+# 解耦；模块按 alias 调用，不关心 base_url 与凭证来自哪里。
+#
+# 密钥不写明文：下面用美元花括号占位指向一个环境变量（见 api_key 那行），只在 New 时解析；
+# 变量缺失则启动直接失败（fail-fast）。密钥因此留在部署环境里，既不进仓库，也不进任何
+# "写进程环境变量"的路径。运行前先 export DEEPSEEK_API_KEY=...
+# 不需要大模型时把下面的 enabled 设为 false（或删掉整段）：AI 模块不会注册、相关路由返回 404。
+# 注意占位符在 YAML 解析之前就会展开；想在 enabled 为 false 时也不要求该变量，
+# 把 api_key 写成 $${DEEPSEEK_API_KEY}（New 才解析，关闭时不会走到 New）。
+#
+# 完整字段（超时、重试、工具循环、embedding、provider_options 等）见
+# support/ai/README.md；这里只保留 demo 用得到的一组，加字段只改配置不动代码。
+llm_ai:
+  # 总开关。false 或整段缺失时：模块不注册、路由 404、其余字段不再校验，
+  # 因此可以先保留一份写好的配置而把开关关着。
+  enabled: true
+  default_model: deepseek-chat
+
+  models:
+    deepseek-chat:
+      provider: deepseek
+      model: deepseek-chat
+      # api_key 支持两种写法：字面量，或下一行这种美元花括号占位，从环境变量读取。
+      # 占位符在 New 时解析；但 config.Load 在 YAML 解析之前就会展开它，所以变量
+      # 缺失会在加载期报错，即使 enabled 为 false。要让占位符穿过加载、留到 New 再
+      # 读取（关闭时完全不要求变量），把下一行写成 $${DEEPSEEK_API_KEY}。
+      api_key: ${DEEPSEEK_API_KEY}
+      timeout: 60s
+      max_retries: 2
+      temperature: 0.7
+      max_output_tokens: 2048
+      # DeepSeek 只接受 response_format=json_object，不接受 json_schema，
+      # 而 goai 默认按 schema 发。这一个开关把它降级成 json_object，
+      # 是"兼容端点差异靠配置表达、不在框架里写厂商分支"的例子。
+      provider_options:
+        structuredOutputs: false
+
+    # OpenAI 兼容端点示例：换成自己的地址与 key 即可，不需要改代码。
+    # 取消注释时把 api_key 换成 <your-dashscope-key>，或写美元花括号占位从环境读取
+    # （注释里要写成两个美元号转义，否则加载期会被当作占位符展开而要求变量）。
+    # qwen-max:
+    #   provider: openai_compatible
+    #   model: qwen-max
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    #   api_key: <your-dashscope-key>
+    #   provider_id: qwen
+    #   timeout: 90s

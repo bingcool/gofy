@@ -358,6 +358,57 @@ app, err := gofy.New(
 诊断端口在启动时绑定：端口冲突会让启动失败，而不是留下一个指向"什么都不应答"的
 抓取配置。该配置在启动时固定，`Reload` 不会重建。
 
+## LLM 接入（support/ai）
+
+`support/ai` 在 [goai](https://github.com/zendev-sh/goai) 之上提供配置驱动的 LLM
+客户端：应用在 `config.yaml` 的 `llm_ai` 段声明若干具名模型（alias），业务按 alias
+调用，不关心 provider、base URL 与凭证来源。
+
+```yaml
+llm_ai:
+  enabled: true            # 总开关；false 或整段缺失时模块不启用
+  default_model: deepseek-chat
+  models:
+    deepseek-chat:
+      provider: deepseek
+      model: deepseek-chat
+      api_key: ${DEEPSEEK_API_KEY}
+      temperature: 0.7
+      max_output_tokens: 2048
+
+    qwen-max:
+      provider: openai_compatible
+      model: qwen-max
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key: ${DASHSCOPE_API_KEY}
+      provider_id: qwen
+```
+
+```go
+client, err := ai.New(cfg.LLMAI, ai.WithLogger(logger))
+resp, err := client.Chat(ctx, ai.ChatRequest{Prompt: "解释一下幂等"})
+```
+
+只有三类 provider：`openai`、`deepseek`、`openai_compatible`。千问、文心、智谱、
+Moonshot、自建 vLLM/LiteLLM 都属于最后一种，靠 `base_url` 区分——框架里没有厂商
+分支，端点差异用 `provider_options` 表达（例如 DeepSeek 不支持 `json_schema`，
+配 `structuredOutputs: false` 即降级为 `json_object`）。
+
+`llm_ai` 整段缺失与 `enabled: false` 等价：模块不注册、相关路由 404、启动不受
+影响，所以"这个部署不接大模型"不需要任何占位配置。
+
+三条刻意的取舍：
+
+- **不写进程环境变量**。凭证只通过 provider 构造函数显式传入；需要从环境取时把
+  `api_key` 写成 `${VAR}`，由 `New` 读取（`config.Load` 会在加载期先展开一次，想让
+  关闭的模块不依赖变量就写 `$${VAR}`）。这一点有测试守着：`New` 前后进程环境逐条
+  比对必须一致。
+- **不做跨 provider 自动 fallback**。流式一旦输出首个 chunk 就无法重放，切换会把
+  两段不同模型的回答拼成一个。需要双活时由业务按 `IsRetryable` 决定重试哪个 alias。
+- **凭证缺失是启动错误**，不是第一次请求的 401。
+
+配置项、调用方式、可观测性与测试约定见 [support/ai/README.md](support/ai/README.md)。
+
 ## 热更新
 
 `App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
@@ -978,6 +1029,7 @@ support/amqp/   AMQP（RabbitMQ）连接、发布、消费与 TTL 延迟队列
 support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go，手动提交位点）
 support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRPC 客户端）
 support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
+support/ai/     配置驱动的 LLM 客户端（goai）：alias、OpenAI 兼容端点、流式与结构化输出
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
 support/uuidint/  基于 Redis 的分布式自增 int64 ID（与 PHP Uuid 布局互通）
 support/lock/    基于 Redis/redsync 的分布式互斥锁（TTL 自愈 + token 围栏解锁）

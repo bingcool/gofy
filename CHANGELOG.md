@@ -8,6 +8,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/ai`: a configuration-driven LLM client over `github.com/zendev-sh/goai`.
+  An application declares aliases under the `llm_ai` section and business code
+  calls them by name; provider, base URL and credentials stay in configuration.
+  Three providers only — `openai`, `deepseek` and `openai_compatible` — because
+  Qwen, Ernie, GLM, Moonshot and self-hosted gateways all speak the OpenAI
+  protocol and differ by `base_url`, not by code. Vendor differences are
+  expressed through `provider_options`: DeepSeek rejects `json_schema`, so
+  `structuredOutputs: false` downgrades the request to `json_object`.
+  Credentials are passed to the provider constructor, never exported: `api_key`
+  takes either a literal or a `${VAR}` placeholder resolved in `New` (write
+  `$${VAR}` when `config.Load`'s load-time expansion must be deferred, so a
+  disabled module needs no variable); a test compares the process environment
+  before and after `New` to keep it that way. Missing credentials fail the
+  startup rather than the first request. There
+  is no cross-provider fallback, deliberately: a stream that already emitted its
+  first chunk cannot be replayed, so switching would splice two models' answers
+  together. Chat, streaming, structured output, embeddings, per-call timeouts,
+  token usage reporting and credential redaction (which preserves the error
+  chain) are covered by httptest-based tests. The whole section is gated by
+  `enabled`: a missing `llm_ai` section and `enabled: false` mean the same
+  thing — nothing is built, routes answer 404 and `New` returns `ErrDisabled`
+  — so a deployment without LLM access needs no placeholder configuration,
+  while `enabled: true` with an empty `models` map is still an error.
+- `examples/demo-service`: an `ai` module demonstrating the four shapes —
+  `/api/v1/demo/ai/models`, `/chat`, `/stream` (SSE) and `/summary` (typed
+  structured output). The module is registered only when `llm_ai.enabled` is
+  true, so a deployment without LLM access keeps starting and simply answers
+  404.
 - Metrics and runtime diagnostics: `WithDiagnostics` serves Prometheus metrics and
   `net/http/pprof` on a listener of their own, off by default and bound to
   `127.0.0.1:6060` when enabled. The endpoints never share the application port,

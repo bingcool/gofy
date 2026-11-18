@@ -9,6 +9,7 @@ import (
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logger"
+	supportai "github.com/bingcool/gofy/support/ai"
 	gofylock "github.com/bingcool/gofy/support/lock"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
@@ -41,8 +42,14 @@ type Config struct {
 	// Diagnostics 是独立运维端口上的 Prometheus 指标与 pprof 配置；默认关闭。
 	// Diagnostics configures the operational listener (metrics + pprof); off by default.
 	Diagnostics gofy.DiagnosticsConfig `yaml:"diagnostics"`
-	PIDFile     string                 `yaml:"pid_file"`
-	JWT         middleware.JWTConfig   `yaml:"jwt"`
+	// LLMAI 是 LLM 接入配置，由 llm_ai.enabled 控制启停：整段缺失或 enabled 为
+	// false 时 AI 模块不注册，相关路由 404，启动不受影响。
+	// LLMAI configures the LLM client, gated by llm_ai.enabled: a missing
+	// section or enabled: false keeps the module unregistered and its routes
+	// answering 404.
+	LLMAI   supportai.Config     `yaml:"llm_ai"`
+	PIDFile string               `yaml:"pid_file"`
+	JWT     middleware.JWTConfig `yaml:"jwt"`
 }
 
 // Database returns the named instance; the caller must have checked it exists.
@@ -116,6 +123,16 @@ func Load(ctx context.Context, path string) (*Config, error) {
 	}
 	if err := cfg.OTel.Validate(); err != nil {
 		return nil, fmt.Errorf("config: otel: %w", err)
+	}
+	// An absent llm_ai section decodes to the zero value, which Validate treats
+	// as "disabled" and accepts: a deployment without LLM access must not need
+	// the section at all. When it is enabled, typos and missing credentials fail
+	// the startup instead of the first user request.
+	// 缺少 llm_ai 段时解码得到零值，Validate 视其为"未启用"并放行：不接大模型的
+	// 部署根本不需要这一段。启用之后，拼写错误与凭证缺失都会让启动失败，而不是等到
+	// 第一个用户请求。
+	if err := cfg.LLMAI.Validate(); err != nil {
+		return nil, fmt.Errorf("config: llm_ai: %w", err)
 	}
 	cfg.Client.Normalize()
 	applyLogPaths(cfg)

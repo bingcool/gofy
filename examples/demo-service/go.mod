@@ -88,6 +88,7 @@ require (
 	github.com/valyala/fastrand v1.1.0 // indirect
 	github.com/vearutop/statigz v1.4.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
+	github.com/zendev-sh/goai v0.11.0 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.2-0.20260911210157-d46ac2e02a79 // indirect
 	go.opencensus.io v0.22.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
