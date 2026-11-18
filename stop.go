@@ -132,6 +132,7 @@ func (a *App) stopPIDFile(ctx context.Context, fullPath, worker string, force bo
 	defer cancel()
 	err = process.WaitExit(waitCtx, pid, 100*time.Millisecond)
 	if err == nil {
+		removePIDFile(logger, fullPath, pid)
 		logger.Info("application stopped", zap.Int("pid", pid))
 		c.Success("%s 已停止 (pid %d)", target, pid)
 		return nil
@@ -153,7 +154,24 @@ func (a *App) stopPIDFile(ctx context.Context, fullPath, worker string, force bo
 	if err := process.WaitExit(killCtx, pid, 50*time.Millisecond); err != nil {
 		return fmt.Errorf("%w: pid %d", ErrStopTimeout, pid)
 	}
+	removePIDFile(logger, fullPath, pid)
 	logger.Info("application killed", zap.Int("pid", pid))
 	c.Success("%s 已强制停止 (pid %d)", target, pid)
 	return nil
+}
+
+// removePIDFile deletes the pid file once its process is confirmed gone. The
+// graceful path usually gets there first through the stopped process's own
+// cleanup; this call covers SIGKILL and OOM kills, which never run it and would
+// otherwise leave a file that the next start has to reject as a live stale pid.
+// A failed removal only warns: the process is already gone, and reporting it as
+// a stop failure would invite a retry that can only answer "not running".
+// removePIDFile 在确认 pid 对应的进程消失后删除 pid 文件。正常停止通常已由被停进程自己
+// 清理；这里覆盖 SIGKILL 与 OOM 这类根本来不及清理的场景，否则下一次启动就得面对一个
+// "仍然活着"的陈旧 pid。删除失败只告警：进程已经不在，把它报成停止失败只会招来一次必然
+// 返回"未运行"的重试。
+func removePIDFile(logger *zap.Logger, fullPath string, pid int) {
+	if err := pidfile.RemoveIfOwner(fullPath, pid); err != nil {
+		logger.Warn("remove pid file failed", zap.String("path", fullPath), zap.Error(err))
+	}
 }
