@@ -603,8 +603,9 @@ var (
 ```go
 gofy.WithModules(
     gofyadapter.DocsModule(docsui.Config{
-        Title: "Demo Service API",
-        Spec:  openapi.DemoServiceYAML,
+        Title:   "Demo Service API",
+        Spec:    openapi.DemoServiceYAML,
+        Enabled: true,
     }),
 )
 ```

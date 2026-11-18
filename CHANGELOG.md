@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `gofy` CLI: `stop` removes the pid file after a confirmed exit. A process
+  killed with SIGKILL, by the OOM killer or by `kill -9` never runs its own
+  cleanup, and the leftover file made the next `start` face a stale pid that
+  still looked alive. Both success paths (graceful exit and post-SIGKILL) now
+  call `pidfile.RemoveIfOwner`, which only deletes a file that still names the
+  stopped pid and therefore never removes a new instance's file. A failed
+  removal is logged as a warning instead of turning a completed stop into an
+  error.
+
 - `gofy` CLI + module lifecycle: three startup/stop holes.
   `restart` and `status` joined the reserved command names, so a custom command
   can no longer shadow a built-in subcommand (cobra keeps the first
@@ -163,14 +172,14 @@ All notable changes to this project are documented here. The format follows
   `ErrMultipartTooLarge` before anything is sent; the limit is per request, not
   per client, so concurrent uploads are not charged against one budget. The
   package doc now states the memory shape: peak ≈ body size × concurrent uploads.
-- `gofy-adapter` nacos resolver: the `weight` strategy no longer feeds drained
-  instances. `weight <= 0` used to be normalised to 1, so an instance an operator
-  had drained to 0 still received traffic (a Nacos instance reports 1.0 by
-  default, so 0 is a decision, not a missing field). Zero and negative weights are
-  now excluded; when every candidate is drained the lookup fails closed with
-  `ErrAllZeroWeight` instead of quietly routing somewhere. `random` and
-  `round_robin` still include drained instances — draining is a weight-strategy
-  operation — which is now stated in the code.
+- `gofy-adapter` nacos resolver: drained instances are excluded under every
+  strategy. `weight <= 0` used to be normalised to 1 (and was only filtered by
+  the `weight` strategy), so an instance an operator had drained to 0 still
+  received traffic from `random` and `round_robin` (a Nacos instance reports 1.0
+  by default, so 0 is a decision, not a missing field). Zero and negative
+  weights are now removed before the strategy runs; when every candidate is
+  drained the lookup fails closed with `ErrAllZeroWeight` instead of quietly
+  routing somewhere, and it does not fall through to the fallback group.
 - `support/claim`: the empty-round callback (`data == nil`) now runs under
   `HandlerTimeout`, like a real row. It was called with the caller's context, so a
   heartbeat that blocked on a slow dependency could hold the polling goroutine
@@ -361,10 +370,11 @@ All notable changes to this project are documented here. The format follows
   endpoint that just dropped. A fixed `BaseURL` still returns the same address,
   and `Last-Event-ID` is carried across the switch.
 - `gofy-interface-api`: the `WithConnectTimeout` derived-client cache is bounded
-  (`maxDerivedClients`, 32) and now has a lifecycle. Entries beyond the cap still
-  serve the call but are not kept, and `Client.Close` releases the idle
-  connections of the pools this package created while leaving a
-  `Config.HTTPClient` alone.
+  (`maxDerivedClients`, 32) and now has a lifecycle. When the cache is full one
+  entry is evicted and its idle connections are closed before the new pool is
+  stored, so `Client.Close` still owns every pool the package created; an
+  evicted pool is rebuilt on demand, and a caller-supplied `Config.HTTPClient`
+  is left alone.
 - `gofy-adapter`: `k8slease.Locker` is single-flight per key within the process.
   Re-acquiring a lease the same identity already holds still keeps the token —
   that rule exists for a *restarted* pod, not for concurrent callers — but a
@@ -375,6 +385,83 @@ All notable changes to this project are documented here. The format follows
   survive a Runner restart — the second `Run` consumed from a client that had
   already been consumed. `NewFactory` builds a fresh consumer per `Run` and
   always closes it; `New` keeps the one-shot contract and says so.
+- `gofy`: the old generation's reload drain is bound to the App run context.
+  It used `context.Background()` for both the lease wait and the module stops,
+  so a `Shutdown` that raced a slow reload had to wait out the full drain
+  timeout before cleanup could proceed. `retireGeneration` now receives the run
+  context: a shutdown cancels the drain immediately and releases the old
+  generation, and the warning says the drain "did not finish" instead of
+  claiming a timeout.
+- `support/nacos`: `LoadConfig` runs `DiscoveryConfig.Validate`, just like
+  `Load`. The single-file entry also serves workers and scripts that never
+  build a client, so a typo such as `load_balancer: round-robiin` now fails when
+  the file is read instead of at the first lookup — or never.
+- `gofy-interface-api` client: a successful envelope without `data` is no longer
+  handed back as `(nil, nil)` for every response type. Only `NoContent` routes,
+  the `endpoint.NoBody` placeholder and pointer response types can represent
+  "no data"; a value type gets a `*ProtocolError` instead of a nil pointer the
+  caller is about to dereference.
+- `gofy-interface-api` client: `NoTimeout` and `NoRetry` (both `-1`) express
+  "explicitly off". The zero value still means "use the default", so the
+  sentinels are the only way to disable the per-call deadline or retries;
+  `WithTimeout(0)` is equivalent to `NoTimeout`, and other negative values are
+  rejected by `New`.
+- `gofy-interface-api` refcheck: `gofy-adapter` is denied everywhere, `cmd`
+  included. The library rules already denied `gofy` and `gin`; leaving the
+  adapter out of `cmd` allowed the reverse dependency edge the split was meant
+  to prevent.
+- `gofy-adapter` k8slease: `Renew` and `Release` on one handle serialize on a
+  mutex. Two concurrent renewals used to read the same `resourceVersion`, and
+  the second `Update` failed as a conflict that `Renew` reported as
+  `ErrLeaseLost`, dropping a lease the process still held. The never-read
+  `version` field is gone.
+- `gofy-adapter` k8slease: `Locker.Close` clears the in-process reservations and
+  rejects later `Acquire` calls with `ErrClosed`. A handle dropped without
+  `Release` used to block its key with `ErrHeld` for the life of the process;
+  the README now states that every acquired handle must be released. Close does
+  not write Lease objects, so an abandoned lease still expires with its term.
+- `gofy-adapter` nacos resolver: a refresh runs on `WithoutCancel` plus the
+  discovery timeout, so a leader whose caller went away still publishes the
+  result for the other waiters; only the leader itself gets its cancellation.
+  `SetOnRefreshFailure` reports every failed refresh, including the ones a stale
+  list hid, once per `CacheTTL` window.
+- `gofy-adapter` nacos resolver: a failure in the fallback group is returned as
+  the outermost error instead of being wrapped in `ErrNoInstances`. A registry
+  outage is no longer reported as "no instances", so callers that degrade on
+  `ErrNoInstances` do not silently hide it.
+- `gofy-adapter`: `DocsModule` serves nothing unless `docsui.Config.Enabled` is
+  true. Registering the module was the only opt-in before, which made the zero
+  value publish the API documentation of a production process by accident;
+  deployments can now keep the registration in every profile and close the UI
+  with one flag.
+- `gofy-adapter` import guard: the forbidden prefixes are the real example
+  module paths, and the `k8s.io` allowlist is scoped to
+  `adapter/lease/k8slease/`. Other directories can no longer pull in client-go.
+- `examples/demo-service`: `Clients.CallBudget()` returns 2×timeout + 1s and
+  `group3` uses it for its probe. The previous 5s deadline equal to the
+  per-attempt timeout was consumed by the primary attempt, leaving
+  `shouldDegrade` a cancelled context and no fallback attempt. The shipped
+  `inner_external_base_uri` stays empty on purpose: empty means "no fallback",
+  and a real deployment address is required to turn it on.
+- `examples/demo-service`: the hard-coded `enableNacosSyncConfig = false` is
+  gone. Startup sync and the watcher now follow `nacos.enabled`,
+  `enable_nacos_config_change_restart` and the command plan, so the configured
+  strategy and grace period actually run; `NACOS_ENABLED=0` is the off switch.
+- `examples/demo-service`: removed the two keys no field reads
+  (`authorization_bearer`, `ephemeral`) and documented that Nacos YAML uses
+  non-strict decoding because `application.yaml` is shared with business
+  sections. A typo in a Nacos key still does not fail; the README table is the
+  reference.
+- `examples/demo-service`: the import guard uses explicit per-layer whitelists
+  with a failing `*)` branch. `controller`, `service`, `innerapi`,
+  `repository`, `query` and `model` no longer silently accept a category the
+  comment said was forbidden; the layering table in the order module README
+  matches the script.
+- `examples/demo-service`: the order list applies the contract's filters.
+  `status`, `created_from` and `created_to` reach the service, which parses the
+  RFC3339 window and rejects `from > to` with a 400; the repository filters on
+  status and a closed time interval and counts with the same predicates. The
+  `COUNT` total and the page now describe the same rows.
 
 ### Changed
 

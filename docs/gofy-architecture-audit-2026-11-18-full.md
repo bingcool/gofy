@@ -24,8 +24,8 @@
 总体判断：
 
 1. **架构骨架是稳的**：分代装配（`support/generation` + Snapshot）、pid 身份记录、claim 的 `owner+attempts` 围栏、worker 就绪闸门、消费终态落库才 ACK、Nacos 双时间戳节流、类型化客户端唯一 URL 构造点，这些都经过前几轮修复，本轮未发现结构性反转。
-2. **系统性风险集中在三条链路**：① 消费台账与 broker 重投语义的错配（B1/B6）；② 「Close 只关连接、不清状态」在多个包重复出现（C1/E3 已修复，C2/D8 仍在）；③ 出厂配置/注释与实现之间的两处偏差，让部分能力实际不可达（F1/F3）。
-3. **常驻内存不是普遍问题，但有几个明确点**：限流 `hits` map、台账表只增不删、派生 transport 缓存满后不回收、换代时旧代连接池不可达。均为「随运行时间单调增长」，见 §4；resolver 的 `cache/rr` 已在 E3 修复中加上关闭清理与 stale 窗口淘汰。
+2. **系统性风险集中在三条链路**：① 消费台账与 broker 重投语义的错配（B1/B6）；② 「Close 只关连接、不清状态」在多个包重复出现（C1/E3/C2/D8）；③ 出厂配置/注释与实现之间的偏差，让部分能力实际不可达（F1/F3）。三条链路均已修复，见各节的修复段。
+3. **常驻内存不是普遍问题，但审计时发现几个明确点**：限流 `hits` map、台账表只增不删、派生 transport 缓存满后不回收、换代时旧代连接池不可达；其中 transport 缓存（D8）与换代连接池（C2）已修复，见 §4。resolver 的 `cache/rr` 已在 E3 修复中加上关闭清理与 stale 窗口淘汰。
 4. **本轮逐条回读及作者确认后撤销 2 条、降级 6 条**（§1 X-1~X-8），它们是刻意设计、框架内不会触发或前提写错，不应作为 bug 排期；另有 17 条修正了表述与前提（如 B5 只影响 MySQL 路径、D2 的「当数据」只适用于下载/分块流、D1 限于非 JSON 编码、C6 需 `RequireExpiry=false`、C4 的 XFF 伪造只在放宽信任代理后成立）。
 
 ---
@@ -157,9 +157,12 @@
 
 ### 2.3 P2
 
-#### A3 · SIGKILL / 进程无法执行清理时 pid 文件残留
+#### A3 · SIGKILL / 进程无法执行清理时 pid 文件残留 · 已修复（2026-11-18）
 
 `gofy/stop.go:146-158` 发出 SIGKILL 后直接返回，不删文件。正常 `SIGTERM` 停止时被停进程自己的 cleanup（`gofy/start.go:961-965` 的 `RemoveIfOwner`）会删除 pid 文件，`stop.go:134-138` 不重复删是正确的；残留只发生在进程来不及执行清理的场景（SIGKILL、OOM kill、`-9` 后立刻断电）。→ `stop` 在确认退出后统一 `pidfile.RemoveIfOwner`。
+
+- **修复（2026-11-18）**：`stopPIDFile` 在正常退出与 SIGKILL 后确认退出的两条成功路径上统一调用 `removePIDFile` → `pidfile.RemoveIfOwner(fullPath, pid)`：只删除仍记着这个 pid 的文件，新实例已重写的文件不动；删除失败只告警，不把已完成的停止报成失败。正常情况下被停进程已自行清理，这里的调用是幂等的。
+- 回归测试：`TestStopRemovesPIDFileAfterGracefulExit`（子进程未自行清理，stop 必须删除）与 `TestStopRemovesPIDFileAfterSIGKILL`（helper 进程忽略 SIGTERM，force 升级后删除）覆盖两条路径。
 
 #### A4 · 自定义命令保留字漏 `restart` / `status` · 已修复（2026-11-18）
 
@@ -225,85 +228,127 @@
 
 `interface-api/client/call.go:173-175,205-208`。普通 JSON 路由服务端漏 data 也算成功，调用方解引用 panic（demo 的 group3 已因此补过判空）。→ 仅 `spec.NoContent` / 204 返回 `(nil,nil)`，其余对非指针 Res 报 `ProtocolError`。
 
+- **修复（2026-11-18）**：`decodeResponse` 仅对 `spec.NoContent`、`endpoint.NoBody` 占位响应与指针响应类型返回 `(nil, nil)`；值类型响应缺少 `data` 时返回 `*ProtocolError`（`missing data payload`），不再把调用方即将解引用的空指针交出去。`TestMissingDataIsProtocolErrorForValueResponse` 与 `TestMissingDataIsNilForNoBodyRoute` 覆盖两条分支，README 的「超时、重试与空 data」一节同步说明。
+
 #### D6 · `Retry:0` / `Timeout:0` 无法表达「显式禁用」
 
 `interface-api/client/client.go:185-187,206-208` 把 0 当未设置改回默认值；`call.go:74-77` 的 `WithTimeout(0)` 同样回退。→ 用指针或 `-1` 哨兵区分零值与未设置。
+
+- **修复（2026-11-18）**：新增 `client.NoTimeout` 与 `client.NoRetry`（均为 `-1` 哨兵）：`Config.Timeout` / `WithTimeout` 取 `NoTimeout` 时不再派生计时器，`Config.Retry` 取 `NoRetry` 时重试为 0；`callOptions.timeoutSet` 让 `WithTimeout(0)` 与哨兵等价，其余负值在 `New` 被拒绝。`TestNoTimeoutDisablesTheDeadline`、`TestNoRetryDisablesRetries`、`TestRejectsMeaninglessNegatives` 覆盖这三种取值。
 
 #### D7 · BaseURL 带 query 时路径被拼进 query 串
 
 `interface-api/client/encode.go:50-56` `target := base; target += path`，`http://h?token=x` 变 `http://h?token=x/orders`；`:74-76` `u.RawQuery = query.Encode()` 无条件覆盖；`client.go:160-171` 校验只看 scheme/host。→ 解析 base 为 URL 后设置 Path，query 合并而非覆盖。
 
+- **修复（2026-11-18）**：`buildRequest` 先 `url.Parse(base)`，路由路径拼进 `u.Path`；`u.RawPath` 保留 `substitutePath` 里 `url.PathEscape` 产生的转义形态，`a/b` 不会被二次转义成 `a%252Fb`。base 自带的路径前缀与 query 都保留，请求参数用 `url.ParseQuery(u.RawQuery)` 合并后重编码，同名参数累加而不是覆盖。新增 `TestBaseURLQueryIsMergedNotOverwritten`、`TestBaseURLPathPrefixIsPreserved`、`TestEscapedPathParamIsNotDoubleEscaped`。
+
 #### D8 · `WithConnectTimeout` 缓存满后派生的 transport 无人回收
 
 `interface-api/client/client.go:308-321` 满时不入 map 直接返回；`:329-341` Close 只遍历 map——缓存满后新建的池关闭时机不受 Close 控制（缓解：空闲连接最终会由 Transport 的 `IdleConnTimeout` 自动回收）。→ 满时淘汰并 `CloseIdleConnections` 最旧条目，或复用共享溢出池。
+
+- **修复（2026-11-18）**：缓存满时改为淘汰一条并 `CloseIdleConnections()`，再存入新池；被淘汰的池在下次用到时按需重建，`Close` 对所有已缓存池仍然有效。`TestConnectTimeoutCacheStaysBounded` 断言容量上限与淘汰后仍可用。淘汰顺序是 map 遍历的任意一条，不是 LRU。
 
 #### E1 · k8slease 并发 Renew 自竞争（X-2 的残留契约问题）
 
 `adapter/lease/k8slease/k8slease.go:315-352` Get→Update 无互斥，`h.version` 无锁写且全仓从未读取。→ `heldLease` 加 Mutex 包住 Get→Update，删死字段 `version`；文档声明 Renew 非并发安全。
 
+- **修复（2026-11-18）**：`heldLease` 新增 `sync.Mutex`，`Renew` 与 `Release` 的 Get→Update/Delete 都在锁内串行化；删除从未读取的 `version` 字段。`TestConcurrentRenewOnOneHandleIsSerialized` 验证同一句柄并发续期不再产生自竞争。README 说明 Renew/Release 串行，调用方无需额外加锁。
+
 #### E2 · leader 用调用方 ctx，取消时本轮刷新静默失败（X-3 的可观测性缺口）
 
 `adapter/client/nacos/resolver.go:475,482-491`。StaleTTL 内已有缓存的等待者仍会被 `serveLocked` 用旧数据服务，「整批作废」并不发生；真正受影响的是必须刷新的那批等待者——刷新失败回退 stale 且收不到一次可区分的信号。→ leader 用 `WithoutCancel(ctx)+WithTimeout(Timeout)` 独立 ctx；waiter 至少收到一次刷新失败事件。
+
+- **修复（2026-11-18）**：刷新改用 `context.WithoutCancel(ctx)` + `WithTimeout(Timeout)`，leader 的调用方取消不再中断共享刷新，结果照常发布给等待者；leader 自己仍收到取消错误。新增 `SetOnRefreshFailure` / `RefreshFailureEvent`（含 `StaleServed`），陈旧列表掩盖的故障也会上报，频率由 `CacheTTL` 节流。`TestResolveCancelDoesNotAbortTheSharedRefresh`、`TestRefreshFailureEventReportsMaskedOutage` 覆盖。事件是进程级回调，不是每个等待者各自的 channel。
 
 #### E4 · Locker 无 Close，held reservation 可永久残留
 
 `adapter/lease/k8slease/k8slease.go:191-210,248,293` held 仅在 Acquire 失败/Release/Renew 失败时删；一旦 `heldLease` 被丢弃，该 key 永远 `ErrHeld`，map 随 key 增长，coordination transport 无释放口。→ 加 `Locker.Close` 清 held，并把「必须 Release」写进接口契约。
 
+- **修复（2026-11-18）**：新增 `Locker.Close()`：置 `closed`、清空 held，后续 `Acquire` 返回 `ErrClosed`；Close 之前取得的句柄仍可 `Release`（清理的表已空，不会 panic）。README 把「调用方必须 Release 每个句柄」写进契约，并说明 Close 不写 Lease 对象、被丢弃的租约会到期自然释放。`TestCloseFreesReservationsAndRejectsAcquire` 覆盖。
+
 #### E5 · `random` / `round_robin` 仍会选中 weight=0 实例
 
 `adapter/client/nacos/resolver.go:587-596` 仅 weight 分支过滤，默认策略是 random（`:681`）；`gofy/support/nacos/naming.go:26` 的 `Weight float64` 无法区分字段缺省与显式 0。→ 在 `filter` 里统一剔除 `Weight<=0`，并把「摘流只对 weight 策略生效」的现有说明改为全策略一致；若要区分缺省，依赖层改 `*float64`。
+
+- **修复（2026-11-18）**：`chooseLocked` 在进入策略前统一剔除 `Weight<=0`，`random`/`round_robin`/`weight` 对摘流语义一致；候选全被摘流时返回 `ErrAllZeroWeight`，且不会转查兜底分组。README 与 `ErrAllZeroWeight` 注释同步。`TestRandomStrategySkipsDrainedInstances`、`TestRoundRobinSkipsDrainedInstances`、`TestRandomStrategyAllDrainedDoesNotFallBack` 覆盖。`Weight float64` 仍无法区分字段缺省与显式 0，依赖 Nacos 把默认权重报成 1.0 的既有约定。
 
 #### E6 · k8slease 无内置超时，TTL 极端值可溢出成 1s
 
 `adapter/lease/k8slease/k8slease.go:104-120` 未设 `rest.Config.Timeout`；`:162,315,359` 全用调用方 ctx；`:415 int32(Ceil(ttl))` 在 `lease.ValidateTTL` 无上限的前提下，TTL 超过约 68 年才会溢出回退成 1s——理论性边界，分量较低。→ 每次调用加超时预算并设默认 Timeout，校验 TTL 上界。
 
+- **修复（2026-11-18）**：新增 `Config.RequestTimeout`（零值默认 10s，负值构造失败），`Acquire`/`Renew`/`Release` 都用它包一层 `context.WithTimeout`；`NewForConfig` 把同一预算写进 `rest.CopyConfig` 后的 `rest.Config.Timeout`（调用方显式值优先，且不改动入参）。`Acquire` 在入口拒绝超过 `math.MaxInt32` 秒的 TTL，`durationSeconds` 不再有溢出退化成 1s 的路径。新增 deadline 注入、挂起 API 超时、TTL 溢出与负超时测试。
+
 #### E7 · `DocsModule` 强制开启，无环境门控
 
 `adapter/gofy/docs.go:26` 直接 `m.cfg.Enabled = true` 覆盖入参，`:32-38` 无条件挂 UI/spec，仅注释要求「非生产」。→ 尊重 `Enabled` 或加显式环境开关。
+
+- **修复（2026-11-18）**：`DocsModule.Register` 在 `cfg.Enabled == false` 时直接返回 nil，不再强制置位；`docsui.Config.Enabled` 注释与 adapter README 都改为「由调用方显式开启」。`TestDocsModuleServesOnlyWhenEnabled` 覆盖零值不挂载。**行为变更**：此前只要注册模块就出文档，现在必须显式设置 `Enabled: true`。
 
 #### E8 · 兜底分组的 Nacos 故障被包成 `ErrNoInstances`
 
 `adapter/client/nacos/resolver.go:410-414` 把 `fbErr` 用外层 `%w=ErrNoInstances` 包裹。→ 换独立哨兵或让 `fbErr` 作外层 `%w`，否则白名单降级（B6 相关）会把「注册中心故障」误判成「无实例」。
 
+- **修复（2026-11-18）**：兜底分组失败时把 `fbErr` 作为最外层 `%w` 返回，不再包在 `ErrNoInstances` 下；按 `ErrNoInstances` 降级的调用方不会再把注册中心故障当成「没有实例」。`TestFallbackRegistryFailureIsNotErrNoInstances` 断言错误链。README 的错误表与兜底说明同步。调用方若要同时识别两种失败，需要分别 `errors.Is` / `errors.As`。
+
 #### F1 · 示例出厂配置使降级链路不可达，group3 预算自相矛盾（X-4 的残留）
 
 `demo/config.yaml:268` `inner_external_base_uri: ''` → `demo/serviceclients/serviceclients.go:168` 不包 `degradable`、不写 metadata；`demo/worker/group3/discovery_check.go:59` 给唯一调用方 `WithTimeout(...,5s)`，而 `config.yaml:269` 单次预算也是 5s、注释写「最坏 10s」。primary 一旦吃满 5s，`shouldDegrade` 因 `ctx.Err()!=nil` 直接放弃。→ fallback 用独立子 ctx（仍受外层总 deadline 约束），group3 deadline 改 ≥2×timeout，或提供一个可用的示例 URI。
+
+- **修复（2026-11-18）**：新增 `Clients.CallBudget()`（2×timeout+1s，nil/未配置时用默认 timeout），group3 的每次探测用它作为 deadline；`config.yaml` 注释说明调用方至少要给这个预算，`worker/README.md` 解释预算不足会让兜底永远不触发。`TestCallBudgetCoversTwoAttempts` 覆盖显式值与 nil 回退。示例的 `inner_external_base_uri` 仍保持空串（留空即不启用降级），因此降级链路需要部署方填真实地址才算「可达」，本轮没有塞一个假地址。
 
 #### F3 · 配置变更策略整段被常量关闭
 
 `demo/main.go:28` `const enableNacosSyncConfig=false` → `:59` Sync 被门控、`:68` watchEnabled=false、`demo/reload.go:67` 不加 nacosWatchModule；而 `demo/application.yaml:44,51,56-59` 已配 `enable_nacos_config_change_restart` / `config_change_strategy:restart` / `restart_grace_period:5`。→ 改为读该键或环境变量，或删掉这些键并注明「示例默认关闭」。
 
+- **修复（2026-11-18）**：删除 `main.go` 的 `enableNacosSyncConfig` 常量；启动期 Sync 只看 `nacosCfg.Enabled && plan.Sync`，watcher 只看 `plan.Watch && nacosCfg.Enabled && nacosCfg.Watch`。`application.yaml` 的 `enable_nacos_config_change_restart` / `config_change_strategy` / `restart_grace_period` 因此真正生效，文件注释说明 `NACOS_ENABLED=0` 是整体关闭开关。示例默认仍会按配置同步/监听，不再有代码级静默关闭。
+
 #### F4 · 两个幽灵键被非严格 YAML 静默吞掉
 
 `demo/nacos.yaml:7` `authorization_bearer`、`demo/application.yaml:22` `ephemeral`；`gofy/support/nacos/config.go:732-747,580-590` 的 rawConfig/rawApplication 无对应字段，`:518,618` 用普通 `yaml.Unmarshal`（非 KnownFields）；`support/nacos/README.md:155` 也承认 ephemeral 不读、固定 true。→ 删两键或补字段接上，并对关键配置启用严格解码。
+
+- **修复（2026-11-18）**：从 `demo/nacos.yaml` 删除 `authorization_bearer`，从 `demo/application.yaml` 删除 `ephemeral`；`support/nacos/README.md` 明确 `ephemeral` 不是受支持键，并说明两端都使用非严格解码（`application.yaml` 与业务段共用文件，严格模式会误报其它段）。本轮没有启用 `KnownFields`，拼错 Nacos 键仍不会报错，只能靠 README 对照。
 
 #### F5 · 分层守卫按「类别」放行，注释声明未落地
 
 `demo/shell/check-imports.sh:146-159` query case 只 fail `module`/`contract`，注释却称「也不碰 adapter」；`adapter/client/framework/other` 静默放行；service/controller/repository 同病，仅 innerapi 是严格白名单。→ 各层改显式白名单 + `*)` fail。
 
+- **修复（2026-11-18）**：`demo/shell/check-imports.sh` 改为按 import 归类出 token，各层使用显式白名单且 `*)` 一律失败：controller 只收本模块 service、契约、`adapter/gofy`、`apperr` 与日志；service 只收本模块 model/repository/innerapi、他模块 innerapi、appio、support、本模块配置段与日志；repository 只收 model/appio/support/gorm；query 收 model/appio/support/框架/第三方；model 只收标准库。`app/module/order/README.md` 的分层表同步。越界 import 不再走默认放行。
+
 #### F6 · 限流 Responder 未注入，429/503 错误信封不一致
 
 `demo/app/container/container.go:79` `RateLimiter{}.Callback()` 零值；`demo/app/middleware/rate_limit.go:43-45` 注释要求装配根传 Responder；`adapter/gofy/bind.go:252-255` 不注入；`gofy/support/middleware/ratelimit.go:47-48` nil 时退化默认。→ `BindOptions` 收 `reg.Responder` 并填入。
+
+- **修复（2026-11-18）**：`BindOptions.RateLimit` 改为 `func(endpoint.Spec, support.Responder) support.Middleware`，adapter 调用时把 `r.Responder()` 作为第二个参数传入；demo 的 `RateLimiter.Callback` 同步改签名，注入值作为默认，`RateLimiter.Responder` 非空时显式覆盖，429/503 因此与 App 其它错误共用同一信封。新增 adapter 注入断言与 demo 计数 Responder 回归测试（429 与 503 都经过注入渲染器）。
 
 #### F7 · 契约过滤参数被静默忽略
 
 `examples/interface-service/appinterface/.../orderrequest/request.go:25-30` 的 `Status`(`oneof`)、`CreatedFrom/To`(`datetime`) 带校验；`demo/app/module/order/controller/order_controller.go:67` 只透传 `UserID/Page/PageSize`；`order_service.go:145` 的 `ListByUser` 只按 user_id 分页。→ 补 WHERE 条件，或从契约移除字段（否则客户端以为过滤生效）。
 
+- **修复（2026-11-18）**：`ListOrders` 把 `status`/`created_from`/`created_to` 透传给 service；`service.ListFilter` 是 `innerapi.ListFilter` 的别名，service 负责 RFC3339 解析与 `from > to` 检查（`ErrInvalidTimeRange` → 400），repository 新增 `ListFilter`（`*time.Time`）并把状态、闭区间时间窗与同一组条件用于 `COUNT`。`TestListOrderFilters` 覆盖 HTTP 层、`TestListAppliesStatusAndTimeWindow` 覆盖 repository。时间格式仍由契约校验器先校验，service 解析失败按内部错误处理。
+
 #### A7 · `retireGeneration` 用 Background 且同步阻塞
 
 `gofy/reload.go:315` 发布新代后同步调用 `retireGeneration(context.Background(),...)`，内部 wait/stopCtx（`generation.go:274`）均基于 Background。→ 透传 Reload 的 ctx / `a.rt.Context()`，否则慢 Reload 会拖长停机。
+
+- **修复（2026-11-18）**：`Reload` 把 `runCtx`（`a.rt.Context()`）传给 `retireGeneration`，排空等待与 `stopModuleList` 都受它约束；停机取消 runCtx 时立即释放旧代，不再等满排空超时。告警措辞改为「drain did not finish」。`TestShutdownAbortsReloadDrain` 覆盖并发 Shutdown 场景。`Reload` 调用方自己的 ctx 仍只约束构建阶段，取消它不会中断已发布新代的排空。
 
 #### C9 · `LoadConfig` 缺 Discovery 校验
 
 `gofy/support/nacos/config.go:410-422` 只调 `ParseChangeStrategy`；`Load:504-506` 却补了 `cfg.Discovery.Validate()`。→ 单文件入口同样调用 Validate，避免拼错配置到首次寻址才暴露。
 
+- **修复（2026-11-18）**：`LoadConfig` 在解析 `ChangeStrategy` 后调用 `Discovery.Validate()`，错误带 `discovery_service_client` 前缀；worker/script 等不构造 Client 的入口也会在读取文件时失败。`TestLoadConfigValidatesDiscovery` 用未知 `load_balancer` 覆盖。非严格解码仍保留（见 F4）。
+
 #### D11 · refcheck 的 `adapterModule` 定义了却没进 deny
 
 `interface-api/cmd/refcheck/main.go:54` 定义后未加入任何规则；`:139` cmd 为 `allowAll`，`:146-149` deny 仅 gofy/gin；`main_test.go:68` 还断言 adapter 不被拒绝。→ 把 adapterModule 并入 library 各规则 deny，否则「全库框架无关」在 cmd 下不成立。
 
+- **修复（2026-11-18）**：新增 `libraryDeny`（gofy + gin + `gofy-adapter`），所有 library 规则（含 `cmd`）统一使用；`deny` 在 `allowAll` 之前检查，cmd 不再放行 adapter。`TestLibraryRulesApplyFrameworkDenyEverywhere` 断言各目录规则，README 的「全库禁止」清单同步。
+
 #### E10 · adapter import 守卫的禁用前缀是占位符（冗余，非放行漏洞）
 
 `adapter/shell/check-imports.sh:10` 禁 `github.com/yourorg/`，而 `go.mod:1` 是 `github.com/bingcool/gofy-adapter`；`:14-26` 的白名单本身已拦住一切未列出的外部包，该行目前不构成实际放行，但守卫意图失效。→ 换成真实前缀，并把 client-go 白名单限定到 k8slease 目录。
+
+- **修复（2026-11-18）**：禁用前缀换成示例真实模块路径 `github.com/yourorg/demo-service` / `github.com/yourorg/interface-service`；`k8s.io/*` 白名单从全局收窄到 `adapter/lease/k8slease/`，其它目录引入 client-go 会失败。该行原本就被外部包白名单兜住，因此修复的是守卫意图，不改变既有放行范围。
 
 ### 2.4 P3
 
@@ -335,7 +380,7 @@
 - **分代可见性**：`generation.Set.Middleware` 只做兜底、不覆盖已有 pin；`support/generation` 的 gate + lease + defer release 保证请求入口固定一代。
 - **claim 围栏**：`owner + attempts` CAS、`FOR UPDATE SKIP LOCKED` 事务内取行、`park` 失败不 ACK、dead/done 终态、`ceilSeconds` 避免 DATETIME 舍入成 0。
 - **worker 就绪**：`ReadyReporter` 由各传输层 `OnReady` 回调、`Runner.Ready()` 汇总、按 Identity 去重、drain 立刻 503、启动失败永不就绪。
-- **Nacos resolver 主链路**：`lastAttempt` 节流 / `lastSuccess` stale 双时间戳、负缓存、单飞按 service+group（长度前缀键）隔离、本地分组门控、metadata URL 主校验、weight 策略排除 0 权重并 fail-closed。
+- **Nacos resolver 主链路**：`lastAttempt` 节流 / `lastSuccess` stale 双时间戳、负缓存、单飞按 service+group（长度前缀键）隔离、本地分组门控、metadata URL 主校验、全部策略排除 0 权重并 fail-closed。
 - **类型化客户端**：URL 只在唯一构造点拼接；分组部署前缀由 `Group.Add` 写入 `Spec.Prefix` 并自动拼接，`WithPathPrefix` 只作更外层的挂载前缀，Call/SSE/download/chunked 覆盖；`Proxy:nil` 避免内网地址走环境代理；`cappedBuffer` 让 multipart 峰值等于上限。
 - **demo 分层与迁移**：service 唯一可 import `app/config` 且只收本模块配置值；query 跨模块只写 SQL 表名；`migrations/0005_job_task.sql` 与 `claim.DDL` 逐字段一致；`Create` 在同一事务扣库存+建单。
 - **客户端跨 reload**：`serviceclients` 进程级构造一次、Reload 不重建，`DemoService/Source/SetLogger/Close` 全 nil 安全，`worker --list` 传 nil 不 panic。
@@ -350,24 +395,24 @@
 | `adapter/client/nacos/resolver.go:194-206` | `cache/rr` 按 service+group 分键；E3 修复后 Close 清空并置 closed，回源时淘汰超过 `StaleTTL` 的槽 | 已修复（2026-11-18） | E3 |
 | `gofy/support/ratelimit/ratelimit.go:81-150` | `hits` map 有周期 sweep（过期键会清），但 GC 周期内无 key 总数硬上限 | 大量不同来源 IP / 大 window | C4 |
 | `gofy/support/consumer/consume.go:929-992` | 台账行只 UPDATE 不删/归档，唯一索引单调膨胀 | 长跑消费者 | B9 |
-| `interface-api/client/client.go:308-341` | 派生 transport 缓存满后新建池不入 map，Close 回收不到 | 调用方传多种 connectTimeout | D8 |
-| `gofy/support/db/io.go:57-106` 等四个 io 包 | `Install` 覆盖旧代，旧连接池不可达 | 反复 Reload | C2 |
+| `interface-api/client/client.go:308-341` | 派生 transport 缓存有界，满时淘汰一条并关闭空闲连接 | 已修复（2026-11-18） | D8 |
+| `gofy/support/db/io.go:57-106` 等四个 io 包 | `Install` 覆盖旧代，旧连接池不可达 | 已修复（2026-11-18） | C2 |
 | `gofy/support/nacos/sync.go:33-39`、`watch.go` | 每次 Sync/Watch 自建 Transport，退出不 Close | 已修复（2026-11-18） | C1 |
-| `adapter/lease/k8slease/k8slease.go:191-210` | `held` map 在句柄丢失后永久残留 | 调用方忘记 Release | E4 |
-| `gofy/reload.go:315` | 旧代排空用 Background，无取消路径 | 停机时慢 Reload | A7 |
+| `adapter/lease/k8slease/k8slease.go:191-210` | `held` map 在句柄丢失后永久残留 | 已修复（2026-11-18） | E4 |
+| `gofy/reload.go:315` | 旧代排空用 Background，无取消路径 | 已修复（2026-11-18） | A7 |
 
 共同模式：**「创建时登记、关闭时不反登记」**。建议统一给这类包定义 `Close()` 语义（清状态 + 关连接 + 置 closed），并在 `App` 的 cleanup 里按代收口。
 
 ---
 
-## 5. 修复优先级建议（A1/A2/B1/B4/B5/B6/C1/D1/D2/D3/D4/E3 已于 2026-11-18 修复）
+## 5. 修复优先级建议（P0/P1 与全部 P2 已于 2026-11-18 修复，逐条状态见 §7）
 
 1. **第一批（数据正确性）**：~~B1~~ → ~~B6~~ → ~~B4/B5~~ → ~~D2/D3~~。先堵住「消息被丢」和「流被当成功」，再统一租约精度。（均已修复；B3 原列于此，复核后撤销，见 §1 X-5。）
-2. **第二批（生命周期与资源）**：~~A1/A2~~ → ~~C1~~ → ~~E3~~ → C2/D8 → A7。这一批都是「Close/取消顺序」，改动小但回归面广，需要配套停机测试。
-3. **第三批（契约一致性）**：~~D1~~ → ~~D4~~ → F3/F4/F5 → E5/E8 → D11/E10。D1/D4 已修复（统一必填判定源、描述符携带前缀 + 启动期断言）；其余仍以守卫与断言为主，避免行为突变。
+2. **第二批（生命周期与资源）**：~~A1/A2~~ → ~~C1~~ → ~~E3~~ → ~~C2/D8~~ → ~~A7~~。这一批都是「Close/取消顺序」，改动小但回归面广，已配套停机与并发测试。
+3. **第三批（契约一致性）**：~~D1~~ → ~~D4~~ → ~~F3/F4/F5~~ → ~~E5/E8~~ → ~~D11/E10~~。D1/D4 统一必填判定源、描述符携带前缀 + 启动期断言；其余以守卫、显式开关与断言为主，均已落地。
 4. **第四批（P3）**：按模块顺手清理，不单独排期。
 
-验证建议：B1 用 Redis + 双副本注入 in-flight；A1/A2 用 daemon 启停与 `SIGTERM` 时序；C1/C2/E3 用连接数/内存曲线；D2/D3 用假后端返回错误信封与 EOF；F1 用 dev-nacos 真机 e2e（本轮已有脚本与方法，见 `docs/nacos-service-discovery-client-design.md` §0.1）。
+验证建议：B1 用 Redis + 双副本注入 in-flight；A1/A2 用 daemon 启停与 `SIGTERM` 时序；C1/C2/E3 用连接数/内存曲线；D2/D3 用假后端返回错误信封与 EOF；F1 需要在填好 `inner_external_base_uri` 的环境用 dev-nacos 真机 e2e（方法见 `docs/nacos-service-discovery-client-design.md` §0.1）；本轮只验证了 `CallBudget` 计算与 worker 预算路径，示例仍故意留空该地址。
 
 ---
 
@@ -385,7 +430,7 @@
 
 ## 7. 问题索引（按严重度排序）
 
-按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」是 **2026-11-18 生成本报告时** 的快照：A1、A2、B1、B4、B5、B6、C1、D1、D2、D3、D4、E3 已在同日修复并更新该列，其余条目本轮只做审计、未改动业务代码，因此仍为「否」；后续修复可直接在表中更新该列。§1 的 X-1 ~ X-8 是复核后撤销/降级/修正的结论，不计入本索引。
+按 P0 → P1 → P2 → P3 排列，同级别保持第 2 节顺序。「是否已修复」按 2026-11-18 的修复批次更新：P0/P1 与全部 P2 已修复并标为「是（2026-11-18）」，P3 仍为「否」。§1 的 X-1 ~ X-8 是复核后撤销/降级/修正的结论，不计入本索引。
 
 | 编号 | 严重度 | 问题 | 是否已修复 |
 |---|---|---|---|
@@ -401,7 +446,7 @@
 | D3 | P1 | SSE 服务端正常关闭（EOF）不触发重连 | 是（2026-11-18） |
 | D4 | P1 | Group Prefix 在文档与请求之间没有一致性保证 | 是（2026-11-18） |
 | E3 | P1 | Resolver 的 `cache` / `rr` 无上限，`Close` 只关连接不清状态 | 是（2026-11-18） |
-| A3 | P2 | SIGKILL / 进程无法执行清理时 pid 文件残留 | 否 |
+| A3 | P2 | SIGKILL / 进程无法执行清理时 pid 文件残留 | 是（2026-11-18） |
 | A4 | P2 | 自定义命令保留字漏 `restart` / `status` | 是（2026-11-18） |
 | A5 | P2 | 去重路径把 `IdentityUnknown` 当成「确有其它实例」 | 是（2026-11-18） |
 | A6 | P2 | 模块 Start/Stop 缺 panic 恢复 | 是（2026-11-18） |
@@ -412,27 +457,27 @@
 | C3 | P2 | Nacos 长轮询两端都缺保护 | 是（2026-11-18） |
 | C5 | P2 | `uuidint.WithRetry(0)` 让主连接零次尝试 | 是（2026-11-18） |
 | C6 | P2 | JWT 非数字 `exp` 被当作「无过期」放行（默认配置下） | 是（2026-11-18） |
-| D5 | P2 | `data` 缺失或为 `null` 一律返回 `(nil, nil)` | 否 |
-| D6 | P2 | `Retry:0` / `Timeout:0` 无法表达「显式禁用」 | 否 |
-| D7 | P2 | BaseURL 带 query 时路径被拼进 query 串 | 否 |
-| D8 | P2 | `WithConnectTimeout` 缓存满后派生的 transport 无人回收 | 否 |
-| E1 | P2 | k8slease 并发 Renew 自竞争（X-2 的残留契约问题） | 否 |
-| E2 | P2 | leader 用调用方 ctx，取消时本轮刷新静默失败（X-3 的可观测性缺口） | 否 |
-| E4 | P2 | Locker 无 Close，held reservation 可永久残留 | 否 |
-| E5 | P2 | `random` / `round_robin` 仍会选中 weight=0 实例 | 否 |
-| E6 | P2 | k8slease 无内置超时，TTL 极端值可溢出成 1s | 否 |
-| E7 | P2 | `DocsModule` 强制开启，无环境门控 | 否 |
-| E8 | P2 | 兜底分组的 Nacos 故障被包成 `ErrNoInstances` | 否 |
-| F1 | P2 | 示例出厂配置使降级链路不可达，group3 预算自相矛盾（X-4 的残留） | 否 |
-| F3 | P2 | 配置变更策略整段被常量关闭 | 否 |
-| F4 | P2 | 两个幽灵键被非严格 YAML 静默吞掉 | 否 |
-| F5 | P2 | 分层守卫按「类别」放行，注释声明未落地 | 否 |
-| F6 | P2 | 限流 Responder 未注入，429/503 错误信封不一致 | 否 |
-| F7 | P2 | 契约过滤参数被静默忽略 | 否 |
-| A7 | P2 | `retireGeneration` 用 Background 且同步阻塞 | 否 |
-| C9 | P2 | `LoadConfig` 缺 Discovery 校验 | 否 |
-| D11 | P2 | refcheck 的 `adapterModule` 定义了却没进 deny | 否 |
-| E10 | P2 | adapter import 守卫的禁用前缀是占位符（冗余，非放行漏洞） | 否 |
+| D5 | P2 | `data` 缺失或为 `null` 一律返回 `(nil, nil)` | 是（2026-11-18） |
+| D6 | P2 | `Retry:0` / `Timeout:0` 无法表达「显式禁用」 | 是（2026-11-18） |
+| D7 | P2 | BaseURL 带 query 时路径被拼进 query 串 | 是（2026-11-18） |
+| D8 | P2 | `WithConnectTimeout` 缓存满后派生的 transport 无人回收 | 是（2026-11-18） |
+| E1 | P2 | k8slease 并发 Renew 自竞争（X-2 的残留契约问题） | 是（2026-11-18） |
+| E2 | P2 | leader 用调用方 ctx，取消时本轮刷新静默失败（X-3 的可观测性缺口） | 是（2026-11-18） |
+| E4 | P2 | Locker 无 Close，held reservation 可永久残留 | 是（2026-11-18） |
+| E5 | P2 | `random` / `round_robin` 仍会选中 weight=0 实例 | 是（2026-11-18） |
+| E6 | P2 | k8slease 无内置超时，TTL 极端值可溢出成 1s | 是（2026-11-18） |
+| E7 | P2 | `DocsModule` 强制开启，无环境门控 | 是（2026-11-18） |
+| E8 | P2 | 兜底分组的 Nacos 故障被包成 `ErrNoInstances` | 是（2026-11-18） |
+| F1 | P2 | 示例出厂配置使降级链路不可达，group3 预算自相矛盾（X-4 的残留） | 是（2026-11-18） |
+| F3 | P2 | 配置变更策略整段被常量关闭 | 是（2026-11-18） |
+| F4 | P2 | 两个幽灵键被非严格 YAML 静默吞掉 | 是（2026-11-18） |
+| F5 | P2 | 分层守卫按「类别」放行，注释声明未落地 | 是（2026-11-18） |
+| F6 | P2 | 限流 Responder 未注入，429/503 错误信封不一致 | 是（2026-11-18） |
+| F7 | P2 | 契约过滤参数被静默忽略 | 是（2026-11-18） |
+| A7 | P2 | `retireGeneration` 用 Background 且同步阻塞 | 是（2026-11-18） |
+| C9 | P2 | `LoadConfig` 缺 Discovery 校验 | 是（2026-11-18） |
+| D11 | P2 | refcheck 的 `adapterModule` 定义了却没进 deny | 是（2026-11-18） |
+| E10 | P2 | adapter import 守卫的禁用前缀是占位符（冗余，非放行漏洞） | 是（2026-11-18） |
 | A8 | P3 | `IdentityUnknown` 时 status 仍报 running、stop 仍发信号 | 否 |
 | B10 | P3 | Reap 三条 UPDATE 不在事务内、无分批 | 否 |
 | B11 | P3 | RocketMQ 停机 `wg.Wait()` 无超时，handler 忽略 ctx 时永久阻塞 | 否 |

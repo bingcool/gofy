@@ -1410,7 +1410,8 @@ type BindOptions struct {
 
 	// RateLimit 按契约声明构造限流中间件，只对声明了 Spec.RateLimit 的路由
 	// 调用，返回值装在路由中间件链最前面；返回 nil 表示该路由不挂限流。
-	RateLimit func(endpoint.Spec) support.Middleware
+	// 第二个参数是 Router 的 Responder，限流拒绝与 App 其它错误共用信封。
+	RateLimit func(endpoint.Spec, support.Responder) support.Middleware
 
 	// Strict 为 true 时，实现类型缺少方法、签名不符会返回错误（默认 true）。
 	Strict bool
@@ -1639,6 +1640,10 @@ func (c *Container) BindOptions() gofyadapter.BindOptions {
 	return gofyadapter.BindOptions{RateLimit: appmiddleware.RateLimiter{}.Callback()}
 }
 ```
+
+adapter 调用回调时把 Router 的 Responder 作为第二个参数注入，`RateLimiter`
+用 `RateLimiter.Responder`（非空时）或注入值渲染 429/503，因此限流错误与
+其它接口共用同一 code/msg/req_id 信封。
 
 中间件在首次请求时用 `redisstore.New(redis.NewIO(ctx, alias))` 构建
 `ratelimit.Store` 并缓存：模块工厂完成路由绑定时 `app/appio` 尚未打开 Redis，
@@ -2507,8 +2512,8 @@ mux.Handle("/docs/", docs)
 mux.Handle("/openapi.json", docs)
 ```
 
-作为 gofy 模块（放在 `apicore/adapter/gofy/docs.go`，避免 `docsui` 依赖 gin/gofy）。注册模块本身就是显式开启，
-因此 `DocsModule` 会强制把 `cfg.Enabled` 置为 true：
+作为 gofy 模块（放在 `apicore/adapter/gofy/docs.go`，避免 `docsui` 依赖 gin/gofy）。文档需要双重显式开启：
+既注册模块，又设置 `cfg.Enabled = true`；零值配置不会发布任何文档路由，生产环境只需关掉这一个开关：
 
 ```go
 package gofyadapter
@@ -2530,7 +2535,9 @@ func DocsModule(cfg docsui.Config) support.Module {
 func (m *docsModule) Name() string { return "docs" }
 
 func (m *docsModule) Register(r *support.Router) error {
-	m.cfg.Enabled = true
+	if !m.cfg.Enabled {
+		return nil
+	}
 	h, err := docsui.Handler(m.cfg)
 	if err != nil {
 		return err
@@ -2545,7 +2552,7 @@ func (m *docsModule) Register(r *support.Router) error {
 }
 ```
 
-> 文档模块只应在非生产环境注册；用 `Runtime.Env` 判断，或由 `main.go` 决定是否 `WithModules`。
+> 文档模块只应在非生产环境启用；用 `Runtime.Env` 决定 `Enabled`，或由 `main.go` 决定是否 `WithModules`。
 
 ### 7.8 CI 校验
 
@@ -3165,8 +3172,9 @@ return nil, gofyadapter.Error(demoservice.ErrOrderNotFound)
 ```go
 if rt.Env != "prd" {
 	appOpts = append(appOpts, gofy.WithModules(gofyadapter.DocsModule(docsui.Config{
-		Title: "Order Service API",
-		Spec:  openapi.DemoServiceYAML,
+		Title:   "Order Service API",
+		Spec:    openapi.DemoServiceYAML,
+		Enabled: rt.Env != "prd",
 	})))
 }
 ```
