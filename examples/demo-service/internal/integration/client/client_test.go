@@ -623,7 +623,7 @@ func TestNewValidation(t *testing.T) {
 		{Service: "order"},
 		{BaseURL: "ftp://example.com"},
 		{BaseURL: "http://"},
-		{BaseURL: "http://example.com", Retry: -1},
+		{BaseURL: "http://example.com", Retry: -2},
 	}
 	for i, cfg := range cases {
 		if _, err := client.New(cfg); err == nil {
