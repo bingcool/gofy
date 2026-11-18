@@ -128,6 +128,20 @@ type callbackInspector interface {
 	Get(name string) func(*gorm.DB)
 }
 
+// EnsureTenant installs the tenant plugin on pool when it is not installed yet.
+// It is the exported form of installTenant, for entry points that receive the
+// framework's db.default instead of building their own generation: worker
+// groups, which do not run ModuleFactories, install it here on their first
+// database use. The install is idempotent for the same reason installTenant is:
+// db.default is a process-wide singleton and a second db.Use fails.
+// EnsureTenant 在池上安装租户插件（尚未安装时）。它是 installTenant 的导出版本，
+// 供不构建自己装配代、只拿到框架 db.default 的入口使用：worker 分组不走
+// ModuleFactories，在首次使用数据库时从这里安装。幂等原因与 installTenant 相同：
+// db.default 是进程级单例，第二次 db.Use 会失败。
+func EnsureTenant(pool *gorm.DB, opts tenant.Options) error {
+	return installTenant(pool, opts)
+}
+
 // installTenant is idempotent: db.default is owned by the framework and shared
 // across Reload generations, so Open may see the same *gorm.DB more than once.
 // Calling db.Use twice on it would fail with a duplicate-callback error.

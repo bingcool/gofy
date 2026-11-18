@@ -39,6 +39,7 @@ import (
 	supportai "github.com/bingcool/gofy/support/ai"
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyworker "github.com/bingcool/gofy/support/worker"
+	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/serviceclients"
 	"github.com/yourorg/demo-service/worker/group1"
 	"github.com/yourorg/demo-service/worker/group2"
@@ -67,8 +68,17 @@ import (
 //
 // llm 是 llm_ai 那一段配置，只用来决定 group3 是否挂上 LLM 巡检（enabled 为 false
 // 时不挂）；它不在这里构造客户端，HTTP 进程因此不会因为一段不使用的 AI 配置而校验凭证。
-func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients, llm supportai.Config) ([]*gofyworker.Group, error) {
-	workerGroup1, err := group1.NewGroup(conns)
+//
+// tenantCfg is the section the HTTP entry and scripts pass to the io generation.
+// Workers do not run ModuleFactories, so the plugin is installed on the
+// framework's pool at first database use (group1) instead of at Open; taking the
+// section here keeps the three entries on one switch.
+// tenantCfg 与 HTTP 入口、脚本传给 io 装配代的是同一段配置。worker 不跑
+// ModuleFactories，因此插件在首次使用数据库时装到框架的连接池上（由 group1 完成），
+// 而不是在 Open 时安装；从这里接收该段配置，三个入口才共用同一个开关。
+func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients, llm supportai.Config, tenantCfg config.TenantConfig) ([]*gofyworker.Group, error) {
+	tenantOpts, tenantEnabled := tenantCfg.Options()
+	workerGroup1, err := group1.NewGroup(conns, tenantEnabled, tenantOpts)
 	if err != nil {
 		return nil, err
 	}

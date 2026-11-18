@@ -14,6 +14,7 @@ import (
 	gofylock "github.com/bingcool/gofy/support/lock"
 	"github.com/bingcool/gofy/support/tenant"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	appkafka "github.com/yourorg/demo-service/app/appio/kafka"
 	"github.com/yourorg/demo-service/app/appio/redis"
 	approcketmq "github.com/yourorg/demo-service/app/appio/rocketmq"
@@ -83,6 +84,22 @@ func (c TenantConfig) Options() (tenant.Options, bool) {
 		}
 	}
 	return opts, true
+}
+
+// OpenOptions is the single definition every entry point uses to pass tenant
+// isolation to the io generation. HTTP reload and scripts call it directly;
+// workers take Options() because they install the plugin on the framework's
+// pool instead of opening a generation. Keeping the three entries on one
+// function is what prevents "HTTP filters, worker does not".
+// OpenOptions 是各入口把租户隔离传给 io 装配代的唯一定义。HTTP Reload 与脚本直接
+// 调用；worker 用 Options()，因为它在框架的连接池上安装插件、不打开装配代。三个入口
+// 共用一处实现，才能避免"HTTP 过滤、worker 不过滤"。
+func (c TenantConfig) OpenOptions() []appdb.OpenOption {
+	opts, enabled := c.Options()
+	if !enabled {
+		return nil
+	}
+	return []appdb.OpenOption{appdb.WithTenant(opts)}
 }
 
 // Database returns the named instance; the caller must have checked it exists.

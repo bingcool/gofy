@@ -49,10 +49,22 @@ package group1
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
+	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 )
+
+// orderTenant holds the tenant plugin options for this process. A group is
+// built before the framework creates the runtime, so the consumer handler is
+// the first place that can reach rt.DB; the options travel through this
+// pointer instead of being threaded into every subscription config, which is a
+// package value and cannot carry per-process state.
+// orderTenant 持有本进程的租户插件选项。分组在框架创建 Runtime 之前构造，因此消费者
+// handler 才是第一个能拿到 rt.DB 的地方；选项通过这个指针传递，而不是塞进每个订阅
+// 配置——那些是包级值，承载不了进程级状态。
+var orderTenant atomic.Pointer[tenant.Options]
 
 // NewGroup builds group1: the scan loop, the immediate and delayed
 // subscriptions, the four producers, the claim queue pair and the liveness
@@ -82,7 +94,20 @@ import (
 // scan_claim.go）补全了闭环：群发的那个每个间隔把同一个订单事件发往所有立即 sink，突发的
 // 那个按批把消息发给批量订阅，入队的那个每轮写一批数据库任务；一个进程即可演示
 // 生产 → 消费 的完整链路，无需第二个终端。
-func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
+// tenantEnabled and tenantOpts are the tenant section, already resolved by the
+// caller: nil options (disabled) leave the framework's pool untouched, so a
+// project without multi-tenancy keeps ordinary GORM behaviour. The store
+// happens before any worker goroutine starts, and the handler only loads.
+// tenantEnabled 与 tenantOpts 是调用方已解析好的租户段：关闭时选项为空，框架的
+// 连接池保持原样，没有多租户的项目因此保持普通 GORM 行为。写入发生在任何 worker
+// goroutine 启动之前，handler 只读取。
+func NewGroup(conns gofyconsumer.Connections, tenantEnabled bool, tenantOpts tenant.Options) (*gofyworker.Group, error) {
+	if tenantEnabled {
+		opts := tenantOpts
+		orderTenant.Store(&opts)
+	} else {
+		orderTenant.Store(nil)
+	}
 	workers := []gofyworker.Worker{
 		newScanWorker(scanDefaults),
 		newOrderEventProducer(conns, orderEventProducerDefaults),

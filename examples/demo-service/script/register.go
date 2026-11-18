@@ -12,16 +12,12 @@ import (
 )
 
 // tenantOpenOptions mirrors the HTTP entry so scripts see the same isolation
-// policy as requests. Both entries build the same generation; differing here
-// would let a script read rows a request cannot.
-// tenantOpenOptions 与 HTTP 入口一致，脚本因此和请求看到同样的隔离策略。两个入口
-// 构建的是同一代，若这里不一致，脚本就能读到请求读不到的行。
+// policy as requests. Both entries call the shared definition in app/config;
+// differing here would let a script read rows a request cannot.
+// tenantOpenOptions 与 HTTP 入口一致，脚本因此和请求看到同样的隔离策略。两个入口都
+// 调用 app/config 的共享定义；若这里不一致，脚本就能读到请求读不到的行。
 func tenantOpenOptions(cfg *config.Config) []appdb.OpenOption {
-	opts, enabled := cfg.Tenant.Options()
-	if !enabled {
-		return nil
-	}
-	return []appdb.OpenOption{appdb.WithTenant(opts)}
+	return cfg.Tenant.OpenOptions()
 }
 
 // Register returns the demo scripts with the app/appio generation wrapped around

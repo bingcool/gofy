@@ -22,17 +22,13 @@ import (
 	"github.com/yourorg/demo-service/app/container"
 )
 
-// tenantOpenOptions turns the llm_ai-style tenant switch into the open option
-// for the io generation. A disabled section returns no options at all, which
-// is what keeps GORM behaviour unchanged for projects without multi-tenancy.
-// tenantOpenOptions 把租户开关转成 io 装配代的 Open 选项。关闭时返回空，
-// 这正是"没有多租户的项目保持普通 GORM 行为"的实现。
+// tenantOpenOptions is kept as a thin alias for the shared definition in
+// app/config: the HTTP entry, scripts and workers must agree on the switch, and
+// three copies of "enabled means WithTenant" is exactly how one of them drifts.
+// tenantOpenOptions 只是 app/config 共享定义的同义包装：HTTP、脚本与 worker 必须对
+// 同一个开关达成一致，而三份"enabled 就包 WithTenant"正是其中一个漂移的来由。
 func tenantOpenOptions(cfg *config.Config) []appdb.OpenOption {
-	opts, enabled := cfg.Tenant.Options()
-	if !enabled {
-		return nil
-	}
-	return []appdb.OpenOption{appdb.WithTenant(opts)}
+	return cfg.Tenant.OpenOptions()
 }
 
 // reloader rebuilds the modules from a freshly loaded config and applies them

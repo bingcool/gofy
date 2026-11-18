@@ -51,6 +51,12 @@ type OrderEventProducerConfig struct {
 	// EventType 决定消费端的分支，因此必须是 applyOrderEvent 认识的值：
 	// order.paid 或 order.cancelled。
 	EventType string
+	// TenantID travels in the payload so the consumer can install it as the
+	// statement tenant. Empty means "no tenant": the consumer leaves ctx alone
+	// and a tenant-aware table fails closed instead of guessing.
+	// TenantID 随 payload 一起走，消费端据此设置语句租户。空值表示"无租户"：消费端
+	// 不动 ctx，租户感知的表会失败关闭，而不是猜一个值。
+	TenantID string
 }
 
 // orderEventProducerDefaults is what group1's producer runs with: one event per
@@ -63,6 +69,12 @@ var orderEventProducerDefaults = OrderEventProducerConfig{
 	OrderID:     1,
 	UserID:      1,
 	EventType:   "order.paid",
+	// The demo's orders table declares no tenant column, so the plugin leaves
+	// it untouched; the value demonstrates the event-to-statement path that a
+	// tenant-aware table would use.
+	// 示例的 orders 表没有租户列，插件因此不改写它；这个值演示的是租户感知的表
+	// 会用到的那条"事件 → 语句"路径。
+	TenantID: "demo-tenant",
 }
 
 // publishTimeout bounds one fan-out. It is per tick, not per send: brokers
@@ -187,9 +199,10 @@ func publishOrderEvent(ctx context.Context, sinks []eventSink, cfg OrderEventPro
 	var errs []error
 	for _, sink := range sinks {
 		payload, err := json.Marshal(orderEventPayload{
-			OrderID: cfg.OrderID,
-			UserID:  cfg.UserID,
-			Reason:  sink.reason,
+			OrderID:  cfg.OrderID,
+			UserID:   cfg.UserID,
+			Reason:   sink.reason,
+			TenantID: cfg.TenantID,
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: encode payload: %w", sink.transport, err))

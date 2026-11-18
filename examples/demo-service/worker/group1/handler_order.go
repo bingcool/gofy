@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
+	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
@@ -68,6 +71,12 @@ type orderEventPayload struct {
 	// Reason 是 payload 可携带的自由文本。本示例中生产者用它记录事件来自哪个
 	// 队列，因此一行日志就能回答"这条是哪个传输投递的"。
 	Reason string `json:"reason"`
+	// TenantID is the tenant the event belongs to. The consumer turns it into
+	// tenant.WithTenant before the first statement, so a tenant-aware table is
+	// filtered without threading an ID through every repository call.
+	// TenantID 是事件所属租户。消费者在第一条语句之前把它变成
+	// tenant.WithTenant，租户感知的表因此自动过滤，不必给每次仓储调用传 ID。
+	TenantID string `json:"tenant_id"`
 }
 
 // applyOrderEvent is the business branch every consumer in this group shares.
@@ -107,6 +116,18 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	if payload.OrderID == 0 {
 		return gofyconsumer.Permanent(fmt.Errorf("%s payload: order_id is required", event.Type))
 	}
+
+	// The tenant travels with the event, not with the process: one replica
+	// handles several tenants, so the plugin must read a per-delivery value.
+	// Installing here also puts the plugin after the framework's tracing
+	// plugin, which is the order the tenant handler relies on.
+	// 租户随事件走而不是随进程：一个副本处理多个租户，插件必须读到按次生效的值。
+	// 在这里安装也保证插件排在框架的链路插件之后——这正是租户 Handler 依赖的顺序。
+	tenantCtx, terr := withOrderTenant(ctx, db, payload.TenantID)
+	if terr != nil {
+		return terr
+	}
+	ctx = tenantCtx
 
 	// The transition condition lives in the UPDATE, not in a read-modify-write:
 	// two concurrent handlers would both pass a SELECT and both write. Only rows
@@ -166,4 +187,32 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 		)
 	}
 	return nil
+}
+
+// withOrderTenant installs the tenant plugin on the runtime pool (idempotent)
+// and carries the event's tenant into ctx. It runs before the first statement
+// of a delivery, which is also after the framework installed tracing — the
+// order the tenant handler depends on, because tracing replaces
+// Statement.Context in its own before callback.
+//
+// A missing tenant is left alone on purpose: the plugin fails closed on a
+// tenant-aware table, and inventing an ID here would read another tenant's
+// rows. A model without the tenant column is not rewritten, which is why the
+// demo's orders table keeps working when an event carries a tenant.
+// withOrderTenant 在 Runtime 的连接池上安装租户插件（幂等），并把事件所属租户带进
+// ctx。它在一次投递的第一条语句之前执行，此时框架已装好 tracing——这正是租户 Handler
+// 依赖的顺序，因为 tracing 会在自己的 before 回调里替换 Statement.Context。
+//
+// 缺少租户时有意不兜底：插件在租户感知的表上失败关闭，在这里编一个 ID 会读到别的
+// 租户的行。不含租户列的模型不会被改写，因此示例的 orders 表在事件带租户时照常工作。
+func withOrderTenant(ctx context.Context, db *gorm.DB, tenantID string) (context.Context, error) {
+	if opts := orderTenant.Load(); opts != nil {
+		if err := appdb.EnsureTenant(db, *opts); err != nil {
+			return ctx, fmt.Errorf("install tenant plugin: %w", err)
+		}
+	}
+	if id := strings.TrimSpace(tenantID); id != "" {
+		ctx = tenant.WithTenant(ctx, id)
+	}
+	return ctx, nil
 }

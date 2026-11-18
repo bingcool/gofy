@@ -300,13 +300,24 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
    按项目约定不 import `logger`（接收 `*zap.Logger` 或回调）；把输出决策留给应用，
    包本身无日志依赖。
 
-7. **worker 进程未接线。** worker 不走 `ModuleFactories`（见 §6 与项目约定），其连接由
-   worker 宿主自行装配。需要租户隔离的 worker 应在其装配点显式调用
-   `tenant.Instrument`；脚本走 `script/register.go`，已与 HTTP 入口共用同一开关。
+7. **worker 进程在消费入口接线，不在 `Open` 接线。** worker 不走 `ModuleFactories`（见 §6
+   与项目约定），其连接是框架托管的 `db.default`，没有 `appio/db.Open` 这个时机。接线因此
+   落在分组自己的装配点：`worker.Register` 接收 `tenant` 配置段，`group1.NewGroup` 把解析好的
+   选项挂在分组上；消费者 handler 在每次投递的第一条语句之前调用 `db.EnsureTenant`（
+   `installTenant` 的导出形式，幂等），再把事件携带的 `tenant_id` 用 `tenant.WithTenant` 注入
+   ctx。放在 handler 里而不是进程启动时，有两个原因：这是唯一能拿到 `rt.DB` 的位置，且天然排在
+   框架的 tracing 插件之后。事件不带租户时不兜底——插件失败关闭，handler 重试。
+   脚本走 `script/register.go`，HTTP 走 `reload.factories`，三者共用
+   `config.TenantConfig.OpenOptions()` / `Options()` 这一处开关定义。
+   示例的 `orders` 表没有租户列，插件因此不改写它；过滤行为在
+   `worker/group1/tenant_test.go` 用带 `tenant_id` 的探针模型验证。
 
 ### 11.2 验证
 
 - `go test ./support/tenant -race`：20 个用例全过，含 100 goroutine 并发不同租户不串扰。
 - demo 装配测试：`installTenant` 装上后 `WithTenant` 查询只返回本租户行；连续三次安装
   不报重复回调。
+- worker 接线测试：`app/appio/db` 的 `EnsureTenant` 连续两次安装后过滤仍生效；
+  `worker/group1` 的 `withOrderTenant` 覆盖三条路径——事件租户生效、关闭时不改写语句、
+  缺租户时 `ErrTenantRequired`（失败关闭）。探针模型带 `tenant_id`，与 `orders` 表分开。
 - `make check` 全绿（含导入守卫、race、cgo-free、Windows cross）。
