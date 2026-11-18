@@ -418,6 +418,16 @@ func LoadConfig(path string) (Config, error) {
 	if _, err := ParseChangeStrategy(string(cfg.ChangeStrategy)); err != nil {
 		return cfg, err
 	}
+	// Discovery needs the same validation as Load: this entry also serves
+	// workers and scripts that never build a Client, so a bad
+	// discovery_service_client value would otherwise surface only at the first
+	// lookup — or never.
+	// 这里与 Load 一样要校验发现配置：该入口同样服务于不构造 Client 的 worker 与
+	// script，否则 discovery_service_client 的错误要等到第一次寻址才暴露——甚至
+	// 永远不暴露。
+	if err := cfg.Discovery.Validate(); err != nil {
+		return cfg, fmt.Errorf("nacos: discovery_service_client: %w", err)
+	}
 	return cfg, nil
 }
 

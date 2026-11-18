@@ -156,6 +156,19 @@ func TestDiscoveryRejectsUnknownLoadBalancer(t *testing.T) {
 	}
 }
 
+// LoadConfig is the single-file entry: a bad discovery value from the
+// environment must fail there too, not only in Load.
+// LoadConfig 是单文件入口：来自环境的错误发现配置也必须在这里失败，而不是只在
+// Load 中报错。
+func TestLoadConfigValidatesDiscovery(t *testing.T) {
+	clearNacosEnv(t)
+	t.Setenv("NACOS_DISCOVERY_LOAD_BALANCER", "round-robiin")
+	path := writeTestFile(t, t.TempDir(), "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("LoadConfig accepted an unknown load_balancer")
+	}
+}
+
 // stale_ttl shorter than cache_ttl used to be widened silently. It is a real
 // mistake — every cache hit after the stale window would fail closed — so it is
 // reported instead.
