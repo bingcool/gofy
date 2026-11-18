@@ -12,6 +12,8 @@ import (
 
 	gofyclaim "github.com/bingcool/gofy/support/claim"
 	gofyworker "github.com/bingcool/gofy/support/worker"
+
+	"github.com/yourorg/demo-service/worker/tenantguard"
 )
 
 // This file is the database-queue counterpart of scan.go: where that loop only
@@ -172,6 +174,9 @@ func newClaimScanProducer(cfg ClaimScanConfig) gofyworker.Worker {
 		if !ok || rt.DB == nil {
 			return errors.New("order-settle-producer: runtime database is required")
 		}
+		if err := tenantguard.Ensure(rt); err != nil {
+			return err
+		}
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := claimLogger(rt.Logger, id)
 		if err := ensureClaimTable(ctx, rt.DB, cfg.Table); err != nil {
@@ -300,6 +305,9 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
 		if !ok || rt.DB == nil {
 			return errors.New("order-settle-consumer: runtime database is required")
+		}
+		if err := tenantguard.Ensure(rt); err != nil {
+			return err
 		}
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := claimLogger(rt.Logger, id)

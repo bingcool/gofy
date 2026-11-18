@@ -14,8 +14,10 @@ import (
 	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
-	appdb "github.com/yourorg/demo-service/app/appio/db"
+	"github.com/bingcool/gofy/core"
+
 	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/worker/tenantguard"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -123,7 +125,7 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	// plugin, which is the order the tenant handler relies on.
 	// 租户随事件走而不是随进程：一个副本处理多个租户，插件必须读到按次生效的值。
 	// 在这里安装也保证插件排在框架的链路插件之后——这正是租户 Handler 依赖的顺序。
-	tenantCtx, terr := withOrderTenant(ctx, db, payload.TenantID)
+	tenantCtx, terr := withOrderTenant(ctx, rt, payload.TenantID)
 	if terr != nil {
 		return terr
 	}
@@ -195,6 +197,11 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 // order the tenant handler depends on, because tracing replaces
 // Statement.Context in its own before callback.
 //
+// The runtime is taken instead of a *gorm.DB on purpose: a worker owns exactly
+// one framework pool, and passing the runtime keeps this path from filtering
+// one pool while another one passed by mistake stays open. A group that opens
+// a second pool must install the plugin on that pool at its own assembly point.
+//
 // A missing tenant is left alone on purpose: the plugin fails closed on a
 // tenant-aware table, and inventing an ID here would read another tenant's
 // rows. A model without the tenant column is not rewritten, which is why the
@@ -203,13 +210,15 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 // ctx。它在一次投递的第一条语句之前执行，此时框架已装好 tracing——这正是租户 Handler
 // 依赖的顺序，因为 tracing 会在自己的 before 回调里替换 Statement.Context。
 //
+// 这里取 Runtime 而不是 *gorm.DB 是有意的：一个 worker 只拥有一个框架连接池，传
+// Runtime 可以避免"误传另一个池、只过滤了那一个"的路径。分组若自己打开了第二个池，
+// 必须在该池的装配点单独安装。
+//
 // 缺少租户时有意不兜底：插件在租户感知的表上失败关闭，在这里编一个 ID 会读到别的
 // 租户的行。不含租户列的模型不会被改写，因此示例的 orders 表在事件带租户时照常工作。
-func withOrderTenant(ctx context.Context, db *gorm.DB, tenantID string) (context.Context, error) {
-	if opts := orderTenant.Load(); opts != nil {
-		if err := appdb.EnsureTenant(db, *opts); err != nil {
-			return ctx, fmt.Errorf("install tenant plugin: %w", err)
-		}
+func withOrderTenant(ctx context.Context, rt *core.Runtime, tenantID string) (context.Context, error) {
+	if err := tenantguard.Ensure(rt); err != nil {
+		return ctx, err
 	}
 	if id := strings.TrimSpace(tenantID); id != "" {
 		ctx = tenant.WithTenant(ctx, id)

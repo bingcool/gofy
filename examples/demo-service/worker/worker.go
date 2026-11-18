@@ -82,7 +82,7 @@ func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients, l
 	if err != nil {
 		return nil, err
 	}
-	workerGroup2, err := group2.NewGroup()
+	workerGroup2, err := group2.NewGroup(tenantEnabled, tenantOpts)
 	if err != nil {
 		return nil, err
 	}

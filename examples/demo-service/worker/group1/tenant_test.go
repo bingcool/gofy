@@ -10,8 +10,11 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/bingcool/gofy/core"
 	gofysqlite "github.com/bingcool/gofy/support/sqlite"
 	"github.com/bingcool/gofy/support/tenant"
+
+	"github.com/yourorg/demo-service/worker/tenantguard"
 )
 
 // tenantProbeRow stands in for a tenant-aware business table. The demo's orders
@@ -32,7 +35,7 @@ func (tenantProbeRow) TableName() string { return "tenant_probe_rows" }
 // context: a shared database would carry one case's plugin into the next.
 // newTenantProbeDB 为每个用例打开一个独立内存 SQLite。DSN 由用例名派生，因为插件
 // 装在 *gorm.DB 上而不是 context 上：共用数据库会把前一个用例的插件带进下一个。
-func newTenantProbeDB(t *testing.T) *gorm.DB {
+func newTenantProbeRuntime(t *testing.T) (*core.Runtime, *gorm.DB) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:tenant_probe_%s?mode=memory&cache=shared",
 		strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()))
@@ -51,7 +54,8 @@ func newTenantProbeDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(&tenantProbeRow{}); err != nil {
 		t.Fatalf("migrate probe rows: %v", err)
 	}
-	return db
+	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop(), DB: db})
+	return rt, db
 }
 
 // seedTenantProbe writes one row per tenant, bypassing the plugin: the rows are
@@ -76,13 +80,12 @@ func seedTenantProbe(t *testing.T, db *gorm.DB) {
 // 投递路径：插件在第一条语句前安装，事件租户决定 handler 能看到哪些行。第二次投递
 // 不能失败——同一进程里每条消息复用的都是同一个 db.default。
 func TestWithOrderTenantAppliesEventTenant(t *testing.T) {
-	db := newTenantProbeDB(t)
-	opts := tenant.Options{}
-	orderTenant.Store(&opts)
-	t.Cleanup(func() { orderTenant.Store(nil) })
+	rt, db := newTenantProbeRuntime(t)
+	tenantguard.Configure(true, tenant.Options{})
+	t.Cleanup(func() { tenantguard.Configure(false, tenant.Options{}) })
 	seedTenantProbe(t, db)
 
-	ctx, err := withOrderTenant(context.Background(), db, " a ")
+	ctx, err := withOrderTenant(context.Background(), rt, " a ")
 	if err != nil {
 		t.Fatalf("withOrderTenant: %v", err)
 	}
@@ -97,7 +100,7 @@ func TestWithOrderTenantAppliesEventTenant(t *testing.T) {
 	// The second message re-installs on the same pool; a duplicate callback
 	// would surface here, not at startup.
 	// 第二条消息会在同一个池上再次安装；回调重复注册会在这里暴露，而不是在启动时。
-	if _, err := withOrderTenant(context.Background(), db, "b"); err != nil {
+	if _, err := withOrderTenant(context.Background(), rt, "b"); err != nil {
 		t.Fatalf("second withOrderTenant: %v", err)
 	}
 }
@@ -106,12 +109,12 @@ func TestWithOrderTenantAppliesEventTenant(t *testing.T) {
 // the statement keeps ordinary GORM behaviour.
 // 关闭即不触碰：不装插件，事件租户不改变任何行为，语句保持普通 GORM 语义。
 func TestWithOrderTenantDisabledLeavesStatementsUntouched(t *testing.T) {
-	db := newTenantProbeDB(t)
-	orderTenant.Store(nil)
-	t.Cleanup(func() { orderTenant.Store(nil) })
+	rt, db := newTenantProbeRuntime(t)
+	tenantguard.Configure(false, tenant.Options{})
+	t.Cleanup(func() { tenantguard.Configure(false, tenant.Options{}) })
 	seedTenantProbe(t, db)
 
-	ctx, err := withOrderTenant(context.Background(), db, "a")
+	ctx, err := withOrderTenant(context.Background(), rt, "a")
 	if err != nil {
 		t.Fatalf("withOrderTenant: %v", err)
 	}
@@ -128,13 +131,12 @@ func TestWithOrderTenantDisabledLeavesStatementsUntouched(t *testing.T) {
 // handler retries instead of silently reading every tenant's rows.
 // 事件不带租户时不做猜测：插件失败关闭，handler 因此重试，而不是静默读到全部租户的行。
 func TestWithOrderTenantWithoutIDFailsClosed(t *testing.T) {
-	db := newTenantProbeDB(t)
-	opts := tenant.Options{}
-	orderTenant.Store(&opts)
-	t.Cleanup(func() { orderTenant.Store(nil) })
+	rt, db := newTenantProbeRuntime(t)
+	tenantguard.Configure(true, tenant.Options{})
+	t.Cleanup(func() { tenantguard.Configure(false, tenant.Options{}) })
 	seedTenantProbe(t, db)
 
-	ctx, err := withOrderTenant(context.Background(), db, "  ")
+	ctx, err := withOrderTenant(context.Background(), rt, "  ")
 	if err != nil {
 		t.Fatalf("withOrderTenant: %v", err)
 	}
@@ -142,5 +144,27 @@ func TestWithOrderTenantWithoutIDFailsClosed(t *testing.T) {
 	err = db.WithContext(ctx).Find(&got).Error
 	if !errors.Is(err, tenant.ErrTenantRequired) {
 		t.Fatalf("statement without a tenant = %v, want ErrTenantRequired", err)
+	}
+}
+
+// A schema-less statement — Table plus a scalar dest — gives the plugin no
+// model to probe for the tenant column, so it fails closed instead of guessing.
+// Cross-tenant aggregates must therefore say so with Without; the scan and
+// report loops rely on this behaviour being explicit rather than accidental.
+// 无 schema 的语句——Table 加标量目标——没有可供插件探测租户列的模型，因此它失败
+// 关闭而不是猜测。跨租户聚合必须用 Without 显式声明；扫描与报表循环依赖的正是
+// 这一行为是显式的，而不是碰巧的。
+func TestSchemaLessAggregateFailsClosed(t *testing.T) {
+	tenantguard.Configure(true, tenant.Options{})
+	t.Cleanup(func() { tenantguard.Configure(false, tenant.Options{}) })
+
+	rt, db := newTenantProbeRuntime(t)
+	if err := tenantguard.Ensure(rt); err != nil {
+		t.Fatalf("install plugin: %v", err)
+	}
+	var n int64
+	err := db.WithContext(context.Background()).Table("tenant_probe_rows").Count(&n).Error
+	if !errors.Is(err, tenant.ErrTenantRequired) {
+		t.Fatalf("schema-less aggregate = %v, want ErrTenantRequired", err)
 	}
 }

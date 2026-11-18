@@ -7,7 +7,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
+	"github.com/yourorg/demo-service/worker/tenantguard"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -57,6 +59,13 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 		if !ok || rt.DB == nil {
 			return errors.New("order-scan: runtime database is required")
 		}
+		// Install before the first tick: the plugin lives on the pool, and this
+		// loop may start before the group's consumer ever receives a message.
+		// 在第一个 tick 之前安装：插件装在池上，而本循环可能早于分组里任何消费者
+		// 收到第一条消息。
+		if err := tenantguard.Ensure(rt); err != nil {
+			return err
+		}
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := rt.Logger.With(zap.String("worker", id.String()))
 
@@ -67,7 +76,13 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 			// The count uses the drain context: a shutdown must not abort a
 			// query that is already talking to the database.
 			// 计数使用 drain context：停机不应该中断已经在与数据库交互的查询。
-			queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 3*time.Second)
+			// A count is a cross-tenant figure: it has no model to probe for a
+			// tenant column, and it is not this loop's job to be scoped to one.
+			// Saying so with Without keeps the plugin from failing closed on a
+			// statement that never carried a tenant.
+			// 计数是跨租户的数字：它没有可供插件探测租户列的模型，也不该被限定在某个
+			// 租户。用 Without 显式声明，插件才不会对一条本就不带租户的语句失败关闭。
+			queryCtx, cancel := context.WithTimeout(tenant.Without(gofyworker.DrainContext(ctx)), 3*time.Second)
 			defer cancel()
 			var pending int64
 			if err := rt.DB.WithContext(queryCtx).

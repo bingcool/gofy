@@ -7,7 +7,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
+	"github.com/yourorg/demo-service/worker/tenantguard"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -57,6 +59,9 @@ func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 		if !ok || rt.DB == nil {
 			return errors.New("report-summary: runtime database is required")
 		}
+		if err := tenantguard.Ensure(rt); err != nil {
+			return err
+		}
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := rt.Logger.With(zap.String("worker", id.String()))
 
@@ -67,7 +72,12 @@ func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 			// The aggregation uses the drain context: a shutdown must not cut
 			// a query that is already on the wire.
 			// 汇总使用 drain context：停机不应该中断已经在执行的查询。
-			queryCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 10*time.Second)
+			// The report aggregates every tenant; it is the privileged shape the
+			// bypass exists for. Without it, a tenant-aware deployment would
+			// either fail closed or silently report one tenant's totals.
+			// 报表聚合所有租户，正是绕过存在的那类特权形状。不声明的话，开了租户隔离的
+			// 部署要么失败关闭，要么只报某一个租户的合计。
+			queryCtx, cancel := context.WithTimeout(tenant.Without(gofyworker.DrainContext(ctx)), 10*time.Second)
 			defer cancel()
 			var rows []statusCount
 			if err := rt.DB.WithContext(queryCtx).

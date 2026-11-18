@@ -300,13 +300,20 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
    按项目约定不 import `logger`（接收 `*zap.Logger` 或回调）；把输出决策留给应用，
    包本身无日志依赖。
 
-7. **worker 进程在消费入口接线，不在 `Open` 接线。** worker 不走 `ModuleFactories`（见 §6
+7. **worker 进程在各自入口接线，不在 `Open` 接线。** worker 不走 `ModuleFactories`（见 §6
    与项目约定），其连接是框架托管的 `db.default`，没有 `appio/db.Open` 这个时机。接线因此
-   落在分组自己的装配点：`worker.Register` 接收 `tenant` 配置段，`group1.NewGroup` 把解析好的
-   选项挂在分组上；消费者 handler 在每次投递的第一条语句之前调用 `db.EnsureTenant`（
-   `installTenant` 的导出形式，幂等），再把事件携带的 `tenant_id` 用 `tenant.WithTenant` 注入
-   ctx。放在 handler 里而不是进程启动时，有两个原因：这是唯一能拿到 `rt.DB` 的位置，且天然排在
-   框架的 tracing 插件之后。事件不带租户时不兜底——插件失败关闭，handler 重试。
+   落在分组自己的装配点：`worker.Register` 接收 `tenant` 配置段，各分组构造时调用
+   `worker/tenantguard.Configure` 保存选项（共享包，避免每个分组各写一份进程级状态）；
+   每个访问数据库的 worker 在 `Run` 入口调用 `tenantguard.Ensure`（`installTenant` 的
+   导出形式，幂等），消费者再把事件携带的 `tenant_id` 用 `tenant.WithTenant` 注入 ctx。
+   放在各入口而不是进程启动时，有两个原因：这是唯一能拿到 `rt.DB` 的位置，且天然排在
+   框架的 tracing 插件之后。
+   **插件装在池上而不是 context 上**，因此不能只让消费者装：扫描与认领循环可能早于第一条
+   消息启动，若消费者一直收不到消息，它们会永远裸查——每个入口各装一次（幂等）才是完整覆盖。
+   **跨租户聚合要显式 `Without`**：`Count(&int64)`、`Table("x")` 配匿名指标这类语句没有模型
+   可供探测租户列，插件会失败关闭；扫描的计数与 group2 的报表因此用 `tenant.Without` 声明
+   特权形状，而不是靠"表里没有租户列"这个巧合。
+   事件不带租户时不兜底——插件失败关闭，handler 重试。
    脚本走 `script/register.go`，HTTP 走 `reload.factories`，三者共用
    `config.TenantConfig.OpenOptions()` / `Options()` 这一处开关定义。
    示例的 `orders` 表没有租户列，插件因此不改写它；过滤行为在
