@@ -18,6 +18,9 @@ func Register(cfg *config.Config) []gofyscript.Script {
 		withIO(cfg, FixOrder()),
 		GenUUID(cfg),
 		LockCheck(cfg),
+		// No appio generation: the stream touches only the LLM endpoint.
+		// 不需要 appio 装配代：这条流只访问 LLM 端点。
+		AIStream(cfg),
 	}
 }
 

@@ -60,14 +60,39 @@ if err != nil {
 }
 defer stream.Close() // 提前中止时必须调用，否则消费 goroutine 不会退出
 
+n, stopped := 0, false
 for delta := range stream.Text() {
-    fmt.Print(delta)
+    fmt.Print(delta) // 每收到一片就写出去，这就是"流式"的全部
+    n++
+    if n == 20 {
+        stopped = true
+        _ = stream.Close() // 先关再跳出，原因见下
+        break
+    }
 }
-if err := stream.Err(); err != nil {
+if err := stream.Err(); err != nil && !stopped {
     return err
 }
 fmt.Println(stream.Result().Usage.TotalTokens)
 ```
+
+三条规则，都踩过：
+
+1. **`Text()` 与 `Chunks()` 二选一**。两者读的是同一个底层流，只能有一个消费者；
+   需要工具调用、推理过程或结束事件时用 `Chunks()`（它返回 goai 的原始分块，
+   也是本包唯一的 goai 类型泄漏点），只要文本就用 `Text()`。
+2. **提前离开循环必须先 `Close()`**。消费 goroutine 会阻塞在向 64 容量的通道发送上，
+   而 `Result()` 与 `Err()` 都要等它结束——直接 `break` 之后读结果是死等。
+3. **自己取消的流不要按错误内容判断**。被取消的 HTTP 读取可能表现成
+   `context.Canceled`、读错误或 provider 的 `ChunkError`；该看的是"谁取消的"
+   （上面的 `stopped`，或 `ctx.Err()`），否则同一段代码会随机报错。
+
+用量只在 `Result()` 里：流式分块只带文本，没有 token 计数；被中断的流那里是 0，
+因为 provider 只在请求结束时结算。
+
+可运行样例见 [`examples/demo-service/script/ai_stream.go`](../../examples/demo-service/script/ai_stream.go)：
+`script ai-stream` 边收边打到 stdout，`--stop-after N` 演示提前中止，`--serve 127.0.0.1:8099`
+把同一条流转成 SSE（一个增量一个 `event: delta`，末尾一个带用量的 `event: done`）。
 
 结构化输出（Go 的方法不能带类型参数，因此是自由函数）：
 

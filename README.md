@@ -402,6 +402,11 @@ Moonshot、自建 vLLM/LiteLLM 都属于最后一种，靠 `base_url` 区分—�
 `deepseek-chat`（原生 `deepseek` provider）与 `deepseek-compat`
 （`openai_compatible` 走同一个端点），一次巡检同时证明两条协议实现都通。
 
+流式输出有独立的可运行样例 `script ai-stream`（`examples/demo-service/script/ai_stream.go`）：
+`--stop-after N` 演示提前中止的正确顺序（先 `Close` 再读 `Result`），`--serve`
+把同一条流转成 SSE（一个增量一个 `event: delta`，末尾一个带用量的 `event: done`）。
+`support/ai/README.md` 里另有三条硬规则的说明。
+
 三条刻意的取舍：
 
 - **不写进程环境变量**。凭证只通过 provider 构造函数显式传入；需要从环境取时把

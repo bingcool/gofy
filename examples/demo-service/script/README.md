@@ -8,6 +8,7 @@
 
 - `fix_order.go`：示例脚本 `fix-order`，按订单 ID 取消待支付订单，走 service 层；
 - `gen_uuid.go`：示例脚本 `gen-uuid`，只验证 Redis 与 ID 生成器；
+- `ai_stream.go`：示例脚本 `ai-stream`，流式调用 LLM 并输出到 stdout 或 SSE；
 - `register.go`：把所有脚本收集成列表，给需要数据库的脚本套上 `app/appio` 装配代，
   再交给 `main.go` 的 `WithScripts`；
 - `register_test.go`：`withIO` 包装的单元测试，不连真实数据库。
@@ -17,16 +18,12 @@
 在 `examples/demo-service` 目录下：
 
 ```bash
-# 列出已注册脚本
+# 列出已注册脚本（NAME / DESCRIPTION 两列）
 go run . script --list
-# 输出：
-# ┌───────────┬─────────────────────────────────────┐
-# │ NAME      │ DESCRIPTION                         │
-# ├───────────┼─────────────────────────────────────┤
-# │ fix-order │ fix inconsistent order data         │
-# ├───────────┼─────────────────────────────────────┤
-# │ gen-uuid  │ generate distributed ids from Redis │
-# └───────────┴─────────────────────────────────────┘
+# fix-order   fix inconsistent order data
+# gen-uuid    generate distributed ids from Redis
+# lock-check  acquire and release a distributed lock stored in Redis
+# ai-stream   stream one completion to stdout, or serve it as SSE
 
 # 默认直接修改数据；加 --dry-run 只预演、不写库
 go run . script fix-order --order-id=123
@@ -54,6 +51,52 @@ go run . script fix-order --order-id=123 --dry-run=true
 注意：`script` 子命令关闭了自身的 flag 解析，`--order-id` 这类参数会原样交给
 脚本；`script fix-order --help` 也会转给脚本的 pflag，只打印该脚本的 flag 用法，
 不会显示脚本名和 `Short` 说明。
+
+## 流式输出（ai-stream）
+
+`ai_stream.go` 是 `support/ai` 流式接口的可运行样例，也是"增量怎么交给调用方"的
+参考实现。三个用法覆盖三件事：正常收完、提前中止、转成 SSE。
+
+```bash
+# 边收边打印，最后一行是用量（token 计数只在流结束后才有）
+go run . script ai-stream --prompt "用三句话说明流式输出适合什么场景"
+
+# 收到 20 片就停：演示提前中止，以及 Close 之后 Result 仍能拿到部分文本
+go run . script ai-stream --prompt "从 1 数到 100，用逗号分隔" --stop-after 20
+
+# 同一条流改成 SSE：一个增量一个事件，末尾一个带用量的 done 事件
+go run . script ai-stream --serve 127.0.0.1:8099
+curl -N http://127.0.0.1:8099/chat
+```
+
+SSE 的线格式（`curl -N` 看到的原文）：
+
+```text
+event: delta
+data: {"text":"流"}
+
+event: delta
+data: {"text":"式"}
+
+event: done
+data: {"alias":"deepseek-chat","elapsed_ms":1371,"input":15,"output":120}
+```
+
+四个要点，样例里都有对应注释：
+
+| 要点 | 做法 |
+| --- | --- |
+| 消费增量 | `range stream.Text()`，收到一片就写出去；需要工具调用 / 推理过程 / 结束事件时改 `Chunks()`，与 `Text()` 互斥（同一个底层流只能有一个读者） |
+| 提前中止 | 先 `stream.Close()` 再读 `Result()`：消费 goroutine 会阻塞在向通道发送上，`Result` / `Err` 又要等它结束，少了这步就是死等 |
+| 错误分类 | 按"谁取消的"判断（`--stop-after` 触发，或 `ctx.Err()`），不去猜 provider 收尾时报什么——被取消的读取可能是 `context.Canceled`、读错误或 `ChunkError` |
+| 转 SSE | payload 一律 JSON 编码：SSE 以换行分隔，含空行的原始文本会提前结束事件、把一个回答拆成坏帧 |
+
+补充两点：
+
+- `--serve` 绑定的就是你给的地址：只在本机用写 `127.0.0.1:8099`，写成 `:8099` 会监听
+  所有网卡；
+- `--timeout`（默认 60s）按**每条流**计，不限制 SSE 服务本身的存活时间；进程要等到
+  `Ctrl+C` 才退出，退出时 `Shutdown` 会给在途的流 3 秒收尾。
 
 ## 新增脚本
 

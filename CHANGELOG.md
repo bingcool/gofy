@@ -40,6 +40,13 @@ All notable changes to this project are documented here. The format follows
   protocol implementations. The worker only exists when `llm_ai.enabled` is
   true, and it builds its client when it runs: the HTTP process therefore never
   validates a credential it does not use.
+- `examples/demo-service`: `script ai-stream` is the runnable streaming sample —
+  deltas printed as they arrive, `--stop-after N` showing the rule that is easy
+  to get wrong (Close before reading Result, or the consumer goroutine blocked on
+  a channel send makes Result wait forever), and `--serve` mapping the same
+  stream to SSE: one delta per event, then a final event carrying the usage the
+  deltas cannot. Both paths are demoed by a script rather than a route, because
+  the sample needs no business port.
 - Metrics and runtime diagnostics: `WithDiagnostics` serves Prometheus metrics and
   `net/http/pprof` on a listener of their own, off by default and bound to
   `127.0.0.1:6060` when enabled. The endpoints never share the application port,
