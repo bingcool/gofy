@@ -44,13 +44,18 @@ type MetricsConfig struct {
 // DefaultMetricsPath 是约定的抓取路径。
 const DefaultMetricsPath = "/metrics"
 
-// DurationBuckets are the histogram boundaries for HTTP request durations, in
+// durationBuckets are the histogram boundaries for HTTP request durations, in
 // seconds. They start at 5ms so a fast internal call is not lumped into the
 // first bucket together with a timeout, and stop at 10s because anything slower
 // is already an incident rather than a latency observation.
-// DurationBuckets 是 HTTP 请求耗时直方图的分桶边界（秒）。起点 5ms，避免把快速的内网
+// The slice is private on purpose: an exported one can be edited by any caller,
+// changing the boundaries of Metrics built later — or racing a build in flight.
+// A histogram's buckets are a dashboard contract, so they stay fixed here.
+// durationBuckets 是 HTTP 请求耗时直方图的分桶边界（秒）。起点 5ms，避免把快速的内网
 // 调用和超时一起塞进第一个桶；终点 10s，因为再慢已经是故障而不是延迟观测。
-var DurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+// 刻意设为私有：导出的切片可被任意调用方修改，既会改变之后创建的 Metrics 的边界，
+// 也会与正在进行的构建竞争。直方图分桶是看板契约，因此固定在这里。
+var durationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
 // Validate checks the configuration without building anything.
 // Validate 只校验配置，不构建任何对象。
@@ -159,7 +164,7 @@ func NewMetrics(cfg MetricsConfig, opts ...Option) (*Metrics, error) {
 		sdkmetric.WithView(sdkmetric.NewView(
 			sdkmetric.Instrument{Name: "http.server.request.duration"},
 			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-				Boundaries: DurationBuckets,
+				Boundaries: append([]float64(nil), durationBuckets...),
 			}},
 		)),
 	)
