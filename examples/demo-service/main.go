@@ -131,7 +131,7 @@ func main() {
 	// 文件中，改它们意味着重新编译——这是"一个订阅一个文件"换来的代价。
 	var groups []*worker.Group
 	if plan.RegisterGroups {
-		built, err := appworker.Register(appworker.ConnectionsFrom(cfg), clients)
+		built, err := appworker.Register(appworker.ConnectionsFrom(cfg), clients, cfg.LLMAI)
 		if err != nil {
 			fatalf("build worker groups: %v", err)
 		}

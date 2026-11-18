@@ -13,9 +13,13 @@ import (
 // ChatRequest 描述一次生成。Model 是配置里的 alias；可覆盖参数的零值一律表示
 // "用该 alias 的默认值"，两个浮点字段因此用指针。
 type ChatRequest struct {
-	// Model is the alias. Empty uses Config.DefaultModel.
-	// Model 是 alias；留空使用 Config.DefaultModel。
-	Model string
+	// ModelAlias is the alias declared under llm_ai.models, not the wire model
+	// id: the provider-side name lives in the configuration, and only the alias
+	// is stable enough to log or to address. Empty uses Config.DefaultModel.
+	// ModelAlias 是 llm_ai.models 里声明的 alias，不是 wire model id：provider 侧的
+	// 模型名在配置里，只有 alias 适合写进日志、适合被调用方引用。留空使用
+	// Config.DefaultModel。
+	ModelAlias string
 
 	// System is the system instruction.
 	// System 是系统指令。
@@ -48,11 +52,11 @@ type ChatResponse struct {
 	ToolCalls    []provider.ToolCall
 	FinishReason provider.FinishReason
 	Usage        Usage
-	// Model is the alias that served the request, not the wire model id: the
-	// caller already knows the latter from its configuration.
-	// Model 是服务本次请求的 alias，而不是 wire model id：后者调用方从配置里就能看到。
-	Model   string
-	Elapsed time.Duration
+	// ModelAlias is the alias that served the request, not the wire model id:
+	// the caller already knows the latter from its configuration.
+	// ModelAlias 是服务本次请求的 alias，而不是 wire model id：后者调用方从配置里就能看到。
+	ModelAlias string
+	Elapsed    time.Duration
 }
 
 // JSONResponse is the structured-output counterpart of ChatResponse.
@@ -61,8 +65,10 @@ type JSONResponse[T any] struct {
 	Object       T
 	Usage        Usage
 	FinishReason provider.FinishReason
-	Model        string
-	Elapsed      time.Duration
+	// ModelAlias is the alias that served the request.
+	// ModelAlias 是服务本次请求的 alias。
+	ModelAlias string
+	Elapsed    time.Duration
 }
 
 // EmbedResponse is the result of Embed.
@@ -70,7 +76,9 @@ type JSONResponse[T any] struct {
 type EmbedResponse struct {
 	Embeddings [][]float64
 	Usage      Usage
-	Model      string
+	// ModelAlias is the alias whose embedding model produced the vectors.
+	// ModelAlias 是产出这些向量的 alias（其 embedding 子段）。
+	ModelAlias string
 	Elapsed    time.Duration
 }
 
@@ -105,11 +113,19 @@ func usageFrom(u provider.Usage) Usage {
 // UsageEvent 是 WithOnUsage 在每次调用后（无论成败）收到的内容。回调在调用方
 // goroutine 上同步执行：不能阻塞，也不能回调 Client 自身。
 type UsageEvent struct {
-	Alias    string
+	// Alias is the configured name the caller asked for.
+	// Alias 是调用方请求的配置名。
+	Alias string
+	// Provider is the wire protocol that served the call.
+	// Provider 是服务本次调用的协议实现。
 	Provider string
-	Model    string
-	Usage    Usage
-	Elapsed  time.Duration
+	// Model is the wire model id sent to the provider, not the alias: it is
+	// what shows up in the provider's own dashboard and invoice.
+	// Model 是发给 provider 的 wire model id，不是 alias：它才是 provider 后台与
+	// 账单上出现的那一个。
+	Model   string
+	Usage   Usage
+	Elapsed time.Duration
 	// Err is the already-redacted error, or nil on success.
 	// Err 是已脱敏的错误；成功时为 nil。
 	Err error

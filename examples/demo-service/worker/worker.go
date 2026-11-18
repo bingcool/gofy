@@ -36,6 +36,7 @@
 package worker
 
 import (
+	supportai "github.com/bingcool/gofy/support/ai"
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/serviceclients"
@@ -63,7 +64,10 @@ import (
 // clients 是进程级的下游客户端，与 broker 连接表并列传入：group3 用它按服务名调用
 // demo-service，从而把注册、发现与真实 HTTP 串成一条可独立运行的检查。传 nil 时
 // DemoService() 返回 ErrNotConfigured 占位实现，分组仍可构造。
-func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients) ([]*gofyworker.Group, error) {
+//
+// llm 是 llm_ai 那一段配置，只用来决定 group3 是否挂上 LLM 巡检（enabled 为 false
+// 时不挂）；它不在这里构造客户端，HTTP 进程因此不会因为一段不使用的 AI 配置而校验凭证。
+func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients, llm supportai.Config) ([]*gofyworker.Group, error) {
 	workerGroup1, err := group1.NewGroup(conns)
 	if err != nil {
 		return nil, err
@@ -72,7 +76,7 @@ func Register(conns gofyconsumer.Connections, clients *serviceclients.Clients) (
 	if err != nil {
 		return nil, err
 	}
-	workerGroup3, err := group3.NewGroup(clients)
+	workerGroup3, err := group3.NewGroup(clients, llm)
 	if err != nil {
 		return nil, err
 	}

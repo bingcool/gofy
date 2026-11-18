@@ -43,10 +43,12 @@ type Config struct {
 	// Diagnostics configures the operational listener (metrics + pprof); off by default.
 	Diagnostics gofy.DiagnosticsConfig `yaml:"diagnostics"`
 	// LLMAI 是 LLM 接入配置，由 llm_ai.enabled 控制启停：整段缺失或 enabled 为
-	// false 时 AI 模块不注册，相关路由 404，启动不受影响。
+	// false 时没有任何使用方去构造客户端，启动也不受影响（demo 的用法见
+	// worker/group3/ai_check.go，不额外挂 HTTP 路由）。
 	// LLMAI configures the LLM client, gated by llm_ai.enabled: a missing
-	// section or enabled: false keeps the module unregistered and its routes
-	// answering 404.
+	// section or enabled: false means nothing builds a client, and startup is
+	// unaffected. The demo exercises it from worker/group3/ai_check.go instead
+	// of exposing routes.
 	LLMAI   supportai.Config     `yaml:"llm_ai"`
 	PIDFile string               `yaml:"pid_file"`
 	JWT     middleware.JWTConfig `yaml:"jwt"`

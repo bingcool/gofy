@@ -394,8 +394,13 @@ Moonshot、自建 vLLM/LiteLLM 都属于最后一种，靠 `base_url` 区分—�
 分支，端点差异用 `provider_options` 表达（例如 DeepSeek 不支持 `json_schema`，
 配 `structuredOutputs: false` 即降级为 `json_object`）。
 
-`llm_ai` 整段缺失与 `enabled: false` 等价：模块不注册、相关路由 404、启动不受
-影响，所以"这个部署不接大模型"不需要任何占位配置。
+`llm_ai` 整段缺失与 `enabled: false` 等价：没有任何使用方去构造客户端、启动不受
+影响，所以"这个部署不接大模型"不需要任何占位配置。demo 的用法是
+`worker/group3/ai_check.go` 里的巡检 worker：`worker --group=group3` 每隔一段时间把
+**每个**配置的 alias 都调用一遍，把文本与 token 数写进日志，把"配置 → 凭证 → 端点"
+整条链路验证一遍，而不必开一条 HTTP 路由。demo 的 `config.yaml` 里因此有两条：
+`deepseek-chat`（原生 `deepseek` provider）与 `deepseek-compat`
+（`openai_compatible` 走同一个端点），一次巡检同时证明两条协议实现都通。
 
 三条刻意的取舍：
 

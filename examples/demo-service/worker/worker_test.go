@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	supportai "github.com/bingcool/gofy/support/ai"
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofykafka "github.com/bingcool/gofy/support/kafka"
@@ -33,7 +34,7 @@ func testConnections() gofyconsumer.Connections {
 // TestRegisterBuildsEveryGroup 固定注册清单与每个 worker 自带的实例数。分组的成员与
 // 实例数现在是代码，因此与文档不一致时，会在这一条测试里暴露。
 func TestRegisterBuildsEveryGroup(t *testing.T) {
-	groups, err := appworker.Register(testConnections(), nil)
+	groups, err := appworker.Register(testConnections(), nil, supportai.Config{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -124,7 +125,7 @@ func TestRegisterRejectsUnknownInstance(t *testing.T) {
 	conns := testConnections()
 	delete(conns.Kafka, "default")
 
-	_, err := appworker.Register(conns, nil)
+	_, err := appworker.Register(conns, nil, supportai.Config{})
 	if err == nil {
 		t.Fatal("Register succeeded without the kafka instance the consumer names")
 	}

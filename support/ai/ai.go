@@ -230,7 +230,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 		ToolCalls:    result.ToolCalls,
 		FinishReason: result.FinishReason,
 		Usage:        usageFrom(result.TotalUsage),
-		Model:        p.alias,
+		ModelAlias:   p.alias,
 		Elapsed:      elapsed,
 	}
 	c.report(UsageEvent{
@@ -265,7 +265,7 @@ func ChatJSON[T any](ctx context.Context, c *Client, req ChatRequest) (*JSONResp
 		Object:       result.Object,
 		Usage:        usageFrom(result.Usage),
 		FinishReason: result.FinishReason,
-		Model:        p.alias,
+		ModelAlias:   p.alias,
 		Elapsed:      elapsed,
 	}
 	c.report(UsageEvent{
@@ -324,7 +324,7 @@ func (c *Client) Embed(ctx context.Context, alias string, values []string) (*Emb
 	resp := &EmbedResponse{
 		Embeddings: result.Embeddings,
 		Usage:      usageFrom(result.Usage),
-		Model:      alias,
+		ModelAlias: alias,
 		Elapsed:    elapsed,
 	}
 	c.report(UsageEvent{
@@ -358,7 +358,7 @@ func (c *Client) prepare(req ChatRequest) (prepared, error) {
 		return prepared{}, ErrClosed
 	}
 
-	alias := strings.TrimSpace(req.Model)
+	alias := strings.TrimSpace(req.ModelAlias)
 	if alias == "" {
 		alias = c.defaultAlias
 	}

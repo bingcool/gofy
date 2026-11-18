@@ -28,14 +28,18 @@ All notable changes to this project are documented here. The format follows
   token usage reporting and credential redaction (which preserves the error
   chain) are covered by httptest-based tests. The whole section is gated by
   `enabled`: a missing `llm_ai` section and `enabled: false` mean the same
-  thing — nothing is built, routes answer 404 and `New` returns `ErrDisabled`
-  — so a deployment without LLM access needs no placeholder configuration,
-  while `enabled: true` with an empty `models` map is still an error.
-- `examples/demo-service`: an `ai` module demonstrating the four shapes —
-  `/api/v1/demo/ai/models`, `/chat`, `/stream` (SSE) and `/summary` (typed
-  structured output). The module is registered only when `llm_ai.enabled` is
-  true, so a deployment without LLM access keeps starting and simply answers
-  404.
+  thing — nothing is built and `New` returns `ErrDisabled` — so a deployment
+  without LLM access needs no placeholder configuration, while `enabled: true`
+  with an empty `models` map is still an error.
+- `examples/demo-service`: an `ai-check` worker in group3 calls **every**
+  configured alias on a slow ticker and logs each answer with its token counts,
+  so `worker --group=group3` exercises the whole chain (configuration →
+  credential → endpoint) without demo routes. The demo ships two aliases —
+  `deepseek-chat` on the native `deepseek` provider and `deepseek-compat` on
+  `openai_compatible` pointing at the same endpoint — so one round proves both
+  protocol implementations. The worker only exists when `llm_ai.enabled` is
+  true, and it builds its client when it runs: the HTTP process therefore never
+  validates a credential it does not use.
 - Metrics and runtime diagnostics: `WithDiagnostics` serves Prometheus metrics and
   `net/http/pprof` on a listener of their own, off by default and bound to
   `127.0.0.1:6060` when enabled. The endpoints never share the application port,

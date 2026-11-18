@@ -19,7 +19,6 @@ import (
 	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/container"
-	aimodule "github.com/yourorg/demo-service/app/module/ai"
 )
 
 // reloader rebuilds the modules from a freshly loaded config and applies them
@@ -65,14 +64,6 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock),
 	}
 	factories = append(factories, ctr.ModuleFactories()...)
-	// The AI module exists only when llm_ai.enabled is true. Registering it
-	// unconditionally would turn "no LLM in this deployment" into a startup
-	// error instead of a 404, and a missing section has to stay a non-event.
-	// 只有 llm_ai.enabled 为 true 才注册 AI 模块。无条件注册会把"这个部署不接
-	// 大模型"变成启动错误，而它本该只是 404；整段缺失更不该有任何副作用。
-	if cfg.LLMAI.Enabled {
-		factories = append(factories, aimodule.NewModuleFactory(cfg.LLMAI))
-	}
 	if r.watch {
 		factories = append(factories, func(rt *core.Runtime) (support.Module, error) {
 			return &nacosWatchModule{

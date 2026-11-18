@@ -101,7 +101,7 @@ func (s *Stream) Result() *ChatResponse {
 			ToolCalls:    res.ToolCalls,
 			FinishReason: res.FinishReason,
 			Usage:        usageFrom(res.TotalUsage),
-			Model:        s.alias,
+			ModelAlias:   s.alias,
 			Elapsed:      elapsed,
 		}
 		s.client.report(UsageEvent{

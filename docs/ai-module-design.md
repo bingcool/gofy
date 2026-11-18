@@ -360,7 +360,7 @@ func (c *Client) Embed(ctx context.Context, alias string, values []string) (*Emb
 
 ```go
 type ChatRequest struct {
-    Model    string             // alias，空表示 default_model
+    ModelAlias string           // alias（不是 wire model id），空表示 default_model
     System   string
     Messages []provider.Message // 与 goai 同类型，不另造消息模型
     Prompt   string             // 与 Messages 二选一
@@ -380,7 +380,7 @@ type ChatResponse struct {
     ToolCalls    []provider.ToolCall
     FinishReason provider.FinishReason
     Usage        Usage          // 从 provider.Usage 映射
-    Model        string         // 实际使用的 alias
+    ModelAlias   string         // 实际使用的 alias（不是 wire model id）
     Elapsed      time.Duration
 }
 ```
@@ -433,30 +433,23 @@ type Config struct {
     LLMAI supportai.Config `yaml:"llm_ai"`
 }
 
-// app/module/ai/module.go
-func NewModuleFactory(cfg supportai.Config) support.ModuleFactory {
-    return func(rt *core.Runtime) (support.Module, error) {
-        client, err := supportai.New(cfg, supportai.WithLogger(rt.Logger))
-        if err != nil {
-            return nil, err
-        }
-        return NewModule(client, rt.Logger), nil
-    }
-}
-
-// reload.go：只有 enabled 为 true 才注册，否则路由 404
-if cfg.LLMAI.Enabled {
-    factories = append(factories, aimodule.NewModuleFactory(cfg.LLMAI))
-}
+// worker/group3/ai_check.go：客户端在 worker 真正运行时按配置构造，
+// 巡检每隔一段时间把每个 alias 调用一遍，把各自的文本与 token 数写进日志。
+client, err := supportai.New(cfg.LLMAI, supportai.WithLogger(logger))
+resp, err := client.Chat(ctx, supportai.ChatRequest{Prompt: "解释幂等"})
 ```
 
-为什么不是 `app/appio`：那里是按"代"管理的连接集合，而 AI 客户端只持有一个 HTTP
-连接池，没有必须跨配置变更存活的游标或缓存。放在模块工厂里，`Reload` 用新配置重建
-一个即可，代价是重新建一次连接池——这比给 appio 增加一代没有任何状态需要保留的句柄
-更简单。
+为什么不开一组 demo HTTP 路由：AI 调用绝大多数落在 worker / script 里，而一条只为
+"证明客户端能用"的路由会顺带把 LLM 暴露到业务端口上（没有认证、没有限流，等于用
+共享 key 对外提供推理服务）。`worker --group=group3` 的巡检覆盖同一件事——配置、
+凭证、端点是否都通——却不引入这个攻击面。
+
+客户端也不进模块生命周期：它没有跨配置变更必须存活的状态，构造在使用方（worker
+或 script）即可；HTTP 进程因此完全不碰 `support/ai` 的构造。巡检的客户端在 run
+函数里才建，`Register` 在 HTTP 进程里也会执行，那一代不该校验一份用不到的凭证。
 
 `goai` 只被用到它的应用编译进来；不使用 AI 的应用零成本：`llm_ai` 整段缺失或
-`enabled: false` 时模块根本不注册，`support/ai` 的构造也就不会发生。
+`enabled: false` 时没有任何使用方去构造，`support/ai` 的 `New` 也就不会发生。
 
 ### 8.2 暂不做：`gofy.WithAI` + `Runtime.AI`
 
@@ -544,7 +537,7 @@ var (
 | 阶段 | 内容 | 产出 |
 |---|---|---|
 | **一** | `Config` + `Validate` + 3 个 provider factory + `Client.Chat` + usage + redact + `support/ai/README.md` + 测试 | `support/ai` 可用 |
-| **二** | `Stream` / `ChatJSON` / `Embed` + `http_client` 子段 + demo 接线（`app/config` + `app/module/ai` 模块工厂） | demo 能跑通模拟调用，可切真实 key |
+| **二** | `Stream` / `ChatJSON` / `Embed` + `http_client` 子段 + demo 用例（`app/config` + `worker/group3/ai_check.go`） | `worker --group=group3` 的巡检能验证"配置 → 凭证 → 端点"整条链路 |
 | **三** | `WithOnUsage` + metrics 联动示例 + 根 README / CHANGELOG | 对外文档完整 |
 | **四（按需）** | `gofy.WithAI` + `Runtime.AI`、OTel span（用 hooks 自建） | 出现第二个使用方再做 |
 
@@ -573,4 +566,4 @@ var (
 | 6 | `http_client` 位置 | 实现时从"每模型"上移为 `llm_ai.http_client`：它是进程级偏好，按模型各建一个连接池只会成倍增加空闲连接 |
 | 7 | 兼容端点差异 | 一律用 `provider_options` 表达，不加厂商分支；已实测 DeepSeek 需要 `structuredOutputs: false` |
 | 8 | `enabled` 开关 | 新增顶级 `enabled`：false 或整段缺失时模块不启用、其余字段不校验，`New` 返回 `ErrDisabled`；`enabled: true` 但没有 `models` 才是 `ErrNoModels` |
-| 9 | demo 接线位置 | 没有走 `app/appio` + container，而是独立的 `app/module/ai` 模块工厂：客户端无跨代状态，构造在工厂里即可，`Reload` 自然重建 |
+| 9 | demo 用法位置 | 不开 HTTP 路由：AI 调用主要落在 worker / script，客户端在用到它的地方构造即可（零跨代状态）。`worker/group3/ai_check.go` 是一个巡检 worker，遍历所有 alias（demo 里 `deepseek-chat` 与 `deepseek-compat` 各一条，后者的 provider 是 `openai_compatible`），`llm_ai.enabled` 为 true 才注册、客户端在 run 里才建，因此 HTTP 进程既不校验凭证也不暴露 LLM 端点 |

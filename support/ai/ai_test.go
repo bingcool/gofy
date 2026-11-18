@@ -334,8 +334,8 @@ func TestChatAgainstOpenAICompatibleEndpoint(t *testing.T) {
 	if resp.Text != "hello there" {
 		t.Errorf("text = %q", resp.Text)
 	}
-	if resp.Model != "qwen" {
-		t.Errorf("model = %q, want the alias", resp.Model)
+	if resp.ModelAlias != "qwen" {
+		t.Errorf("model_alias = %q, want the alias", resp.ModelAlias)
 	}
 	if resp.Usage.InputTokens != 11 || resp.Usage.OutputTokens != 4 || resp.Usage.TotalTokens != 15 {
 		t.Errorf("usage = %+v", resp.Usage)
@@ -366,7 +366,7 @@ func TestChatAgainstOpenAICompatibleEndpoint(t *testing.T) {
 func TestChatRejectsUnknownAliasAndEmptyPrompt(t *testing.T) {
 	client := newTestClient(t, compatConfig("https://example.com/v1"))
 
-	if _, err := client.Chat(context.Background(), ChatRequest{Model: "absent", Prompt: "hi"}); !errors.Is(err, ErrModelNotFound) {
+	if _, err := client.Chat(context.Background(), ChatRequest{ModelAlias: "absent", Prompt: "hi"}); !errors.Is(err, ErrModelNotFound) {
 		t.Fatalf("err = %v, want ErrModelNotFound", err)
 	}
 	if _, err := client.Chat(context.Background(), ChatRequest{Prompt: "   "}); !errors.Is(err, ErrEmptyPrompt) {
@@ -444,8 +444,8 @@ func TestEmbed(t *testing.T) {
 	if len(resp.Embeddings) != 1 || len(resp.Embeddings[0]) != 3 {
 		t.Fatalf("embeddings = %+v", resp.Embeddings)
 	}
-	if resp.Model != "qwen" {
-		t.Errorf("model = %q", resp.Model)
+	if resp.ModelAlias != "qwen" {
+		t.Errorf("model_alias = %q", resp.ModelAlias)
 	}
 }
 
