@@ -130,7 +130,7 @@ type App struct {
 	// registration is disabled or the App runs in Handler mode.
 	// registrar 把本实例发布到 Nacos 命名服务；注册被关闭或 App 运行在
 	// Handler 模式时为 nil。
-	registrar *nacos.Register
+	registrar *nacos.Registrar
 
 	pidPath       string
 	pidTicker     *time.Ticker

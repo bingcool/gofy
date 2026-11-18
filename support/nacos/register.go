@@ -140,7 +140,7 @@ func (c RegisterConfig) validate() error {
 	return nil
 }
 
-// Register publishes one instance and renews its lease until stopped.
+// Registrar publishes one instance and renews its lease until stopped.
 //
 // Start and Stop are serialised through op. Registering, flipping the state to
 // running and starting the heartbeat are one critical section, so a Stop can
@@ -148,12 +148,12 @@ func (c RegisterConfig) validate() error {
 // intermediate state is what used to let a heartbeat start after Stop had
 // already deregistered and returned, leaving an instance renewing itself with
 // nothing left to stop it.
-// Register 发布一个实例并持续续约，直到被停止。
+// Registrar 发布一个实例并持续续约，直到被停止。
 //
 // Start 与 Stop 通过 op 串行化。注册、切到 running、启动心跳是一个临界区，Stop 因此
 // 不会看到"已标记启动但还没注册完"的中间态——正是那个中间态让心跳在 Stop 已经注销并
 // 返回之后才启动，留下一个还在自我续约、却没有东西能停掉它的实例。
-type Register struct {
+type Registrar struct {
 	client   *Client
 	cfg      RegisterConfig
 	logger   *zap.Logger
@@ -184,12 +184,12 @@ const (
 )
 
 // cloneMetadata copies a metadata map so a registrar never shares one with its
-// caller. Both directions matter: the config outlives NewRegister, and the
+// caller. Both directions matter: the config outlives NewRegistrar, and the
 // instance returned by Instance is free to be edited by the caller. A shared
 // map would let either side mutate what registration and heartbeat serialise,
 // racing with them.
 // cloneMetadata 复制 metadata map，使注册器不与调用方共享同一个 map。两个方向都要防：
-// 配置在 NewRegister 之后依然存在，Instance 的返回值也可被任意修改；共享 map 会让
+// 配置在 NewRegistrar 之后依然存在，Instance 的返回值也可被任意修改；共享 map 会让
 // 任一侧改到注册与心跳正在序列化的内容，形成数据竞争。
 func cloneMetadata(src map[string]string) map[string]string {
 	if src == nil {
@@ -202,11 +202,11 @@ func cloneMetadata(src map[string]string) map[string]string {
 	return dst
 }
 
-// NewRegister builds a registrar from the Nacos connection config and the
+// NewRegistrar builds a registrar from the Nacos connection config and the
 // service_register block. The instance is not registered until Start.
-// NewRegister 根据 Nacos 连接配置和 service_register 块创建注册器；实例在调用
+// NewRegistrar 根据 Nacos 连接配置和 service_register 块创建注册器；实例在调用
 // Start 之前不会注册。
-func NewRegister(cfg Config, logger *zap.Logger) (*Register, error) {
+func NewRegistrar(cfg Config, logger *zap.Logger) (*Registrar, error) {
 	reg := cfg.Register.normalize(cfg.Namespace)
 	if !reg.Enabled {
 		return nil, ErrDisabled
@@ -230,7 +230,7 @@ func NewRegister(cfg Config, logger *zap.Logger) (*Register, error) {
 		logger = zap.NewNop()
 	}
 	ip := ResolveRegisterIP(reg.IP, client.cfg.Host)
-	return &Register{
+	return &Registrar{
 		client: client,
 		cfg:    reg,
 		logger: logger,
@@ -256,7 +256,7 @@ func NewRegister(cfg Config, logger *zap.Logger) (*Register, error) {
 // sends on registration and heartbeat, and without racing a serialisation.
 // Instance 返回已发布的实例描述。Metadata 是副本：调用方可以随意修改，不会影响注册
 // 与心跳发送的内容，也不会和序列化过程产生竞争。
-func (r *Register) Instance() Instance {
+func (r *Registrar) Instance() Instance {
 	inst := r.instance
 	inst.Metadata = cloneMetadata(r.instance.Metadata)
 	return inst
@@ -269,7 +269,7 @@ func (r *Register) Instance() Instance {
 // Start 注册实例并启动心跳循环。它是幂等的：运行期间重复调用直接返回 nil，
 // 不会重复注册。返回 nil 时实例已经注册、心跳已经在跑；并发的 Stop 会等这次调用结束，
 // 而不是插进它的中间。
-func (r *Register) Start(ctx context.Context) error {
+func (r *Registrar) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -309,7 +309,7 @@ func (r *Register) Start(ctx context.Context) error {
 // instance is deregistered and no heartbeat is running.
 // Stop 取消心跳并注销实例；该调用是幂等的。它会等待在途的 Start 结束，因此"Stop 返回"
 // 永远意味着实例已注销、也没有心跳在跑。
-func (r *Register) Stop(ctx context.Context) error {
+func (r *Registrar) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -365,7 +365,7 @@ func (r *Register) Stop(ctx context.Context) error {
 // Go 会随机选一个——Stop 用已取消的 ctx 调用就会一半概率失败。先抢空槽位，保住"关闭
 // 流程已经取消了 ctx，注销仍要执行"这条行为；只有槽位被占用时才等待，而那个等待尊重
 // deadline，不会越过它继续阻塞。
-func (r *Register) acquire(ctx context.Context) bool {
+func (r *Registrar) acquire(ctx context.Context) bool {
 	select {
 	case r.op <- struct{}{}:
 		return true
@@ -379,9 +379,9 @@ func (r *Register) acquire(ctx context.Context) bool {
 	}
 }
 
-func (r *Register) release() { <-r.op }
+func (r *Registrar) release() { <-r.op }
 
-func (r *Register) heartbeat(ctx context.Context, done chan struct{}) {
+func (r *Registrar) heartbeat(ctx context.Context, done chan struct{}) {
 	defer close(done)
 
 	interval := r.cfg.HeartbeatInterval

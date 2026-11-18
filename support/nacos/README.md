@@ -343,10 +343,10 @@ worker 启动时拉一次配置，是为了让新起的进程不拿镜像里那�
   `StopAccepting`，注册完成后会立刻注销（撤销失败视为启动失败）。否则会出现「已经
   在返回 503、却仍挂在命名服务里」的实例，这正是发现服务最该避免的状态。
 
-需要自己控制生命周期时直接用 `Register`：
+需要自己控制生命周期时直接用 `Registrar`：
 
 ```go
-registrar, err := nacos.NewRegister(nx, logger)
+registrar, err := nacos.NewRegistrar(nx, logger)
 if err != nil {
     return err
 }
@@ -358,12 +358,12 @@ defer registrar.Stop(ctx)
 inst := registrar.Instance() // 实际注册的 IP/端口/分组
 ```
 
-`NewRegister` 要求 `Register.Enabled` 为 true 且 `ServiceName` 非空，端口可用
+`NewRegistrar` 要求 `Register.Enabled` 为 true 且 `ServiceName` 非空，端口可用
 `RegisterConfig.Port` 或环境变量提供。
 
 ## Naming API
 
-不想用 `Register` 时可以直接调用底层接口：
+不想用 `Registrar` 时可以直接调用底层接口：
 
 ```go
 client, err := nacos.NewNamingClient(nx) // 只校验连接字段，不要求 DataID/File

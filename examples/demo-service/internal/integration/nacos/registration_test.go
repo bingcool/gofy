@@ -20,14 +20,14 @@ import (
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
 )
 
-// TestRegisterAndResolverEndToEnd wires both sides of the feature: gofy's
+// TestRegistrarAndResolverEndToEnd wires both sides of the feature: gofy's
 // registrar publishes demo-service into a fake Nacos, the resolver discovers
 // it, the typed client calls the discovered address, and deregistration makes
 // the service undiscoverable again.
-// TestRegisterAndResolverEndToEnd 端到端串起注册与发现两侧：gofy 的注册器
+// TestRegistrarAndResolverEndToEnd 端到端串起注册与发现两侧：gofy 的注册器
 // 把 demo-service 写入假 Nacos，resolver 解析出地址，类型化客户端按地址调用，
 // 最后注销使服务重新不可发现。
-func TestRegisterAndResolverEndToEnd(t *testing.T) {
+func TestRegistrarAndResolverEndToEnd(t *testing.T) {
 	fake := &fakeNaming{}
 	nacosServer := httptest.NewServer(fake)
 	defer nacosServer.Close()
@@ -42,7 +42,7 @@ func TestRegisterAndResolverEndToEnd(t *testing.T) {
 	defer backend.Close()
 	backendPort := backend.Listener.Addr().(*net.TCPAddr).Port
 
-	registrar, err := gofynacos.NewRegister(gofynacos.Config{
+	registrar, err := gofynacos.NewRegistrar(gofynacos.Config{
 		Addr:      nacosServer.URL,
 		Namespace: "dev",
 		Register: gofynacos.RegisterConfig{
@@ -54,7 +54,7 @@ func TestRegisterAndResolverEndToEnd(t *testing.T) {
 		},
 	}, nil)
 	if err != nil {
-		t.Fatalf("NewRegister: %v", err)
+		t.Fatalf("NewRegistrar: %v", err)
 	}
 
 	ctx := context.Background()

@@ -272,7 +272,7 @@ func TestNewNamingClientRequiresValidPort(t *testing.T) {
 	}
 }
 
-func TestRegisterRegistersAndDeregisters(t *testing.T) {
+func TestRegistrarRegistersAndDeregisters(t *testing.T) {
 	fake := &fakeNaming{}
 	server := httptest.NewServer(fake)
 	defer server.Close()
@@ -290,9 +290,9 @@ func TestRegisterRegistersAndDeregisters(t *testing.T) {
 			Metadata:    map[string]string{"version": "1.0.0"},
 		},
 	}
-	registrar, err := NewRegister(cfg, nil)
+	registrar, err := NewRegistrar(cfg, nil)
 	if err != nil {
-		t.Fatalf("NewRegister: %v", err)
+		t.Fatalf("NewRegistrar: %v", err)
 	}
 	inst := registrar.Instance()
 	if !inst.Ephemeral || !inst.Enabled || !inst.Healthy {
@@ -327,10 +327,10 @@ func TestRegisterRegistersAndDeregisters(t *testing.T) {
 	}
 }
 
-func TestRegisterRejectsMissingServiceName(t *testing.T) {
+func TestRegistrarRejectsMissingServiceName(t *testing.T) {
 	cfg := Config{Register: RegisterConfig{Enabled: true, Port: 8080}}
-	if _, err := NewRegister(cfg, nil); err == nil {
-		t.Fatal("NewRegister accepted a missing service name")
+	if _, err := NewRegistrar(cfg, nil); err == nil {
+		t.Fatal("NewRegistrar accepted a missing service name")
 	}
 }
 

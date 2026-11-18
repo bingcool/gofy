@@ -10,9 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// newMetadataRegister builds a registrar without starting it — the metadata
+// newMetadataRegistrar builds a registrar without starting it — the metadata
 // contract is about the value handed out, not about a live registration.
-func newMetadataRegister(t *testing.T, meta map[string]string) (*Register, map[string]string) {
+func newMetadataRegistrar(t *testing.T, meta map[string]string) (*Registrar, map[string]string) {
 	t.Helper()
 	fake := &fakeNaming{}
 	server := httptest.NewServer(fake)
@@ -28,19 +28,19 @@ func newMetadataRegister(t *testing.T, meta map[string]string) (*Register, map[s
 		Port:        18080,
 		Metadata:    meta,
 	}
-	reg, err := NewRegister(cfg, zap.NewNop())
+	reg, err := NewRegistrar(cfg, zap.NewNop())
 	if err != nil {
-		t.Fatalf("NewRegister: %v", err)
+		t.Fatalf("NewRegistrar: %v", err)
 	}
 	return reg, cfg.Register.Metadata
 }
 
-// TestRegisterMetadataIsCopied pins both ends of the metadata boundary: the
-// config given to NewRegister and the instance handed out by Instance must not
+// TestRegistrarMetadataIsCopied pins both ends of the metadata boundary: the
+// config given to NewRegistrar and the instance handed out by Instance must not
 // share the map the registrar itself keeps for registration and heartbeat.
-func TestRegisterMetadataIsCopied(t *testing.T) {
+func TestRegistrarMetadataIsCopied(t *testing.T) {
 	src := map[string]string{"version": "1.0.0", "zone": "a"}
-	reg, cfgMeta := newMetadataRegister(t, src)
+	reg, cfgMeta := newMetadataRegistrar(t, src)
 
 	// Mutating the caller's config after construction does not reach the
 	// registrar's instance.
