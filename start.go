@@ -113,6 +113,17 @@ func (a *App) run(parent context.Context) error {
 	}
 	a.telemetry = telemetry
 
+	// Metrics are built before buildHTTP because the Gin middleware is installed
+	// while the engine is assembled. A nil pipeline is the disabled case, and
+	// every method on *otel.Metrics tolerates it.
+	// 指标必须在 buildHTTP 之前构建，因为 Gin 中间件是在装配 engine 时安装的。
+	// nil 管道即禁用状态，*otel.Metrics 的所有方法都能容忍 nil。
+	metrics, err := a.buildMetrics(lg)
+	if err != nil {
+		return a.abort(err)
+	}
+	a.metrics = metrics
+
 	db, ownDB, err := a.buildDB(ctx, lg)
 	if err != nil {
 		return a.abort(err)
@@ -156,6 +167,15 @@ func (a *App) run(parent context.Context) error {
 		return a.abort(fmt.Errorf("gofy: listen %s: %w", addr, err))
 	}
 	a.listener = listener
+
+	// Bind the operational listener before the pid file is written: a port
+	// conflict is a configuration error, and failing here leaves no pid file for
+	// the next start to clean up.
+	// 在写 pid 文件之前绑定运维监听：端口冲突属于配置错误，在这里失败不会给下一次
+	// 启动留下需要清理的 pid 文件。
+	if err := a.startDiagnostics(lg); err != nil {
+		return a.abort(err)
+	}
 
 	if pidPath != "" {
 		if err := pidfile.WriteRecord(pidPath, pidfile.NewRecord(os.Getpid()), a.opts.pidPerm); err != nil {
@@ -298,7 +318,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system, access *zap.Logger, fa
 	// 中间件安装顺序是对外契约（docs/library-design.md §3.4.6、§7.1），
 	// 修改时必须同步 TestMiddlewareOrderContract：
 	//
-	//   RequestID → Telemetry Trace → HeaderPropagation → SecurityHeaders
+	//   RequestID → Telemetry Trace → Metrics → HeaderPropagation → SecurityHeaders
 	//   → AccessLog → CORS → Recovery → BodyLimit
 	//   → App Middleware → healthz/readyz
 	//   → Base Router(RateLimit → JWTAuth)
@@ -327,6 +347,17 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system, access *zap.Logger, fa
 	// trace id 兜底 X-Trace-Id；探针请求不进入 trace。
 	if traceMW := a.telemetry.GinMiddleware(otel.SkipPaths("/healthz", "/readyz")); traceMW != nil {
 		engine.Use(traceMW)
+	}
+	// Metrics sit next to Trace: both observe the same traffic, and this position
+	// is outside Recovery, so a panic that Recovery turns into a 500 is counted
+	// with its final status. Probes are excluded for the same reason they are
+	// excluded from traces — a request every few seconds would dominate every rate
+	// and latency percentile.
+	// 指标紧跟 Trace：两者观测同一批流量，且该位置在 Recovery 外层，Recovery 把
+	// panic 转成 500 之后记录的仍是最终状态码。排除探针的理由与排除 Trace 相同：
+	// 每几秒一次的请求会主导所有速率与延迟分位。
+	if metricsMW := a.metrics.GinMiddleware(otel.SkipPaths("/healthz", "/readyz")); metricsMW != nil {
+		engine.Use(metricsMW)
 	}
 	if a.opts.headerPropagation {
 		// Installed right after RequestID: fall back to req_id or the OTel trace id for
@@ -963,6 +994,18 @@ func (a *App) cleanup() error {
 			}
 		}
 
+		// Stop the diagnostics listener before the application server: a scrape or
+		// a pprof profile captured while modules are shutting down reports a state
+		// that never existed. A failure here is logged, not escalated — the
+		// operational endpoint must not decide whether the process stops.
+		// 在应用服务之前关闭诊断监听：在模块停机期间抓取或采到的 pprof 描述的是一个
+		// 从未存在过的状态。这里的失败只记录，不升级——运维端点不该决定进程能否停下。
+		if a.diagnostics != nil {
+			if err := a.diagnostics.Shutdown(ctx); err != nil {
+				lg.Warn("diagnostics shutdown failed", zap.Error(err))
+			}
+		}
+
 		if a.srv != nil && a.serving {
 			if err := a.srv.Shutdown(ctx); err != nil {
 				_ = a.srv.Close()
@@ -999,6 +1042,12 @@ func (a *App) cleanup() error {
 		// collector must not be escalated into a shutdown error.
 		// 模块停机和数据库关闭产生的 span 也在缓冲区内，最后统一 flush。
 		// 导出失败只记录日志，不把采集器不可用升级成停机错误。
+		// Metrics are pulled, not pushed, so there is nothing to flush; closing the
+		// provider releases its instruments. A failure has the same disposition as
+		// a trace export failure.
+		// 指标是拉取而非推送，没有需要 flush 的内容；关闭 provider 只是释放 instrument。
+		// 失败的处理方式与追踪导出失败相同。
+		_ = a.metrics.Shutdown(ctx)
 		_ = a.telemetry.Shutdown(ctx)
 
 		if a.cancel != nil {

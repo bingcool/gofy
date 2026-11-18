@@ -10,6 +10,7 @@ import (
 	"github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
+	"github.com/bingcool/gofy/support/diagnostics"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 )
@@ -55,6 +56,13 @@ type NacosConfig = nacos.Config
 // WithTelemetry.
 // TelemetryConfig 是传给 WithTelemetry 的 OpenTelemetry tracing 配置。
 type TelemetryConfig = otel.Config
+
+// DiagnosticsConfig is the operational listener configuration passed to
+// WithDiagnostics: the Prometheus scrape endpoint and net/http/pprof, served on
+// their own port.
+// DiagnosticsConfig 是传给 WithDiagnostics 的运维监听配置：Prometheus 抓取端点与
+// net/http/pprof，跑在独立端口上。
+type DiagnosticsConfig = diagnostics.Config
 
 // HTTPConfig configures the HTTP server.
 // HTTPConfig 配置 HTTP 服务器；零值字段会先补成框架默认值再整体校验。

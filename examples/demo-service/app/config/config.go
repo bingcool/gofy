@@ -38,8 +38,11 @@ type Config struct {
 	Order    OrderConfig                    `yaml:"order"`
 	Client   ClientConfig                   `yaml:"client"`
 	OTel     gofy.TelemetryConfig           `yaml:"otel"`
-	PIDFile  string                         `yaml:"pid_file"`
-	JWT      middleware.JWTConfig           `yaml:"jwt"`
+	// Diagnostics 是独立运维端口上的 Prometheus 指标与 pprof 配置；默认关闭。
+	// Diagnostics configures the operational listener (metrics + pprof); off by default.
+	Diagnostics gofy.DiagnosticsConfig `yaml:"diagnostics"`
+	PIDFile     string                 `yaml:"pid_file"`
+	JWT         middleware.JWTConfig   `yaml:"jwt"`
 }
 
 // Database returns the named instance; the caller must have checked it exists.

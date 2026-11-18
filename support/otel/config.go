@@ -1,8 +1,13 @@
-// Package otel provides production-oriented OpenTelemetry tracing for gofy:
-// a validated configuration, an OTLP exporter with batch processing, W3C
-// propagation and instrumentation helpers for Gin, net/http, GORM and Redis.
+// Package otel provides production-oriented OpenTelemetry telemetry for gofy:
+// a validated tracing configuration, an OTLP exporter with batch processing,
+// W3C propagation and instrumentation helpers for Gin, net/http, GORM and Redis.
 //
-// The package installs no process-wide state unless Config.Global is enabled.
+// Metrics are a separate pipeline with their own constructor. NewMetrics builds
+// a Prometheus registry and meter provider, exposes a scrape handler and
+// registers the Go runtime gauges; it does not consult Config, so an application
+// that cannot run a collector still gets a scrape endpoint.
+//
+// The tracing package installs no process-wide state unless Config.Global is enabled.
 // With Global=false a Provider only owns its SDK tracer provider, exporter and
 // propagator; export failures are logged through the Provider's logger. With
 // Global=true it additionally replaces otel.SetErrorHandler,
@@ -10,10 +15,15 @@
 // process may use Global=true; competing Apps would overwrite each other's
 // globals. Callers receive a *Provider and decide when to shut it down;
 // Shutdown never touches the global providers.
-// 包 otel 为 gofy 提供面向生产环境的 OpenTelemetry 追踪能力：经过校验的配置、
+// 包 otel 为 gofy 提供面向生产环境的 OpenTelemetry 遥测能力：经过校验的追踪配置、
 // 带批处理的 OTLP exporter、W3C 传播，以及 Gin、net/http、GORM、Redis 的埋点
 // 辅助函数。
-// 默认不安装任何进程级状态，只有 Config.Global 打开时才安装。Global=false 时
+//
+// 指标是独立管道，有自己的构造函数。NewMetrics 构建 Prometheus registry 与
+// meter provider、暴露抓取 handler 并注册 Go 运行时 gauge；它不读取 Config，
+// 因此跑不起 collector 的应用同样能拿到抓取端点。
+//
+// 追踪部分默认不安装任何进程级状态，只有 Config.Global 打开时才安装。Global=false 时
 // Provider 只持有自己的 SDK tracer provider、exporter 与 propagator，导出失败
 // 由 Provider 的 logger 记录；Global=true 时还会替换 otel.SetErrorHandler、
 // otel.SetTracerProvider 与 otel.SetTextMapPropagator。

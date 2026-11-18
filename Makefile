@@ -56,9 +56,14 @@ guards:
 # 全仓库禁止依赖 cgo：源码必须能在 CGO_ENABLED=0 下构建，依赖图里不能有
 # CgoFiles（SQLite 因此使用 glebarez/sqlite 的纯 Go 实现）。-race 需要 cgo，
 # 只在 test-race 里启用。
+#
+# list 也必须带 CGO_ENABLED=0：默认环境下 go list 会把只在该平台 + cgo 时编译的
+# 文件算作 CgoFiles，例如 prometheus/client_golang 的
+# process_collector_mem_cgo_darwin.go。那种文件在 CGO_ENABLED=0 的构建里根本不参与
+# 编译（该库有纯 Go 回退），是误报；真正的 cgo-only 依赖会在上面的 build 一步失败。
 cgo-free:
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) $(PKGS)
-	@cgo="$$($(GO) list -deps -test -f '{{if .CgoFiles}}{{.ImportPath}}{{end}}' $(PKGS) | grep -v '^$$' || true)"; \
+	@cgo="$$(CGO_ENABLED=0 $(GO) list -deps -test -f '{{if .CgoFiles}}{{.ImportPath}}{{end}}' $(PKGS) | grep -v '^$$' || true)"; \
 	if [ -n "$$cgo" ]; then echo "cgo is not allowed:"; echo "$$cgo"; exit 1; fi
 
 # Windows 交叉编译守卫：只在 Linux/macOS 开发时，平台相关的符号缺失不会在本地构建里暴露。

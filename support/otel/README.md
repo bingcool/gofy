@@ -1,12 +1,17 @@
 # support/otel
 
-生产可用的 OpenTelemetry 追踪接入：带校验的配置、OTLP 导出器、批处理 span
+生产可用的 OpenTelemetry 遥测接入：带校验的追踪配置、OTLP 导出器、批处理 span
 处理器、W3C TraceContext + Baggage 传播，以及 Gin、`net/http`、GORM、Redis
 的埋点助手。包本身不持有全局状态，除非显式设置 `Config.Global`；调用方拿到
 `*Provider` 并自己决定何时关闭。
 
-`App` 通过 `gofy.WithTelemetry` 使用这一层：启用后自动安装 Gin 服务端 span
-中间件、为 App 托管的 MySQL 连接池埋点，并在关停时 flush 导出器。
+指标是独立管道：`NewMetrics` 构建 Prometheus registry 与 meter provider，暴露
+抓取 handler 并注册 Go 运行时指标。它不读取追踪配置，因此跑不起 collector 的
+应用同样能拿到 `/metrics`。
+
+`App` 通过 `gofy.WithTelemetry` 使用追踪，通过 `gofy.WithDiagnostics` 使用指标
+与 pprof：前者自动安装 Gin 服务端 span 中间件、为 App 托管的 MySQL 连接池埋点，
+后者在独立端口上暴露 `/metrics` 与 `/debug/pprof/*`。
 
 ## 在 App 中使用
 
@@ -139,6 +144,48 @@ defer provider.Shutdown(ctx)
 `Propagator()`、`Tracer(name)`、`Config()`、`ForceFlush(ctx)`、`Shutdown(ctx)`。
 `TracerProvider()` 和 `Propagator()` 永远非 nil；禁用时返回 no-op tracer 和
 W3C 组合传播器，调用方可以直接使用，不必分支。
+
+## 指标（Prometheus）
+
+```go
+metrics, err := otel.NewMetrics(
+	otel.MetricsConfig{Enabled: true},
+	otel.WithLogger(logger),
+	otel.WithServiceName("order-service"),
+)
+if err != nil {
+	return err
+}
+defer metrics.Shutdown(ctx)
+
+// metrics.Handler() 挂到任意 mux；metrics.Path() 是配置的路径（默认 /metrics）。
+// gin 中间件放在 Trace 之后、Recovery 外层，panic 转成的 500 仍按最终状态码计数。
+engine.Use(metrics.GinMiddleware(otel.SkipPaths("/healthz", "/readyz")))
+```
+
+| 指标 | 类型 | 说明 |
+| --- | --- | --- |
+| `http.server.request.duration` | histogram (s) | 标签 `http.request.method`、`http.route`、`http.response.status_code`；分桶 5ms～10s |
+| `http.server.active_requests` | up/down counter | 在途请求数 |
+| `process.runtime.go.goroutines` | gauge | 当前协程数 |
+| `process.runtime.go.mem.heap_alloc` / `heap_inuse` / `heap_objects` / `stack_inuse` | gauge | 堆与栈 |
+| `process.runtime.go.gc.count` / `gc.pause_total` | gauge | GC 次数与累计停顿（unit `ns`） |
+
+上表是 OTel instrument 名。Prometheus 输出会把点换成下划线，并按 unit 追加后缀：
+`http_server_request_duration_seconds`、`process_runtime_go_mem_heap_alloc_bytes`、
+`process_runtime_go_gc_pause_total_nanoseconds`；无 unit 后缀可加的（`{goroutine}`、
+`{gc}` 等）保持原名，如 `process_runtime_go_goroutines`、`process_runtime_go_gc_count`。
+
+`Handler()` 在实例私有的 `prometheus.Registry` 上工作，不用
+`prometheus.DefaultRegisterer`：同一进程里第二个 `App`（或第二个测试实例）不会
+因为重复注册而失败。
+
+**基数**：`http.route` 取 gin 的 `FullPath()`（注册的模式），未匹配路由收敛为
+`unmatched`；非标准方法归为 `OTHER`。按实际路径打标签会让每个 id 变成新时间线。
+`SkipPaths` 用来排除探针——每几秒一次的请求会主导所有速率与延迟分位。
+
+`*Metrics` 的 nil 与禁用状态等价：`Enabled()` 返回 false、`Handler()` 与
+`GinMiddleware()` 返回 nil、`Shutdown()` 是 no-op，调用方不需要判空。
 
 ## 埋点助手
 

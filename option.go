@@ -15,6 +15,7 @@ import (
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
+	"github.com/bingcool/gofy/support/diagnostics"
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
@@ -139,6 +140,11 @@ type options struct {
 	securityHeaders *support.SecurityHeadersConfig // security response headers；安全响应头配置
 
 	telemetry *otel.Config // OpenTelemetry 配置
+
+	// diagnostics holds the operational listener configuration. nil means no
+	// diagnostics listener and no metrics pipeline.
+	// diagnostics 保存运维监听配置；nil 表示不启动诊断监听，也不构建指标管道。
+	diagnostics *diagnostics.Config
 }
 
 // defaultOptions returns the gofy.New defaults: app name "app", env "dev", console
@@ -851,6 +857,48 @@ func WithTelemetry(cfg otel.Config) Option {
 		}
 		c := cfg
 		o.telemetry = &c
+		return nil
+	}
+}
+
+// WithDiagnostics enables the operational endpoints: Prometheus metrics at
+// /metrics and net/http/pprof under /debug/pprof/. They are served on a listener
+// of their own, never on the application port, so business routing, middleware
+// and authentication cannot accidentally expose a heap dump.
+//
+// The listener is off by default and binds to 127.0.0.1:6060 when enabled. A
+// container deployment that scrapes from another Pod sets addr to 0.0.0.0:6060
+// and relies on the network policy for isolation. Both endpoint groups are on by
+// default; DisableMetrics or DisablePprof removes one of them.
+//
+// Enabling metrics also installs the Gin middleware that records request count,
+// duration and in-flight requests, plus the Go runtime gauges (goroutines, heap,
+// GC). The route label is the registered pattern, so a path parameter never
+// creates a new time series. /healthz and /readyz are excluded: a probe every few
+// seconds would otherwise dominate every rate and latency percentile on the
+// dashboard.
+//
+// The endpoints are fixed at startup; Reload does not rebuild them.
+// WithDiagnostics 打开运维端点：/metrics 提供 Prometheus 指标，/debug/pprof/ 提供
+// net/http/pprof。它们跑在独立监听上，绝不使用应用端口，业务路由、中间件与鉴权因此
+// 不可能意外暴露堆转储。
+//
+// 监听默认关闭，开启后默认绑定 127.0.0.1:6060。从其他 Pod 抓取的容器部署应把 addr
+// 设为 0.0.0.0:6060，由网络策略负责隔离。两组端点默认都开；DisableMetrics 或
+// DisablePprof 用来去掉其中之一。
+//
+// 开启指标还会安装记录请求数、耗时与在途请求的 Gin 中间件，以及 Go 运行时 gauge
+// （协程、堆、GC）。route 标签取注册的路由模式，路径参数因此不会造出新时间线。
+// /healthz 与 /readyz 被排除：否则每几秒一次的探针会主导看板上的所有速率与延迟分位。
+//
+// 端点配置在启动时固定，Reload 不会重建。
+func WithDiagnostics(cfg diagnostics.Config) Option {
+	return func(o *options) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		c := cfg
+		o.diagnostics = &c
 		return nil
 	}
 }

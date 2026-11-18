@@ -6,8 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Metrics and runtime diagnostics: `WithDiagnostics` serves Prometheus metrics and
+  `net/http/pprof` on a listener of their own, off by default and bound to
+  `127.0.0.1:6060` when enabled. The endpoints never share the application port,
+  because pprof exposes heap contents, goroutine stacks and the command line, and
+  a scrape client should not need the application's routing or authentication.
+  `DisableMetrics` / `DisablePprof` remove either group; both are on by default so
+  a bare `enabled: true` does not produce an empty listener.
+- `otel.NewMetrics` builds a Prometheus registry, meter provider and scrape
+  handler, and registers the Go runtime gauges (`process.runtime.go.goroutines`,
+  `heap_alloc`, `heap_inuse`, `heap_objects`, `stack_inuse`, `gc.count`,
+  `gc.pause_total_ns`). One callback reads `runtime.MemStats` once for every
+  memory instrument; calling it per gauge would multiply the stop-the-world cost.
+  The registry is private to the instance, so a second App or a second test does
+  not fail on duplicate registration.
+- `otel.Metrics.GinMiddleware` records request duration, active requests and the
+  final status code. The route label is gin's registered pattern, unmatched
+  requests collapse into `http.route="unmatched"` and non-standard methods into
+  `OTHER`, so REST path parameters cannot create a time series per id. Probes are
+  excluded via `SkipPaths`.
+- `support/diagnostics` hosts the operational listener: a private `http.ServeMux`
+  (never `http.DefaultServeMux`, so a blank import elsewhere cannot expose pprof),
+  graceful shutdown, a startup warning when pprof is bound to a non-loopback
+  address, and a startup error when both endpoint groups are disabled. A port
+  conflict fails the application start rather than leaving a scrape config that
+  answers nothing.
+
 ### Fixed
 
+- `make cgo-free` now lists dependencies with `CGO_ENABLED=0` too. The scan ran
+  under the default environment, where `go list` counts files that only compile
+  on that platform with cgo — `prometheus/client_golang` ships
+  `process_collector_mem_cgo_darwin.go` alongside a pure-Go fallback — and
+  reported a cgo dependency that the actual build never uses. A genuinely
+  cgo-only dependency still fails, at the `build` step above it.
 - Cross-platform build: the Windows build compiles again. `worker_notify.go`
   referenced `process.NotifyEnv` and `process.NotifyFD`, which only exist in
   `detach_unix.go`, so every Windows build failed on two undefined symbols while

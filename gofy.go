@@ -22,6 +22,7 @@ import (
 	"github.com/bingcool/gofy/script"
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
+	"github.com/bingcool/gofy/support/diagnostics"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
@@ -98,9 +99,21 @@ type App struct {
 	// telemetry 在启动时构建，并被每次 Reload 复用；未使用 WithTelemetry 或
 	// tracing 关闭时为 nil。
 	telemetry *otel.Provider
-	srv       *http.Server
-	listener  net.Listener
-	serving   bool
+
+	// metrics is built at startup when WithDiagnostics enabled the scrape
+	// endpoint. A nil value is a disabled pipeline: GinMiddleware returns nil and
+	// Shutdown is a no-op, so the HTTP path needs no nil checks.
+	// metrics 在 WithDiagnostics 打开抓取端点时于启动期构建。nil 表示管道禁用：
+	// GinMiddleware 返回 nil、Shutdown 是 no-op，HTTP 路径因此不需要判空。
+	metrics *otel.Metrics
+
+	// diagnostics is the operational listener (metrics + pprof). It is nil when
+	// WithDiagnostics was not used or the listener is disabled.
+	// diagnostics 是运维监听（指标 + pprof）；未使用 WithDiagnostics 或监听关闭时为 nil。
+	diagnostics *diagnostics.Server
+	srv         *http.Server
+	listener    net.Listener
+	serving     bool
 	// handlerRef is the http.Handler given to the server. run installs a
 	// handlerSwap here so Reload can replace the route table without rebinding
 	// the listener; Handler mode has no server and leaves it nil. gen is the
@@ -405,6 +418,54 @@ func (a *App) buildTelemetry(ctx context.Context, logger *zap.Logger) (*otel.Pro
 		return nil, fmt.Errorf("gofy: telemetry: %w", err)
 	}
 	return provider, nil
+}
+
+// buildMetrics builds the Prometheus pipeline when the diagnostics listener has
+// metrics enabled. Metrics are independent of tracing: an application that
+// cannot run a collector still needs a scrape endpoint, so this does not consult
+// the telemetry config.
+// buildMetrics 在诊断监听启用指标时构建 Prometheus 管道。指标与追踪相互独立：
+// 跑不起 collector 的应用仍然需要抓取端点，因此这里不读取 telemetry 配置。
+func (a *App) buildMetrics(logger *zap.Logger) (*otel.Metrics, error) {
+	if a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled || a.opts.diagnostics.DisableMetrics {
+		return nil, nil
+	}
+	metrics, err := otel.NewMetrics(
+		otel.MetricsConfig{Enabled: true, Path: a.opts.diagnostics.MetricsPath},
+		otel.WithLogger(logger),
+		otel.WithServiceName(a.opts.name),
+		otel.WithServiceVersion(a.version.Version),
+		otel.WithEnvironment(a.opts.env),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("gofy: metrics: %w", err)
+	}
+	return metrics, nil
+}
+
+// startDiagnostics binds the operational listener. A bind failure is fatal: an
+// operator who configured metrics expects the endpoint to exist, and a silently
+// missing /metrics is indistinguishable from a service that exports nothing.
+// startDiagnostics 绑定运维监听。绑定失败是致命的：配置了指标的运维期望端点存在，
+// 而静默缺失的 /metrics 与一个什么都不导出的服务无法区分。
+func (a *App) startDiagnostics(logger *zap.Logger) error {
+	if a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled {
+		return nil
+	}
+	srv, err := diagnostics.New(*a.opts.diagnostics, diagnostics.WithLogger(logger))
+	if err != nil {
+		return fmt.Errorf("gofy: diagnostics: %w", err)
+	}
+	endpoints := diagnostics.Endpoints{}
+	if a.metrics != nil {
+		endpoints.Metrics = a.metrics.Handler()
+		endpoints.MetricsPath = a.metrics.Path()
+	}
+	if err := srv.Start(endpoints); err != nil {
+		return fmt.Errorf("gofy: diagnostics: %w", err)
+	}
+	a.diagnostics = srv
+	return nil
 }
 
 // instrumentDB adds GORM spans to the pool the App owns. A connection injected

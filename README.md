@@ -311,6 +311,53 @@ instrumentation 共用进程；导出失败经注入的 logger 上报并按一�
 `otel.Tracer()` 这类全局入口也返回本 Provider 时显式设置 `global: true`，
 此时同一进程只应有一个 App 打开它。
 
+## 指标与运行时诊断
+
+`WithDiagnostics` 在**独立监听**上提供 Prometheus 指标与 `net/http/pprof`。默认
+关闭；开启后默认绑定 `127.0.0.1:6060`，两个端点都开。
+
+```go
+app, err := gofy.New(
+	gofy.WithName("order-service"),
+	gofy.WithDiagnostics(gofy.DiagnosticsConfig{
+		Enabled: true,
+		Addr:    "0.0.0.0:6060", // 容器内被 Prometheus 抓取；网络策略负责隔离
+		// DisablePprof:   true, // 不允许堆转储离开进程时关掉
+		// DisableMetrics: true, // 只要 pprof
+		// MetricsPath: "/internal/metrics",
+	}),
+	// ...
+)
+```
+
+启用后框架负责：
+
+- `/metrics` 输出 HTTP 服务指标：`http_server_request_duration_seconds`（直方图，
+  5ms～10s 分桶）、`http_server_active_requests`；
+- 输出 Go 运行时指标：`process_runtime_go_goroutines`、`heap_alloc_bytes`、
+  `heap_inuse_bytes`、`heap_objects`、`stack_inuse_bytes`、`gc_count`、
+  `gc_pause_total_nanoseconds`；一次 `ReadMemStats` 喂给全部内存指标，避免 STW
+  开销翻倍；
+- `/debug/pprof/*` 提供 index、cmdline、profile、symbol、trace；
+- 关停时先关诊断监听，再关应用服务——避免在模块停机途中被抓取到从未存在过的状态。
+
+指标与追踪互相独立：只开 `WithDiagnostics` 不配 `WithTelemetry` 也能工作，资源属性
+（`service.name` 等）取应用名、版本与环境。两者都开时描述同一个服务。
+
+**基数控制**（这三条决定了指标能不能长期存下来）：
+
+- `http.route` 取 gin 注册的路由模式（`/orders/:id`），不是实际路径；未匹配任何路由
+  的请求收敛为 `http_route="unmatched"`，因此 REST 里的 id 不会各造一条时间线；
+- `http.request.method` 限定在标准方法内，自造动词归为 `OTHER`；
+- `/healthz`、`/readyz` 被排除。探针每几秒一次，不排除会主导所有速率与延迟分位。
+
+**安全边界**：pprof 会输出堆内容、协程栈与命令行（`cmdline` 含启动参数），可能包含
+敏感数据。默认绑定回环地址；绑定到非回环地址时启动日志会给出一次警告。生产环境应
+把诊断端口限制在管理网络，或设置 `disable_pprof: true`。
+
+诊断端口在启动时绑定：端口冲突会让启动失败，而不是留下一个指向"什么都不应答"的
+抓取配置。该配置在启动时固定，`Reload` 不会重建。
+
 ## 热更新
 
 `App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：

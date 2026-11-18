@@ -75,6 +75,11 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 	}
 	return append(opts,
 		gofy.WithTelemetry(cfg.OTel),
+		// 运维端点跑独立端口：/metrics 给 Prometheus，/debug/pprof/ 给排障。
+		// 默认关闭（配置里 enabled: false），需要时在 config.yaml 打开。
+		// The operational endpoints live on their own port; off unless config.yaml
+		// turns them on.
+		gofy.WithDiagnostics(cfg.Diagnostics),
 		gofy.WithHTTP(cfg.HTTP),
 		gofy.WithDatabase(cfg.Database(config.DefaultDatabase)),
 		gofy.WithNacosRegistration(nacosCfg),
