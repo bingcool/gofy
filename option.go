@@ -111,11 +111,12 @@ type options struct {
 	// Worker configuration: groups run only through the worker subcommand, never
 	// with the HTTP server.
 	// worker 相关配置：分组只通过 worker 子命令运行，从不随 HTTP 服务启动。
-	workerGroups      []*worker.Group // 常驻任务分组；`worker --group` 选择
-	workerPolicy      worker.Policy   // 单个实例失败后的重启策略
-	workerConcurrency map[string]int  // "group/worker" → 实例数
-	workerDrain       time.Duration   // 停机时在途任务的完成预算
-	workerHealth      string          // worker 进程可选的 /healthz 监听地址
+	workerGroups      []*worker.Group         // 常驻任务分组；`worker --group` 选择
+	workerModules     []support.ModuleFactory // worker 进程的装配模块；Start 先于分组
+	workerPolicy      worker.Policy           // 单个实例失败后的重启策略
+	workerConcurrency map[string]int          // "group/worker" → 实例数
+	workerDrain       time.Duration           // 停机时在途任务的完成预算
+	workerHealth      string                  // worker 进程可选的 /healthz 监听地址
 
 	shutdownTimeout time.Duration // 关闭预算：HTTP 优雅关闭与模块 Stop 共享的总时长
 
@@ -518,6 +519,44 @@ func WithWorkerGroups(groups ...*worker.Group) Option {
 			seen[g.Name()] = struct{}{}
 			o.workerGroups = append(o.workerGroups, g)
 		}
+		return nil
+	}
+}
+
+// WithWorkerModules registers the modules a worker process assembles before any
+// group starts. It is the worker counterpart of WithModuleFactories: the same
+// factory type, built from the same Runtime, but with no Router and no reload —
+// a worker process assembles one generation for its whole life.
+//
+// Register is never called: a worker has no HTTP stack. Start runs after the
+// Runtime exists and before the first group starts, so business code that
+// resolves a handle on its first tick finds a published generation instead of
+// failing per tick. Stop runs from the App's cleanup, after every group drained
+// and before the framework closes the database it handed to the module.
+//
+// A factory that returns an error or a nil module aborts startup: a worker whose
+// assembly failed must not pretend to accept work. That is the difference from
+// an optional config section — a missing section is the module's business, a
+// broken assembly is the process's.
+// WithWorkerModules 注册 worker 进程在任一分组启动之前装配的模块。它是
+// WithModuleFactories 的 worker 对应物：同样的工厂类型、同样从 Runtime 构造，但
+// 没有 Router、没有热更新——worker 进程整个生命周期只装配一代。
+//
+// 它从不调用 Register：worker 没有 HTTP 栈。Start 在 Runtime 就绪之后、第一个分组
+// 启动之前执行，因此首个 tick 就要取句柄的业务代码看到的是已发布的代际，而不是每个
+// tick 报一次错。Stop 由 App 的 cleanup 执行，位置在所有分组 drain 之后、框架关闭
+// 交给模块的数据库之前。
+//
+// 工厂返回错误或 nil 模块会中止启动：装配失败的 worker 不能继续装作能接活。这与
+// "可选配置段"不同——缺一段是模块自己的判断，装配坏掉是进程的判断。
+func WithWorkerModules(factories ...ModuleFactory) Option {
+	return func(o *options) error {
+		for _, f := range factories {
+			if f == nil {
+				return fmt.Errorf("gofy: worker module factory must not be nil")
+			}
+		}
+		o.workerModules = append(o.workerModules, factories...)
 		return nil
 	}
 }

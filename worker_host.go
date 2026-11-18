@@ -15,6 +15,7 @@ import (
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/internal/process"
 	"github.com/bingcool/gofy/internal/proclock"
+	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/worker"
 	"go.uber.org/zap"
 )
@@ -113,6 +114,18 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		Tracing:        telemetry.Enabled(),
 	})
 	a.rt = rt
+
+	// Worker-side IO assembly. A worker process never runs ModuleFactories, so
+	// without this there is no published generation and every entry would have to
+	// fake one out of Runtime.DB. The position carries two meanings: before the
+	// groups (a first tick must already resolve a handle) and inside cleanup
+	// (Stop runs after the drain and before the database closes).
+	// worker 侧 IO 装配。worker 进程从不运行 ModuleFactories，没有这一步就没有已发布
+	// 的代际，每个入口只能从 Runtime.DB 伪造一个。位置有两重意义：放在分组之前（首个
+	// tick 就必须能解析到句柄），以及交给 cleanup（Stop 排在 drain 之后、关库之前）。
+	if err := a.startWorkerModules(rt); err != nil {
+		return a.abort(err)
+	}
 
 	runners := make([]*worker.Runner, len(groups))
 	for i, group := range groups {
@@ -606,4 +619,54 @@ func workerPIDPath(path, group string) string {
 	}
 	ext := filepath.Ext(path)
 	return strings.TrimSuffix(path, ext) + "-worker-" + group + ext
+}
+
+// startWorkerModules builds and starts the modules registered with
+// WithWorkerModules. Factories run first as a group, so a construction error
+// stops the process before any connection is opened; Start then runs in
+// registration order and each started module joins a.started, which is what
+// makes cleanup stop them in reverse order, after the groups drained and before
+// the database they were handed is closed.
+//
+// Nothing here calls Register: a worker process has no Router. A module that
+// only makes sense behind HTTP belongs in WithModuleFactories, where the HTTP
+// path builds it.
+// startWorkerModules 构造并启动 WithWorkerModules 注册的模块。工厂先整体执行，
+// 因此构造错误在打开任何连接之前就让进程停下；随后按注册顺序 Start，每个启动成功的
+// 模块记入 a.started——cleanup 据此逆序停止它们，位置在分组 drain 之后、它们拿到的
+// 数据库被关闭之前。
+//
+// 这里不调用 Register：worker 进程没有 Router。只在 HTTP 之后才有意义的模块属于
+// WithModuleFactories，由 HTTP 路径构建。
+func (a *App) startWorkerModules(rt *core.Runtime) error {
+	if len(a.opts.workerModules) == 0 {
+		return nil
+	}
+	mods := make([]support.Module, 0, len(a.opts.workerModules))
+	seen := make(map[string]struct{}, len(a.opts.workerModules))
+	for _, factory := range a.opts.workerModules {
+		m, err := factory(rt)
+		if err != nil {
+			return fmt.Errorf("gofy: build worker module: %w", err)
+		}
+		if m == nil {
+			return errors.New("gofy: worker module factory returned nil")
+		}
+		if _, dup := seen[m.Name()]; dup {
+			return fmt.Errorf("gofy: duplicate worker module %q", m.Name())
+		}
+		seen[m.Name()] = struct{}{}
+		mods = append(mods, m)
+	}
+	for _, m := range mods {
+		starter, ok := m.(support.Starter)
+		if !ok {
+			continue
+		}
+		if err := startModule(starter, rt.Context()); err != nil {
+			return fmt.Errorf("gofy: worker module %q start: %w", m.Name(), err)
+		}
+		a.started = append(a.started, m)
+	}
+	return nil
 }
