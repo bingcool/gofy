@@ -1,7 +1,8 @@
 # worker 取连接的现状盘点与迁移方案
 
-- 状态：**仅盘点，未实施**（2026-11-19）。本文只回答"worker 里 `rt.DB` 用在什么地方、要不要改、怎么分批改"，
-  不含任何代码改动。
+- 状态：**已被修订**（2026-11-19 晚）。第 0～4 批曾全部落地（见 §10），但 §10 引入的 `workerio` 与
+  `tenantguard` 是"用 `Runtime.DB` 伪造一代"的补丁；改由进程装配入口承担之后两者已删除，见 **§11**。
+  本文保留原始盘点与分批依据，便于回溯"为什么先这么改、后来为什么换掉"。
 - 起点：`core.Runtime` 的 `DB` 字段是框架启动期持有的 `db.default`，worker 进程没有装配代，
   业务只能从 `Runtime` 拿连接；HTTP 与脚本走的是 `appio.WithContext(ctx).DBIO(...)`。
   两套取法并存，且 worker 拿不到命名实例。
@@ -195,3 +196,121 @@ App（打开 / instrument / 关闭 db.default，生命周期由框架持有）
 `tenant.Instrument` 后依次执行四种语句形状，输出见 §4.1。
 `scan(anon struct)` 一组返回的是"表不存在"，说明租户检查没有介入；
 其余两组无 `Without` 时在构造阶段就被 `ErrTenantRequired` 短路，SQL 未发出。
+
+## 10. 落地记录（2026-11-19）
+
+五批全部完成。逐批对照 §6：
+
+| 批次 | 实际改动 | 验证 |
+|---|---|---|
+| 0 | `enqueueClaimJob` 的 map INSERT 加 `tenant.Without`（`worker/group1/scan_claim.go`） | 新增 `TestClaimEnqueueIsCrossTenant`：租户开启时入队成功、行数正确 |
+| 1 | 新增 `worker/workerio`（`Ensure` / `Use` / `Reset` / `Published`）；`appio.NewSnapshotDB` 导出 | 4 条用例：发布一次、`Use` 固定代际、缺库报 `ErrDatabaseRequired`、`Reset` 幂等且撤回 |
+| 2 | group1 四个取用点（handler、scan、claim 生产者、claim 消费者）改走 `workerio.Use` | `grep rt.DB worker/` 只剩 `tenantguard` 与 `workerio`；原有 handler 状态机与 tenant 用例全过 |
+| 3 | group2 `summary` 同上 | 报表用例与 `make check` 通过 |
+| 4 | 守卫加到 `shell/check-io-access.sh`；`worker/README.md`、`docs/gorm-tenant-design.md` §11.1 更新 | 注入一行 `rt.DB` 时守卫失败并打印文件行号；删除后恢复通过 |
+
+### 与计划的差异
+
+1. **多了一个 `workerio.Use`**。计划里各入口写 `Ensure` + `DBIO` 两步；实际把它合成一个入口辅助：
+   发布代际、`appio.WithSnapshot` 固定到 ctx、再经 `DBIO` 解析。固定的必要性在于 tick 可能活过一次
+   `Reset`——固定后仍解析启动时那个句柄，而不是跟随全局。下游代码仍是
+   `appio.WithContext(ctx).DBIO(...)`，没有引入第二种取法。
+2. **守卫落在 `check-io-access.sh`，不是 `check-imports.sh`**。它检查的是"怎么取句柄"，与那份
+   已有的 service/repository/query 规则同属一类；`check-imports.sh` 只看 import 关系，看不出 `rt.DB`。
+   同时加了一条：`worker/` 内除 `workerio` 外不得调用 `appio.Publish/PublishDB/Current`，避免第二个发布点。
+3. **`Reset` 接到了 `main.go`**：`app.Execute` 返回后、仅 `plan.Kind` 以 `worker` 开头时调用。
+   HTTP、脚本与控制类命令走各自的模块生命周期，不需要它。
+
+### 仍未做
+
+**命名实例**（§7 决策 3）保持未开：`workerio` 用 `appdb.NewSet(rt.DB)`，只有 `db.default`，
+`DBIO("order")` 返回 `ErrNotConfigured`。当前 0 处需要；要用时按决策 3 改成 `appdb.Open` 并传过滤后的
+配置，代价是 `order` / `product` 会急切建连。
+
+### 验证中发现并修复的并发缺陷
+
+第一次带着 `tenant.enabled=true` 真跑 `worker --group=group1` 时，GORM 打出
+`duplicated callback gofy:tenant:before_delete/before_create`：`installTenant` 的
+"先查 inspector、再 Instrument" 不是原子的，三个 worker 同时首用数据库时有两个都看到了
+"尚未安装"。已在 `app/appio/db/db.go` 加包级 `installMu` 把检查与安装串行化（安装每池一次，
+不在热路径）；重跑后告警消失，入队、认领、扫描都正常。
+
+### 一处测试约束
+
+`workerio` 的代际是进程级，而 `worker/group1` 的测试辅助为每个用例新开 SQLite。`newOrderHandlerContext`
+因此注册了 `t.Cleanup(workerio.Reset)`：不撤回的话，下一个用例会解析到上一个（已关闭）的池，
+报 `sql: database is closed`。新增的 worker 测试若自己造 Runtime，也需要同样的清理。
+
+## 11. 修订：由装配入口取代 workerio（2026-11-19 晚）
+
+### 11.1 为什么推翻 §10
+
+§10 的做法是"每个 worker 入口用 `Runtime.DB` 发布一份只带 default 的代际"。它有三处说不通：
+
+1. **它证明了缺的是装配入口，而不是缺一条取法。** worker 复用 service 与 repository，
+   而那两层只认 `appio.WithContext(ctx).DBIO(...)`；它们不需要"Runtime 上有个 DB 字段"，
+   需要的是"进程里有一代已发布的句柄"。
+2. **租户插件装错了位置。** 插件装在池上，而 `tenantguard.Ensure(rt)` 只能在拿到 `rt.DB`
+   之后装；一个早于消费者启动的扫描循环、或者一条都没收到的消费者，都要靠"每个入口各装一次"
+   来兜底。装配点是唯一能看到这一代全部池的位置，`appdb.WithTenant` 本来就为此存在。
+3. **命名实例拿不到。** `appdb.NewSet(rt.DB)` 没有 registry，`DBIO("order")` 报
+   `ErrNotConfigured`。而 worker 一旦复用依赖 `db.order` 的 service，就必须有 registry。
+
+### 11.2 新形态
+
+| 层 | 职责 | 代码 |
+|---|---|---|
+| 框架 | 提供 worker 装配钩子：Runtime 就绪后 `factory(rt)` → `Start`，分组 drain 后由 cleanup `Stop`（早于关池） | `option.go` `WithWorkerModules`、`worker_host.go` `startWorkerModules` |
+| 应用装配 | 声明"worker 进程需要哪几段 IO"，本例只有 db | `appio.NewDBOnlyModuleFactory(cfg.DB, cfg.Tenant.OpenOptions()...)` |
+| 业务 | 与 HTTP 完全一致 | `appio.WithContext(ctx).DBIO(ctx, "default")` |
+
+要点：
+
+- **`Register` 从不被调用**：worker 没有 Router，钩子复用 `ModuleFactory` 类型但不走路由阶段。
+- **不需要代际固定**：worker 进程不参与 Reload，`Publish` 一次即恒定，`WithSnapshot` 与
+  `workerio.Reset` 都没有存在理由。
+- **只装需要的那一段**：`appredis.Open` / `appkafka.Open` / `appamqp.Open` 对每个 enabled 实例
+  同步建连，全量装配会和消费者自建的 broker 连接重复。裁剪由应用声明，框架不猜。
+- **default 池仍归框架**：`Runtime.DB` 是"框架托管池的引用"，只在装配层出现；业务侧读到它就是接错，
+  守卫脚本直接拦（无白名单）。
+
+### 11.3 删除与保留
+
+删除：`worker/workerio`（4 文件）、`worker/tenantguard`（2 文件 + 测试）、6 个入口的 `Use`/`Ensure` 调用、
+`main.go` 的 `workerio.Reset`、守卫脚本的两处豁免。
+
+保留：`appio.NewSnapshotDB` 与 `PublishDB`（脚本与单测仍用它们构造只带 default 的一代）、
+`appdb.EnsureTenant`（测试模拟装配、以及未来自建池的入口）。
+
+`withOrderTenant` 收窄成"只把事件租户带进 ctx"：插件由装配安装，它不再需要 `rt`，也因此不会
+把某条路径绑死在一个池上。
+
+### 11.4 命名实例：从"未做"变为"已具备"
+
+§10「仍未做」的那条不再成立。`NewDBOnlyModuleFactory` 走 `appdb.Open`，`db.order` / `db.product`
+与 HTTP 路径一样打开并进 registry。实测启动日志：
+
+```
+{"msg":"db instance connected","instance":"order"}
+{"msg":"db instance connected","instance":"product"}
+```
+
+### 11.5 验证
+
+| 场景 | 结果 |
+|---|---|
+| `make check`（29 包，含 `-race`） | 全绿 |
+| 框架 `go test ./...` | 全绿（新增 5 条 `worker_module_test.go` 用例） |
+| `worker --group=group1 --name=order-scan`（tenant off） | 装配先于分组，tick 正常，无 `runtime database is required` |
+| `worker --group=group1 --name=order-scan`（tenant on） | 插件在装配期已装，tick 正常 |
+| `worker --group=group1 --name=order-settle-producer`（tenant on） | 入队 6 行成功（跨租户 map INSERT） |
+| `worker --group=group1 --name=order-settle-consumer`（tenant on） | 认领、结算、租约全部正常 |
+| 失败路径 | factory 报错 → 进程不启动、worker 从未运行；A 成功 B 失败 → A 被 Stop |
+
+### 11.6 行为变化的两处细节
+
+1. **报错时机**：以前没有 db 时是每个 tick 报一次 `ErrNotConfigured` 并无限退避；现在
+   装配失败会让进程启动失败。但"没有 `db` 段"仍不是装配失败——`db` 是可选段，
+   `NewDBOnlyModuleFactory` 照样装配，失败推迟到首次取用，与请求一致。
+2. **关停顺序**：`Stop` 由 `a.started` 驱动，排在分组 drain 之后、`gofydb.Close` 之前。
+   worker 装配走的正是 HTTP 模块同一套 cleanup 逆序停止逻辑，没有第二条关闭路径。

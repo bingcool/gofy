@@ -15,6 +15,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/bingcool/gofy"
@@ -128,18 +129,34 @@ type callbackInspector interface {
 }
 
 // EnsureTenant installs the tenant plugin on pool when it is not installed yet.
-// It is the exported form of installTenant, for entry points that receive the
-// framework's db.default instead of building their own generation: worker
-// groups, which do not run ModuleFactories, install it here on their first
-// database use. The install is idempotent for the same reason installTenant is:
-// db.default is a process-wide singleton and a second db.Use fails.
+// It is the exported form of installTenant, for entry points that hold a pool the
+// assembly did not open: tests that need a filtered pool without running a
+// module, and an application assembling a second pool outside appio. Worker
+// processes do not need it — their generation is built with WithTenant, so the
+// plugin is installed at Open like it is on the HTTP path.
+//
+// The install is idempotent for the same reason installTenant is: db.default is a
+// process-wide singleton and a second db.Use fails.
 // EnsureTenant 在池上安装租户插件（尚未安装时）。它是 installTenant 的导出版本，
-// 供不构建自己装配代、只拿到框架 db.default 的入口使用：worker 分组不走
-// ModuleFactories，在首次使用数据库时从这里安装。幂等原因与 installTenant 相同：
-// db.default 是进程级单例，第二次 db.Use 会失败。
+// 供持有"非装配点打开"的连接池的入口使用：需要在不跑模块的情况下拿到带过滤的池的测试，
+// 以及 appio 之外自建第二个池的应用。worker 进程不需要它——它那一代用 WithTenant
+// 构建，插件与 HTTP 路径一样在 Open 时安装。
+//
+// 幂等原因与 installTenant 相同：db.default 是进程级单例，第二次 db.Use 会失败。
 func EnsureTenant(pool *gorm.DB, opts tenant.Options) error {
 	return installTenant(pool, opts)
 }
+
+// installMu serializes the check-and-install below. The inspector guard alone is
+// not enough: worker groups start at the same time and each calls EnsureTenant
+// on the same pool, so two of them can both observe "not installed" before
+// either registers — GORM then logs a duplicated callback for every callback the
+// loser registers. The lock costs nothing on the hot path because install
+// happens once per pool.
+// installMu 把下面的"先查后装"串行化。光有 inspector 判断不够：worker 分组同时启动，
+// 各自对同一个池调用 EnsureTenant，两个调用可能在对方注册完成前都看到"尚未安装"——GORM
+// 随后会对后者的每个回调报重复注册。安装每个池只发生一次，这把锁不在热路径上。
+var installMu sync.Mutex
 
 // installTenant is idempotent: db.default is owned by the framework and shared
 // across Reload generations, so Open may see the same *gorm.DB more than once.
@@ -150,6 +167,8 @@ func installTenant(pool *gorm.DB, opts tenant.Options) error {
 	if pool == nil {
 		return nil
 	}
+	installMu.Lock()
+	defer installMu.Unlock()
 	if inspector, ok := any(pool.Callback().Query()).(callbackInspector); ok &&
 		inspector.Get("gofy:tenant:before_query") != nil {
 		return nil

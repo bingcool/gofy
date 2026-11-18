@@ -9,7 +9,8 @@ import (
 
 	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
-	"github.com/yourorg/demo-service/worker/tenantguard"
+	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -56,14 +57,17 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 	}
 	return gofyworker.Func("order-scan", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
-		if !ok || rt.DB == nil {
-			return errors.New("order-scan: runtime database is required")
+		if !ok {
+			return errors.New("order-scan: runtime is required")
 		}
-		// Install before the first tick: the plugin lives on the pool, and this
-		// loop may start before the group's consumer ever receives a message.
-		// 在第一个 tick 之前安装：插件装在池上，而本循环可能早于分组里任何消费者
-		// 收到第一条消息。
-		if err := tenantguard.Ensure(rt); err != nil {
+		// The handle comes from the generation the process assembled before this
+		// group started, resolved the same way a request resolves it. The tenant
+		// plugin was installed there too, so this loop cannot run unfiltered even
+		// if it starts before any consumer receives a message.
+		// 句柄来自本进程在分组启动之前装配的那一代，解析方式与请求一致。租户插件也在
+		// 那里装好，因此即使本循环早于任何消费者收到消息，它也不会裸查。
+		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		if err != nil {
 			return err
 		}
 		id, _ := gofyworker.IdentityFrom(ctx)
@@ -85,7 +89,7 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 			queryCtx, cancel := context.WithTimeout(tenant.Without(gofyworker.DrainContext(ctx)), 3*time.Second)
 			defer cancel()
 			var pending int64
-			if err := rt.DB.WithContext(queryCtx).
+			if err := db.WithContext(queryCtx).
 				Table("orders").
 				Where("status = ?", string(orderenum.OrderStatusPending)).
 				Count(&pending).Error; err != nil {

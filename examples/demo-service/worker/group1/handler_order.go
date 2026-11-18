@@ -14,10 +14,9 @@ import (
 	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
-	"github.com/bingcool/gofy/core"
-
+	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/module/order/model"
-	"github.com/yourorg/demo-service/worker/tenantguard"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -87,24 +86,34 @@ type orderEventPayload struct {
 // type to it — and still reaches the native record when it needs an offset, a
 // delivery tag or a manual acknowledgement.
 //
-// The database comes from the runtime in ctx instead of being captured when the
-// handler is built: a consumer config is a package value, and its handler must
-// not hold a pool that outlives a reload. A worker process runs no HTTP module,
-// so the runtime's handle is the only connection it can rely on.
+// The database is resolved per delivery through the generation the process
+// assembled at startup, not captured when the handler is built: a consumer
+// config is a package value, and its handler must not hold a pool. The handle
+// therefore arrives the same way a request gets one — appio.DBIO("default") —
+// instead of the Runtime holding a pool for it.
 // applyOrderEvent 是本分组内所有消费者共用的业务分支。
 //
 // 它接收已解码的信封，因此每个消费者文件把自己的消息类型适配到它——需要位点、投递
 // 标签或手动确认时，仍然能拿到原生记录。
 //
-// 数据库来自 ctx 里的 Runtime，而不是在构造 handler 时捕获：消费者配置是包级值，它的
-// handler 不应该持有一个比 reload 活得更久的连接池。worker 进程不运行 HTTP 模块，
-// 能依赖的连接只有 Runtime 持有的那个。
+// 数据库在每次投递时经进程启动时装配的那一代解析，而不是在构造 handler 时捕获：
+// 消费者配置是包级值，它的 handler 不应该持有一个连接池。句柄因此和请求走同一条
+// 路——appio.DBIO("default")——而不是让 Runtime 替它持有一个池。
 func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	rt, ok := gofyworker.RuntimeFrom(ctx)
-	if !ok || rt.DB == nil {
-		return errors.New("order handler requires a runtime database")
+	if !ok {
+		return errors.New("order handler requires a runtime")
 	}
-	db := rt.DB
+	// The handle comes from the generation the worker process assembled at
+	// startup, resolved the same way a request resolves it. No pin is needed:
+	// a worker process never reloads, so the published generation is the one it
+	// started with for its whole life.
+	// 句柄来自 worker 进程启动时装配的那一代，解析方式与请求完全一致。不需要固定：
+	// worker 进程从不热更新，已发布的那一代就是它整个生命周期使用的那一代。
+	db, dbErr := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+	if dbErr != nil {
+		return dbErr
+	}
 
 	rule, ok := orderEventRules[event.Type]
 	if !ok {
@@ -120,16 +129,14 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	}
 
 	// The tenant travels with the event, not with the process: one replica
-	// handles several tenants, so the plugin must read a per-delivery value.
-	// Installing here also puts the plugin after the framework's tracing
-	// plugin, which is the order the tenant handler relies on.
-	// 租户随事件走而不是随进程：一个副本处理多个租户，插件必须读到按次生效的值。
-	// 在这里安装也保证插件排在框架的链路插件之后——这正是租户 Handler 依赖的顺序。
-	tenantCtx, terr := withOrderTenant(ctx, rt, payload.TenantID)
-	if terr != nil {
-		return terr
-	}
-	ctx = tenantCtx
+	// handles several tenants, so the value the plugin reads must be per
+	// delivery. The plugin itself was installed when the process assembled its
+	// io-db generation — after the framework's tracing plugin, which is the order
+	// the tenant handler relies on.
+	// 租户随事件走而不是随进程：一个副本处理多个租户，插件读到的值必须按次生效。插件
+	// 本身在进程装配 io-db 代际时装好，位置在框架的链路插件之后——正是租户 Handler
+	// 依赖的顺序。
+	ctx = withOrderTenant(ctx, payload.TenantID)
 
 	// The transition condition lives in the UPDATE, not in a read-modify-write:
 	// two concurrent handlers would both pass a SELECT and both write. Only rows
@@ -191,37 +198,31 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	return nil
 }
 
-// withOrderTenant installs the tenant plugin on the runtime pool (idempotent)
-// and carries the event's tenant into ctx. It runs before the first statement
-// of a delivery, which is also after the framework installed tracing — the
-// order the tenant handler depends on, because tracing replaces
-// Statement.Context in its own before callback.
+// withOrderTenant carries the event's tenant into ctx. The plugin that reads it
+// was installed on the pool by the process assembly (io-db plus the tenant
+// options), so this function has one job left: decide whether this delivery
+// names a tenant.
 //
-// The runtime is taken instead of a *gorm.DB on purpose: a worker owns exactly
-// one framework pool, and passing the runtime keeps this path from filtering
-// one pool while another one passed by mistake stays open. A group that opens
-// a second pool must install the plugin on that pool at its own assembly point.
+// The plugin is deliberately not installed here. Installing it on a *gorm.DB
+// taken from the snapshot would tie this path to one pool and leave another one
+// silently unfiltered; the assembly point is the only place that sees every pool
+// of the generation.
 //
 // A missing tenant is left alone on purpose: the plugin fails closed on a
-// tenant-aware table, and inventing an ID here would read another tenant's
-// rows. A model without the tenant column is not rewritten, which is why the
-// demo's orders table keeps working when an event carries a tenant.
-// withOrderTenant 在 Runtime 的连接池上安装租户插件（幂等），并把事件所属租户带进
-// ctx。它在一次投递的第一条语句之前执行，此时框架已装好 tracing——这正是租户 Handler
-// 依赖的顺序，因为 tracing 会在自己的 before 回调里替换 Statement.Context。
+// tenant-aware table, and inventing an ID here would read another tenant's rows.
+// A model without the tenant column is not rewritten, which is why the demo's
+// orders table keeps working when an event carries a tenant.
+// withOrderTenant 把事件所属租户带进 ctx。读取它的插件已由进程装配（io-db 加租户
+// 选项）装在池上，因此这个函数只剩一件事：判断这次投递是否指名了租户。
 //
-// 这里取 Runtime 而不是 *gorm.DB 是有意的：一个 worker 只拥有一个框架连接池，传
-// Runtime 可以避免"误传另一个池、只过滤了那一个"的路径。分组若自己打开了第二个池，
-// 必须在该池的装配点单独安装。
+// 插件刻意不在这里安装。在从快照取到的 *gorm.DB 上安装会把这条路径绑死在一个池上，
+// 并让另一个池悄悄失去过滤；装配点是唯一能看到这一代全部池的位置。
 //
 // 缺少租户时有意不兜底：插件在租户感知的表上失败关闭，在这里编一个 ID 会读到别的
 // 租户的行。不含租户列的模型不会被改写，因此示例的 orders 表在事件带租户时照常工作。
-func withOrderTenant(ctx context.Context, rt *core.Runtime, tenantID string) (context.Context, error) {
-	if err := tenantguard.Ensure(rt); err != nil {
-		return ctx, err
-	}
+func withOrderTenant(ctx context.Context, tenantID string) context.Context {
 	if id := strings.TrimSpace(tenantID); id != "" {
-		ctx = tenant.WithTenant(ctx, id)
+		return tenant.WithTenant(ctx, id)
 	}
-	return ctx, nil
+	return ctx
 }

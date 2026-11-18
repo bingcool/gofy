@@ -19,25 +19,21 @@
 package group2
 
 import (
-	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
-
-	"github.com/yourorg/demo-service/worker/tenantguard"
 )
 
 // NewGroup builds group2. The summary worker passes its own defaults, declared
 // next to the loop they control.
 //
-// The tenant section is taken for the same reason as group1: group2 is its own
-// deployment, so its process may contain no group1 worker at all. Without this
-// the report would read the pool before any plugin was installed and never
-// notice it is running unfiltered.
+// The tenant plugin is installed by the process assembly, not here: group2 is
+// its own deployment, and its process always assembles the same io-db
+// generation before any group starts. That is what makes "the report is
+// filtered" independent of which group happens to run.
 // NewGroup 构造 group2。汇总任务传入自己的 defaults，声明就写在它控制的循环旁边。
 //
-// 接收租户段的原因与 group1 相同：group2 是独立部署，它的进程里可能没有任何 group1
-// 的 worker。不接的话，报表会在插件安装之前就读连接池，而且永远不知道自己没被过滤。
-func NewGroup(tenantEnabled bool, tenantOpts tenant.Options) (*gofyworker.Group, error) {
-	tenantguard.Configure(tenantEnabled, tenantOpts)
+// 租户插件由进程装配安装，不在这里：group2 是独立部署，它的进程同样会在任何分组启动
+// 之前装配那一代 io-db。因此"报表被过滤"不取决于本进程恰好跑了哪个分组。
+func NewGroup() (*gofyworker.Group, error) {
 	return gofyworker.NewGroup(
 		"group2",
 		newSummaryWorker(summaryDefaults),

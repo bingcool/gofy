@@ -300,19 +300,21 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
    按项目约定不 import `logger`（接收 `*zap.Logger` 或回调）；把输出决策留给应用，
    包本身无日志依赖。
 
-7. **worker 进程在各自入口接线，不在 `Open` 接线。** worker 不走 `ModuleFactories`（见 §6
-   与项目约定），其连接是框架托管的 `db.default`，没有 `appio/db.Open` 这个时机。接线因此
-   落在分组自己的装配点：`worker.Register` 接收 `tenant` 配置段，各分组构造时调用
-   `worker/tenantguard.Configure` 保存选项（共享包，避免每个分组各写一份进程级状态）；
-   每个访问数据库的 worker 在 `Run` 入口调用 `tenantguard.Ensure`（`installTenant` 的
-   导出形式，幂等），消费者再把事件携带的 `tenant_id` 用 `tenant.WithTenant` 注入 ctx。
-   放在各入口而不是进程启动时，有两个原因：这是唯一能拿到 `rt.DB` 的位置，且天然排在
-   框架的 tracing 插件之后。
-   **插件装在池上而不是 context 上**，因此不能只让消费者装：扫描与认领循环可能早于第一条
-   消息启动，若消费者一直收不到消息，它们会永远裸查——每个入口各装一次（幂等）才是完整覆盖。
+7. **worker 进程在装配入口接线，与 `Open` 同一个时机。** worker 不走 `ModuleFactories`，
+   但它现在有自己的装配入口：`gofy.WithWorkerModules(appio.NewDBOnlyModuleFactory(...))`。
+   框架在 Runtime 就绪之后、第一个分组启动之前调用它的 `Start`，那一代用
+   `appdb.Open(..., appdb.WithTenant(opts))` 打开连接——所以插件与 HTTP 一样落在
+   `Open` 上，而不是落在某个 worker 的 `Run` 里。
+   这是被修订过的结论：更早的实现让 `worker.Register` 接收 `tenant` 段、每个入口调
+   `tenantguard.Ensure` 惰性安装。它有两个说不通的地方——插件装在池上而不是 context 上，
+   于是"装"这件事要靠每个入口各做一次才完整（扫描循环可能早于任何消息启动）；而它依赖
+   `Runtime.DB` 存在，等于让 worker 的业务路径认识 Runtime 的连接字段。装配入口解决了两者：
+   插件先于任何 worker 存在，业务只认 `appio.WithContext(ctx).DBIO`，`Runtime.DB` 只在
+   装配层出现（`shell/check-io-access.sh` 对该目录无豁免地拦住直读）。
+   消费者只负责一件事：把事件携带的 `tenant_id` 用 `tenant.WithTenant` 注入 ctx。
    **跨租户聚合要显式 `Without`**：`Count(&int64)`、`Table("x")` 配匿名指标这类语句没有模型
-   可供探测租户列，插件会失败关闭；扫描的计数与 group2 的报表因此用 `tenant.Without` 声明
-   特权形状，而不是靠"表里没有租户列"这个巧合。
+   可供探测租户列，插件会失败关闭；扫描的计数、group2 的报表与认领生产者的
+   `Table().Create(map)` 因此用 `tenant.Without` 声明特权形状，而不是靠"表里没有租户列"这个巧合。
    事件不带租户时不兜底——插件失败关闭，handler 重试。
    脚本走 `script/register.go`，HTTP 走 `reload.factories`，三者共用
    `config.TenantConfig.OpenOptions()` / `Options()` 这一处开关定义。
@@ -324,7 +326,10 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
 - `go test ./support/tenant -race`：20 个用例全过，含 100 goroutine 并发不同租户不串扰。
 - demo 装配测试：`installTenant` 装上后 `WithTenant` 查询只返回本租户行；连续三次安装
   不报重复回调。
-- worker 接线测试：`app/appio/db` 的 `EnsureTenant` 连续两次安装后过滤仍生效；
-  `worker/group1` 的 `withOrderTenant` 覆盖三条路径——事件租户生效、关闭时不改写语句、
-  缺租户时 `ErrTenantRequired`（失败关闭）。探针模型带 `tenant_id`，与 `orders` 表分开。
+- worker 接线测试：`app/appio` 的 `TestDBOnlyModuleInstallsTenantPluginAtAssembly` 证明
+  租户选项随装配走——`NewDBOnlyModuleFactory(..., WithTenant(opts))` 启动后，池上无 schema
+  的聚合直接 `ErrTenantRequired`（失败关闭），说明插件先于任何 worker 生效。
+  `app/appio/db` 的 `EnsureTenant` 连续两次安装后过滤仍生效；`worker/group1` 的
+  `withOrderTenant` 覆盖三条路径——事件租户生效、关闭时不改写语句、缺租户时
+  `ErrTenantRequired`（失败关闭）。探针模型带 `tenant_id`，与 `orders` 表分开。
 - `make check` 全绿（含导入守卫、race、cgo-free、Windows cross）。

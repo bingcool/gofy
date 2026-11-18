@@ -9,9 +9,21 @@
 | script | `demo-service script <name>` | 跑完即退，不写 pid | 数据修复、一次性迁移 |
 | worker | `demo-service worker --group=<g>` | 常驻，不监听业务端口 | 扫表、MQ 消费、定时汇总 |
 
-worker 进程没有 HTTP 栈，也不注册路由。轮询类任务通过框架注入的 `Runtime` 拿
-logger 与数据库，MQ 消费者则在 `Run` 里按配置自建连接——worker 进程不运行 `app/appio`
-模块，因此没有现成的连接句柄可以引用，这一点与 HTTP 进程不同。
+worker 进程没有 HTTP 栈，也不注册路由。轮询类任务通过框架注入的 `Runtime` 拿 logger；数据库句柄则经
+`appio.WithContext(ctx).DBIO(ctx, "default")` 解析，与 HTTP 请求和脚本同一条路径。
+
+代际由进程装配，不由 worker 入口发布：`main.go` 用 `gofy.WithWorkerModules` 注册
+`appio.NewDBOnlyModuleFactory(cfg.DB, cfg.Tenant.OpenOptions()...)`，框架在 Runtime 就绪之后、
+第一个分组启动之前调用它的 `Start`——打开 `db.default` 的命名实例、安装租户插件、发布快照；
+分组 drain 完之后由 cleanup 调用 `Stop`，早于框架关闭连接池。因此：
+
+- worker 成员不持有任何连接，`NewGroup` 也不接收数据库或租户参数；
+- `Runtime.DB` 是"框架托管池的引用"，只在装配层出现；worker 目录里读到它就是接错了
+  （`shell/check-io-access.sh` 会拦）；
+- 只需要数据库的 worker 不会连带打开 redis / kafka / amqp：broker 连接由消费者按名字自建
+  （见 `connections.go`），再开一套只会重复建连。
+
+MQ 消费者在 `Run` 里按配置自建连接，与数据库句柄无关。
 
 ## 配置与 Nacos
 

@@ -2,7 +2,7 @@
 // order volume.
 //
 // The group hosts the whole produce → consume path. The scan loop polls on a
-// timer and needs nothing but the runtime database. Six immediate
+// timer and needs nothing but the io-db generation the process assembled. Six immediate
 // subscriptions cover Kafka twice (the default one and a manual-commit demo),
 // RabbitMQ, RocketMQ twice (one message per pull, and a batch pull fed by its
 // own burst producer) and a Redis queue; each one is a file of its own holding
@@ -29,7 +29,7 @@
 //
 // 包 group1 是第一个 worker 分组：随订单量扩缩的秒级任务。
 //
-// 分组里跑着完整的 生产 → 消费 链路。扫描循环按定时器轮询，只依赖 Runtime 的数据库。
+// 分组里跑着完整的 生产 → 消费 链路。扫描循环按定时器轮询，只依赖本进程装配的 io-db 代际。
 // 六个立即订阅覆盖 Kafka 两次（默认订阅与手动提交样例）、RabbitMQ、RocketMQ 两次
 // （一次一条与一次一批，后者由自己的突发生产者喂养）与 Redis 队列；每个消费者一个文件，
 // 里面只有它自己的设置与 handler，没有别的——它们背后的信封、
@@ -51,10 +51,7 @@ import (
 	"fmt"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
-
-	"github.com/yourorg/demo-service/worker/tenantguard"
 )
 
 // NewGroup builds group1: the scan loop, the immediate and delayed
@@ -85,15 +82,15 @@ import (
 // scan_claim.go）补全了闭环：群发的那个每个间隔把同一个订单事件发往所有立即 sink，突发的
 // 那个按批把消息发给批量订阅，入队的那个每轮写一批数据库任务；一个进程即可演示
 // 生产 → 消费 的完整链路，无需第二个终端。
-// tenantEnabled and tenantOpts are the tenant section, already resolved by the
-// caller: nil options (disabled) leave the framework's pool untouched, so a
-// project without multi-tenancy keeps ordinary GORM behaviour. The shared
-// tenantguard holds the value; workers only read it at their entry points.
-// tenantEnabled 与 tenantOpts 是调用方已解析好的租户段：关闭时选项为空，框架的
-// 连接池保持原样，没有多租户的项目因此保持普通 GORM 行为。值由共享的 tenantguard
-// 持有，worker 只在自己的入口读取。
-func NewGroup(conns gofyconsumer.Connections, tenantEnabled bool, tenantOpts tenant.Options) (*gofyworker.Group, error) {
-	tenantguard.Configure(tenantEnabled, tenantOpts)
+// The tenant plugin is not installed here. It is installed when the worker
+// process assembles its IO generation (appio.NewDBOnlyModuleFactory with the
+// tenant options), which happens before this group starts — so by the time any
+// worker runs, the pool is already filtered. A group therefore takes no tenant
+// section: it has no assembly point to apply it to.
+// 租户插件不在这里安装。它在 worker 进程装配 IO 代际时装好（appio.NewDBOnlyModuleFactory
+// 带上租户选项），位置早于本分组启动——因此任何 worker 运行时，池已经带上过滤。分组
+// 因此不再接收租户段：它没有可施加该选项的装配点。
+func NewGroup(conns gofyconsumer.Connections) (*gofyworker.Group, error) {
 	workers := []gofyworker.Worker{
 		newScanWorker(scanDefaults),
 		newOrderEventProducer(conns, orderEventProducerDefaults),

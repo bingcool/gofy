@@ -11,9 +11,11 @@ import (
 	"gorm.io/gorm"
 
 	gofyclaim "github.com/bingcool/gofy/support/claim"
+	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
-	"github.com/yourorg/demo-service/worker/tenantguard"
+	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 )
 
 // This file is the database-queue counterpart of scan.go: where that loop only
@@ -171,15 +173,21 @@ func newClaimScanProducer(cfg ClaimScanConfig) gofyworker.Worker {
 	cfg = cfg.withDefaults()
 	return gofyworker.Func("order-settle-producer", 1, func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
-		if !ok || rt.DB == nil {
-			return errors.New("order-settle-producer: runtime database is required")
+		if !ok {
+			return errors.New("order-settle-producer: runtime is required")
 		}
-		if err := tenantguard.Ensure(rt); err != nil {
+		// The producer writes to the queue's own table, so it takes the handle
+		// through the same generation the consumer uses — the one this process
+		// assembled before the group started.
+		// 生产者写的是队列自己的表，因此它与消费者用同一代际取句柄——就是本进程在分组
+		// 启动之前装配的那一代。
+		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		if err != nil {
 			return err
 		}
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := claimLogger(rt.Logger, id)
-		if err := ensureClaimTable(ctx, rt.DB, cfg.Table); err != nil {
+		if err := ensureClaimTable(ctx, db, cfg.Table); err != nil {
 			return fmt.Errorf("order-settle-producer: %w", err)
 		}
 
@@ -229,7 +237,7 @@ func newClaimScanProducer(cfg ClaimScanConfig) gofyworker.Worker {
 			// the job commit together or not at all.
 			// 每轮一个事务。否则在插入过程中 tick 的认领会看到半个批次；真实服务里这些 INSERT
 			// 本来就与创建工作的那个事务同生共死——业务行与任务行要么一起提交，要么都不提交。
-			if err := rt.DB.WithContext(enqueueCtx).Transaction(func(tx *gorm.DB) error {
+			if err := db.WithContext(enqueueCtx).Transaction(func(tx *gorm.DB) error {
 				for _, row := range rows {
 					if err := enqueueClaimJob(enqueueCtx, tx, cfg, row); err != nil {
 						return err
@@ -286,7 +294,15 @@ func enqueueClaimJob(ctx context.Context, db *gorm.DB, cfg ClaimScanConfig, job 
 	// Table() quotes the name and Create() binds every value, so the statement
 	// stays free of string building even though it is a sample.
 	// Table() 负责引用表名，Create() 绑定所有值，因此即使是样例，语句里也没有拼字符串。
-	if err := db.WithContext(ctx).Table(cfg.Table).Create(row).Error; err != nil {
+	// The job row belongs to no tenant: it is the queue's own bookkeeping, and
+	// this INSERT carries a map — no model for the plugin to probe, so without
+	// an explicit bypass a tenant-enabled deployment fails closed on every
+	// round. Saying Without here is a statement about the statement, not a
+	// workaround: the row is shared by whichever tenant's work it points at.
+	// 任务行不属于任何租户：它是队列自己的台账，而这条 INSERT 携带的是 map——没有可供
+	// 插件探测的模型，不显式绕过，开启租户隔离后每一轮都会失败关闭。这里的 Without 是
+	// 对这条语句本身的声明，不是权宜之计：这一行由它指向的那份工作共享，与租户无关。
+	if err := db.WithContext(tenant.Without(ctx)).Table(cfg.Table).Create(row).Error; err != nil {
 		return fmt.Errorf("enqueue claim job: %w", err)
 	}
 	return nil
@@ -303,15 +319,16 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 	cfg = cfg.withDefaults()
 	return gofyworker.Func("order-settle-consumer", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
-		if !ok || rt.DB == nil {
-			return errors.New("order-settle-consumer: runtime database is required")
+		if !ok {
+			return errors.New("order-settle-consumer: runtime is required")
 		}
-		if err := tenantguard.Ensure(rt); err != nil {
+		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		if err != nil {
 			return err
 		}
 		id, _ := gofyworker.IdentityFrom(ctx)
 		lg := claimLogger(rt.Logger, id)
-		if err := ensureClaimTable(ctx, rt.DB, cfg.Table); err != nil {
+		if err := ensureClaimTable(ctx, db, cfg.Table); err != nil {
 			return fmt.Errorf("order-settle-consumer: %w", err)
 		}
 
@@ -323,7 +340,7 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 		// Runner 在 Run 内构建，而不是在 NewGroup：它持有这一代的连接池，热更新后 runner 会用
 		// 新一代重新进入 Run。从"行被认领"到"结果落库"之间的事现在都在 claim.Runner 里——
 		// 这个 worker 只提供参数、一个 Handler 和两个结果钩子。
-		runner, err := gofyclaim.NewRunner(rt.DB, gofyclaim.RunnerConfig{
+		runner, err := gofyclaim.NewRunner(db, gofyclaim.RunnerConfig{
 			Config: gofyclaim.Config{
 				Table:       cfg.Table,
 				Job:         cfg.Job,
@@ -361,7 +378,7 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 				if data == nil {
 					return 0, nil
 				}
-				return settleOrderJob(ctx, rt.DB, data)
+				return settleOrderJob(ctx, db, data)
 			},
 			// Worker-side outcome hooks: logging only. Runner has already made
 			// the outcome durable (finish_handle_time / fail_reason + time), and

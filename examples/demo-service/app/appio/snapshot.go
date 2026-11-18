@@ -58,10 +58,34 @@ func Current() *Snapshot { return currentSnapshot.Current() }
 // Publish 把 s 发布为当前一代；s 为 nil 时撤回发布（脚本结束、测试清理）。
 func Publish(s *Snapshot) { currentSnapshot.Publish(s) }
 
-// PublishDB 发布一个只带默认数据库的快照。单元测试不执行 app/appio 模块生命周期，
+// NewSnapshotDB builds a generation that carries only the framework-managed
+// default pool. It exists for entries that never run the io module but still want
+// the same way of taking a handle: unit tests publish a pool they opened, and a
+// script that only needs the default database can do the same. Worker processes
+// do not use it — their generation comes from NewDBOnlyModuleFactory, which has a
+// registry and therefore the named instances a reused service may need.
+//
+// The Set owns no extra pool — NewSet only wraps the handle — so closing this
+// generation never closes db. Named instances are not reachable through it:
+// NewSet has no registry, so DBIO reports ErrUnknownInstance for any other name.
+// NewSnapshotDB 构造只带框架托管的 default 池的一代。它服务于不运行 io 模块、却想用
+// 同一种方式取连接的入口：单测发布自己打开的池，只需要默认库的脚本也可以这么做。
+// worker 进程不用它——那一代来自 NewDBOnlyModuleFactory，有 registry，因此复用的
+// service 需要的命名实例也在。
+//
+// 这个 Set 不拥有额外连接池——NewSet 只是包装句柄——因此关闭这一代永远不会关闭 db。
+// 它取不到命名实例：NewSet 没有 registry，其它名字的 DBIO 返回 ErrUnknownInstance。
+func NewSnapshotDB(db *gorm.DB) *Snapshot {
+	return &Snapshot{db: appdb.NewSet(db)}
+}
+
+// PublishDB publishes a generation that carries only the default database. Unit
+// tests do not run the app/appio module lifecycle and use a test connection
+// through this path; scripts and requests run Registry/Start and do not.
+// PublishDB 发布只带默认数据库的一代。单元测试不执行 app/appio 模块生命周期，
 // 用测试连接走这条路径；脚本与请求都跑 Registry/Start，不用它。
 func PublishDB(db *gorm.DB) {
-	Publish(&Snapshot{db: appdb.NewSet(db)})
+	Publish(NewSnapshotDB(db))
 }
 
 func newSnapshot(db *appdb.Set, redis *appredis.Set, amqp *appamqp.Set, kafka *appkafka.Set, rocketmq *approcketmq.Set, uuidint *appuuidint.Set, lock *appredislock.Set) *Snapshot {

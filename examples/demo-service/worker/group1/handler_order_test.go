@@ -13,6 +13,7 @@ import (
 	gofyworker "github.com/bingcool/gofy/support/worker"
 
 	"github.com/bingcool/gofy/core"
+	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/module/order/model"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
@@ -56,6 +57,17 @@ func newOrderHandlerContext(t *testing.T) (context.Context, *gorm.DB) {
 	}
 
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop(), DB: db})
+	// The handler resolves its handle through appio, exactly like a request, so
+	// the test publishes the pool as the process generation. That generation is
+	// process-wide and this helper opens a new database per test: without
+	// withdrawing it, the next case would resolve the previous (closed) pool and
+	// fail with "sql: database is closed". Cleanups run last-registered-first, so
+	// this one runs before the pool is closed.
+	// handler 与请求一样通过 appio 解析句柄，因此测试把池发布成进程代际。代际是进程级的，
+	// 而本辅助函数为每个用例新开数据库：不撤回的话，下一个用例会解析到上一个（已关闭的）
+	// 池，报 "sql: database is closed"。cleanup 后注册先执行，因此它先于关池运行。
+	appio.PublishDB(db)
+	t.Cleanup(func() { appio.Publish(nil) })
 	return gofyworker.WithRuntime(context.Background(), rt), db
 }
 

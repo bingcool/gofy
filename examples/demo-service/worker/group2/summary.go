@@ -9,7 +9,8 @@ import (
 
 	"github.com/bingcool/gofy/support/tenant"
 	gofyworker "github.com/bingcool/gofy/support/worker"
-	"github.com/yourorg/demo-service/worker/tenantguard"
+	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -56,10 +57,18 @@ func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 	}
 	return gofyworker.Func("report-summary", uint8(cfg.Concurrency), func(ctx context.Context) error {
 		rt, ok := gofyworker.RuntimeFrom(ctx)
-		if !ok || rt.DB == nil {
-			return errors.New("report-summary: runtime database is required")
+		if !ok {
+			return errors.New("report-summary: runtime is required")
 		}
-		if err := tenantguard.Ensure(rt); err != nil {
+		// Same entry shape as group1: the process assembled one io-db generation
+		// before any group started, and this loop resolves its handle through
+		// DBIO. group2 is a separate deployment, but its own process assembled the
+		// same generation, so nothing here depends on group1 having run.
+		// 与 group1 相同的入口形状：本进程在任何分组启动之前已装配一代 io-db，本循环通过
+		// DBIO 解析句柄。group2 是独立部署，但它自己的进程装配了同一代，因此这里不依赖
+		// group1 是否运行过。
+		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		if err != nil {
 			return err
 		}
 		id, _ := gofyworker.IdentityFrom(ctx)
@@ -80,7 +89,7 @@ func newSummaryWorker(cfg SummaryWorkerConfig) gofyworker.Worker {
 			queryCtx, cancel := context.WithTimeout(tenant.Without(gofyworker.DrainContext(ctx)), 10*time.Second)
 			defer cancel()
 			var rows []statusCount
-			if err := rt.DB.WithContext(queryCtx).
+			if err := db.WithContext(queryCtx).
 				Table("orders").
 				Select("status, COUNT(*) AS total").
 				Group("status").
