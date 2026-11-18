@@ -19,7 +19,6 @@ nacos:
     namespace_id: dev
     group_name: GO_GROUP
     weight: 1
-    ephemeral: true
     metadata:
       version: 1.0.0
 
@@ -40,7 +39,8 @@ nacos:
     # 两个 group_name 相同时不会发生第二次查询，集群内不要打开这个开关。
     group_name: GO_GROUP
 
-  # 监控配置变化(main.go的enableNacosSyncConfig配置是总开关)
+  # 监控配置变化。这里就是总开关：true 时 main 启动期拉取一次并持续监听，
+  # false 时只保留静态配置（nacos.enabled / NACOS_ENABLED=0 可整体关闭双文件布局）。
   enable_nacos_config_change_restart: true
   # 配置变更后的处理策略，按部署形态选择：
   #   reload  - 原地热更新，进程与 pid 不变（本地开发，默认）

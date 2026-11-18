@@ -152,7 +152,10 @@ nacos:
   `DEFAULT_GROUP`；
 - `discovery_service_client` 的 `namespace_id` / `group_name` 为空时继承
   `service_register` 的值。本包只负责解析，实际发现逻辑在客户端实现；
-- `service_register.ephemeral` 不读取，实例固定为临时实例，与 swoolefy 一致。
+- `service_register.ephemeral` 不是受支持的键，实例固定为临时实例，与 swoolefy 一致；
+  写进示例也不会有任何效果（demo 已不再保留这个键）。
+- 解析器忽略未知键（非严格解码）：`application.yaml` 与业务配置共用一个文件，
+  严格模式会把其它段的键当成错误。拼错的 Nacos 键因此不会报错，改键后请对照本表。
 
 ### 环境变量
 

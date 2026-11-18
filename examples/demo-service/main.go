@@ -21,12 +21,6 @@ var (
 	buildTime = "unknown"
 )
 
-// enableNacosSyncConfig 控制启动时是否从 Nacos 同步配置并监听变更。
-// 简单项目只维护本地 config.yaml 时设为 false；不创建 nacos.yaml 且不设置
-// NACOS_* 环境变量时，配置本身也是禁用的，效果相同。
-// 该开关只影响配置同步，不影响 nacos.yaml 中显式开启的服务注册。
-const enableNacosSyncConfig = false
-
 func main() {
 	ctx, stop := gofy.SignalContext(context.Background())
 	defer stop()
@@ -52,11 +46,18 @@ func main() {
 		// freshly launched process never runs on a stale local config.yaml. A
 		// restart is a start: it pulls before the old process is stopped, so a
 		// failed pull leaves the old process running instead of replacing it with
-		// one on stale settings.
+		// one on stale settings. The gate is the Nacos config itself: `nacos.enabled`
+		// (or NACOS_ENABLED=0 to opt out) decides whether the two-file layout is
+		// active, and `enable_nacos_config_change_restart` decides whether the
+		// watcher keeps running. There is no second switch in code that could
+		// silently disable the configured strategy.
 		// 启动期拉取：HTTP 与 worker 进程都只读一次配置，新起的进程因此不会用陈旧的本地
 		// config.yaml。restart 属于启动：它在停旧进程之前拉取，因此拉取失败时旧进程继续运行，
-		// 而不是被一个用旧配置起的新进程替换掉。
-		if enableNacosSyncConfig && nacosCfg.Enabled && plan.Sync {
+		// 而不是被一个用旧配置起的新进程替换掉。开关就是 Nacos 配置本身：`nacos.enabled`
+		// （或用 NACOS_ENABLED=0 关闭）决定双文件布局是否生效，
+		// `enable_nacos_config_change_restart` 决定监听是否持续。代码里没有第二道开关，
+		// 不会静默绕过配置好的策略。
+		if nacosCfg.Enabled && plan.Sync {
 			if _, err := nacos.Sync(ctx, nacosCfg); err != nil {
 				fatalf("sync nacos config: %v", err)
 			}
@@ -65,7 +66,7 @@ func main() {
 	// Only the HTTP process hosts the watcher: workers stay immutable at runtime
 	// and pick up changes through a rolling restart by the deployment layer.
 	// 只有 HTTP 进程挂监听：worker 运行期保持不变，配置变更由部署层滚动重启生效。
-	watchEnabled := plan.Watch && enableNacosSyncConfig && nacosCfg.Enabled && nacosCfg.Watch
+	watchEnabled := plan.Watch && nacosCfg.Enabled && nacosCfg.Watch
 
 	cfg := &config.Config{}
 	if plan.LoadConfig {
