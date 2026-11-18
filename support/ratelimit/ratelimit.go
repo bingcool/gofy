@@ -106,10 +106,19 @@ func (s *MemoryStore) Allow(_ context.Context, key string, limit int, window tim
 	if window <= 0 {
 		return Result{}, ErrInvalidWindow
 	}
-	now := s.clock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Read the clock inside the critical section. Taken before the lock, two
+	// callers could read t1 then t2, write them in the opposite order, and leave
+	// hits unsorted — which breaks the head-only pruning, sweep's newest-hit
+	// check and the RetryAfter/ResetAt arithmetic. Reading under the lock keeps
+	// timestamp order identical to append order.
+	// 在临界区内取时钟。若在加锁前取，两个调用方可能分别读到 t1、t2，却以相反顺序
+	// 写入，使 hits 乱序——只从头部清理、sweep 看最新命中、RetryAfter/ResetAt 计算
+	// 都建立有序前提之上。锁内取时钟保证时间戳顺序与追加顺序一致。
+	now := s.clock()
 
 	if s.keys == nil {
 		s.keys = make(map[string]*bucket)
