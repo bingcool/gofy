@@ -243,3 +243,18 @@ GOFY_TEST_MYSQL_DSN='user:password@tcp(127.0.0.1:3306)/app?charset=utf8mb4&parse
 ```
 
 集成测试会验证 `SELECT 1` 和 `MaxOpenConns` 是否生效。
+
+## 可选：行级租户隔离
+
+本包只负责打开连接，**默认不装任何租户插件**。需要按 `tenant_id` 自动过滤时，
+在拿到 `*gorm.DB` 之后自行安装 `support/tenant`（须排在 otel 的 GORM 插件之后）：
+
+```go
+gormDB, err := db.New(ctx, cfg, logger)
+_ = otel.InstrumentGORM(gormDB)          // 先：链路
+err = tenant.Instrument(gormDB, tenant.Options{}) // 后：租户
+```
+
+设计、边界与绕过方式见 [docs/gorm-tenant-design.md](../../docs/gorm-tenant-design.md)，
+使用说明见 [support/tenant/README.md](../tenant/README.md)。demo 的装配代用
+`tenant.enabled` 开关控制，默认关闭。
