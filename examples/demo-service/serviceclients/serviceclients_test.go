@@ -146,6 +146,25 @@ func TestNewReportsDeploymentGroupFallback(t *testing.T) {
 	}
 }
 
+// The budget has to leave room for both attempts: one per-attempt timeout only
+// reaches the primary, so the fallback would never run.
+// 预算必须容得下两次尝试：只给一次尝试的超时只够主调用，兜底永远不会执行。
+func TestCallBudgetCoversTwoAttempts(t *testing.T) {
+	clients, err := serviceclients.New(config.ClientConfig{Timeout: 2 * time.Second}, nacosconfig.Config{Enabled: false})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = clients.Close() })
+	if got, want := clients.CallBudget(), 5*time.Second; got != want {
+		t.Fatalf("CallBudget = %s, want %s", got, want)
+	}
+
+	var nilClients *serviceclients.Clients
+	if got, want := nilClients.CallBudget(), 2*config.DefaultClientTimeout+time.Second; got != want {
+		t.Fatalf("nil CallBudget = %s, want %s", got, want)
+	}
+}
+
 // A nil Clients is a legal state for a process without downstream calls; every
 // method has to stay callable.
 // nil Clients 是没有下游调用的进程的合法状态；每个方法都必须仍可调用。

@@ -55,8 +55,13 @@ func newDiscoveryCheckWorker(clients *serviceclients.Clients, cfg DiscoveryCheck
 		return gofyworker.Ticker(ctx, interval, func(ctx context.Context) error {
 			// DrainContext keeps an in-flight call alive through a shutdown so
 			// the log line shows the real outcome instead of a cancellation.
+			// The budget covers both the primary attempt and the fallback: a
+			// one-attempt deadline would be consumed by the primary timeout,
+			// leaving shouldDegrade a cancelled context and no second try.
 			// DrainContext 让在途调用跨过停机，日志里记录的是真实结果而不是被取消。
-			callCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), 5*time.Second)
+			// 预算覆盖主调用与兜底两次尝试：只给一次尝试的 deadline 会被主调用超时
+			// 耗尽，shouldDegrade 只会看到已取消的 context，兜底不会发生。
+			callCtx, cancel := context.WithTimeout(gofyworker.DrainContext(ctx), clients.CallBudget())
 			defer cancel()
 
 			started := time.Now()

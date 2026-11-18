@@ -84,6 +84,7 @@ type Clients struct {
 	resolver    *nacosadapter.Resolver
 	source      string
 	fallbackURL string
+	timeout     time.Duration
 
 	// lg arrives after construction: the clients are built before the
 	// application exists, and only the application owns the configured logger.
@@ -113,7 +114,7 @@ func New(cfg config.ClientConfig, nacosCfg nacosconfig.Config) (*Clients, error)
 	timeout := cfg.Timeout
 	fallbackURL := strings.TrimSpace(cfg.InnerExternalBaseURI)
 
-	clients := &Clients{source: "not configured", fallbackURL: fallbackURL}
+	clients := &Clients{source: "not configured", fallbackURL: fallbackURL, timeout: timeout}
 
 	// Without Nacos the base URL is not a fallback but the only address there
 	// is: offline development, CI and a canary all take this path.
@@ -242,6 +243,21 @@ func (c *Clients) DemoService() DemoService {
 		return unconfigured{}
 	}
 	return c.demo
+}
+
+// CallBudget is the time a caller should allow for one logical call that may
+// degrade: two full attempts plus a one-second margin for the fallback's
+// lookup and connect. A shorter caller deadline is not just tighter — the
+// first attempt consumes it, so shouldDegrade sees a cancelled context and the
+// fallback never runs.
+// CallBudget 是允许一次可能降级的逻辑调用使用的时长：两次完整尝试，再加一秒余量
+// 给兜底的寻址与建连。调用方 deadline 更短不只是更紧——第一次尝试就会耗尽它，
+// shouldDegrade 看到已取消的 context，兜底根本不会执行。
+func (c *Clients) CallBudget() time.Duration {
+	if c == nil || c.timeout <= 0 {
+		return 2*config.DefaultClientTimeout + time.Second
+	}
+	return 2*c.timeout + time.Second
 }
 
 // Source describes how the clients are addressed, for the one startup log line

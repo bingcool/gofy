@@ -103,7 +103,11 @@ group3 是运维探针，独立进程启动才能证明"别的进程能发现我
 
 group3 的调用方不是注册自己的那个 HTTP 进程，因此它成功一次就同时验证了四件事：注册写入
 了 Nacos、resolver 用对了 namespace/group、类型化客户端拼对了路由、HTTP 服务真的可达。
-失败只记 `warn` 不退出：注册中心故障时，负责报告故障的进程不该先死。
+失败只记 `warn` 不退出：注册中心故障时，负责报告故障的进程不该先死。每次调用给
+`clients.CallBudget()`（2×客户端 timeout + 1s），这样主调用超时后 `shouldDegrade`
+仍有余量改打 `inner_external_base_uri`；只给一次尝试的 deadline 会让兜底永远不触发。
+`inner_external_base_uri` 为空时兜底本就不启用，启动日志的 `client=...` 行会显示
+是否带 `fallback`。
 两者的副本数、发布节奏、资源画像都不同，混在一个进程里只能取交集。
 
 十一个消费者总是注册进 group1，`--list` 一定列出它们——"一个订阅一个文件"就是这个意思。
