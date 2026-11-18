@@ -661,7 +661,7 @@ func (a *App) startNacosRegistration(ctx context.Context, listener net.Listener,
 	if regCfg.Register.Port == 0 {
 		regCfg.Register.Port = listenerPort(listener, a.opts.http.Port)
 	}
-	registrar, err := nacos.NewRegistrar(regCfg, lg)
+	registrar, err := nacos.NewRegister(regCfg, lg)
 	if err != nil {
 		return fmt.Errorf("gofy: nacos service registration: %w", err)
 	}

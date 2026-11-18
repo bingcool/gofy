@@ -13,10 +13,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// newRaceRegistrar builds a registrar pointed at fake, with a one-second
+// newRaceRegister builds a registrar pointed at fake, with a one-second
 // heartbeat so a leaked loop becomes visible quickly.
-// newRaceRegistrar 构造一个指向 fake 的注册器；心跳间隔取 1 秒，泄漏的循环能很快暴露。
-func newRaceRegistrar(t *testing.T, fake *fakeNaming) *Registrar {
+// newRaceRegister 构造一个指向 fake 的注册器；心跳间隔取 1 秒，泄漏的循环能很快暴露。
+func newRaceRegister(t *testing.T, fake *fakeNaming) *Register {
 	t.Helper()
 	server := httptest.NewServer(fake)
 	t.Cleanup(server.Close)
@@ -34,26 +34,26 @@ func newRaceRegistrar(t *testing.T, fake *fakeNaming) *Registrar {
 		Port:              18080,
 		HeartbeatInterval: time.Second,
 	}
-	reg, err := NewRegistrar(cfg, zap.NewNop())
+	reg, err := NewRegister(cfg, zap.NewNop())
 	if err != nil {
-		t.Fatalf("NewRegistrar: %v", err)
+		t.Fatalf("NewRegister: %v", err)
 	}
 	return reg
 }
 
-// TestRegistrarStopWaitsForInFlightStart is the regression for the lifecycle
+// TestRegisterStopWaitsForInFlightStart is the regression for the lifecycle
 // race: Stop used to observe "started" during registration, flip it back, return
 // success — and then Start would finish, start the heartbeat, and keep renewing
 // an instance that had already been deregistered. Now Stop waits for Start.
-// TestRegistrarStopWaitsForInFlightStart 是生命周期竞态的回归测试：过去 Stop 会在
+// TestRegisterStopWaitsForInFlightStart 是生命周期竞态的回归测试：过去 Stop 会在
 // 注册过程中看到"已启动"，把它翻回去并成功返回；随后 Start 完成、启动心跳，继续为一个
 // 已经注销的实例续约。现在 Stop 会等 Start 结束。
-func TestRegistrarStopWaitsForInFlightStart(t *testing.T) {
+func TestRegisterStopWaitsForInFlightStart(t *testing.T) {
 	fake := &fakeNaming{
 		registerGate:    make(chan struct{}),
 		registerStarted: make(chan struct{}),
 	}
-	reg := newRaceRegistrar(t, fake)
+	reg := newRaceRegister(t, fake)
 
 	startErr := make(chan error, 1)
 	go func() { startErr <- reg.Start(context.Background()) }()
@@ -99,17 +99,17 @@ func TestRegistrarStopWaitsForInFlightStart(t *testing.T) {
 	}
 }
 
-// TestRegistrarStopHonoursDeadlineWhileStartRegisters pins the other half of the
+// TestRegisterStopHonoursDeadlineWhileStartRegisters pins the other half of the
 // contract: waiting for Start must not ignore the caller's deadline, and the
 // registrar stays usable afterwards.
-// TestRegistrarStopHonoursDeadlineWhileStartRegisters 钉住契约的另一半：等待 Start
+// TestRegisterStopHonoursDeadlineWhileStartRegisters 钉住契约的另一半：等待 Start
 // 不能无视调用方的 deadline，而且之后注册器仍然可用。
-func TestRegistrarStopHonoursDeadlineWhileStartRegisters(t *testing.T) {
+func TestRegisterStopHonoursDeadlineWhileStartRegisters(t *testing.T) {
 	fake := &fakeNaming{
 		registerGate:    make(chan struct{}),
 		registerStarted: make(chan struct{}),
 	}
-	reg := newRaceRegistrar(t, fake)
+	reg := newRaceRegister(t, fake)
 
 	startErr := make(chan error, 1)
 	go func() { startErr <- reg.Start(context.Background()) }()
@@ -139,14 +139,14 @@ func TestRegistrarStopHonoursDeadlineWhileStartRegisters(t *testing.T) {
 	}
 }
 
-// TestRegistrarStopWithCancelledContextStillDeregisters guards the shutdown
+// TestRegisterStopWithCancelledContextStillDeregisters guards the shutdown
 // behaviour the lifecycle slot must not break: a Stop whose context was already
 // cancelled by the shutdown still deregisters, exactly as before.
-// TestRegistrarStopWithCancelledContextStillDeregisters 守护生命周期操作位不能破坏的
+// TestRegisterStopWithCancelledContextStillDeregisters 守护生命周期操作位不能破坏的
 // 关闭行为：关闭流程已经取消了 ctx，Stop 仍然要完成注销，与之前一致。
-func TestRegistrarStopWithCancelledContextStillDeregisters(t *testing.T) {
+func TestRegisterStopWithCancelledContextStillDeregisters(t *testing.T) {
 	fake := &fakeNaming{}
-	reg := newRaceRegistrar(t, fake)
+	reg := newRaceRegister(t, fake)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -169,16 +169,16 @@ func TestRegistrarStopWithCancelledContextStillDeregisters(t *testing.T) {
 	}
 }
 
-// TestRegistrarConcurrentStartRegistersOnce keeps idempotency honest under
+// TestRegisterConcurrentStartRegistersOnce keeps idempotency honest under
 // concurrency: the second Start joins the first instead of registering again.
-// TestRegistrarConcurrentStartRegistersOnce 保证并发下仍是幂等的：第二个 Start 加入
+// TestRegisterConcurrentStartRegistersOnce 保证并发下仍是幂等的：第二个 Start 加入
 // 第一个，而不是再注册一次。
-func TestRegistrarConcurrentStartRegistersOnce(t *testing.T) {
+func TestRegisterConcurrentStartRegistersOnce(t *testing.T) {
 	fake := &fakeNaming{
 		registerGate:    make(chan struct{}),
 		registerStarted: make(chan struct{}),
 	}
-	reg := newRaceRegistrar(t, fake)
+	reg := newRaceRegister(t, fake)
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
