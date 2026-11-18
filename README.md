@@ -121,8 +121,9 @@ app, err := gofy.New(
 - **限流**：滑动窗口，按 `客户端 IP + 方法 + 路由` 分桶；响应带 `X-RateLimit-*`，
   超限返回 `429 / 42900` 和 `Retry-After`。单进程用
   `ratelimit.NewMemoryStore()`；多实例用 `support/redis` +
-  `ratelimit/redisstore` 共享计数。存储故障默认返回 `503 / 50300`，
-  `FailOpen: true` 可放行。
+  `ratelimit/redisstore` 共享计数。同一个 Store 可以服务多条 Window 不同的规则，
+  实现按 key 记录自己的窗口，清理不会误删其他规则仍在有效期内的计数。存储故障默认
+  返回 `503 / 50300`，`FailOpen: true` 可放行。
 - **安全响应头**：默认 `nosniff`、`DENY`、`strict-origin-when-cross-origin`，
   可追加 HSTS、CSP、Permissions-Policy 和自定义头；含换行的值在启动时报错。
 - **404 / 405**：未匹配路径和错误方法统一走响应包络（`40400` / `40500`），405 带

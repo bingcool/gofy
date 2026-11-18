@@ -75,6 +75,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/ratelimit`: `MemoryStore` sweeps each key against the window that key
+  was counted in, instead of the window of whichever rule happened to call last.
+  `Store` is an exported interface and nothing said a store must serve only one
+  window, so sharing one memory store between rules with different windows — a
+  one-second route limit and a one-hour login limit, say — let the short rule
+  delete the long rule's still-live counters every time it ran; the under-counted
+  key then admitted requests past its own limit. The window now lives on the key
+  (and is rebound when a configuration change moves a key to another window), so
+  a sweep can only drop counters that can no longer contribute. Cleanup also runs
+  once per `gcPeriod` (one minute) instead of once per `max(gcPeriod, window)`,
+  which used to defer the sweep for an hour on a store with hourly rules.
 - `make cgo-free` now lists dependencies with `CGO_ENABLED=0` too. The scan ran
   under the default environment, where `go list` counts files that only compile
   on that platform with cgo — `prometheus/client_golang` ships
