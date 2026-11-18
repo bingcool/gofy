@@ -748,8 +748,9 @@ nacos:
 规则：
 
 - `nacos.Load` 合并两个文件，优先级为 文件 > 环境变量 > 默认值；
-- 该布局默认启用 Nacos（与 swoolefy 一样，文件存在即视为配置由远端托管），
-  `nacos.enabled: false` 或 `NACOS_ENABLED=0` 可关闭；
+- 该布局默认启用 Nacos（与 swoolefy 一样，文件存在即视为配置由远端托管）。关闭写在
+  文件里：`nacos.enabled: false`。**`enabled` 以文件为准**——任一文件写了 `nacos.enabled`，
+  `NACOS_ENABLED` 就不再参与；只有两个文件都没写时环境变量才决定，都没写则默认开启；
 - 命名空间优先级：`nacos.yaml` 的 `namespace`（或 `NACOS_NAMESPACE`）→
   `service_config.tenant`（或 `NACOS_TENANT`）→ public；
 - `enable_nacos_config_change_restart` 对应 `Config.Watch`，控制启动后是否继续监听
@@ -791,7 +792,7 @@ nacos:
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `NACOS_ENABLED` | 是否启用，`1`/`true` 启用 | `false`（两文件布局下默认 `true`） |
+| `NACOS_ENABLED` | 是否启用，`1`/`true` 启用；文件里写了 `nacos.enabled` 时该变量不参与 | `false`（两文件布局下默认 `true`） |
 | `NACOS_ADDR` | 服务地址，优先级高于 `NACOS_HOST`/`NACOS_PORT` | `http://127.0.0.1:8848` |
 | `NACOS_HOST` / `NACOS_PORT` | 服务地址与端口 | `127.0.0.1` / `8848` |
 | `NACOS_USERNAME` / `NACOS_PASSWORD` | 开启鉴权的集群才需要 | 空 |

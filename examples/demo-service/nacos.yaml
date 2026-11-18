@@ -1,5 +1,10 @@
 # Nacos 服务器连接配置（优先于环境变量；未配置项再读 NACOS_* 环境变量）
+# enabled 一旦写在这里就以文件为准：设为 false 时，即使环境里导出了 NACOS_ENABLED=1
+# 也不会启用；只有删掉这个键，环境变量才参与。application.yaml 里的同名键同样优先。
+# nacos.enabled=true（文件没写这个键时看 NACOS_ENABLED=1）相当于 Nacos 总开关：
+# 启动服务就会拉取远端配置覆盖本地 config.yaml。
 nacos:
+  enabled: false
   host: 192.168.10.187
   port: 8848
   username: ''

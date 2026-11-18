@@ -449,8 +449,9 @@ func LoadConfig(path string) (Config, error) {
 // it is missing, the legacy single-file keys keep working.
 //
 // In this layout Nacos is enabled by default, mirroring swoolefy where the
-// presence of nacos.yaml means the configuration is managed remotely. Set
-// nacos.enabled: false or NACOS_ENABLED=0 to opt out.
+// presence of nacos.yaml means the configuration is managed remotely. To opt
+// out, write nacos.enabled: false: an explicit switch in either file wins over
+// NACOS_ENABLED, which only fills a file that says nothing about it.
 // Load 读取 swoolefy 风格的两个文件：nacosPath 存服务端连接信息，appPath
 // （通常是 application.yaml）存配置中心入口与变更监听开关。
 //
@@ -460,7 +461,8 @@ func LoadConfig(path string) (Config, error) {
 // 仍可使用单文件布局的旧键。
 //
 // 该布局下 Nacos 默认启用，与 swoolefy 一致：存在 nacos.yaml 即表示配置由远端
-// 托管。要关闭请显式设置 nacos.enabled: false 或 NACOS_ENABLED=0。
+// 托管。要关闭请写 nacos.enabled: false —— 任一文件里的显式开关优先于
+// NACOS_ENABLED，后者只在文件没有表态时生效。
 func Load(nacosPath, appPath string) (Config, error) {
 	cfg := FromEnv()
 	n, err := readNacosFile(nacosPath)

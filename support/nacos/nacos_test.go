@@ -351,6 +351,75 @@ func TestLoadFileWinsOverEnv(t *testing.T) {
 	}
 }
 
+// TestLoadEnabledComesFromTheFile pins the switch's precedence: an explicit
+// nacos.enabled in either file decides, and NACOS_ENABLED only fills a file
+// that stays silent. A leftover export in an operator's shell must not undo
+// "disabled in the file" — otherwise writing it there would be pointless.
+// TestLoadEnabledComesFromTheFile 固化开关的优先级：任一文件里显式写的 nacos.enabled
+// 说了算，NACOS_ENABLED 只在文件没有表态时才生效。运维 shell 里一个残留的导出不该
+// 推翻"文件里已关闭"——否则写在文件里就没有意义。
+func TestLoadEnabledComesFromTheFile(t *testing.T) {
+	t.Run("nacos.yaml false beats NACOS_ENABLED=1", func(t *testing.T) {
+		clearNacosEnv(t)
+		t.Setenv("NACOS_ENABLED", "1")
+		dir := t.TempDir()
+		nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  enabled: false\n  host: 10.0.0.2\n")
+
+		cfg, err := Load(nacosPath, filepath.Join(dir, "application.yaml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Enabled {
+			t.Fatal("Enabled = true, want the nacos.yaml switch to win")
+		}
+	})
+
+	t.Run("application.yaml true beats NACOS_ENABLED=0", func(t *testing.T) {
+		clearNacosEnv(t)
+		t.Setenv("NACOS_ENABLED", "0")
+		dir := t.TempDir()
+		nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+		appPath := writeTestFile(t, dir, "application.yaml", "nacos:\n  enabled: true\n")
+
+		cfg, err := Load(nacosPath, appPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Enabled {
+			t.Fatal("Enabled = false, want the application.yaml switch to win")
+		}
+	})
+
+	t.Run("environment decides when no file sets it", func(t *testing.T) {
+		clearNacosEnv(t)
+		t.Setenv("NACOS_ENABLED", "0")
+		dir := t.TempDir()
+		nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+
+		cfg, err := Load(nacosPath, filepath.Join(dir, "application.yaml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Enabled {
+			t.Fatal("Enabled = true, want NACOS_ENABLED=0 to apply")
+		}
+	})
+
+	t.Run("layout default stays on", func(t *testing.T) {
+		clearNacosEnv(t)
+		dir := t.TempDir()
+		nacosPath := writeTestFile(t, dir, "nacos.yaml", "nacos:\n  host: 10.0.0.2\n")
+
+		cfg, err := Load(nacosPath, filepath.Join(dir, "application.yaml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Enabled {
+			t.Fatal("Enabled = false, want the two-file layout to default on")
+		}
+	})
+}
+
 func TestLoadExplicitDisableAndMissingApplicationFile(t *testing.T) {
 	clearNacosEnv(t)
 	dir := t.TempDir()

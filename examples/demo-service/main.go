@@ -47,14 +47,15 @@ func main() {
 		// restart is a start: it pulls before the old process is stopped, so a
 		// failed pull leaves the old process running instead of replacing it with
 		// one on stale settings. The gate is the Nacos config itself: `nacos.enabled`
-		// (or NACOS_ENABLED=0 to opt out) decides whether the two-file layout is
-		// active, and `enable_nacos_config_change_restart` decides whether the
+		// decides whether the two-file layout is active — the file wins, NACOS_ENABLED
+		// only applies when neither file sets it — and
+		// `enable_nacos_config_change_restart` decides whether the
 		// watcher keeps running. There is no second switch in code that could
 		// silently disable the configured strategy.
 		// 启动期拉取：HTTP 与 worker 进程都只读一次配置，新起的进程因此不会用陈旧的本地
 		// config.yaml。restart 属于启动：它在停旧进程之前拉取，因此拉取失败时旧进程继续运行，
 		// 而不是被一个用旧配置起的新进程替换掉。开关就是 Nacos 配置本身：`nacos.enabled`
-		// （或用 NACOS_ENABLED=0 关闭）决定双文件布局是否生效，
+		// 决定双文件布局是否生效（以文件为准，NACOS_ENABLED 只在文件未表态时生效），
 		// `enable_nacos_config_change_restart` 决定监听是否持续。代码里没有第二道开关，
 		// 不会静默绕过配置好的策略。
 		if nacosCfg.Enabled && plan.Sync {

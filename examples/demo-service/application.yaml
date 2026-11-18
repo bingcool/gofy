@@ -40,7 +40,8 @@ nacos:
     group_name: GO_GROUP
 
   # 监控配置变化。这里就是总开关：true 时 main 启动期拉取一次并持续监听，
-  # false 时只保留静态配置（nacos.enabled / NACOS_ENABLED=0 可整体关闭双文件布局）。
+  # Nacos 整体启停看 nacos.yaml 的 enabled——写了就以文件为准，NACOS_ENABLED
+  # 只在文件没有表态时才参与。
   enable_nacos_config_change_restart: true
   # 配置变更后的处理策略，按部署形态选择：
   #   reload  - 原地热更新，进程与 pid 不变（本地开发，默认）
