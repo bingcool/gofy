@@ -132,6 +132,21 @@ var (
 	_ gofyworker.Concurrent = (*QueuesConsumer)(nil)
 )
 
+// The database requirement is the same kind of promise: every adapter has to
+// expose its idempotency switch through DefaultDBRequirer, or a deployment
+// without db.default would bind a consumer to a pool that is not there and only
+// discover it inside Run.
+// 数据库要求是同一份承诺：每个适配器都必须通过 DefaultDBRequirer 暴露自己的幂等开关，
+// 否则没有 db.default 的部署会把消费者绑到一个不存在的池上，而且直到 Run 里才发现。
+var (
+	_ gofyworker.DefaultDBRequirer = (*KafkaConsumer)(nil)
+	_ gofyworker.DefaultDBRequirer = (*AMQPConsumer)(nil)
+	_ gofyworker.DefaultDBRequirer = (*RocketMQConsumer)(nil)
+	_ gofyworker.DefaultDBRequirer = (*QueuesConsumer)(nil)
+	_ gofyworker.DefaultDBRequirer = (*DelayAMQPConsumer)(nil)
+	_ gofyworker.DefaultDBRequirer = (*DelayQueuesConsumer)(nil)
+)
+
 // Message is the protocol-independent view of one delivery. Each consumer
 // adapter converts its own record type into this struct, so the handling chain
 // below is written once instead of four times.
@@ -337,10 +352,24 @@ type Processor struct {
 }
 
 // NewProcessor builds the shared chain. It fails when idempotency is requested
-// without a database: silently dropping deduplication would turn every
-// redelivery into a second side effect.
-// NewProcessor 构造共用链路。开启幂等却没有数据库时直接失败：静默放弃去重会让
-// 每次重投都变成第二次副作用。
+// without db.default: silently dropping deduplication would turn every
+// redelivery into a second side effect, and the ledger cannot live in a named
+// instance.
+//
+// The ledger is process-wide and owns its schema, so it belongs to the
+// framework-managed pool rather than to a business database that may be a read
+// replica or a least-privilege account. The message names db.default on
+// purpose: "requires a database" reads as if any configured instance would do,
+// which is exactly the wrong conclusion for a deployment that only configures
+// db.order. The worker host turns the same requirement into a startup error, so
+// this branch is the defence for callers that build a processor directly.
+// NewProcessor 构造共用链路。开启幂等却没有 db.default 时直接失败：静默放弃去重会让
+// 每次重投都变成第二次副作用，而台账不能放在命名实例里。
+//
+// 台账是进程级的、自带 schema，因此属于框架托管的池，而不是业务库——后者可能是只读副本或
+// 最小权限账号。文案刻意点名 db.default："requires a database" 读起来像"配了哪个实例都
+// 行"，而对只配了 db.order 的部署来说，这恰恰是错误结论。worker 宿主会把同一个要求变成
+// 启动期错误，因此这里只是给直接构造处理器的调用方兜底。
 func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 	if rt == nil {
 		return nil, errors.New("consumer runtime is required")
@@ -378,7 +407,7 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 	}
 	if cfg.Idempotency {
 		if rt.DB == nil {
-			return nil, fmt.Errorf("consumer %s: idempotency requires a database", cfg.Consumer)
+			return nil, fmt.Errorf("consumer %s: idempotency requires db.default, the framework-managed database; named instances such as db.order cannot back the ledger", cfg.Consumer)
 		}
 		p.deduper = &deduper{
 			db:          rt.DB,

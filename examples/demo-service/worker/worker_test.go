@@ -133,3 +133,38 @@ func TestRegisterRejectsUnknownInstance(t *testing.T) {
 		t.Fatalf("error = %v, want it to name the missing instance", err)
 	}
 }
+
+// TestRegisteredConsumersRequireDefaultDB pins the startup gate for the
+// deployment shape that exposed the gap: a worker process configured with
+// db.order and no db.default. group1's subscriptions all enable the ledger, so
+// the host must refuse to start with a message naming db.default instead of
+// letting each consumer fail inside Run and restart forever behind a 503.
+//
+// The second half is the guard against over-correction: with the pool present
+// the same groups pass, so the gate can never become "every worker needs
+// db.default".
+// TestRegisteredConsumersRequireDefaultDB 固定这次暴露出的部署形状所对应的启动闸门：
+// 只配 db.order、没有 db.default 的 worker 进程。group1 的订阅都开了台账，因此宿主必须
+// 拒绝启动，并在错误里点名 db.default，而不是让每个消费者在 Run 里失败、无限重启、一直
+// 503。
+//
+// 后半段是防"矫枉过正"的：池存在时同样的分组通过，闸门因此不会退化成"所有 worker 都
+// 需要 db.default"。
+func TestRegisteredConsumersRequireDefaultDB(t *testing.T) {
+	groups, err := appworker.Register(testConnections(), nil, supportai.Config{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	err = gofyworker.RequireDefaultDB(groups, false)
+	if err == nil {
+		t.Fatal("worker process without db.default started anyway; the failure would surface inside Run")
+	}
+	for _, want := range []string{"db.default", "db.order", "group1/order-kafka-consumer"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to mention %q", err, want)
+		}
+	}
+	if err := gofyworker.RequireDefaultDB(groups, true); err != nil {
+		t.Fatalf("db.default present: %v", err)
+	}
+}

@@ -110,7 +110,10 @@ broker 死信时用的是它自己队列上的参数，不是本侧构造的 `De
 给出具体键，订阅只写 `BindingKey`（如 `order.*`）。topic 拓扑的 key 不能为空，注册阶段
 会拒绝空 binding——那种队列永远收不到消息。direct 订阅保持默认即可。
 
-`Idempotency` 需要数据库，因此默认关闭：打开它就从"handler 必须幂等"变成"重投是空操作"。
+`Idempotency` 需要 **`db.default`（框架托管的连接池）**，因此默认关闭：打开它就从
+"handler 必须幂等"变成"重投是空操作"。台账是进程级、自带 DDL 的一张表，所以不放在命名实例
+（`db.order`）里；只配命名实例的 worker 进程会在启动阶段被 `worker.RequireDefaultDB` 拒绝，
+而不是让消费者在 `Run` 里失败、无限重启、就绪一直 503。
 `MaxAttempts` 只在开启幂等时生效——没有台账就没有地方记尝试次数。
 
 AMQP 的持久化用反向字段 `NonDurable`：普通 bool 的零值会让"重启即丢队列"变成默认，

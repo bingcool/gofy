@@ -116,6 +116,28 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	})
 	a.rt = rt
 
+	// Fail before anything starts when a worker cannot run without db.default.
+	// The check has to sit here rather than inside Run: a consumer that enables
+	// the idempotency ledger and finds no pool returns an error from Run, and
+	// the default RestartOnError policy would restart it forever while
+	// readiness never closes — a process that looks alive and serves nothing.
+	// At this point the same condition is still a startup error carrying a
+	// reason, and the operator sees it in the terminal instead of a 503 loop.
+	//
+	// Only workers that declare the requirement are checked: a group built on
+	// named instances (db.order) is a valid deployment without db.default, and
+	// rejecting it here would undo the database-only generation.
+	// 在启动任何东西之前，拦下"离不开 db.default 的 worker"。检查必须在这里而不是 Run
+	// 里：开启幂等台账却找不到池的消费者会从 Run 返回错误，默认的 RestartOnError 策略于是
+	// 无限重启它、就绪永不放行——一个看着活着、什么也不干的进程。在这个位置，同一个条件
+	// 仍是带原因的启动错误，运维在终端就能看到，而不是面对 503 循环。
+	//
+	// 只检查声明了该要求的 worker：靠命名实例（db.order）构建的分组在没有 db.default 时
+	// 是合法部署，在这里拒绝它会废掉"只装数据库"的那一代。
+	if err := worker.RequireDefaultDB(groups, rt.DB != nil); err != nil {
+		return a.abort(err)
+	}
+
 	// Worker-side IO assembly. A worker process never runs ModuleFactories, so
 	// without this there is no published generation and every entry would have to
 	// fake one out of Runtime.DB. The position carries two meanings: before the

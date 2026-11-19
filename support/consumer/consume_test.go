@@ -115,10 +115,13 @@ func TestTruncateBytes(t *testing.T) {
 }
 
 // TestProcessorRequiresDatabase keeps a misconfiguration loud: idempotency
-// without a database cannot be silently downgraded, because that would repeat
-// every side effect on redelivery.
-// TestProcessorRequiresDatabase 让配置错误足够响：没有数据库的幂等不能被静默降级，
-// 否则每次重投都会重复副作用。
+// without db.default cannot be silently downgraded, because that would repeat
+// every side effect on redelivery. The message has to name db.default — "needs
+// a database" reads as if db.order would do, which is the wrong fix for the
+// deployment that only configures the named instance.
+// TestProcessorRequiresDatabase 让配置错误足够响：没有 db.default 的幂等不能被静默
+// 降级，否则每次重投都会重复副作用。文案必须点名 db.default——"需要数据库"读起来像
+// db.order 也能顶上，而对只配了命名实例的部署来说，那是错误的修法。
 func TestProcessorRequiresDatabase(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
 	_, err := NewProcessor(rt, ProcessorConfig{
@@ -130,8 +133,10 @@ func TestProcessorRequiresDatabase(t *testing.T) {
 	if err == nil {
 		t.Fatal("NewProcessor succeeded without a database, want an error")
 	}
-	if !strings.Contains(err.Error(), "idempotency requires a database") {
-		t.Fatalf("error = %v, want it to name the missing database", err)
+	for _, want := range []string{"idempotency requires db.default", "db.order"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to mention %q", err, want)
+		}
 	}
 }
 

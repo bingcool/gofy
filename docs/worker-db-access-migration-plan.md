@@ -314,3 +314,30 @@ App（打开 / instrument / 关闭 db.default，生命周期由框架持有）
    `NewDBOnlyModuleFactory` 照样装配，失败推迟到首次取用，与请求一致。
 2. **关停顺序**：`Stop` 由 `a.started` 驱动，排在分组 drain 之后、`gofydb.Close` 之前。
    worker 装配走的正是 HTTP 模块同一套 cleanup 逆序停止逻辑，没有第二条关闭路径。
+
+### 11.7 幂等台账仍绑定 db.default，改为启动期检查（2026-11-19 审计）
+
+命名实例打通后暴露的第一个边界：`consumer.NewProcessor` 的台账只认 `rt.DB`。只配 `db.order`
+的部署可以跑业务 IO，但任何一个 `Idempotency: true` 的消费者都会在 `Run` 里失败——默认
+`RestartOnError` 会无限重启它；消费者又实现了 `ReportsReady`，于是就绪闸门永不放行，
+`/healthz` 一直 503，而进程看起来是活着的。
+
+结论是**保留**"台账在 db.default"这条约束，而不是让消费者支持任意库：`support/consumer`
+是 support 层，拿不到 `appio` 的 registry；台账是进程级、自带 DDL（`AutoMigrate`）的一张表，
+而业务库可能只读或只有最小权限；集中在一个池也意味着一处保留策略与监控。
+
+变化只在**发现时机与文案**：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 检查时机 | 消费者 `Run` → `start()` → `NewProcessor` | 那里仍保留，但 worker 宿主在 `Runtime` 就绪后、分组启动前先查一遍 |
+| 检查依据 | 无 | `worker.DefaultDBRequirer`（六个消费者适配器实现，返回 `cfg.Idempotency`）+ `worker.RequireDefaultDB(groups, rt.DB != nil)` |
+| 文案 | `idempotency requires a database` | `idempotency requires db.default, the framework-managed database; named instances such as db.order cannot back the ledger` |
+| 错误内容 | 只有消费者名 | 启动错误列出全部 `group/worker`，并说明命名实例不能顶替 |
+
+检查由接口驱动，而不是"worker 进程一律要求 default"：只配命名实例的部署对轮询任务仍然合法
+（11.6 第 1 条继续成立），业务侧 `DBIO(ctx, "default")` 的惰性 `ErrNotConfigured` 也不变——
+框架只对自己拥有的依赖做启动期断言。
+
+`worker_host.go` 里这一步放在 `a.rt = rt` 之后、`startWorkerModules` 之前：配置错了就不该
+先建连，更不该先把探针拉到 503 再失败。

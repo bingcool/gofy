@@ -193,6 +193,12 @@ func (c *DelayAMQPConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concu
 // 并不能证明订阅已经存在。
 func (c *DelayAMQPConsumer) ReportsReady() {}
 
+// RequiresDefaultDB reports the ledger's dependency on db.default: with
+// idempotency on, this consumer cannot run without the framework-managed pool.
+// RequiresDefaultDB 报告台账对 db.default 的依赖：幂等开启时，该消费者离不开框架
+// 托管的连接池。
+func (c *DelayAMQPConsumer) RequiresDefaultDB() bool { return c.cfg.Idempotency }
+
 // QueueConfig builds the transport-level configuration for this subscription.
 // A producer should publish through it, so the staging and target topologies
 // cannot drift apart between the two sides of the loop. Passive is part of that

@@ -119,6 +119,12 @@ func (c *DelayQueuesConsumer) Concurrency() uint8 { return concurrency(c.cfg.Con
 // 不等于"延迟队列可用"。
 func (c DelayQueuesConsumer) ReportsReady() {}
 
+// RequiresDefaultDB reports the ledger's dependency on db.default: with
+// idempotency on, this consumer cannot run without the framework-managed pool.
+// RequiresDefaultDB 报告台账对 db.default 的依赖：幂等开启时，该消费者离不开框架
+// 托管的连接池。
+func (c DelayQueuesConsumer) RequiresDefaultDB() bool { return c.cfg.Idempotency }
+
 // Run owns the subscription: it connects, polls the delayed ZSET until ctx is
 // cancelled and releases the client on the way out.
 // Run 拥有订阅：建连、轮询延迟 ZSET 到 ctx 取消，并在退出时释放客户端。

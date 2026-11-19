@@ -255,6 +255,11 @@ w, err := consumer.NewKafka(conns, orderKafka) // 满足 worker.Worker，直接�
 | 幂等键 | Kafka 用 `message_id` 头或 `topic/partition@offset`；AMQP 用 `MessageId` |
 | 链路 | 从消息属性提取 `traceparent`，把消费挂到生产者那条 trace 上 |
 
+台账固定落在 `db.default`：它是一张进程级、自带 DDL 的表，命名实例（`db.order`）不能代替。
+所以"只配命名实例"的 worker 部署会在启动阶段被拦下——`worker.RequireDefaultDB` 会点名缺池的
+`group/worker` 并说明原因，而不是让它们在 `Run` 里报错后无限重启、就绪一直 503。轮询类任务
+不受影响：它们从 `DBIO` 取句柄，只有命名实例也能正常工作。
+
 ### 4.3 Redis 队列
 
 ```go

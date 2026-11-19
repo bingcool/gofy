@@ -137,6 +137,12 @@ func (c *QueuesConsumer) Name() string { return c.cfg.Name }
 // "Run 已进入"并不等于"进程可以接活"。
 func (c QueuesConsumer) ReportsReady() {}
 
+// RequiresDefaultDB reports the ledger's dependency on db.default: with
+// idempotency on, this consumer cannot run without the framework-managed pool.
+// RequiresDefaultDB 报告台账对 db.default 的依赖：幂等开启时，该消费者离不开框架
+// 托管的连接池。
+func (c QueuesConsumer) RequiresDefaultDB() bool { return c.cfg.Idempotency }
+
 // Concurrency returns how many instances the worker should run.
 // Concurrency 返回 worker 应当运行的实例数。
 func (c *QueuesConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurrency) }
