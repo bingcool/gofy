@@ -1,4 +1,4 @@
-package logger
+package sqllog
 
 import (
 	"math/rand/v2"

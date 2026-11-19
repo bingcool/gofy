@@ -1,12 +1,21 @@
 # SQL 日志设计：可配置、带 X-Trace-Id、可脱敏、可限流
 
-- 状态：**方案待评审**（2026-11-19）；三项决策已确认（见 §13）
+- 状态：**已实现**（2026-11-19）；实现位置由 `logger` 迁至 `support/sqllog`（见下方说明）
 - 关联：[library-design.md](./library-design.md)（logger 与 db 包定位）、
   [gorm-tenant-design.md](./gorm-tenant-design.md) §11（GORM 插件安装顺序）、
   [worker-guide.md](./worker-guide.md)（worker 进程的 ctx 来源）
 - 参考：swoolefy 的 DB 组件（`bingcool/library` `src/Db/PDOConnection.php`
   `query()` / `registerSlowSqlFn()`）——借鉴点与不照搬点见 §8
 - 目标读者：要排查线上慢查询与错误 SQL 的开发者；决定日志容量与脱敏口径的运维
+
+> **实现位置（2026-11-19 晚）**：本方案落在 **`support/sqllog`**，不在 `logger`。三条导入守卫
+> 决定了这件事：`logger` 必须保持叶子包（不得依赖任何 gofy 包），而链路字段需要
+> `support/otel` 与 `support/headerpropagation`；`support/db`、`support/sqlite` 又不允许
+> import `logger`。下文出现的旧名字按此对应阅读：`logger.Policy` → `sqllog.Policy`、
+> `logger.NewSQLPolicy` → `sqllog.NewPolicy`、`logger.SQLLogConfig` → `sqllog.Config`、
+> `logger.SQLMode*` → `sqllog.Mode*`、`logger.MaskConfig`/`MaskStrategy` → `sqllog.*`、
+> `logger.GormLogger{,Config}` → `sqllog.GormLogger{,Config}`。设计本身（模式、脱敏、采样、
+> 限流、配置语义）未变；包内错误前缀由 `logger:` 改为 `sqllog:`。
 
 ---
 

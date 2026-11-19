@@ -9,8 +9,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/bingcool/gofy"
-	gofylogger "github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support/nacos"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
 	"github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/serviceclients"
@@ -122,7 +122,7 @@ func main() {
 	// and the app-side io generation must share this exact pointer.
 	// SQL 日志策略每进程只构造一次：它的采样器与限流器意味着"本进程每秒最多写 N 条"，
 	// 因此框架与应用的 io 代际必须共用这一个指针。
-	policy, err := gofylogger.NewSQLPolicy(cfg.SQLLog)
+	policy, err := gofysqllog.NewPolicy(cfg.SQLLog)
 	if err != nil {
 		fatalf("build sql log policy: %v", err)
 	}

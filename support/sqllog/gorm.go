@@ -1,8 +1,9 @@
-package logger
+package sqllog
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -63,6 +64,28 @@ func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface {
 // are compared with gorm's own constants, so the mapping is explicit.
 // toGormLevel 把 zap 级别映射到 gorm 的刻度。两套刻度看起来相似，但比较时用的是 gorm
 // 自己的常量，因此显式映射。
+// parseLevel turns the configured log_level into a zap level. It is a local
+// copy of the logger package's parser: support/sqllog must not import logger,
+// or every database package that imports sqllog would pull the framework's
+// logging setup back in through the dependency graph.
+// parseLevel 把配置里的 log_level 转成 zap 级别。它是 logger 包同名解析器的本地副本：
+// support/sqllog 不能 import logger，否则每个引用 sqllog 的数据库包都会经由依赖图把
+// 框架的日志装配重新拉回来。
+func parseLevel(level string) (zapcore.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "", "info":
+		return zap.InfoLevel, nil
+	case "debug":
+		return zap.DebugLevel, nil
+	case "warn", "warning":
+		return zap.WarnLevel, nil
+	case "error":
+		return zap.ErrorLevel, nil
+	default:
+		return zap.InfoLevel, fmt.Errorf("sqllog: invalid level %q (want debug, info, warn or error)", level)
+	}
+}
+
 func toGormLevel(level zapcore.Level) gormlogger.LogLevel {
 	switch {
 	case level <= zapcore.InfoLevel:
@@ -93,7 +116,7 @@ type gormLogger struct {
 // Trace 因此拿到带占位符的模板而不是实际参数——这正是 off/placeholder 档不让值进入
 // 日志的方式。
 func (g *gormLogger) ParamsFilter(_ context.Context, sql string, params ...interface{}) (string, []interface{}) {
-	if g.sqlMode() == SQLModeFull {
+	if g.sqlMode() == ModeFull {
 		return sql, params
 	}
 	return sql, nil
@@ -143,7 +166,7 @@ func (g *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 	elapsed := time.Since(begin)
 	mode := g.sqlMode()
 	slow := g.slowThreshold > 0 && elapsed > g.slowThreshold
-	if mode == SQLModeOff && err == nil && !slow {
+	if mode == ModeOff && err == nil && !slow {
 		return
 	}
 
@@ -189,8 +212,8 @@ func (g *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 // is a state the log platform can check, an empty one is not.
 // statementFields 按档位渲染语句，并带上是否脱敏。off 档不贡献任何字段——"没有 sql
 // 字段"是日志平台可以判断的状态，空串不是。
-func (g *gormLogger) statementFields(sql string, mode SQLMode) []zap.Field {
-	if mode == SQLModeOff || sql == "" {
+func (g *gormLogger) statementFields(sql string, mode Mode) []zap.Field {
+	if mode == ModeOff || sql == "" {
 		return nil
 	}
 	rendered := sanitizeControl(g.maskSQL(sql))
@@ -220,19 +243,19 @@ func (g *gormLogger) enabled() bool {
 // sqlMode resolves the mode: an active policy wins, then an explicit Mode, then
 // the legacy boolean.
 // sqlMode 解析档位：生效的策略优先，其次是显式 Mode，最后才是旧的布尔字段。
-func (g *gormLogger) sqlMode() SQLMode {
+func (g *gormLogger) sqlMode() Mode {
 	if g.policy != nil {
 		return g.policy.Mode()
 	}
 	if g.mode != "" {
-		if mode, err := ParseSQLMode(g.mode); err == nil {
+		if mode, err := ParseMode(g.mode); err == nil {
 			return mode
 		}
 	}
 	if g.parameterized {
-		return SQLModePlaceholder
+		return ModePlaceholder
 	}
-	return SQLModeFull
+	return ModeFull
 }
 
 func (g *gormLogger) logSchemaQueries() bool {

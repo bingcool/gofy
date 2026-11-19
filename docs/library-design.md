@@ -149,6 +149,7 @@ github.com/bingcool/gofy/
 │   │   └── db.go             # Config、New、Close
 │   ├── pg/                      # PostgreSQL 连接（gorm.io/driver/postgres + pgx/v5）
 │   ├── sqlite/                  # SQLite 连接（glebarez/sqlite，纯 Go 无 cgo）
+│   ├── sqllog/                  # SQL 语句日志：策略、脱敏、采样限流、GORM 适配
 │   ├── uuidint/                 # 基于 Redis 的分布式自增 int64 ID
 │   ├── lock/                    # 基于 Redis/redsync 的分布式互斥锁（TTL 自愈）
 │   ├── phpoffice/               # Excel .xlsx 导出/导入（excelize，纯 Go）
@@ -156,8 +157,7 @@ github.com/bingcool/gofy/
 │   └── redis/
 │       └── redis.go             # Config、New、Ping、Close
 ├── logger/
-│   ├── logger.go               # Config、New、Nop、Sync
-│   └── gorm.go                  # GORM logger 适配（可选使用）
+│   └── logger.go               # Config、New、Nop、Sync（叶子包：只依赖 zap 与轮转）
 ├── script/
 │   └── script.go                # Script、Runtime 别名、Validate
 ├── command/
@@ -187,7 +187,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。

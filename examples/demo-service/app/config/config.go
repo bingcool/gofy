@@ -12,6 +12,7 @@ import (
 	"github.com/bingcool/gofy/logger"
 	supportai "github.com/bingcool/gofy/support/ai"
 	gofylock "github.com/bingcool/gofy/support/lock"
+	"github.com/bingcool/gofy/support/sqllog"
 	"github.com/bingcool/gofy/support/tenant"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
@@ -34,10 +35,10 @@ type Config struct {
 	Log  logger.Config   `yaml:"log"`
 	// SQLLog is the top-level SQL log policy, shared by every connection. It is
 	// intentionally not per-database: masking is a compliance policy, and N
-	// pools would mean N places to get it right. See logger.SQLLogConfig.
+	// pools would mean N places to get it right. See sqllog.Config.
 	// SQLLog 是顶层的 SQL 日志策略，被所有连接共享。刻意不按数据库拆分：脱敏是合规策略，
 	// 每个池一处配置就意味着有 N 处需要配对。
-	SQLLog   logger.SQLLogConfig            `yaml:"sql_log"`
+	SQLLog   sqllog.Config                  `yaml:"sql_log"`
 	DB       map[string]gofy.DatabaseConfig `yaml:"db"`
 	Redis    redis.Config                   `yaml:"redis"`
 	AMQP     appamqp.Config                 `yaml:"amqp"`

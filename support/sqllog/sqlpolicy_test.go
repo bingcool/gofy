@@ -1,4 +1,4 @@
-package logger
+package sqllog
 
 import (
 	"context"
@@ -14,25 +14,25 @@ import (
 
 func boolPtr(v bool) *bool { return &v }
 
-func TestSQLLogConfigResolveEnabled(t *testing.T) {
+func TestConfigResolveEnabled(t *testing.T) {
 	cases := []struct {
 		name string
-		cfg  SQLLogConfig
+		cfg  Config
 		want bool
 	}{
-		{name: "absent section", cfg: SQLLogConfig{}, want: false},
-		{name: "empty mapping", cfg: SQLLogConfig{keys: map[string]struct{}{}}, want: false},
-		{name: "explicit false with other keys", cfg: SQLLogConfig{
+		{name: "absent section", cfg: Config{}, want: false},
+		{name: "empty mapping", cfg: Config{keys: map[string]struct{}{}}, want: false},
+		{name: "explicit false with other keys", cfg: Config{
 			Enabled: boolPtr(false),
 			Mode:    "full",
 			keys:    map[string]struct{}{"enabled": {}, "mode": {}},
 		}, want: false},
-		{name: "explicit true", cfg: SQLLogConfig{Enabled: boolPtr(true)}, want: true},
-		{name: "mode only", cfg: SQLLogConfig{
+		{name: "explicit true", cfg: Config{Enabled: boolPtr(true)}, want: true},
+		{name: "mode only", cfg: Config{
 			Mode: "full",
 			keys: map[string]struct{}{"mode": {}},
 		}, want: true},
-		{name: "explicit zero value counts as written", cfg: SQLLogConfig{
+		{name: "explicit zero value counts as written", cfg: Config{
 			keys: map[string]struct{}{"log_schema_queries": {}},
 		}, want: true},
 	}
@@ -45,12 +45,12 @@ func TestSQLLogConfigResolveEnabled(t *testing.T) {
 	}
 }
 
-func TestSQLLogConfigNormalizeFillsDefaults(t *testing.T) {
-	cfg, err := SQLLogConfig{}.normalize()
+func TestConfigNormalizeFillsDefaults(t *testing.T) {
+	cfg, err := Config{}.normalize()
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	if cfg.Mode != string(SQLModePlaceholder) {
+	if cfg.Mode != string(ModePlaceholder) {
 		t.Fatalf("mode = %q, want placeholder", cfg.Mode)
 	}
 	if cfg.SampleRate != DefaultSQLSampleRate {
@@ -64,18 +64,18 @@ func TestSQLLogConfigNormalizeFillsDefaults(t *testing.T) {
 	}
 }
 
-func TestSQLLogConfigSentinels(t *testing.T) {
-	cfg, err := SQLLogConfig{MaxLength: -1, ErrorRateLimit: -1, SampleRate: 1}.normalize()
+func TestConfigSentinels(t *testing.T) {
+	cfg, err := Config{MaxLength: -1, ErrorRateLimit: -1, SampleRate: 1}.normalize()
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
 	if cfg.MaxLength != -1 || cfg.ErrorRateLimit != -1 || cfg.SampleRate != 1 {
 		t.Fatalf("sentinels lost: %+v", cfg)
 	}
-	if _, err := (SQLLogConfig{MaxLength: -2}).normalize(); err == nil {
+	if _, err := (Config{MaxLength: -2}).normalize(); err == nil {
 		t.Fatal("max_length -2 accepted, want error")
 	}
-	if _, err := (SQLLogConfig{Mode: "verbose"}).normalize(); err == nil {
+	if _, err := (Config{Mode: "verbose"}).normalize(); err == nil {
 		t.Fatal("unknown mode accepted, want error")
 	}
 }
@@ -83,7 +83,7 @@ func TestSQLLogConfigSentinels(t *testing.T) {
 func TestPolicyDisabledIgnoresInvalidValues(t *testing.T) {
 	// A switched-off section must not fail startup even when it holds a stale
 	// value: nothing takes effect, so nothing is validated.
-	policy, err := NewSQLPolicy(SQLLogConfig{
+	policy, err := NewPolicy(Config{
 		Enabled: boolPtr(false),
 		Mode:    "verbose",
 		keys:    map[string]struct{}{"enabled": {}},
@@ -98,13 +98,13 @@ func TestPolicyDisabledIgnoresInvalidValues(t *testing.T) {
 
 func TestPolicyOffModeKeepsFailuresWithoutText(t *testing.T) {
 	core, observed := observer.New(zapcore.DebugLevel)
-	policy, err := NewSQLPolicy(SQLLogConfig{
+	policy, err := NewPolicy(Config{
 		Mode:           "off",
 		ErrorRateLimit: -1,
 		keys:           map[string]struct{}{"mode": {}},
 	})
 	if err != nil {
-		t.Fatalf("NewSQLPolicy: %v", err)
+		t.Fatalf("NewPolicy: %v", err)
 	}
 	gl := GormLogger(zap.New(core), GormLoggerConfig{SlowThreshold: time.Nanosecond, Policy: policy})
 
@@ -124,9 +124,9 @@ func TestPolicyOffModeKeepsFailuresWithoutText(t *testing.T) {
 
 func TestPolicyDisabledProducesNothingAndSkipsFC(t *testing.T) {
 	core, observed := observer.New(zapcore.DebugLevel)
-	policy, err := NewSQLPolicy(SQLLogConfig{})
+	policy, err := NewPolicy(Config{})
 	if err != nil {
-		t.Fatalf("NewSQLPolicy: %v", err)
+		t.Fatalf("NewPolicy: %v", err)
 	}
 	gl := GormLogger(zap.New(core), GormLoggerConfig{SlowThreshold: time.Nanosecond, Policy: policy})
 
@@ -146,14 +146,14 @@ func TestPolicyDisabledProducesNothingAndSkipsFC(t *testing.T) {
 
 func TestPolicyMasksExpandedStatement(t *testing.T) {
 	core, observed := observer.New(zapcore.DebugLevel)
-	policy, err := NewSQLPolicy(SQLLogConfig{
+	policy, err := NewPolicy(Config{
 		Mode:       "full",
 		SampleRate: 1,
 		Mask:       MaskConfig{Enabled: true},
 		keys:       map[string]struct{}{"mode": {}},
 	})
 	if err != nil {
-		t.Fatalf("NewSQLPolicy: %v", err)
+		t.Fatalf("NewPolicy: %v", err)
 	}
 	// No slow threshold: this case is about rendering, and a 1ns threshold can
 	// still miss on a coarse clock, which would make the test flaky.
@@ -190,13 +190,13 @@ func TestPolicyMasksExpandedStatement(t *testing.T) {
 
 func TestPolicyRateLimitDropsAndSummarizes(t *testing.T) {
 	core, observed := observer.New(zapcore.DebugLevel)
-	policy, err := NewSQLPolicy(SQLLogConfig{
+	policy, err := NewPolicy(Config{
 		Mode:           "full",
 		ErrorRateLimit: 2,
 		keys:           map[string]struct{}{"mode": {}},
 	})
 	if err != nil {
-		t.Fatalf("NewSQLPolicy: %v", err)
+		t.Fatalf("NewPolicy: %v", err)
 	}
 	gl := GormLogger(zap.New(core), GormLoggerConfig{Policy: policy})
 

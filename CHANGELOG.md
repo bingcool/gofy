@@ -586,6 +586,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `support/sqllog` (new package): the SQL log layer — `Policy`, `Config`, `Mode`,
+  the mask set, the sampler/limiters and the GORM adapter — moved out of
+  `logger`. It reads `X-Trace-Id` and the OTel span from the request context, so
+  it has to import `support/headerpropagation` and `support/otel`; while it lived
+  in `logger`, the logging package depended on the framework, and
+  `support/db`/`support/sqlite` imported `logger` to reach the policy — three
+  import-guard rules broken by one feature. `logger` is a leaf again (zap plus
+  rotation only), and the database packages reach the adapter through
+  `support/sqllog`. **Breaking:** `logger.Policy` → `sqllog.Policy`,
+  `logger.NewSQLPolicy` → `sqllog.NewPolicy`, `logger.SQLLogConfig` →
+  `sqllog.Config`, `logger.SQLMode` / `SQLModeOff` / `SQLModePlaceholder` /
+  `SQLModeFull` / `ParseSQLMode` → `sqllog.Mode` / `ModeOff` / `ModePlaceholder` /
+  `ModeFull` / `ParseMode`, and `logger.MaskConfig`, `logger.MaskStrategy`,
+  `logger.GormLogger`, `logger.GormLoggerConfig` → their `sqllog` equivalents.
+  Errors from the moved package are prefixed `sqllog:` instead of `logger:`.
 - Documentation: the demo's `client.timeout` comment now states the real budget.
   The value bounds **one attempt** (including its lookup), and degradation is a
   second attempt with its own deadline, so one logical call can take twice the

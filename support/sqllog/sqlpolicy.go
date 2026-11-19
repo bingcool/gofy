@@ -1,4 +1,4 @@
-package logger
+package sqllog
 
 import (
 	"context"
@@ -12,31 +12,31 @@ import (
 	"github.com/bingcool/gofy/support/otel"
 )
 
-// SQLMode selects how much of a statement reaches the log.
-// SQLMode 决定一条语句有多少内容进入日志。
-type SQLMode string
+// Mode selects how much of a statement reaches the log.
+// Mode 决定一条语句有多少内容进入日志。
+type Mode string
 
 const (
-	// SQLModeOff writes no statement text: failed and slow statements are still
+	// ModeOff writes no statement text: failed and slow statements are still
 	// reported, with the error and the timings only.
-	// SQLModeOff 不写语句文本：失败与慢语句仍会上报，但只有错误与耗时。
-	SQLModeOff SQLMode = "off"
-	// SQLModePlaceholder writes the statement template with its placeholders.
-	// SQLModePlaceholder 写出带占位符的语句模板。
-	SQLModePlaceholder SQLMode = "placeholder"
-	// SQLModeFull writes the expanded statement.
-	// SQLModeFull 写出展开后的语句。
-	SQLModeFull SQLMode = "full"
+	// ModeOff 不写语句文本：失败与慢语句仍会上报，但只有错误与耗时。
+	ModeOff Mode = "off"
+	// ModePlaceholder writes the statement template with its placeholders.
+	// ModePlaceholder 写出带占位符的语句模板。
+	ModePlaceholder Mode = "placeholder"
+	// ModeFull writes the expanded statement.
+	// ModeFull 写出展开后的语句。
+	ModeFull Mode = "full"
 )
 
-// ParseSQLMode validates a mode name.
-// ParseSQLMode 校验档位名。
-func ParseSQLMode(name string) (SQLMode, error) {
-	switch mode := SQLMode(strings.ToLower(strings.TrimSpace(name))); mode {
-	case SQLModeOff, SQLModePlaceholder, SQLModeFull:
+// ParseMode validates a mode name.
+// ParseMode 校验档位名。
+func ParseMode(name string) (Mode, error) {
+	switch mode := Mode(strings.ToLower(strings.TrimSpace(name))); mode {
+	case ModeOff, ModePlaceholder, ModeFull:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("logger: invalid sql log mode %q (want off, placeholder or full)", name)
+		return "", fmt.Errorf("sqllog: invalid sql log mode %q (want off, placeholder or full)", name)
 	}
 }
 
@@ -50,18 +50,18 @@ const (
 	DefaultSQLErrorRateLimit = 20
 )
 
-// SQLLogConfig is the top-level sql_log section. It is process-wide on purpose:
+// Config is the top-level sql_log section. It is process-wide on purpose:
 // masking is a compliance policy rather than a property of one connection, so
 // there is exactly one place to get it right instead of one per pool.
 //
 // Enabled is a pointer because "absent" and "explicitly false" mean the same
 // thing here but "present with other keys" does not: see ResolveEnabled.
-// SQLLogConfig 是顶层的 sql_log 段。它刻意是进程级的：脱敏是合规策略而不是某个连接的
+// Config 是顶层的 sql_log 段。它刻意是进程级的：脱敏是合规策略而不是某个连接的
 // 属性，所以只有一处需要配对，而不是每个连接池一处。
 //
 // Enabled 用指针，是因为"没写"与"显式 false"在这里含义相同，但"写了别的字段"不同：
 // 见 ResolveEnabled。
-type SQLLogConfig struct {
+type Config struct {
 	Enabled *bool `yaml:"enabled"`
 	// Mode: off | placeholder | full; empty means placeholder.
 	// Mode：off | placeholder | full；空串表示 placeholder。
@@ -102,7 +102,7 @@ type SQLLogConfig struct {
 // non-zero field, yet the operator clearly meant to configure the feature.
 // UnmarshalYAML 在解码前记录本节出现过的键。按值判断做不到：`sql_log:
 // {log_schema_queries: false}` 没有任何非零字段，但写配置的人显然是想启用这个功能。
-func (c *SQLLogConfig) UnmarshalYAML(node *yaml.Node) error {
+func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.MappingNode {
 		keys := make(map[string]struct{}, len(node.Content)/2)
 		for i := 0; i+1 < len(node.Content); i += 2 {
@@ -110,7 +110,7 @@ func (c *SQLLogConfig) UnmarshalYAML(node *yaml.Node) error {
 		}
 		c.keys = keys
 	}
-	type plain SQLLogConfig
+	type plain Config
 	return node.Decode((*plain)(c))
 }
 
@@ -126,7 +126,7 @@ func (c *SQLLogConfig) UnmarshalYAML(node *yaml.Node) error {
 //   - 显式 enabled 优先；
 //   - 否则只要出现了其它键就算启用——写了 mode: full 却忘了 enabled，不能静默失效；
 //   - 整段缺席、null 或空映射视为关闭。
-func (c SQLLogConfig) ResolveEnabled() bool {
+func (c Config) ResolveEnabled() bool {
 	if c.Enabled != nil {
 		return *c.Enabled
 	}
@@ -143,35 +143,35 @@ func (c SQLLogConfig) ResolveEnabled() bool {
 // the struct in code must see the same behaviour as one that uses the loader.
 // normalize 填默认值并校验。它在每条入口路径上运行，而不只是 config.Load 之后：
 // 自己解码 YAML 或在代码里构造结构体的调用方，必须与走加载器的调用方得到相同行为。
-func (c SQLLogConfig) normalize() (SQLLogConfig, error) {
+func (c Config) normalize() (Config, error) {
 	out := c
 	out.Mode = strings.ToLower(strings.TrimSpace(c.Mode))
 	if out.Mode == "" {
-		out.Mode = string(SQLModePlaceholder)
+		out.Mode = string(ModePlaceholder)
 	}
-	if _, err := ParseSQLMode(out.Mode); err != nil {
+	if _, err := ParseMode(out.Mode); err != nil {
 		return c, err
 	}
 	if out.SampleRate == 0 {
 		out.SampleRate = DefaultSQLSampleRate
 	}
 	if out.SampleRate < 0 || out.SampleRate > 1 {
-		return c, fmt.Errorf("logger: sql log sample rate %v must be within [0,1]", c.SampleRate)
+		return c, fmt.Errorf("sqllog: sql log sample rate %v must be within [0,1]", c.SampleRate)
 	}
 	if out.MaxLength == 0 {
 		out.MaxLength = DefaultSQLMaxLength
 	}
 	if out.MaxLength < -1 {
-		return c, fmt.Errorf("logger: sql log max length %d must be -1 or not negative", c.MaxLength)
+		return c, fmt.Errorf("sqllog: sql log max length %d must be -1 or not negative", c.MaxLength)
 	}
 	if out.ErrorRateLimit == 0 {
 		out.ErrorRateLimit = DefaultSQLErrorRateLimit
 	}
 	if out.ErrorRateLimit < -1 {
-		return c, fmt.Errorf("logger: sql log error rate limit %d must be -1 or not negative", c.ErrorRateLimit)
+		return c, fmt.Errorf("sqllog: sql log error rate limit %d must be -1 or not negative", c.ErrorRateLimit)
 	}
 	if out.SlowRateLimit < -1 {
-		return c, fmt.Errorf("logger: sql log slow rate limit %d must be -1 or not negative", c.SlowRateLimit)
+		return c, fmt.Errorf("sqllog: sql log slow rate limit %d must be -1 or not negative", c.SlowRateLimit)
 	}
 	if out.SlowRateLimit < 0 {
 		out.SlowRateLimit = 0
@@ -187,7 +187,7 @@ func (c SQLLogConfig) normalize() (SQLLogConfig, error) {
 // error_rate_limit 的含义是"本进程每秒最多写 N 条"，每个连接各持一份计数器会把这个数
 // 乘以连接池数量。
 type Policy struct {
-	cfg          SQLLogConfig
+	cfg          Config
 	mask         maskSet
 	sampler      *sampler
 	errorLimiter *limiter
@@ -195,12 +195,12 @@ type Policy struct {
 	disabled     bool
 }
 
-// NewSQLPolicy builds the policy. A disabled section returns a disabled policy
+// NewPolicy builds the policy. A disabled section returns a disabled policy
 // without validating or compiling anything: the values do not take effect, so a
 // stale value left in a switched-off section must not stop the process.
-// NewSQLPolicy 构造策略。关闭的段落返回一个关闭的策略，不校验也不编译任何东西：
+// NewPolicy 构造策略。关闭的段落返回一个关闭的策略，不校验也不编译任何东西：
 // 值本来就不生效，关掉的配置里留着一个旧值不该让进程起不来。
-func NewSQLPolicy(cfg SQLLogConfig) (*Policy, error) {
+func NewPolicy(cfg Config) (*Policy, error) {
 	if !cfg.ResolveEnabled() {
 		return &Policy{disabled: true}, nil
 	}
@@ -228,11 +228,11 @@ func (p *Policy) Disabled() bool { return p == nil || p.disabled }
 
 // Mode returns the statement-text mode.
 // Mode 返回语句文本档位。
-func (p *Policy) Mode() SQLMode {
+func (p *Policy) Mode() Mode {
 	if p == nil || p.disabled {
-		return SQLModeOff
+		return ModeOff
 	}
-	return SQLMode(p.cfg.Mode)
+	return Mode(p.cfg.Mode)
 }
 
 // MaskEnabled reports whether the mask section is on.

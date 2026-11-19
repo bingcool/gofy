@@ -23,7 +23,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/bingcool/gofy/logger"
+	"github.com/bingcool/gofy/support/sqllog"
 )
 
 // ErrDSNRequired is returned when Config.DSN is empty.
@@ -184,7 +184,7 @@ func Close(conn *gorm.DB) error {
 type Option func(*options)
 
 type options struct {
-	policy    *logger.Policy
+	policy    *sqllog.Policy
 	sqlLogger *zap.Logger
 }
 
@@ -198,7 +198,7 @@ func newOptions(opts ...Option) *options {
 
 // WithSQLPolicy attaches the process-wide sql_log policy.
 // WithSQLPolicy 挂上进程级 sql_log 策略。
-func WithSQLPolicy(policy *logger.Policy) Option {
+func WithSQLPolicy(policy *sqllog.Policy) Option {
 	return func(o *options) { o.policy = policy }
 }
 
@@ -213,7 +213,7 @@ func newGormLogger(o *options, app *zap.Logger, cfg Config) gormlogger.Interface
 	if sink == nil {
 		sink = app
 	}
-	return logger.GormLogger(sink, logger.GormLoggerConfig{
+	return sqllog.GormLogger(sink, sqllog.GormLoggerConfig{
 		SlowThreshold:        cfg.SlowThreshold,
 		LogLevel:             cfg.LogLevel,
 		ParameterizedQueries: !cfg.LogParameterValues,

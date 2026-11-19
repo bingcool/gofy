@@ -14,9 +14,9 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/core/systemenv"
-	gofylogger "github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/nacos"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/config"
@@ -54,7 +54,7 @@ type reloader struct {
 	// rebuilds pools and must keep handing them the same counters.
 	// policy 是 main 里构造一次的进程级 SQL 日志策略。Reload 重建连接池时必须继续把同一组
 	// 计数器交给它们。
-	policy *gofylogger.Policy
+	policy *gofysqllog.Policy
 	// app is stored after New and before Execute so the watcher callback can
 	// reach the running application.
 	// app 在 New 之后、Execute 之前存入，监听回调据此拿到运行中的应用句柄。

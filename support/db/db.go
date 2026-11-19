@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/bingcool/gofy/logger"
+	"github.com/bingcool/gofy/support/sqllog"
 )
 
 // ErrDSNRequired is returned when Config.DSN is empty.
@@ -184,7 +184,7 @@ func redactDSN(dsn string) string {
 type Option func(*options)
 
 type options struct {
-	policy    *logger.Policy
+	policy    *sqllog.Policy
 	sqlLogger *zap.Logger
 }
 
@@ -201,7 +201,7 @@ func newOptions(opts ...Option) *options {
 // policy keeps the legacy behaviour (log by log_level, no sampling or masking).
 // WithSQLPolicy 挂上进程级 sql_log 策略。把同一个 *Policy 传给每个连接，限流才是
 // 进程级的；传 nil 则保持旧行为（按 log_level 输出，不采样、不脱敏）。
-func WithSQLPolicy(policy *logger.Policy) Option {
+func WithSQLPolicy(policy *sqllog.Policy) Option {
 	return func(o *options) { o.policy = policy }
 }
 
@@ -223,7 +223,7 @@ func newGormLogger(o *options, app *zap.Logger, cfg Config) gormlogger.Interface
 	if sink == nil {
 		sink = app
 	}
-	return logger.GormLogger(sink, logger.GormLoggerConfig{
+	return sqllog.GormLogger(sink, sqllog.GormLoggerConfig{
 		SlowThreshold:             cfg.SlowThreshold,
 		LogLevel:                  cfg.LogLevel,
 		IgnoreRecordNotFoundError: false,

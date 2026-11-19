@@ -1,4 +1,4 @@
-package logger
+package sqllog
 
 import (
 	"crypto/sha256"
@@ -120,14 +120,14 @@ func (m maskSet) merge(cfg MaskConfig) (maskSet, error) {
 		case MaskStrategyMask, MaskStrategyHash, MaskStrategyRemove:
 			out.strategy = MaskStrategy(raw)
 		default:
-			return m, fmt.Errorf("logger: invalid mask strategy %q (want mask, hash or remove)", cfg.Strategy)
+			return m, fmt.Errorf("sqllog: invalid mask strategy %q (want mask, hash or remove)", cfg.Strategy)
 		}
 	}
 
 	for _, column := range cfg.Columns {
 		key := normalizeColumn(column)
 		if key == "" {
-			return m, errors.New("logger: mask column must not be empty")
+			return m, errors.New("sqllog: mask column must not be empty")
 		}
 		out.columns[key] = struct{}{}
 	}
@@ -135,19 +135,19 @@ func (m maskSet) merge(cfg MaskConfig) (maskSet, error) {
 	for _, pattern := range cfg.Patterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
-			return m, errors.New("logger: mask pattern must not be empty")
+			return m, errors.New("sqllog: mask pattern must not be empty")
 		}
 		if expr, ok := strings.CutPrefix(pattern, "re:"); ok {
 			compiled, err := regexp.Compile(expr)
 			if err != nil {
-				return m, fmt.Errorf("logger: invalid mask pattern %q: %w", pattern, err)
+				return m, fmt.Errorf("sqllog: invalid mask pattern %q: %w", pattern, err)
 			}
 			out.patterns = append(out.patterns, compiled)
 			continue
 		}
 		builtin, ok := builtinPatterns[strings.ToLower(pattern)]
 		if !ok {
-			return m, fmt.Errorf("logger: unknown mask pattern %q", pattern)
+			return m, fmt.Errorf("sqllog: unknown mask pattern %q", pattern)
 		}
 		out.patterns = append(out.patterns, builtin)
 	}

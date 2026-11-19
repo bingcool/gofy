@@ -19,9 +19,9 @@ import (
 	"sync/atomic"
 
 	"github.com/bingcool/gofy"
-	gofylogger "github.com/bingcool/gofy/logger"
 	gofydb "github.com/bingcool/gofy/support/db"
 	gofyotel "github.com/bingcool/gofy/support/otel"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
 	"github.com/bingcool/gofy/support/tenant"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -113,7 +113,7 @@ type OpenOption func(*openOptions)
 
 type openOptions struct {
 	tenant    *tenant.Options
-	sqlPolicy *gofylogger.Policy
+	sqlPolicy *gofysqllog.Policy
 	sqlLogger *zap.Logger
 }
 
@@ -123,7 +123,7 @@ type openOptions struct {
 // set of counters.
 // WithSQLPolicy 把进程级 SQL 日志策略交给本代打开的每个池。它与框架通过
 // gofy.WithSQLPolicy 拿到的是同一个指针，因此命名实例与 default 池共用一组计数器。
-func WithSQLPolicy(policy *gofylogger.Policy) OpenOption {
+func WithSQLPolicy(policy *gofysqllog.Policy) OpenOption {
 	return func(o *openOptions) { o.sqlPolicy = policy }
 }
 
