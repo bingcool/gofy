@@ -50,8 +50,14 @@ type Starter interface {
 }
 
 // Stopper is called after the HTTP server stops accepting new requests.
+// The ctx is a budget, not an enforced limit: the framework calls Stop
+// synchronously and cannot take the work back, so a module that ignores ctx
+// holds every later Stop, the database close and the pid file removal behind
+// it. Return promptly, or honor the deadline inside Stop.
 // Stopper 在 HTTP 服务停止接收新请求后调用；实现应在 ctx 截止前完成释放，
-// 该阶段不应再依赖已经关闭的入站流量。
+// 该阶段不应再依赖已经关闭的入站流量。ctx 是"预算"而不是强制限制：框架同步调用
+// Stop，无法把已经交出去的工作收回来，因此忽略 ctx 的模块会把它之后的所有 Stop、
+// 数据库关闭与 pid 文件删除一起拖住。请及时返回，或在 Stop 内部自己遵守截止时间。
 type Stopper interface {
 	Stop(ctx context.Context) error
 }

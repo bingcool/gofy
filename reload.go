@@ -338,11 +338,25 @@ func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, syst
 	}
 }
 
-// stopModuleList stops modules in reverse registration order, like cleanup,
-// and gives each Stop its own timeout so one hung module cannot block the
-// others.
+// stopModuleList stops modules in reverse registration order, like cleanup, and
+// hands each Stop its own deadline. The deadline is a budget, not a guarantee:
+// nothing here enforces it, so a module that ignores ctx — or blocks below the
+// last point that checks it — still holds this loop, and the remaining modules,
+// the database close and the pid file removal wait behind it.
+//
+// A module is expected to honor the budget itself; support.Stopper says so. The
+// one wait in this repo that could outlive it is appio's UUID prefetch pool,
+// which now takes the budget (support/uuidint.StopPoolContext) instead of
+// blocking on `<-done`. Any future module that stops a consumer or a third-party
+// SDK must do the same.
 // stopModuleList 按注册的逆序停止模块（与 cleanup 一致），并给每次 Stop 单独的
-// 超时，一个卡住的模块不会堵住其他模块。
+// 截止时间。这个截止时间只是"预算"，不是保证：这里没有任何强制执行，所以忽略
+// ctx、或在最后一个检查点之下阻塞的模块，仍然会拖住这个循环，其余模块、数据库关闭
+// 与 pid 文件删除都排在它后面。
+//
+// 预算由模块自己遵守，support.Stopper 也是这么写的。本仓库里唯一可能超预算的等待
+// 是 appio 的 UUID 预取池，它现在接收预算（support/uuidint.StopPoolContext），
+// 不再堵在 `<-done` 上。以后任何要停消费者或第三方 SDK 的模块都得照做。
 func stopModuleList(ctx context.Context, modules []support.Module, timeout time.Duration) []error {
 	if len(modules) == 0 {
 		return nil

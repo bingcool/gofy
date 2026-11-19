@@ -1614,8 +1614,11 @@ SQLite 连接包，API 与 `support/db`、`support/pg` 对齐（`Config` 字段�
 - `WithPool(size, interval)` 启用每 Generator 独立的本地预取池：
   `StartPool` 同步预热一批后由 ticker 定时补货，`Get`/`GetBatch` 先消费池内
   ID；池满跳过补货，连续 3 个周期无人消费清空旧池，`StopPool` 幂等并回落到
-  单次 Redis 取号。池内未使用的号会成为空洞，不影响唯一性（PHP 的 Channel
-  池是静态共享的，Go 版按实例隔离）。
+  单次 Redis 取号。`StopPoolContext(ctx)` 是带预算的版本：取消 ticker 不会打断
+  它已进入的那次 Redis 调用，所以到达截止时间就返回 `ctx.Err()` 并留下一个预取
+  goroutine，而不是把调用方一起挂住；缓冲此时**不关闭**（关闭会让被放弃的
+  goroutine 发送 panic），之后再调一次可以在 ticker 退出后完成收尾。池内未使用的
+  号会成为空洞，不影响唯一性（PHP 的 Channel 池是静态共享的，Go 版按实例隔离）。
 - 主连接最多尝试 `retryTimes` 次（默认 3、间隔 150ms）；耗尽后回调
   `WithErrorHandler`，再依次尝试备用连接各一次；全部失败返回包裹
   `ErrUnavailable` 的错误，`ctx` 取消时返回 `context.Canceled`。
@@ -5040,6 +5043,7 @@ func (*Generator) Get(context.Context) (int64, error)
 func (*Generator) GetBatch(context.Context, int) ([]int64, error)
 func (*Generator) StartPool(context.Context) error
 func (*Generator) StopPool()
+func (*Generator) StopPoolContext(context.Context) error
 
 var ErrKeyRequired, ErrUnavailable
 ```

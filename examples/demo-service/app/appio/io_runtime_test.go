@@ -318,18 +318,27 @@ func closerNames(closers []namedCloser) []string {
 
 // TestCloseAllRunsInReverseOrder fixes the rule Stop depends on: a resource is
 // closed only after everything opened after it, which is what puts UUID (and
-// its Redis-touching ticker) before the clients it uses.
+// its Redis-touching ticker) before the clients it uses. It also pins that the
+// caller's budget reaches every closer: only the pool uses it, but a closer
+// that never sees it could not honor it either.
 // TestCloseAllRunsInReverseOrder 固定 Stop 依赖的规则：资源在它之后打开的全部关闭
-// 完之后才关闭，UUID（及其访问 Redis 的 ticker）因此排在它使用的客户端之前。
+// 完之后才关闭，UUID（及其访问 Redis 的 ticker）因此排在它使用的客户端之前。同时
+// 钉住调用方的预算会到达每个 closer：只有池会用它，但拿不到它的 closer 也无从遵守。
 func TestCloseAllRunsInReverseOrder(t *testing.T) {
 	var order []string
+	deadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 	mk := func(name string) namedCloser {
-		return namedCloser{name: name, close: func() error {
+		return namedCloser{name: name, close: func(ctx context.Context) error {
+			if got, ok := ctx.Deadline(); !ok || !got.Equal(deadline) {
+				t.Errorf("%s got no release budget", name)
+			}
 			order = append(order, name)
 			return nil
 		}}
 	}
-	if err := closeAll([]namedCloser{mk("db"), mk("redis"), mk("uuidint"), mk("lock")}); err != nil {
+	if err := closeAll(ctx, []namedCloser{mk("db"), mk("redis"), mk("uuidint"), mk("lock")}); err != nil {
 		t.Fatalf("closeAll: %v", err)
 	}
 	want := "lock,uuidint,redis,db"
@@ -346,12 +355,12 @@ func TestCloseAllRunsInReverseOrder(t *testing.T) {
 func TestCloseAllKeepsGoingAndNamesFailures(t *testing.T) {
 	var order []string
 	closers := []namedCloser{
-		{name: "db", close: func() error { order = append(order, "db"); return nil }},
-		{name: "redis", close: func() error { order = append(order, "redis"); return errors.New("boom") }},
-		{name: "uuidint", close: func() error { order = append(order, "uuidint"); return errors.New("ticker stuck") }},
+		{name: "db", close: func(context.Context) error { order = append(order, "db"); return nil }},
+		{name: "redis", close: func(context.Context) error { order = append(order, "redis"); return errors.New("boom") }},
+		{name: "uuidint", close: func(context.Context) error { order = append(order, "uuidint"); return errors.New("ticker stuck") }},
 	}
 
-	err := closeAll(closers)
+	err := closeAll(context.Background(), closers)
 	if err == nil {
 		t.Fatal("expected an error")
 	}

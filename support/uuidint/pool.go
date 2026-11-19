@@ -2,6 +2,7 @@ package uuidint
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -27,6 +28,7 @@ type idPool struct {
 	stopped   bool               // StopPool 是否已执行
 	cancel    context.CancelFunc // 取消后台 ticker
 	done      chan struct{}      // 后台 goroutine 退出后关闭
+	closedIDs sync.Once          // 关闭 ids 只执行一次，超时后重试可以接着关
 	lastDrain time.Time          // last consume time, used to tell whether the pool is backed up; 最近一次消费时间，用于判断池是否积压
 }
 
@@ -86,30 +88,67 @@ func (g *Generator) StartPool(ctx context.Context) error {
 }
 
 // StopPool stops the ticker and closes the buffer; it is safe to call
-// repeatedly and without StartPool. Afterwards Get/GetBatch go straight to
-// Redis and unused buffered IDs are discarded.
-// StopPool 停止 ticker 并关闭缓冲，可重复调用；未 StartPool 时也安全。
-// 返回后 Get/GetBatch 直接访问 Redis，缓冲里剩余未使用的号会被丢弃。
+// repeatedly and without StartPool. It waits without a deadline, so a caller
+// that cannot afford to wait must use StopPoolContext. Afterwards Get/GetBatch
+// go straight to Redis and unused buffered IDs are discarded.
+// StopPool 停止 ticker 并关闭缓冲，可重复调用；未 StartPool 时也安全。它没有截止
+// 时间，等不起的调用方应改用 StopPoolContext。返回后 Get/GetBatch 直接访问
+// Redis，缓冲里剩余未使用的号会被丢弃。
 func (g *Generator) StopPool() {
+	_ = g.StopPoolContext(context.Background())
+}
+
+// StopPoolContext is StopPool with a budget. Cancelling the ticker does not
+// interrupt the Redis call it is already inside — the pool context carries no
+// deadline, and go-redis only shortens a command by the deadline in ctx — so
+// that call has to run into read_timeout before the goroutine can return. This
+// version gives up at the deadline instead of holding the caller for it, and
+// reports ctx.Err().
+//
+// Giving up leaves a prefetch goroutine behind and, deliberately, the buffer
+// open: closing it here would panic that goroutine's next send. A later Get
+// drains whatever is left and goes to Redis, and a repeated call can still
+// finish the job once the ticker exits.
+// StopPoolContext 是带预算的 StopPool。取消 ticker 不会打断它已经进入的那次 Redis
+// 调用——池的 ctx 没有 deadline，而 go-redis 只会按 ctx 里的 deadline 缩短命令——
+// 那条调用必须撞上 read_timeout 才会返回。所以这里在截止时间放弃等待并回报
+// ctx.Err()，而不是把调用方一起挂住。
+//
+// 放弃会留下一个预取 goroutine，并且故意不关闭缓冲：此时关闭会让被放弃的
+// goroutine 下一次发送 panic。之后的 Get 会取空剩余号并直接访问 Redis；ticker 真
+// 退出后再调一次也能把收尾做完。
+func (g *Generator) StopPoolContext(ctx context.Context) error {
 	if g == nil || g.pool == nil {
-		return
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	p := g.pool
 
 	p.mu.Lock()
-	if !p.started || p.stopped {
+	if !p.started {
+		// Never started: done is still open, so waiting on it would block
+		// forever, and there is nothing to stop either.
+		// 从未启动：done 仍然打开，等它就是永远等，而且也没有东西要停。
 		p.mu.Unlock()
-		return
+		return nil
 	}
+	first := !p.stopped
 	p.stopped = true
 	cancel := p.cancel
 	p.mu.Unlock()
 
-	if cancel != nil {
+	if first && cancel != nil {
 		cancel()
 	}
-	<-p.done
-	close(p.ids)
+	select {
+	case <-p.done:
+		p.closedIDs.Do(func() { close(p.ids) })
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("uuidint: pool ticker did not stop: %w", ctx.Err())
+	}
 }
 
 // drainPool takes up to n IDs from the buffer without touching Redis; when the

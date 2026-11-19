@@ -108,6 +108,12 @@ ids, err := gen.GetBatch(ctx, 10)
   不会静默丢弃。
 - `StopPool` 幂等；停止后 `Get` 直接回落到 Redis 单次取号。池不可重启，
   需要重启时重新 `New` 一个 Generator。
+- `StopPoolContext(ctx)` 是带预算的版本，供 `Module.Stop` 这类不能无限等待的
+  调用方使用：取消 ticker 不会打断它已经进入的那次 Redis 调用（池的 ctx 没有
+  deadline，go-redis 只按 ctx 里的 deadline 缩短命令），因此到截止时间返回
+  `ctx.Err()` 并留下一个预取 goroutine，而不是把调用方挂住。此时缓冲**不关闭**
+  （关闭会让被放弃的 goroutine 下一次发送 panic）；ticker 真退出后再调一次可以
+  完成收尾并关闭缓冲。
 
 ## 失败与降级
 

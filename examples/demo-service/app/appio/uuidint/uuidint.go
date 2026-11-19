@@ -239,18 +239,29 @@ func (s *Set) Install() {
 	current.Store(s)
 }
 
-// Close stops the pool and clears the handle only while it still points at this
-// set, so a reload that already installed a new generator keeps it intact. No
-// Redis connection is owned here.
-// Close 停止预取池，并只在发布指针仍指向自己时清空句柄，Reload 已安装的新生成器
-// 不受影响。本包不持有 Redis 连接，连接由 app/appio 的 Redis Set 释放。
+// Close stops the pool without a deadline; CloseContext carries the caller's
+// release budget. Both clear the handle only while it still points at this set,
+// so a reload that already installed a new generator keeps it intact. No Redis
+// connection is owned here.
+// Close 无截止时间地停止预取池；CloseContext 则把调用方的释放预算传下去。两者都
+// 只在发布指针仍指向自己时清空句柄，Reload 已安装的新生成器不受影响。本包不持有
+// Redis 连接，连接由 app/appio 的 Redis Set 释放。
 func (s *Set) Close() error {
+	return s.CloseContext(context.Background())
+}
+
+// CloseContext stops the prefetch pool within ctx. A ticker that does not exit
+// before the deadline yields ctx.Err(), so the caller learns the pool outlived
+// its budget instead of blocking on it.
+// CloseContext 在 ctx 内停止预取池。ticker 未在截止前退出时返回 ctx.Err()，调用方
+// 因此知道池超出了预算，而不是被它堵住。
+func (s *Set) CloseContext(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
 	current.CompareAndSwap(s, nil)
-	if s.gen != nil {
-		s.gen.StopPool()
+	if s.gen == nil {
+		return nil
 	}
-	return nil
+	return s.gen.StopPoolContext(ctx)
 }
