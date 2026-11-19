@@ -153,7 +153,11 @@ db:
 
 第三行是有意的：只写 `mode: full` 却忘了 `enabled: true`，如果判定为"未启用"，配置会静默失效——那比"写了就算启用"更难查。规则一句话：**要么整段不写，要么写了就算启用；`enabled: false` 是唯一能保留配置却关掉功能的方式。**
 
-判定按**键是否出现**，不按值：`SQLLogConfig` 用一个 `UnmarshalYAML` 记录"本节出现过哪些键"，因此 `log_schema_queries: false`、`sample_rate: 0` 这类零值也算"写了"。不能用"任一字段非零"来近似——`sql_log: {log_schema_queries: false}` 会被误判成没写。`sql_log: {}` 一个键都没有，因此是关闭。
+判定按**键是否出现**，不按值：`SQLLogConfig` 用一个 `UnmarshalYAML` 记录"本节出现过哪些键"，因此 `log_schema_queries: false`、`sample_rate: 0` 这类零值也算"写了"。YAML 路径因此不能只用"任一字段非零"来近似——`sql_log: {log_schema_queries: false}` 会被误判成没写。`sql_log: {}` 一个键都没有，因此是关闭。
+
+代码里构造 `sqllog.Config` 走**同一套判定**，只是没有键可数：`keys` 只在 YAML 路径上存在，所以程序化路径在"显式 `enabled`"之后按"任一字段非零"补一条。否则 `Config{Mode: "full"}` 会解析成关闭，而等价的 `sql_log: {mode: full}` 解析成启用——同一份配置两种行为。零值字段与未提及的字段在 Go 结构体里无法区分，因此 `Config{LogSchemaQueries: false}` 表达的仍是"不启用"；要明确关掉就写 `Enabled: &false`。
+
+这条按值规则能成立，前提是**结构体不被提前填充默认值**：`config.Load` 会在解码前跑 `defaults.Set`，所以 `Mode` 刻意没有 `default` 标签，否则整段缺席时它也会被填成 `placeholder`，继而被读成"运维配置了东西"。默认值由 `normalize()` 在构造策略时补，那也是它唯一被真正需要的地方。
 
 关闭时框架不做任何额外的事：
 

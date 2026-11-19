@@ -124,7 +124,7 @@ func TestTruncateBytes(t *testing.T) {
 // db.order 也能顶上，而对只配了命名实例的部署来说，那是错误的修法。
 func TestProcessorRequiresDatabase(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
-	_, err := NewProcessor(rt, ProcessorConfig{
+	_, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer:    testConsumerName,
 		Handler:     func(context.Context, Message, Envelope) error { return nil },
 		Idempotency: true,
@@ -146,7 +146,7 @@ func TestProcessorRequiresDatabase(t *testing.T) {
 func TestProcessorWithoutIdempotencyRuns(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
 	handled := 0
-	proc, err := NewProcessor(rt, ProcessorConfig{
+	proc, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer:    testConsumerName,
 		Handler:     func(context.Context, Message, Envelope) error { handled++; return nil },
 		Idempotency: false,
@@ -176,7 +176,7 @@ func TestProcessorWithoutIdempotencyRuns(t *testing.T) {
 // broker 停止重投；可重试失败则返回错误。
 func TestProcessorAcknowledgesPermanentFailure(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
-	permanent, err := NewProcessor(rt, ProcessorConfig{
+	permanent, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer:    testConsumerName,
 		Handler:     func(context.Context, Message, Envelope) error { return Permanent(errors.New("bad event")) },
 		Idempotency: false,
@@ -190,7 +190,7 @@ func TestProcessorAcknowledgesPermanentFailure(t *testing.T) {
 		t.Fatalf("permanent failure must be acknowledged, got %v", err)
 	}
 
-	retryable, err := NewProcessor(rt, ProcessorConfig{
+	retryable, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer:    testConsumerName,
 		Handler:     func(context.Context, Message, Envelope) error { return errors.New("database is down") },
 		Idempotency: false,
@@ -210,7 +210,7 @@ func TestProcessorAcknowledgesPermanentFailure(t *testing.T) {
 // 变成合法 JSON。
 func TestProcessorAcknowledgesUndecodableBody(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
-	proc, err := NewProcessor(rt, ProcessorConfig{
+	proc, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer:    testConsumerName,
 		Handler:     func(context.Context, Message, Envelope) error { return nil },
 		Idempotency: false,

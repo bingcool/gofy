@@ -65,7 +65,7 @@ func newLedgerProcessor(t *testing.T, handler HandlerFunc, maxAttempts int, leas
 	}
 
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop(), DB: db})
-	proc, err := NewProcessor(rt, ProcessorConfig{
+	proc, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer:        testConsumerName,
 		Handler:         handler,
 		Idempotency:     true,
@@ -686,7 +686,7 @@ func TestLedgerPruneRemovesOnlyOldTerminalRows(t *testing.T) {
 // 也不报错，定时任务因此可以无条件下调。
 func TestPruneWithoutIdempotencyIsANoop(t *testing.T) {
 	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
-	proc, err := NewProcessor(rt, ProcessorConfig{
+	proc, err := NewProcessor(context.Background(), rt, ProcessorConfig{
 		Consumer: "no-ledger",
 		Handler:  func(context.Context, Message, Envelope) error { return nil },
 	})

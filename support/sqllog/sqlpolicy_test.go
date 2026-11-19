@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"gopkg.in/yaml.v3"
 )
 
 func boolPtr(v bool) *bool { return &v }
@@ -40,6 +41,77 @@ func TestConfigResolveEnabled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.cfg.ResolveEnabled(); got != tc.want {
 				t.Fatalf("ResolveEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfigResolveEnabledForProgrammaticConfig is the regression for the audit
+// finding: a Config built in code used to resolve to disabled no matter what
+// was set, because keys only exists on the YAML path.
+// TestConfigResolveEnabledForProgrammaticConfig 是审计结论的回归测试：代码里构造的
+// Config 原先无论填了什么都会解析为关闭，因为 keys 只存在于 YAML 路径上。
+func TestConfigResolveEnabledForProgrammaticConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{name: "zero value stays off", cfg: Config{}, want: false},
+		{name: "mode", cfg: Config{Mode: "full"}, want: true},
+		{name: "mode off still enables the section", cfg: Config{Mode: string(ModeOff)}, want: true},
+		{name: "sample rate", cfg: Config{SampleRate: 0.5}, want: true},
+		{name: "negative max length means no truncation", cfg: Config{MaxLength: -1}, want: true},
+		{name: "schema queries", cfg: Config{LogSchemaQueries: true}, want: true},
+		{name: "error rate limit", cfg: Config{ErrorRateLimit: -1}, want: true},
+		{name: "slow rate limit", cfg: Config{SlowRateLimit: 5}, want: true},
+		{name: "mask strategy", cfg: Config{Mask: MaskConfig{Strategy: "mask"}}, want: true},
+		{name: "mask columns", cfg: Config{Mask: MaskConfig{Columns: []string{"employee_no"}}}, want: true},
+		{name: "mask patterns", cfg: Config{Mask: MaskConfig{Patterns: []string{"re:^ORD"}}}, want: true},
+		{name: "explicit false beats values", cfg: Config{Enabled: boolPtr(false), Mode: "full"}, want: false},
+		{name: "explicit true alone", cfg: Config{Enabled: boolPtr(true)}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.ResolveEnabled(); got != tc.want {
+				t.Fatalf("ResolveEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfigYAMLAndStructAgree is the equivalence test the audit asked for: the
+// same configuration must resolve the same way whether it came from YAML or
+// from a struct literal.
+// TestConfigYAMLAndStructAgree 是审计要求的等价测试：同一份配置无论来自 YAML 还是
+// 结构体字面量，都必须解析出同一个结果。
+func TestConfigYAMLAndStructAgree(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		code Config
+		want bool
+	}{
+		{name: "empty mapping", doc: "{}\n", code: Config{}, want: false},
+		{name: "mode only", doc: "mode: full\n", code: Config{Mode: "full"}, want: true},
+		{name: "sample rate only", doc: "sample_rate: 0.5\n", code: Config{SampleRate: 0.5}, want: true},
+		{name: "explicit off with values", doc: "enabled: false\nmode: full\n",
+			code: Config{Enabled: boolPtr(false), Mode: "full"}, want: false},
+		{name: "explicit on", doc: "enabled: true\n", code: Config{Enabled: boolPtr(true)}, want: true},
+		{name: "mask only", doc: "mask:\n  columns: [employee_no]\n",
+			code: Config{Mask: MaskConfig{Columns: []string{"employee_no"}}}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var fromYAML Config
+			if err := yaml.Unmarshal([]byte(tc.doc), &fromYAML); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := fromYAML.ResolveEnabled(); got != tc.want {
+				t.Fatalf("YAML ResolveEnabled() = %v, want %v", got, tc.want)
+			}
+			if got := tc.code.ResolveEnabled(); got != tc.want {
+				t.Fatalf("struct ResolveEnabled() = %v, want %v", got, tc.want)
 			}
 		})
 	}

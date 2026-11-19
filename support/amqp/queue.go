@@ -138,18 +138,14 @@ func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) e
 	if strings.TrimSpace(routingKey) == "" {
 		routingKey = q.cfg.routingKey()
 	}
-	// Carry the caller's trace headers; the caller's own values win.
-	// 带上调用方的链路头；调用方自己的值优先。
-	for name, value := range headerpropagation.Outgoing(ctx) {
-		if opts.Headers == nil {
-			opts.Headers = amqp091.Table{}
-		}
-		if _, ok := opts.Headers[name]; !ok {
-			opts.Headers[name] = value
-		}
-	}
+	// Carry the caller's trace headers; the caller's values win. The merge
+	// runs on a copy because opts.Headers belongs to the caller: writing into it
+	// would add entries the caller never set, and would race with any other
+	// goroutine reusing the same table.
+	// 带上调用方的链路头；调用方自己的值优先。合并在副本上完成，因为 opts.Headers 属于
+	// 调用方：写进去会多出它没有设置的键，也会与复用同一张表的其它 goroutine 竞争。
 	publishing := amqp091.Publishing{
-		Headers:       opts.Headers,
+		Headers:       publishHeaders(ctx, opts.Headers),
 		ContentType:   opts.ContentType,
 		DeliveryMode:  1,
 		Priority:      opts.Priority,
@@ -197,6 +193,29 @@ func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) e
 		return fmt.Errorf("amqp: publish: %w", err)
 	}
 	return nil
+}
+
+// publishHeaders merges the trace headers carried by ctx into the caller's
+// table and returns the result. The caller's values win, and the returned table
+// is never the caller's own when anything was added. With nothing to add it
+// returns caller unchanged: only reading happens afterwards.
+// publishHeaders 把 ctx 携带的链路头合并进调用方的表并返回结果。调用方的值优先，
+// 且只要有新增，返回的就不是调用方那张表。没有需要新增的项时原样返回 caller：之后只读。
+func publishHeaders(ctx context.Context, caller amqp091.Table) amqp091.Table {
+	extra := headerpropagation.Outgoing(ctx)
+	if len(extra) == 0 {
+		return caller
+	}
+	out := make(amqp091.Table, len(caller)+len(extra))
+	for name, value := range extra {
+		out[name] = value
+	}
+	// Second, so a header the caller set itself survives the merge.
+	// 后写，调用方自己设置的链路头因此得以保留。
+	for name, value := range caller {
+		out[name] = value
+	}
+	return out
 }
 
 // PublishJSON marshals value as JSON and publishes it. ContentType defaults to

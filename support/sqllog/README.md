@@ -44,6 +44,20 @@ gormDB, err := gofydb.New(ctx, dbCfg, logger,
 | `ModePlaceholder`（默认） | 带占位符的模板，值不外泄 |
 | `ModeFull` | 展开后的语句，仅限本地排障 |
 
+## 什么算"启用了本节"
+
+`ResolveEnabled` 按顺序看三件事，YAML 与代码构造走同一套判定：
+
+1. 写了 `enabled` 就听它的，`false` 压过其它所有字段；
+2. 否则 YAML 段里出现任何其它键就算启用——写了 `mode: full` 却忘了 `enabled`，
+   不能静默失效；
+3. 否则结构体里有任一非零字段就算启用，`sqllog.Config{Mode: "full"}` 因此与
+   `sql_log: {mode: full}` 行为一致。
+
+第 3 条只在代码里构造 `Config` 时起作用（YAML 路径由第 2 条先命中）。零值字段与
+未提及的字段无法区分，所以 `Config{LogSchemaQueries: false}` 表达的仍是"不启用"；
+想明确关闭就用 `Enabled: &false`。
+
 ## 两条容易踩的语义
 
 - **限流是进程级的**：`error_rate_limit` 的含义是"本进程每秒最多写 N 条"。

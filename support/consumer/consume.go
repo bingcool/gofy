@@ -71,7 +71,7 @@ func start(ctx context.Context, name string, idempotency bool, maxAttempts int, 
 		zap.String("worker", id.String()),
 		zap.String("consumer", name),
 	)
-	proc, err := NewProcessor(rt, ProcessorConfig{
+	proc, err := NewProcessor(ctx, rt, ProcessorConfig{
 		Consumer:    name,
 		Handler:     handler,
 		Idempotency: idempotency,
@@ -314,6 +314,16 @@ type ProcessorConfig struct {
 	// 的间隔加一次写库。进程整体停顿满一个窗口时行仍会被别的副本接管，所以 handler 必须幂等。
 	// 取值不短于 broker 的重投间隔，可避免在途副本多转几轮重投。
 	ProcessingLease time.Duration
+	// SchemaTimeout bounds the ledger schema initialisation that runs when
+	// Idempotency is on; zero means DefaultSchemaTimeout. The DDL itself is
+	// cheap, but the connection it needs may not be: without a bound, a pool
+	// that cannot reach the database keeps the consumer — and the worker
+	// shutdown that is waiting for it — blocked for as long as the driver's own
+	// timeout allows.
+	// SchemaTimeout 限制开启 Idempotency 时执行的台账建表；0 表示 DefaultSchemaTimeout。
+	// DDL 本身很轻，但它要的连接未必：没有上限时，连不上库的连接池会让消费者——以及等着
+	// 它退出的 worker 关闭流程——一直阻塞到驱动自己的超时。
+	SchemaTimeout time.Duration
 	// OnLedgerError reports a ledger write that failed after the acknowledgement
 	// decision was already made: a done/failed marker that could not be stored.
 	// The message still follows that decision — a successful handler is
@@ -347,14 +357,19 @@ type Processor struct {
 	propagator    propagation.TextMapPropagator
 	maxAttempts   int
 	lease         time.Duration
+	schemaTimeout time.Duration
 	renewInterval time.Duration
 	onLedgerError func(messageID string, err error)
 }
 
-// NewProcessor builds the shared chain. It fails when idempotency is requested
-// without db.default: silently dropping deduplication would turn every
-// redelivery into a second side effect, and the ledger cannot live in a named
-// instance.
+// NewProcessor builds the shared chain. ctx is the consumer's lifecycle context
+// and becomes the parent of the ledger schema initialisation, so cancelling it
+// — on shutdown, or through SchemaTimeout — aborts the DDL instead of leaving
+// the caller waiting on the database.
+//
+// It fails when idempotency is requested without db.default: silently dropping
+// deduplication would turn every redelivery into a second side effect, and the
+// ledger cannot live in a named instance.
 //
 // The ledger is process-wide and owns its schema, so it belongs to the
 // framework-managed pool rather than to a business database that may be a read
@@ -363,14 +378,20 @@ type Processor struct {
 // which is exactly the wrong conclusion for a deployment that only configures
 // db.order. The worker host turns the same requirement into a startup error, so
 // this branch is the defence for callers that build a processor directly.
-// NewProcessor 构造共用链路。开启幂等却没有 db.default 时直接失败：静默放弃去重会让
-// 每次重投都变成第二次副作用，而台账不能放在命名实例里。
+// NewProcessor 构造共用链路。ctx 是消费者的生命周期 context，也是台账建表的父 context：
+// 取消它——关闭流程，或 SchemaTimeout 到期——就会中止 DDL，而不是让调用方继续等数据库。
+//
+// 开启幂等却没有 db.default 时直接失败：静默放弃去重会让每次重投都变成第二次副作用，
+// 而台账不能放在命名实例里。
 //
 // 台账是进程级的、自带 schema，因此属于框架托管的池，而不是业务库——后者可能是只读副本或
 // 最小权限账号。文案刻意点名 db.default："requires a database" 读起来像"配了哪个实例都
 // 行"，而对只配了 db.order 的部署来说，这恰恰是错误结论。worker 宿主会把同一个要求变成
 // 启动期错误，因此这里只是给直接构造处理器的调用方兜底。
-func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
+func NewProcessor(ctx context.Context, rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
+	if ctx == nil {
+		return nil, errors.New("consumer context is required")
+	}
 	if rt == nil {
 		return nil, errors.New("consumer runtime is required")
 	}
@@ -385,10 +406,14 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 		propagator:    rt.Propagator,
 		maxAttempts:   max(cfg.MaxAttempts, 1),
 		lease:         cfg.ProcessingLease,
+		schemaTimeout: cfg.SchemaTimeout,
 		onLedgerError: cfg.OnLedgerError,
 	}
 	if p.lease <= 0 {
 		p.lease = DefaultProcessingLease
+	}
+	if p.schemaTimeout <= 0 {
+		p.schemaTimeout = DefaultSchemaTimeout
 	}
 	// Renew three times per lease window, so one slow database write cannot by
 	// itself consume a whole window. The floor keeps a sub-millisecond lease
@@ -415,7 +440,17 @@ func NewProcessor(rt *core.Runtime, cfg ProcessorConfig) (*Processor, error) {
 			maxAttempts: p.maxAttempts,
 			lease:       p.lease,
 		}
-		if err := p.deduper.ensureSchema(context.Background()); err != nil {
+		// The DDL runs under the caller's lifecycle context plus a bound of its
+		// own. Both halves matter: cancellation makes a shutdown able to
+		// interrupt a connection attempt, and the timeout keeps a consumer that
+		// was built outside any lifecycle from waiting on the driver's timeout.
+		// 建表跑在调用方的生命周期 context 之下，并额外加一层自己的上限。两者都必要：
+		// 取消让关闭流程能打断建连，超时则避免在没有生命周期的构造路径上一直等到驱动的
+		// 超时。
+		schemaCtx, cancelSchema := context.WithTimeout(ctx, p.schemaTimeout)
+		err := p.deduper.ensureSchema(schemaCtx)
+		cancelSchema()
+		if err != nil {
 			return nil, fmt.Errorf("consumer %s: idempotency schema: %w", cfg.Consumer, err)
 		}
 	}
@@ -760,6 +795,18 @@ const (
 // 处理时开始执行，而这正是台账要消除的重叠。只有当 broker 重投更快、且明确知道
 // handler 很快时才应调小。
 const DefaultProcessingLease = 5 * time.Minute
+
+// DefaultSchemaTimeout bounds the ledger schema initialisation when
+// ProcessorConfig.SchemaTimeout is zero.
+//
+// The statement is a single CREATE TABLE (or a HasTable probe), so 30s is
+// already generous; it exists to turn "the database never answers" into a
+// startup error instead of a start that hangs.
+// DefaultSchemaTimeout 是 ProcessorConfig.SchemaTimeout 为零时台账建表的时限。
+//
+// 语句只有一条 CREATE TABLE（或一次 HasTable 探测），30 秒已相当宽裕；它的作用是把
+// "数据库没有应答"变成启动失败，而不是一直卡在启动里。
+const DefaultSchemaTimeout = 30 * time.Second
 
 // inFlightError is the concrete type behind ErrInFlight. It implements the
 // queues package's InFlightError marker structurally, which lets a Redis queue

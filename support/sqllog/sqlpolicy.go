@@ -64,8 +64,21 @@ const (
 type Config struct {
 	Enabled *bool `yaml:"enabled"`
 	// Mode: off | placeholder | full; empty means placeholder.
+	//
+	// There is deliberately no `default` tag here. config.Load applies
+	// defaults.Set before decoding, so a tag would fill Mode even when the
+	// sql_log section is absent — and then ResolveEnabled's value-based rule
+	// would read that filler as "the operator configured something" and switch
+	// SQL logging on for every deployment that never asked for it. normalize
+	// applies the same default when the policy is built, which is the only point
+	// where the value is actually needed.
 	// Mode：off | placeholder | full；空串表示 placeholder。
-	Mode string `yaml:"mode" default:"placeholder"`
+	//
+	// 这里刻意没有 `default` 标签。config.Load 在解码前先跑 defaults.Set，标签会在
+	// sql_log 整段缺席时也把 Mode 填上——随后 ResolveEnabled 的按值规则会把这份填充读成
+	// "运维配置了东西"，从而给每一个从未要求过 SQL 日志的部署打开日志。normalize 在构造
+	// 策略时会填同一个默认值，那才是真正需要这个值的地方。
+	Mode string `yaml:"mode"`
 	// SampleRate applies to Info rows; 0 means "not set" (use the default), 1
 	// means every row. 0 used to mean "log everything", which contradicted the
 	// zero value of a missing field, so that reading was dropped.
@@ -117,15 +130,27 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 // ResolveEnabled reports whether the section is active. Three rules, in order:
 //
 //   - an explicit enabled wins;
-//   - otherwise any other key in the section means "enabled" — writing mode:
+//   - otherwise any other key in the YAML section means "enabled" — writing mode:
 //     full and forgetting enabled must not silently do nothing;
-//   - an absent, null or empty section stays disabled.
+//   - otherwise any non-zero field means "enabled", so a Config built in code
+//     behaves exactly like the YAML that would produce it.
 //
+// The third rule is what makes the two entry paths agree. keys only exists on
+// the YAML path, so a programmatic Config{Mode: "full"} would otherwise resolve
+// to disabled while sql_log: {mode: full} resolved to enabled — the same
+// configuration, two behaviours depending on how it was loaded. The YAML rule
+// still comes first because it can see something values cannot: an explicit
+// zero, such as log_schema_queries: false.
 // ResolveEnabled 报告本节是否生效。三条规则，按顺序：
 //
 //   - 显式 enabled 优先；
-//   - 否则只要出现了其它键就算启用——写了 mode: full 却忘了 enabled，不能静默失效；
-//   - 整段缺席、null 或空映射视为关闭。
+//   - 否则只要 YAML 里出现了其它键就算启用——写了 mode: full 却忘了 enabled，不能静默失效；
+//   - 否则只要有任一非零字段就算启用，使代码里构造的 Config 与产生它的 YAML 行为一致。
+//
+// 第三条是两条入口路径达成一致的关键。keys 只存在于 YAML 路径上，因此程序化构造的
+// Config{Mode: "full"} 原先解析为关闭，而 sql_log: {mode: full} 解析为启用——同一份配置，
+// 两种行为，只取决于怎么加载。YAML 规则仍然排在前面，因为它能看到值看不到的东西：显式
+// 零值，例如 log_schema_queries: false。
 func (c Config) ResolveEnabled() bool {
 	if c.Enabled != nil {
 		return *c.Enabled
@@ -135,7 +160,28 @@ func (c Config) ResolveEnabled() bool {
 			return true
 		}
 	}
-	return false
+	return c.configured()
+}
+
+// configured reports whether any field was given a value. It is the value-based
+// counterpart of the YAML key scan, used when the struct was built in code.
+//
+// A field left at its zero value is indistinguishable from a field that was
+// never mentioned, which is a property of Go structs, not of this function:
+// Config{LogSchemaQueries: false} states no intent either way. Callers that mean
+// "off" say so through Enabled.
+// configured 报告是否有任一字段被赋值。它是 YAML 键扫描在值层面的对应物，用于在代码里
+// 构造结构体的情形。
+//
+// 保持零值的字段与从未提及的字段无法区分，这是 Go 结构体的性质而不是本函数的：
+// Config{LogSchemaQueries: false} 没有表达任何意图。想表达"关闭"的调用方用 Enabled。
+func (c Config) configured() bool {
+	if c.Mode != "" || c.SampleRate != 0 || c.MaxLength != 0 ||
+		c.LogSchemaQueries || c.ErrorRateLimit != 0 || c.SlowRateLimit != 0 {
+		return true
+	}
+	m := c.Mask
+	return m.Enabled || m.Strategy != "" || len(m.Columns) > 0 || len(m.Patterns) > 0
 }
 
 // normalize fills defaults and validates the values. It runs on every entry

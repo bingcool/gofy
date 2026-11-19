@@ -75,6 +75,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/consumer`: the idempotency ledger is now created under the caller's
+  context. `NewProcessor` ran the DDL on `context.Background()`, so a consumer
+  that was shutting down could not interrupt a connection attempt, and a pool
+  that could not reach the database kept the worker's shutdown waiting for as
+  long as the driver allowed. The initialisation now inherits the lifecycle
+  context and adds its own bound, `ProcessorConfig.SchemaTimeout` (default
+  `DefaultSchemaTimeout`, 30s).
+- `support/amqp`, `support/kafka`: publishing no longer rewrites the caller's
+  headers. Both producers merged the trace headers straight into
+  `PublishOptions.Headers`, which is a map: the caller's data gained entries it
+  never set, and reusing that map from another goroutine raced with the publish.
+  The merge happens on a copy, still with the caller's values winning.
+- `support/sqllog`: `ResolveEnabled` now agrees between the two entry paths. A
+  `Config` built in code used to resolve to disabled no matter what was set —
+  the YAML key scan that implements "wrote anything means enabled" has nothing to
+  read outside YAML — so `Config{Mode: "full"}` and `sql_log: {mode: full}`
+  behaved differently. A third rule (any non-zero field means enabled) covers the
+  programmatic path. `Mode` lost its `default:"placeholder"` tag for this to hold:
+  `config.Load` applies defaults before decoding, so the tag would have filled
+  `Mode` even for an absent section and switched SQL logging on for every
+  deployment that never configured it. `normalize` still applies that default
+  when the policy is built.
 - `support/nacos`: the registrar can no longer be stopped halfway through
   starting. `Start` used to set its started flag before the network call, so a
   `Stop` arriving in that window saw "started", flipped it back, returned success
@@ -586,6 +608,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `consumer.NewProcessor` takes a context: the signature is now
+  `NewProcessor(ctx, rt, cfg)` instead of `NewProcessor(rt, cfg)`. The context is
+  the consumer's lifecycle and the parent of the ledger schema initialisation,
+  which used to run on `context.Background()`. **Breaking** for callers that
+  build a processor directly; the six consumer adapters go through the shared
+  `start` helper and are unaffected.
 - `support/sqllog` (new package): the SQL log layer — `Policy`, `Config`, `Mode`,
   the mask set, the sampler/limiters and the GORM adapter — moved out of
   `logger`. It reads `X-Trace-Id` and the OTel span from the request context, so

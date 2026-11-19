@@ -112,23 +112,18 @@ func (p *Producer) Publish(ctx context.Context, body []byte, opts PublishOptions
 	}
 
 	// Carry the caller's trace headers so a consumed message can be attributed
-	// to the request that produced it. The caller's own values win.
-	// 带上调用方的链路头，消费端才能把消息归到产生它的请求上。调用方自己的值优先。
-	headers := headerpropagation.Outgoing(ctx)
-	for name, value := range headers {
-		if opts.Headers == nil {
-			opts.Headers = make(map[string]string, len(headers))
-		}
-		if _, ok := opts.Headers[name]; !ok {
-			opts.Headers[name] = value
-		}
-	}
-
+	// to the request that produced it. The caller's own values win, and the
+	// merge happens on a copy: opts.Headers is the caller's map and may be read
+	// or reused by another goroutine, so writing into it would be a data race
+	// with a side effect the caller never asked for.
+	// 带上调用方的链路头，消费端才能把消息归到产生它的请求上。调用方自己的值优先，
+	// 且合并在副本上进行：opts.Headers 属于调用方，可能被别的 goroutine 读取或复用，
+	// 直接写入既是数据竞争，也是调用方没有要求的副作用。
 	record := &kgo.Record{
 		Topic:     topic,
 		Key:       []byte(opts.Key),
 		Value:     body,
-		Headers:   recordHeaders(opts.Headers),
+		Headers:   recordHeaders(publishHeaders(ctx, opts.Headers)),
 		Timestamp: opts.Timestamp,
 	}
 	flushCtx, cancel := context.WithTimeout(ctx, p.cfg.FlushTimeout)
@@ -154,6 +149,31 @@ func (p *Producer) PublishJSON(ctx context.Context, value any, opts PublishOptio
 	}
 	opts.Headers = withContentType(opts.Headers, "application/json")
 	return p.Publish(ctx, body, opts)
+}
+
+// publishHeaders merges the trace headers carried by ctx into the caller's
+// headers and returns the result. The caller's values win, and the returned map
+// is never the caller's own when anything was added — writing into caller would
+// mutate data the producer does not own. With nothing to add it returns caller
+// unchanged, because reading it is all that happens next.
+// publishHeaders 把 ctx 携带的链路头合并进调用方的头并返回结果。调用方的值优先，
+// 且只要有新增，返回的就不是调用方那个 map——写入 caller 等于修改生产者并不拥有的数据。
+// 没有需要新增的项时原样返回 caller，因为接下来只读不写。
+func publishHeaders(ctx context.Context, caller map[string]string) map[string]string {
+	extra := headerpropagation.Outgoing(ctx)
+	if len(extra) == 0 {
+		return caller
+	}
+	out := make(map[string]string, len(caller)+len(extra))
+	for name, value := range extra {
+		out[name] = value
+	}
+	// Second, so a header the caller set itself survives the merge.
+	// 后写，调用方自己设置的链路头因此得以保留。
+	for name, value := range caller {
+		out[name] = value
+	}
+	return out
 }
 
 func recordHeaders(headers map[string]string) []kgo.RecordHeader {
