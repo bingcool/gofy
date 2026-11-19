@@ -23,6 +23,7 @@ package appio
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
@@ -53,13 +54,12 @@ type Module struct {
 	lockCfg     gofylock.Config
 	dbOpts      []appdb.OpenOption
 
-	dbSet       *appdb.Set
-	redisSet    *appredis.Set
-	amqpSet     *appamqp.Set
-	kafkaSet    *appkafka.Set
-	rocketmqSet *approcketmq.Set
-	uuidintSet  *appuuidint.Set
-	lockSet     *appredislock.Set
+	// closers records what Start opened, in opening order. Stop and the failure
+	// path walk it backwards, so "close dependents before their dependencies" is
+	// declared once instead of being repeated in every branch.
+	// closers 按打开顺序记录 Start 打开的资源。Stop 与失败回滚都反向遍历它，
+	// "先停依赖者、再关被依赖者"因此只声明一次，而不是在每个分支各写一遍。
+	closers []namedCloser
 	// snapshot 是本代句柄的只读视图，Start 发布、Stop 只撤回仍指向自己的快照。
 	snapshot *Snapshot
 }
@@ -89,6 +89,39 @@ func NewModule(rt *gofy.Runtime, dbCfg map[string]gofy.DatabaseConfig, redisCfg 
 	}
 }
 
+// namedCloser is one resource and the name used when its Close fails, so a
+// failure says which resource it came from instead of only carrying the driver
+// error.
+// namedCloser 是一个资源，以及其 Close 失败时用于报错的名字：失败因此能指出是
+// 哪一个资源，而不只是驱动返回的错误。
+type namedCloser struct {
+	name  string
+	close func() error
+}
+
+// closeAll closes the recorded resources in reverse opening order: nothing may
+// outlive what it depends on. The UUID prefetch pool is the case that matters —
+// its ticker talks to Redis, so stopping it after the clients were closed turns
+// a reload into "redis: client is closed" retries and error callbacks.
+//
+// Every Close runs even when an earlier one fails, and the errors are joined
+// with the resource name: a leaked connection is worse than a noisy error.
+// closeAll 按打开顺序的逆序关闭资源：任何组件都不能比它依赖的东西活得更久。
+// 真正要紧的是 UUID 预取池——它的 ticker 会访问 Redis，若在客户端关闭之后才停，
+// 一次 Reload 就会变成 "redis: client is closed" 重试与错误回调。
+//
+// 即使前面的 Close 失败，后面的也都会执行；错误按资源名聚合：连接泄漏比错误噪音
+// 更糟。
+func closeAll(closers []namedCloser) error {
+	errs := make([]error, 0, len(closers))
+	for i := len(closers) - 1; i >= 0; i-- {
+		if err := closers[i].close(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", closers[i].name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Name returns the module name.
 // Name 返回模块名 "io"，框架用它做模块去重与错误标识。
 func (m *Module) Name() string { return "io" }
@@ -98,42 +131,55 @@ func (m *Module) Name() string { return "io" }
 func (m *Module) Register(*support.Router) error { return nil }
 
 // Start opens the extra instances and publishes every handle.
-// Start 依次打开各实例，任一失败都会关掉已建的连接再返回错误；全部就绪后才
-// 安装句柄并一次发布快照，避免请求读到半成品。
+// Start 依次打开各实例，任一失败都会按相反顺序关掉已建的连接再返回错误；全部
+// 就绪后才安装句柄并一次发布快照，避免请求读到半成品。
 func (m *Module) Start(ctx context.Context) error {
 	if m.rt == nil {
 		return errors.New("io: runtime is required")
 	}
+	// opened is the single record of what this generation owns, in opening
+	// order. Every failure path and Stop close it backwards, so the dependency
+	// order — UUID and the lock hold this generation's Redis clients — is
+	// expressed once, next to the opens that create it.
+	// opened 是本代拥有资源的唯一记录，按打开顺序排列。所有失败路径与 Stop 都
+	// 反向关闭它，依赖关系（UUID 与锁持有本代的 Redis 客户端）因此只写在打开它们的
+	// 位置旁边，不会在多处各写一份。
+	opened := make([]namedCloser, 0, 7)
+
 	dbSet, err := appdb.Open(ctx, m.rt.DB, m.dbCfg, m.rt, m.dbOpts...)
 	if err != nil {
 		return err
 	}
+	opened = append(opened, namedCloser{name: "db", close: dbSet.Close})
+
 	redisSet, err := appredis.Open(ctx, m.redisCfg, m.rt)
 	if err != nil {
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
+	opened = append(opened, namedCloser{name: "redis", close: redisSet.Close})
+
 	amqpSet, err := appamqp.Open(ctx, m.amqpCfg, m.rt.Logger)
 	if err != nil {
-		_ = redisSet.Close()
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
+	opened = append(opened, namedCloser{name: "amqp", close: amqpSet.Close})
+
 	kafkaSet, err := appkafka.Open(ctx, m.kafkaCfg, m.rt.Logger)
 	if err != nil {
-		_ = amqpSet.Close()
-		_ = redisSet.Close()
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
+	opened = append(opened, namedCloser{name: "kafka", close: kafkaSet.Close})
+
 	rocketmqSet, err := approcketmq.Open(ctx, m.rocketmqCfg, m.rt.Logger)
 	if err != nil {
-		_ = kafkaSet.Close()
-		_ = amqpSet.Close()
-		_ = redisSet.Close()
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
+	opened = append(opened, namedCloser{name: "rocketmq", close: rocketmqSet.Close})
+
 	// The generator is pinned to this generation's Redis clients, so Get does
 	// not depend on the last installed Registry. An empty fallback alias skips
 	// the lookup; a configured one without an enabled instance fails in Open.
@@ -151,41 +197,30 @@ func (m *Module) Start(ctx context.Context) error {
 		fallbackClient,
 	)
 	if err != nil {
-		_ = rocketmqSet.Close()
-		_ = kafkaSet.Close()
-		_ = amqpSet.Close()
-		_ = redisSet.Close()
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
+	// Recorded before StartPool: once the ticker runs it reads Redis, so even a
+	// failed start has to stop the pool before the clients are closed.
+	// 在 StartPool 之前记录：ticker 一旦运行就会读 Redis，因此即使启动失败，
+	// 也必须在关闭客户端之前先停掉池。
+	opened = append(opened, namedCloser{name: "uuidint", close: uuidintSet.Close})
 	if err := uuidintSet.Start(ctx); err != nil {
-		_ = rocketmqSet.Close()
-		_ = kafkaSet.Close()
-		_ = amqpSet.Close()
-		_ = redisSet.Close()
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
+
 	// The lock is pinned to this generation's Redis client for the same reason
 	// the generator is: a reload must not move an acquired lock's connection.
 	// 锁与生成器同因：绑定本代 Redis 客户端，Reload 不会改变已持有锁的连接。
 	lockSet, err := appredislock.Open(m.lockCfg, m.rt.Logger, redisSet.Client(m.lockCfg.RedisInstanceName()))
 	if err != nil {
-		_ = uuidintSet.Close()
-		_ = rocketmqSet.Close()
-		_ = kafkaSet.Close()
-		_ = amqpSet.Close()
-		_ = redisSet.Close()
-		_ = dbSet.Close()
+		_ = closeAll(opened)
 		return err
 	}
-	m.dbSet = dbSet
-	m.redisSet = redisSet
-	m.amqpSet = amqpSet
-	m.kafkaSet = kafkaSet
-	m.rocketmqSet = rocketmqSet
-	m.uuidintSet = uuidintSet
-	m.lockSet = lockSet
+	opened = append(opened, namedCloser{name: "lock", close: lockSet.Close})
+
+	m.closers = opened
 	dbSet.Install()
 	redisSet.Install()
 	amqpSet.Install()
@@ -238,20 +273,23 @@ func (m *Module) RequestBinder() support.RequestBinderFunc {
 	}
 }
 
-// Stop closes this generation. A reload starts the replacement before stopping
-// the old module, so the old snapshot is withdrawn only when it is still the
-// published one and the old handles never clear the new connections.
-// Stop 关闭本代全部句柄。Reload 先启动新模块再停旧模块，因此只撤回仍指向自己的
-// 快照，旧句柄不会清掉新连接。
+// Stop closes this generation in reverse opening order: the lock handle, the
+// UUID prefetch pool (its ticker reads Redis), the brokers, the Redis clients
+// they depend on, and finally the database. A reload starts the replacement
+// before stopping the old module, so the old snapshot is withdrawn only when it
+// is still the published one and the old handles never clear the new
+// connections.
+//
+// The order is load-bearing, not cosmetic: closing Redis first would leave the
+// pool's ticker talking to a closed client until StopPool runs, which turns
+// each reload into failed refills and error callbacks.
+// Stop 按打开顺序的逆序关闭本代：锁句柄、UUID 预取池（其 ticker 读 Redis）、
+// 各 broker、它们依赖的 Redis 客户端，最后是数据库。Reload 先启动新模块再停旧
+// 模块，因此只撤回仍指向自己的快照，旧句柄不会清掉新连接。
+//
+// 这个顺序有实际作用，不是排版：先关 Redis 会让池的 ticker 在 StopPool 之前一直
+// 对着已关闭的客户端补货，每次 Reload 都变成失败的重试与错误回调。
 func (m *Module) Stop(context.Context) error {
 	currentSnapshot.CompareAndSwap(m.snapshot, nil)
-	return errors.Join(
-		m.dbSet.Close(),
-		m.redisSet.Close(),
-		m.amqpSet.Close(),
-		m.kafkaSet.Close(),
-		m.rocketmqSet.Close(),
-		m.uuidintSet.Close(),
-		m.lockSet.Close(),
-	)
+	return closeAll(m.closers)
 }

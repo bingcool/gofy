@@ -51,6 +51,13 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 		Publish(nil)
 	})
 
+	// The close list is opening order and Stop walks it backwards. Pinning it
+	// here keeps the UUID pool ahead of the Redis clients its ticker reads from.
+	// 关闭清单是打开顺序，Stop 反向遍历。在这里钉住它，UUID 池才会先于它读取的
+	// Redis 客户端被停止。
+	if got := closerNames(m.closers); strings.Join(got, ",") != "db,redis,amqp,kafka,rocketmq,uuidint,lock" {
+		t.Fatalf("close order = %v", got)
+	}
 	if appdb.Default() != rt.DB {
 		t.Fatal("db.Default does not point at the runtime connection")
 	}
@@ -294,5 +301,66 @@ func TestStartInstallsRocketMQInstance(t *testing.T) {
 	}
 	if approcketmq.Default() != nil {
 		t.Fatal("rocketmq.Default was not cleared")
+	}
+}
+
+// closerNames is the ordering assertion helper: the list itself stays the
+// source of truth, this only makes it comparable.
+// closerNames 是顺序断言用的辅助函数：清单本身仍是唯一事实来源，这里只把它变成
+// 可比较的形式。
+func closerNames(closers []namedCloser) []string {
+	names := make([]string, 0, len(closers))
+	for _, c := range closers {
+		names = append(names, c.name)
+	}
+	return names
+}
+
+// TestCloseAllRunsInReverseOrder fixes the rule Stop depends on: a resource is
+// closed only after everything opened after it, which is what puts UUID (and
+// its Redis-touching ticker) before the clients it uses.
+// TestCloseAllRunsInReverseOrder 固定 Stop 依赖的规则：资源在它之后打开的全部关闭
+// 完之后才关闭，UUID（及其访问 Redis 的 ticker）因此排在它使用的客户端之前。
+func TestCloseAllRunsInReverseOrder(t *testing.T) {
+	var order []string
+	mk := func(name string) namedCloser {
+		return namedCloser{name: name, close: func() error {
+			order = append(order, name)
+			return nil
+		}}
+	}
+	if err := closeAll([]namedCloser{mk("db"), mk("redis"), mk("uuidint"), mk("lock")}); err != nil {
+		t.Fatalf("closeAll: %v", err)
+	}
+	want := "lock,uuidint,redis,db"
+	if got := strings.Join(order, ","); got != want {
+		t.Fatalf("close order = %q, want %q", got, want)
+	}
+}
+
+// TestCloseAllKeepsGoingAndNamesFailures: one failing Close must not skip the
+// rest, and the joined error has to say which resource failed — otherwise the
+// operator sees a driver error with no owner.
+// TestCloseAllKeepsGoingAndNamesFailures：一个 Close 失败不能跳过其余，聚合错误
+// 必须指出是哪个资源失败，否则运维只看到一个没有归属的驱动错误。
+func TestCloseAllKeepsGoingAndNamesFailures(t *testing.T) {
+	var order []string
+	closers := []namedCloser{
+		{name: "db", close: func() error { order = append(order, "db"); return nil }},
+		{name: "redis", close: func() error { order = append(order, "redis"); return errors.New("boom") }},
+		{name: "uuidint", close: func() error { order = append(order, "uuidint"); return errors.New("ticker stuck") }},
+	}
+
+	err := closeAll(closers)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"redis: boom", "uuidint: ticker stuck"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	if len(order) != len(closers) {
+		t.Fatalf("closed %v, want all %d resources", order, len(closers))
 	}
 }
