@@ -67,6 +67,7 @@ Go 侧最终 ID：`id = prefixNumber + incrId`（19 位数字，`int64` 可容�
 | `WithRetry(times, delay)` | 主连接尝试次数与间隔；同毫秒冲突也走重试；`0` 表示默认次数 | `3` / `150ms` |
 | `WithErrorHandler(func(error))` | 主连接重试耗尽时回调一次，再尝试备用连接 | 无 |
 | `WithPool(size, interval)` | 启用本地预取池：启动预热 `size` 个号，之后每 `interval` 补一批 | 不启用 |
+| `WithRefillTimeout(time.Duration)` | 单轮补货的时限（预热与每次 ticker 补货），至少 1ms | `3s` |
 
 `WithClient` 与 `WithInstance` 互斥；`New` 会校验 key 非空、TTL/重试参数，
 以及注入的客户端不能为 nil。启用池时校验 `size ∈ [1, MaxIncr]`、
@@ -108,12 +109,18 @@ ids, err := gen.GetBatch(ctx, 10)
   不会静默丢弃。
 - `StopPool` 幂等；停止后 `Get` 直接回落到 Redis 单次取号。池不可重启，
   需要重启时重新 `New` 一个 Generator。
+- 停止后不会再发起新的补货：`refill` 在申请批次之前就检查停止标志，预热恰好与停止
+  撞上时也一样；一轮补货在途期间到达的停止优先，那批号直接丢弃。
+- `WithRefillTimeout(d)` 限制单轮补货（默认 3s，与 go-redis 默认读超时一致）：
+  到期后本轮不再发起新的尝试或备用调用，等待连接池也被截断。它**不会**取消已经发出的
+  那条命令——只有客户端用 `ContextTimeoutEnabled` 构建时 go-redis 才按 ctx deadline
+  缩短 socket I/O，因此单条命令仍受客户端 `ReadTimeout` 约束，两个值应一起调大。
 - `StopPoolContext(ctx)` 是带预算的版本，供 `Module.Stop` 这类不能无限等待的
-  调用方使用：取消 ticker 不会打断它已经进入的那次 Redis 调用（池的 ctx 没有
-  deadline，go-redis 只按 ctx 里的 deadline 缩短命令），因此到截止时间返回
-  `ctx.Err()` 并留下一个预取 goroutine，而不是把调用方挂住。此时缓冲**不关闭**
-  （关闭会让被放弃的 goroutine 下一次发送 panic）；ticker 真退出后再调一次可以
-  完成收尾并关闭缓冲。
+  调用方使用。取消与单轮上限配合，goroutine 的存活时间因此有已知天花板；预算更短的
+  调用方仍会在自己的截止时间返回 `ctx.Err()` 并留下一个预取 goroutine，而不是被挂住。
+  此时缓冲**不关闭**（关闭会让被放弃的 goroutine 下一次发送 panic）；那一轮返回后
+  再调一次可以完成收尾并关闭缓冲。遗留 goroutine 不会破坏已经开始的释放流程：它下一次
+  访问到的要么是停止标志、要么是已关闭的客户端，两者都只是错误。
 
 ## 失败与降级
 

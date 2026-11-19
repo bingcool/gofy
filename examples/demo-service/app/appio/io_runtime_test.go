@@ -373,3 +373,54 @@ func TestCloseAllKeepsGoingAndNamesFailures(t *testing.T) {
 		t.Fatalf("closed %v, want all %d resources", order, len(closers))
 	}
 }
+
+// TestRollbackJoinsTheCleanupFailure is the audit finding made testable: a
+// failed rollback used to be dropped, so a leaked connection was invisible
+// behind the startup error. Both errors must now survive, and the original must
+// stay identifiable through errors.Is.
+// TestRollbackJoinsTheCleanupFailure 把审计结论变成可测的：回滚失败原先被丢弃，连接
+// 泄漏就藏在启动错误后面。现在两者都必须保留，且原始错误仍能通过 errors.Is 识别。
+func TestRollbackJoinsTheCleanupFailure(t *testing.T) {
+	cause := errors.New("redis: dial tcp 127.0.0.1:6379: connect: connection refused")
+	opened := []namedCloser{
+		{name: "db", close: func(context.Context) error { return nil }},
+		{name: "amqp", close: func(context.Context) error { return errors.New("broker already gone") }},
+	}
+
+	err := rollback(context.Background(), opened, cause)
+
+	if !errors.Is(err, cause) {
+		t.Fatalf("rollback error %v does not wrap the startup error", err)
+	}
+	for _, want := range []string{cause.Error(), "amqp: broker already gone"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	// Two failures, two lines: the closer that succeeded must not add a third.
+	// 两个失败两行：关闭成功的资源不该多出第三行。
+	if lines := strings.Split(strings.TrimSpace(err.Error()), "\n"); len(lines) != 2 {
+		t.Fatalf("error has %d lines, want 2: %q", len(lines), err)
+	}
+}
+
+// TestRollbackWithoutCleanupFailureKeepsTheOriginalMessage: when the rollback is
+// clean, the returned error must read exactly like the startup error — an
+// errors.Join with a nil cleanup still prints the same text, and this pins it.
+// TestRollbackWithoutCleanupFailureKeepsTheOriginalMessage：回滚干净时，返回的错误
+// 必须与启动错误逐字相同——errors.Join 聚合一个 nil 时打印的就是原文本，这里钉住它。
+func TestRollbackWithoutCleanupFailureKeepsTheOriginalMessage(t *testing.T) {
+	cause := errors.New("amqp: connect: connection refused")
+	err := rollback(context.Background(), []namedCloser{
+		{name: "db", close: func(context.Context) error { return nil }},
+	}, cause)
+	if err == nil {
+		t.Fatal("rollback dropped the startup error")
+	}
+	if err.Error() != cause.Error() {
+		t.Fatalf("error = %q, want %q", err, cause.Error())
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("error %v does not wrap the startup error", err)
+	}
+}

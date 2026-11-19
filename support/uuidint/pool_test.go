@@ -10,6 +10,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/bingcool/gofy/support/uuidint"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // counter reads the Redis counter value written by the Lua script.
@@ -241,5 +242,106 @@ func TestPoolConcurrentGets(t *testing.T) {
 	}
 	if len(seen) != workers*perWorker {
 		t.Fatalf("got %d unique ids, want %d", len(seen), workers*perWorker)
+	}
+}
+
+// TestStopPoolAfterTheClientWasClosed is the audit's failure path end to end: a
+// StopPoolContext that timed out leaves the ticker running, closeAll then closes
+// Redis, and the leftover ticker keeps refilling against a closed client. What
+// must hold is that this is survivable — the refill fails, the goroutine exits on
+// the next cancel, the buffer is closed only after it is gone, and a later Get
+// reports the closed client instead of panicking or hanging.
+// TestStopPoolAfterTheClientWasClosed 是审计描述的失败路径的端到端版本：StopPoolContext
+// 超时留下仍在运行的 ticker，closeAll 随后关掉 Redis，遗留的 ticker 继续对着已关闭的
+// 客户端补货。必须成立的是它能被安全吸收——补货失败、goroutine 在下一次取消时退出、
+// 缓冲只在它消失后才关闭，之后的 Get 报客户端已关闭而不会 panic 或挂住。
+func TestStopPoolAfterTheClientWasClosed(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{
+		Addr:         mr.Addr(),
+		MaxRetries:   -1,
+		ReadTimeout:  100 * time.Millisecond,
+		WriteTimeout: 100 * time.Millisecond,
+		DialTimeout:  100 * time.Millisecond,
+	})
+	gen, err := uuidint.New("closed-key",
+		uuidint.WithClient(client),
+		uuidint.WithPool(4, 10*time.Millisecond),
+		uuidint.WithRefillTimeout(50*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := gen.StartPool(context.Background()); err != nil {
+		t.Fatalf("StartPool: %v", err)
+	}
+
+	// The release budget ran out elsewhere and closeAll moved on to the clients.
+	// 别处的释放预算已经用完，closeAll 继续去关客户端了。
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	// Let a few refills hit the closed client.
+	// 让几轮补货撞上已关闭的客户端。
+	time.Sleep(40 * time.Millisecond)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := gen.StopPoolContext(stopCtx); err != nil {
+		t.Fatalf("StopPoolContext after the client was closed: %v", err)
+	}
+	if _, err := gen.Get(context.Background()); err == nil {
+		t.Fatal("Get returned an id after the client was closed")
+	}
+}
+
+// TestStopPoolUnderConcurrentGets runs the pool at its shortest interval while
+// four goroutines drain it, then stops it, under -race. The point is not the IDs
+// — it is that start, refill, drain and stop share the buffer and the flags
+// without a data race and without a close that catches the refill mid-send.
+// TestStopPoolUnderConcurrentGets 让池以最短周期运行、四个 goroutine 同时消费，然后
+// 停止，并在 -race 下跑。重点不是号本身，而是启动、补货、消费、停止共享同一份缓冲与
+// 标志位时既没有数据竞争，也没有"关闭撞上补货发送"的情况。
+func TestStopPoolUnderConcurrentGets(t *testing.T) {
+	mr := miniredis.RunT(t)
+	gen, err := uuidint.New("race-key",
+		uuidint.WithClient(testClient(t, mr)),
+		uuidint.WithPool(8, 10*time.Millisecond),
+		uuidint.WithRefillTimeout(50*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := gen.StartPool(context.Background()); err != nil {
+		t.Fatalf("StartPool: %v", err)
+	}
+
+	drainCtx, stopDraining := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer stopDraining()
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for drainCtx.Err() == nil {
+				if _, err := gen.Get(drainCtx); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := gen.StopPoolContext(stopCtx); err != nil {
+		t.Fatalf("StopPoolContext: %v", err)
+	}
+	wg.Wait()
+
+	// A second stop must stay harmless now that the buffer is closed.
+	// 缓冲已经关闭之后再停一次，仍必须无害。
+	if err := gen.StopPoolContext(context.Background()); err != nil {
+		t.Fatalf("second StopPoolContext: %v", err)
 	}
 }

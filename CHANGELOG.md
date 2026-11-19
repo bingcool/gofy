@@ -75,6 +75,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/uuidint`: a stopped pool no longer starts new prefetch work. `refill`
+  read neither the stop flag nor the context before allocating a batch, so a
+  warm-up that raced with `StopPoolContext` — or a round already inside the retry
+  loop — could still talk to Redis, and push its batch into a buffer nobody would
+  consume, after the caller had been told the pool was stopped. `refill` now
+  checks the stop flag before the round and drops the batch if a stop arrived
+  while it was in flight, and `generate` refuses to start an attempt with a done
+  context, which keeps a shutdown to one command's time instead of the whole
+  retry sequence. New `WithRefillTimeout` (default 3s) bounds a round; it does
+  not cancel a command already on the wire — go-redis only shortens socket I/O by
+  a context deadline when the client is built with `ContextTimeoutEnabled` — so
+  one command is still bounded by the client's `ReadTimeout`, and the two values
+  are meant to be raised together. Covered by tests for the abandoned-ticker
+  path (client closed underneath a running pool), for "no refill after stop", and
+  for start/refill/drain/stop under `-race`.
+- `examples/demo-service`: a failed startup rollback is no longer discarded.
+  Seven branches called `closeAll` and threw its error away with `_ =`, so a
+  connection that failed to close was invisible behind the error that triggered
+  the rollback. They now return `errors.Join(cause, cleanup)` through one
+  `rollback` helper, which keeps both reachable with `errors.Is`/`errors.As` and
+  still names each resource that failed.
 - `support/consumer`: the idempotency ledger is now created under the caller's
   context. `NewProcessor` ran the DDL on `context.Background()`, so a consumer
   that was shutting down could not interrupt a connection attempt, and a pool

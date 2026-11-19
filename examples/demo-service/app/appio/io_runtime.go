@@ -119,6 +119,12 @@ func withoutContext(close func() error) func(context.Context) error {
 // with the resource name: a leaked connection is worse than a noisy error. ctx
 // is the caller's release budget and reaches only the pool; a pool that
 // outlives it is reported and then left behind rather than waited for.
+//
+// Leaving it behind is safe by construction, and this is the part worth
+// knowing: the pool checks its stop flag before every round and the buffer is
+// only closed by the goroutine that sends into it, so an abandoned ticker can
+// only collect errors from the clients this function goes on to close. It
+// cannot panic, cannot close anything, and cannot come back to life.
 // closeAll 按打开顺序的逆序关闭资源：任何组件都不能比它依赖的东西活得更久。
 // 真正要紧的是 UUID 预取池——它的 ticker 会访问 Redis，若在客户端关闭之后才停，
 // 一次 Reload 就会变成 "redis: client is closed" 重试与错误回调。
@@ -126,6 +132,10 @@ func withoutContext(close func() error) func(context.Context) error {
 // 即使前面的 Close 失败，后面的也都会执行；错误按资源名聚合：连接泄漏比错误噪音
 // 更糟。ctx 是调用方的释放预算，只对池生效；超出预算的池会被报告后留在原地，而不是
 // 一直等下去。
+//
+// "留在原地"在构造上是安全的，这一点值得知道：池在每一轮之前检查停止标志，而缓冲只由
+// 往里面发送的那个 goroutine 关闭，因此被放弃的 ticker 只可能从本函数接着关闭的客户端
+// 那里收到错误。它不会 panic、不会关掉任何东西，也不会活过来。
 func closeAll(ctx context.Context, closers []namedCloser) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -139,6 +149,18 @@ func closeAll(ctx context.Context, closers []namedCloser) error {
 	return errors.Join(errs...)
 }
 
+// rollback closes what Start already opened and returns the startup error with
+// the cleanup failure joined onto it. Dropping the cleanup error would hide a
+// leaked connection behind the original failure; joining keeps both reachable —
+// errors.Is / errors.As still match the open error, and a failed Close is
+// reported by resource name next to it.
+// rollback 关闭 Start 已经打开的资源，并把清理失败聚合到启动错误上。丢掉清理错误
+// 会把一个连接泄漏藏在原始失败后面；聚合后两者都可达——errors.Is / errors.As 仍能
+// 命中启动错误，而失败的 Close 也按资源名报在旁边。
+func rollback(ctx context.Context, opened []namedCloser, cause error) error {
+	return errors.Join(cause, closeAll(ctx, opened))
+}
+
 // Name returns the module name.
 // Name 返回模块名 "io"，框架用它做模块去重与错误标识。
 func (m *Module) Name() string { return "io" }
@@ -150,6 +172,12 @@ func (m *Module) Register(*support.Router) error { return nil }
 // Start opens the extra instances and publishes every handle.
 // Start 依次打开各实例，任一失败都会按相反顺序关掉已建的连接再返回错误；全部
 // 就绪后才安装句柄并一次发布快照，避免请求读到半成品。
+//
+// A failed rollback is reported together with the error that caused it, not
+// instead of it: both are real, and only one of them is visible in the log if
+// they are not joined.
+// 回滚本身失败时，它和引发回滚的启动错误一起上报，而不是替换掉它：两者都是事实，
+// 不聚合的话日志里只能看到一个。
 func (m *Module) Start(ctx context.Context) error {
 	if m.rt == nil {
 		return errors.New("io: runtime is required")
@@ -171,29 +199,25 @@ func (m *Module) Start(ctx context.Context) error {
 
 	redisSet, err := appredis.Open(ctx, m.redisCfg, m.rt)
 	if err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 	opened = append(opened, namedCloser{name: "redis", close: withoutContext(redisSet.Close)})
 
 	amqpSet, err := appamqp.Open(ctx, m.amqpCfg, m.rt.Logger)
 	if err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 	opened = append(opened, namedCloser{name: "amqp", close: withoutContext(amqpSet.Close)})
 
 	kafkaSet, err := appkafka.Open(ctx, m.kafkaCfg, m.rt.Logger)
 	if err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 	opened = append(opened, namedCloser{name: "kafka", close: withoutContext(kafkaSet.Close)})
 
 	rocketmqSet, err := approcketmq.Open(ctx, m.rocketmqCfg, m.rt.Logger)
 	if err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 	opened = append(opened, namedCloser{name: "rocketmq", close: withoutContext(rocketmqSet.Close)})
 
@@ -214,8 +238,7 @@ func (m *Module) Start(ctx context.Context) error {
 		fallbackClient,
 	)
 	if err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 	// Recorded before StartPool: once the ticker runs it reads Redis, so even a
 	// failed start has to stop the pool before the clients are closed.
@@ -223,8 +246,7 @@ func (m *Module) Start(ctx context.Context) error {
 	// 也必须在关闭客户端之前先停掉池。
 	opened = append(opened, namedCloser{name: "uuidint", close: uuidintSet.CloseContext})
 	if err := uuidintSet.Start(ctx); err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 
 	// The lock is pinned to this generation's Redis client for the same reason
@@ -232,8 +254,7 @@ func (m *Module) Start(ctx context.Context) error {
 	// 锁与生成器同因：绑定本代 Redis 客户端，Reload 不会改变已持有锁的连接。
 	lockSet, err := appredislock.Open(m.lockCfg, m.rt.Logger, redisSet.Client(m.lockCfg.RedisInstanceName()))
 	if err != nil {
-		_ = closeAll(ctx, opened)
-		return err
+		return rollback(ctx, opened, err)
 	}
 	opened = append(opened, namedCloser{name: "lock", close: withoutContext(lockSet.Close)})
 

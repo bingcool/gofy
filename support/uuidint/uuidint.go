@@ -38,6 +38,15 @@ const MaxIncr = 999990
 // 独立的一套计数器，跨过一个毫秒边界就能把它与主的最后一个 ID 分开。
 const defaultFallbackDelay = 10 * time.Millisecond
 
+// defaultRefillTimeout bounds one prefetch round when WithRefillTimeout is not
+// given. Three seconds matches the Redis client's default read timeout, so a
+// healthy instance never hits it; a stuck one hits it once per round instead of
+// holding a shutdown for several client timeouts.
+// defaultRefillTimeout 是未设置 WithRefillTimeout 时单轮预取的时限。三秒与 Redis
+// 客户端默认读超时一致，健康的实例永远不会碰到它；卡住的实例每轮只撞一次，而不是把
+// 关闭拖过好几个客户端超时。
+const defaultRefillTimeout = 3 * time.Second
+
 var (
 	// ErrKeyRequired is returned when the Redis key is empty.
 	// Redis key 为空时由 New 返回，可用 errors.Is 比较。
@@ -65,6 +74,7 @@ type settings struct {
 	onError       func(error)
 	poolSize      int
 	poolInterval  time.Duration
+	refillTimeout time.Duration
 }
 
 // WithClient uses an explicit Redis client as the primary source. It cannot be
@@ -256,6 +266,39 @@ func WithPool(size int, interval time.Duration) Option {
 	}
 }
 
+// WithRefillTimeout bounds one prefetch round: the warm-up StartPool runs and
+// every ticker refill. The round carries this as a context deadline, which caps
+// the connection-pool wait and stops the round from starting another attempt or
+// another fallback once it expires — so a cancelled pool stops within one
+// command's time instead of after the whole retry sequence.
+//
+// It does not cancel a command that is already on the wire: go-redis only
+// shortens socket I/O by a context deadline when the client is built with
+// ContextTimeoutEnabled. One command is therefore still bounded by the client's
+// ReadTimeout, which is why the default here matches go-redis's default of 3s.
+// Raise both together when one batch legitimately needs longer.
+//
+// A round that hits the bound is discarded and leaves gaps in the counter, never
+// duplicates.
+// WithRefillTimeout 限制单轮预取：StartPool 的预热与每次 ticker 补货都算一轮。这一轮
+// 把它作为 context deadline，因此限制了等待连接池的时间，并在到期后不再发起新的尝试或
+// 备用调用——取消后的池因此在一个命令的时间内停下，而不是等完整个重试序列。
+//
+// 它不会取消已经发出的命令：只有客户端用 ContextTimeoutEnabled 构建时，go-redis 才会按
+// context deadline 缩短 socket I/O。单个命令因此仍受客户端 ReadTimeout 约束，这也是这里
+// 的默认值取 go-redis 默认的 3 秒的原因。单批确实需要更久时，两个值一起调大。
+//
+// 撞上上限的那轮直接丢弃，只在计数上留下空洞，不会重复。
+func WithRefillTimeout(timeout time.Duration) Option {
+	return func(s *settings) error {
+		if timeout < time.Millisecond {
+			return errors.New("uuidint: refill timeout must be at least 1ms")
+		}
+		s.refillTimeout = timeout
+		return nil
+	}
+}
+
 // source is the Redis connection used for one allocation: an explicit client or
 // an alias resolved lazily.
 // source 是一次取号要用的 Redis 连接：显式客户端，或按别名懒解析。
@@ -303,6 +346,7 @@ func New(key string, opts ...Option) (*Generator, error) {
 		retryTimes:    defaultRetryTimes,
 		retryDelay:    150 * time.Millisecond,
 		fallbackDelay: defaultFallbackDelay,
+		refillTimeout: defaultRefillTimeout,
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -334,7 +378,7 @@ func New(key string, opts ...Option) (*Generator, error) {
 		g.primary = source{instance: "default"}
 	}
 	if s.poolSize > 0 {
-		g.pool = newIDPool(s.poolSize, s.poolInterval)
+		g.pool = newIDPool(s.poolSize, s.poolInterval, s.refillTimeout)
 	}
 	return g, nil
 }
@@ -382,6 +426,18 @@ func (g *Generator) GetBatch(ctx context.Context, n int) ([]int64, error) {
 func (g *Generator) generate(ctx context.Context, step int) (int64, error) {
 	var errs []error
 	for attempt := 0; attempt < g.retryTimes; attempt++ {
+		// Checked before every attempt, not only before the retry delay: once
+		// the caller is gone (a cancelled shutdown, an expired refill bound)
+		// another round trip cannot change the outcome, and the pool's stop
+		// budget should not be spent on attempts nobody is waiting for.
+		// 每次尝试前都检查，而不只是重试等待前：调用方已经走了（关闭时被取消、补货到了
+		// 上限）时，再跑一个来回也改变不了结果，池的停止预算不该花在没人等的尝试上。
+		if err := ctx.Err(); err != nil {
+			if len(errs) == 0 {
+				return 0, err
+			}
+			break
+		}
 		if attempt > 0 {
 			if err := g.wait(ctx); err != nil {
 				return 0, err

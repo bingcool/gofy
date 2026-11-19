@@ -22,22 +22,38 @@ type idPool struct {
 	ids      chan int64    // 预取好的号，FIFO 消费
 	size     int           // ids requested per batch, also the buffer capacity; 每批申请数量，同时是缓冲容量
 	interval time.Duration // refill interval of the background ticker; 定时补货周期
+	// refillTimeout bounds one round: it caps the wait for a pooled connection
+	// and stops the round from starting another attempt once it expires. A
+	// command already on the wire is bounded by the client's own ReadTimeout
+	// instead; see WithRefillTimeout.
+	// refillTimeout 限制单轮：它限制等待连接池的时间，并让本轮在到期后不再发起新的尝试。
+	// 已经发出的命令则由客户端自己的 ReadTimeout 约束；见 WithRefillTimeout。
+	refillTimeout time.Duration
 
-	mu        sync.Mutex
-	started   bool               // StartPool 是否已执行
-	stopped   bool               // StopPool 是否已执行
-	cancel    context.CancelFunc // 取消后台 ticker
-	done      chan struct{}      // 后台 goroutine 退出后关闭
-	closedIDs sync.Once          // 关闭 ids 只执行一次，超时后重试可以接着关
-	lastDrain time.Time          // last consume time, used to tell whether the pool is backed up; 最近一次消费时间，用于判断池是否积压
+	mu      sync.Mutex
+	started bool               // StartPool 是否已执行
+	stopped bool               // StopPool 是否已执行
+	cancel  context.CancelFunc // 取消后台 ticker
+	done    chan struct{}      // 后台 goroutine 退出后关闭
+	// closedIDs closes the buffer exactly once. It is only ever called after
+	// done is closed, and done is closed by the goroutine that owns every
+	// send into the buffer — that ordering, not the mutex, is what makes a
+	// send-after-close impossible: a caller that gives up at its deadline
+	// leaves the buffer open on purpose.
+	// closedIDs 只关闭缓冲一次。它只在 done 关闭之后被调用，而 done 由那个负责所有
+	// 发送的 goroutine 关闭——真正让"关闭后再发送"不可能发生的正是这个次序，而不是
+	// 互斥锁：到了截止时间就放弃的调用方会故意让缓冲保持打开。
+	closedIDs sync.Once
+	lastDrain time.Time // last consume time, used to tell whether the pool is backed up; 最近一次消费时间，用于判断池是否积压
 }
 
-func newIDPool(size int, interval time.Duration) *idPool {
+func newIDPool(size int, interval, refillTimeout time.Duration) *idPool {
 	return &idPool{
-		ids:      make(chan int64, size),
-		size:     size,
-		interval: interval,
-		done:     make(chan struct{}),
+		ids:           make(chan int64, size),
+		size:          size,
+		interval:      interval,
+		refillTimeout: refillTimeout,
+		done:          make(chan struct{}),
 	}
 }
 
@@ -98,25 +114,25 @@ func (g *Generator) StopPool() {
 	_ = g.StopPoolContext(context.Background())
 }
 
-// StopPoolContext is StopPool with a budget. Cancelling the ticker does not
-// interrupt the Redis call it is already inside — the pool context carries no
-// deadline, and go-redis only shortens a command by the deadline in ctx — so
-// that call has to run into read_timeout before the goroutine can return. This
-// version gives up at the deadline instead of holding the caller for it, and
-// reports ctx.Err().
+// StopPoolContext is StopPool with a budget. Cancelling does not interrupt a
+// refill round that is already running, so the round carries its own bound:
+// WithRefillTimeout caps every one of them (default 3s), which puts a known
+// ceiling on how long the goroutine can outlive the cancel. A caller whose
+// budget is shorter than that still gives up at its deadline and reports
+// ctx.Err() — the pool never waits longer than it was told to.
 //
 // Giving up leaves a prefetch goroutine behind and, deliberately, the buffer
 // open: closing it here would panic that goroutine's next send. A later Get
-// drains whatever is left and goes to Redis, and a repeated call can still
-// finish the job once the ticker exits.
-// StopPoolContext 是带预算的 StopPool。取消 ticker 不会打断它已经进入的那次 Redis
-// 调用——池的 ctx 没有 deadline，而 go-redis 只会按 ctx 里的 deadline 缩短命令——
-// 那条调用必须撞上 read_timeout 才会返回。所以这里在截止时间放弃等待并回报
-// ctx.Err()，而不是把调用方一起挂住。
+// drains whatever is left and goes to Redis, and a repeated call finishes the
+// release once the round returns.
+// StopPoolContext 是带预算的 StopPool。取消不会打断已经在跑的那一轮补货，因此那一轮
+// 自带上限：WithRefillTimeout 限制每一轮（默认 3 秒），goroutine 能在取消后活多久因此
+// 有确定的天花板。预算比这更短的调用方仍会在自己的截止时间放弃并回报 ctx.Err()——池
+// 绝不会比被告知的时间等得更久。
 //
-// 放弃会留下一个预取 goroutine，并且故意不关闭缓冲：此时关闭会让被放弃的
-// goroutine 下一次发送 panic。之后的 Get 会取空剩余号并直接访问 Redis；ticker 真
-// 退出后再调一次也能把收尾做完。
+// 放弃会留下一个预取 goroutine，并且故意不关闭缓冲：此时关闭会让被放弃的 goroutine
+// 下一次发送 panic。之后的 Get 会取空剩余号并直接访问 Redis；那一轮返回后再调一次
+// 就能把收尾做完。
 func (g *Generator) StopPoolContext(ctx context.Context) error {
 	if g == nil || g.pool == nil {
 		return nil
@@ -206,6 +222,15 @@ func (g *Generator) refill(ctx context.Context) {
 	p := g.pool
 
 	p.mu.Lock()
+	// A stopped pool does no new work. Without this check the synchronous
+	// warm-up can still be starting when a stop arrives, and it would talk to
+	// Redis after the caller was told the pool had stopped.
+	// 已停止的池不再发起任何新工作。没有这个检查时，预热可能正好在停止到达时开始，
+	// 于是调用方已经被告知池已停止，它却还在访问 Redis。
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
 	if len(p.ids) > 0 && time.Since(p.lastDrain) > 3*p.interval {
 		for len(p.ids) > 0 {
 			<-p.ids
@@ -216,10 +241,33 @@ func (g *Generator) refill(ctx context.Context) {
 	if len(p.ids) >= cap(p.ids) {
 		return
 	}
-	maxID, err := g.generate(ctx, p.size)
+	// One round, one deadline. It stops the retry loop from starting another
+	// attempt after a cancel, so a stop costs one command's time rather than the
+	// whole retry-and-fallback sequence. It cannot abort a command that is
+	// already on the wire: go-redis only shortens socket I/O by a context
+	// deadline when the client is built with ContextTimeoutEnabled, so that one
+	// command is bounded by the client's ReadTimeout.
+	// 一轮一个 deadline。它让重试循环在取消之后不再发起新的尝试，停止的代价因此是一个
+	// 命令的时间，而不是整个重试加备用的序列。它无法中止已经发出的命令：只有客户端用
+	// ContextTimeoutEnabled 构建时，go-redis 才会按 context deadline 缩短 socket I/O，
+	// 因此那一个命令由客户端的 ReadTimeout 约束。
+	roundCtx, cancel := context.WithTimeout(ctx, p.refillTimeout)
+	maxID, err := g.generate(roundCtx, p.size)
+	cancel()
 	if err != nil {
 		return
 	}
+
+	// A stop that arrived while the round was in flight wins: the IDs are
+	// dropped instead of being pushed into a buffer nobody will consume.
+	// 本轮在途期间到达的停止优先：这批号直接丢弃，而不是推进一个没人会消费的缓冲。
+	p.mu.Lock()
+	stopped := p.stopped
+	p.mu.Unlock()
+	if stopped {
+		return
+	}
+
 	for _, id := range expandRange(maxID, p.size) {
 		select {
 		case p.ids <- id:
