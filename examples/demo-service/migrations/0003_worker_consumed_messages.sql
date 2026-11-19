@@ -1,6 +1,8 @@
 -- 消费幂等台账：每个 (consumer, message_id) 一行。
 -- 唯一索引就是去重机制：认领消息是一次 INSERT，要么拿到行，要么得知已存在，
 -- 两个副本之间没有读改写窗口。status 取值 processing / done / failed / dead。
+-- message_id 的上限是 128 字符：消费端会把更长的 ID 压成 sha256 摘要再写入，
+-- 因此这里不需要放宽——放宽只会让截断/超长错误推迟到线上才出现。
 -- 消费者首次启动时也会用 AutoMigrate 建这张表，此脚本供 schema 变更走发布流程的
 -- 环境使用，两边 DDL 一致。
 CREATE TABLE IF NOT EXISTS worker_consumed_messages (

@@ -86,11 +86,17 @@ ctx = tenant.WithTenant(ctx, "t-42")   // 脚本/worker/测试直接指定租户
 
 | 语句 | 行为 |
 |---|---|
-| SELECT / UPDATE / DELETE | 追加 `clause.Eq` 到 WHERE，与已有条件用 AND 合并 |
+| SELECT / UPDATE / DELETE | 追加 `clause.Eq`，并把调用方已有的 WHERE 包成一个分组后 AND 组合 |
 | INSERT（struct / map / 切片 / 批量） | `SetColumn` 填充租户列；已有显式值时按 `OverwriteExplicit` 处理 |
-| 已含租户条件的 WHERE | 不重复追加（遍历结构化表达式判定） |
+| 已含租户条件的 WHERE | **只在合取路径上成立时才不追加**：顶层 AND 链里的 `clause.Eq`，或单条 `tenant_id = ?` 手写条件。`<>`、`NOT`、`OR`、`LIKE`、`IN` 以及任何只在字面上提到列名的条件都不算，照常追加 |
 | 不含租户列的模型 | 不改写 |
 | 原生 `Exec` / `Raw` / `Row` | **不改写**——没有 schema 可判定；需手写租户条件 |
+
+"已含租户条件"的判定必须是**合取**的：`Where("tenant_id <> ?")`、
+`Where("tenant_id = ? OR is_public = 1")`、`Where("NOT (tenant_id = ?)")` 都提到了
+租户列，却都不限制结果集。把它们当作"已过滤"会让跨租户数据直接可见，且不报错、不留
+日志。要按别的租户查询（管理端），用 `tenant.Without` 显式表达意图，而不是写一个
+租户条件指望插件让路。
 
 ## 边界
 

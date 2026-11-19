@@ -75,6 +75,48 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/queues`: a shutdown no longer discards popped messages. Both consume
+  loops returned as soon as `ctx.Err()` was non-nil, but `Pop` had already
+  removed the message from Redis — `DelayQueue` removed the whole due batch, up
+  to `PopLimit` (10) messages — so a rolling restart silently lost them, with no
+  log line. The unprocessed remainder (and the message whose handler failed
+  because of the cancellation) is now written back with `RetryInFlight` before
+  `Consume` returns: to the retry ZSET for `Queue`, back into the delayed ZSET
+  with no delay for `DelayQueue`. Neither charges the retry budget — a failure
+  caused by the cancellation says nothing about the message, and charging it
+  could drop the last copy during the shutdown. The write-back runs on a context
+  derived with `context.WithoutCancel` plus a 5s bound (`requeueTimeout`), so the
+  cancellation cannot make every write fail and an unreachable Redis cannot hold
+  the shutdown. A process kill still loses in-flight work; that boundary is
+  unchanged and now stated explicitly.
+- `support/tenant`: a WHERE clause that merely mentions `tenant_id` no longer
+  disables the automatic filter. `hasTenantCondition` recursed into
+  `OrConditions`/`NotConditions` and substring-matched raw SQL, so
+  `Where("tenant_id <> ?")`, `Where("tenant_id = ? OR is_public = 1")`,
+  `Where("NOT (tenant_id = ?)")` and even `Where("code <> ?", "tenant_id")` were
+  all read as "the caller already scoped this" — and returned other tenants'
+  rows with no error and no log. Only an equality on the conjunctive path now
+  counts: a top-level `clause.Eq`, an ANDed group, or a lone `tenant_id = ?`
+  comparison in raw SQL (`<>`, `!=`, `LIKE`, `IN`, a disjunction, a negation or
+  a literal on the right-hand side are rejected). The filter is also ANDed
+  correctly now: GORM appends a new expression to the end of the WHERE list, so
+  `tenant_id = ? OR code = ?` plus `AND tenant_id = ?` rendered as
+  `… OR code = ? AND tenant_id = ?` — restricting the last operand only. The
+  existing condition is wrapped into one `AndConditions` group first, which
+  yields `(tenant_id = ? OR code = ?) AND tenant_id = ?`. Callers that really
+  mean another tenant keep using `tenant.Without`.
+- `support/consumer`: message ids are fitted to the ledger column. `message_id`
+  is `VARCHAR(128)` and the value comes from the producer — AMQP's `MessageId`
+  is a shortstr with no length the consumer can rely on — so an over-long id
+  reached the insert unchanged. On MySQL that is either a retry loop that never
+  ends (strict mode: `Data too long`, the partition stalls) or a truncated key
+  (non-strict mode: two ids sharing the first 128 characters collide on the
+  unique index and the second message is acknowledged as a duplicate, silently
+  lost). Ids longer than the column are now stored as
+  `sha256:<64 hex chars>`: stable across redeliveries, unique enough for the
+  index, 71 characters. `msg.ID` — what the handler and the log see — keeps the
+  producer's value; the log gains a `ledger_id` field when the two differ so the
+  row can still be found.
 - `support/uuidint`: a stopped pool no longer starts new prefetch work. `refill`
   read neither the stop flag nor the context before allocating a batch, so a
   warm-up that raced with `StopPoolContext` — or a round already inside the retry
@@ -629,6 +671,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `support/tenant`: statements whose only tenant condition was a disjunction, a
+  negation or an inequality are now filtered to the context tenant. Such
+  conditions never restricted the result set, so the plugin used to skip its own
+  filter and return every tenant's rows; they now come back scoped, which means
+  **fewer rows than before**. A query that legitimately spans tenants must use
+  `tenant.Without` — relying on a `tenant_id` mention to switch the filter off no
+  longer works.
+- `consumer`: the ledger stores ids longer than 128 characters as
+  `sha256:<hex>`. Searching `worker_consumed_messages` by a long producer id now
+  needs the digest (also logged as `ledger_id`); ids within the column are stored
+  unchanged.
 - `consumer.NewProcessor` takes a context: the signature is now
   `NewProcessor(ctx, rt, cfg)` instead of `NewProcessor(rt, cfg)`. The context is
   the consumer's lifecycle and the parent of the ledger schema initialisation,

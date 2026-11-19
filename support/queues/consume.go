@@ -125,13 +125,16 @@ func (o ConsumeOptions) withDefaults() ConsumeOptions {
 //
 // A popped message is already removed from Redis, so a process crash while a
 // handler runs loses that message: this queue is at-most-once for in-flight
-// work. Use an MQ consumer or a claimed task table (support/claim) when a lost
+// work. A cancelled context is not a crash, and is handled differently: the
+// message the handler was working on is written back before Consume returns.
+// Use an MQ consumer or a claimed task table (support/claim) when a lost
 // in-flight message is unacceptable.
 // Consume 持续处理消息直到 ctx 被取消。取消时返回 nil，与各 MQ 消费者一致，
 // 因此可以直接作为 goroutine 主体或 worker.Worker 使用。
 //
 // 消息在 Pop 时已从 Redis 删除，handler 执行期间进程崩溃会丢这一条：本队列对
-// 在途消息是"至多一次"。不能丢在途消息的场景请用 MQ 消费者或认领式任务表
+// 在途消息是"至多一次"。ctx 被取消不是崩溃，处理方式不同：Consume 返回前会把
+// handler 手上那条写回。不能丢在途消息的场景请用 MQ 消费者或认领式任务表
 // （support/claim）。
 func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
 	if handler == nil {
@@ -178,6 +181,12 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 		}
 		if err := callHandler(ctx, handler, msg); err != nil {
 			if ctx.Err() != nil {
+				// The pop already removed the message and the handler failed
+				// because the shutdown cancelled its context. Returning here
+				// without a write-back loses the message for good.
+				// 弹出已经删除了消息，而 handler 失败是因为停机取消了它的 context。
+				// 此处不回写就返回，这条消息永久丢失。
+				q.requeueAfterCancel(ctx, opts, msg)
 				return nil
 			}
 			if isInFlight(err) {
@@ -210,6 +219,27 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 	}
 }
 
+// requeueAfterCancel writes messages back after the consume context was
+// cancelled. The retry budget is left untouched: a handler that failed with a
+// cancelled context says nothing about the message, and charging it could drop
+// the last copy during a shutdown. They go to the retry ZSET with no delay, so
+// the next Pop — on this instance or another — promotes them immediately.
+// requeueAfterCancel 在消费上下文取消后把消息写回。它不改重试预算：带着已取消的
+// context 失败不能说明消息有问题，扣预算可能在停机时丢掉最后一份副本。消息以零延迟
+// 进入重试 ZSET，下一次 Pop（本实例或其它实例）会立刻把它回流到主队列。
+func (q *Queue) requeueAfterCancel(ctx context.Context, opts ConsumeOptions, msgs ...*Message) {
+	if len(msgs) == 0 {
+		return
+	}
+	writeCtx, cancel := shutdownRequeue(ctx)
+	defer cancel()
+	for _, msg := range msgs {
+		if err := q.RetryInFlight(writeCtx, msg, 0); err != nil {
+			report(opts, err)
+		}
+	}
+}
+
 // callHandler runs the handler with panic recovery so one bad message cannot
 // take down the consumer.
 // callHandler 执行 handler 并捕获 panic，避免一条坏消息拖垮整个消费者。
@@ -234,6 +264,24 @@ func report(opts ConsumeOptions, err error) {
 	if opts.OnError != nil {
 		opts.OnError(err)
 	}
+}
+
+// requeueTimeout bounds the write-back that runs after the consume context has
+// been cancelled. The messages were already removed from Redis, so giving up
+// silently loses them, but a shutdown must not wait on an unreachable Redis
+// forever either. One batch shares one budget.
+// requeueTimeout 限制消费上下文取消后执行的回写耗时。消息在取出时已经从 Redis
+// 删除，静默放弃就是丢消息；停机时也不该无限等一个不可达的 Redis。一批共享同一份
+// 预算。
+const requeueTimeout = 5 * time.Second
+
+// shutdownRequeue builds the context for writing messages back after the
+// consume context was cancelled. WithoutCancel keeps the values (trace, tenant)
+// while dropping the cancellation that would make every write fail.
+// shutdownRequeue 构造消费上下文取消后回写消息所用的 context。WithoutCancel 保留
+// 值（链路、租户），同时去掉会让每次写入都失败的取消信号。
+func shutdownRequeue(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(contextOrBackground(ctx)), requeueTimeout)
 }
 
 // wait pauses for d and reports whether the context is still alive.

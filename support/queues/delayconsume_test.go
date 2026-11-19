@@ -232,3 +232,113 @@ func TestDelayConsumeReportsReadyOnceAfterFirstPop(t *testing.T) {
 	default:
 	}
 }
+
+// TestDelayConsumeRequeuesBatchOnShutdown is the P0 regression: the pop script
+// deletes the whole due batch from the ZSET, so between Pop and the handler the
+// messages exist only in memory. Returning on a cancelled context therefore
+// discarded up to PopLimit messages without a trace. Every message of the batch
+// must come back — the one the handler failed on included, because the failure
+// was the cancellation.
+// TestDelayConsumeRequeuesBatchOnShutdown 是 P0 的回归测试：弹出脚本把整批到期
+// 消息从 ZSET 删除，因此在 Pop 与 handler 之间消息只存在于内存里。因 ctx 取消而返回
+// 会静默丢掉最多 PopLimit 条。整批都必须回来——包括 handler 失败的那条，因为导致失败
+// 的是取消。
+func TestDelayConsumeRequeuesBatchOnShutdown(t *testing.T) {
+	q, _ := newDelayQueue(t, queues.Config{Key: "orders:delay"})
+	for i := 0; i < 3; i++ {
+		if err := q.Add(context.Background(), map[string]int{"n": i}, 0); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	handled := make(chan struct{})
+	var attempts int
+	go func() {
+		done <- q.Consume(ctx, func(handlerCtx context.Context, _ *queues.Message) error {
+			attempts++
+			close(handled)
+			cancel()
+			return handlerCtx.Err()
+		}, queues.ConsumeOptions{IdleDelay: 10 * time.Millisecond})
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler never ran")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Consume = %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not return after cancellation")
+	}
+
+	if attempts != 1 {
+		t.Fatalf("handler attempts = %d, want 1: the batch must stop at the cancel", attempts)
+	}
+	length, err := q.Len(context.Background())
+	if err != nil {
+		t.Fatalf("Len: %v", err)
+	}
+	if length != 3 {
+		t.Fatalf("delayed queue length = %d, want 3: the popped batch was dropped", length)
+	}
+}
+
+// TestDelayConsumeRequeuesOnlyUnprocessedOnShutdown pins the other branch: a
+// message that was handled successfully is not written back, and the ones the
+// loop never reached are. Requeueing the handled one would duplicate work; the
+// unprocessed ones would be lost.
+// TestDelayConsumeRequeuesOnlyUnprocessedOnShutdown 固定另一条分支：处理成功的消息
+// 不写回，循环没走到的消息要写回。写回已处理的那条会重复副作用，不写回未处理的则会丢。
+func TestDelayConsumeRequeuesOnlyUnprocessedOnShutdown(t *testing.T) {
+	q, _ := newDelayQueue(t, queues.Config{Key: "orders:delay"})
+	for i := 0; i < 3; i++ {
+		if err := q.Add(context.Background(), map[string]int{"n": i}, 0); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	handled := make(chan struct{})
+	go func() {
+		done <- q.Consume(ctx, func(_ context.Context, _ *queues.Message) error {
+			// Succeed, then ask for shutdown: the cancellation now has to be
+			// noticed between two messages, not inside a handler.
+			// 先成功，再请求停机：此时取消是在两条消息之间被看到，而不是在 handler 内。
+			cancel()
+			close(handled)
+			return nil
+		}, queues.ConsumeOptions{IdleDelay: 10 * time.Millisecond})
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler never ran")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Consume = %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not return after cancellation")
+	}
+
+	length, err := q.Len(context.Background())
+	if err != nil {
+		t.Fatalf("Len: %v", err)
+	}
+	if length != 2 {
+		t.Fatalf("delayed queue length = %d, want 2: one handled, two must come back", length)
+	}
+}

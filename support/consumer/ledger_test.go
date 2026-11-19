@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/glebarez/sqlite"
 	"go.uber.org/zap"
@@ -696,5 +697,80 @@ func TestPruneWithoutIdempotencyIsANoop(t *testing.T) {
 	n, err := proc.Prune(context.Background(), time.Hour)
 	if err != nil || n != 0 {
 		t.Fatalf("Prune without idempotency = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// TestLedgerFitsOverLongMessageIDs is the regression for the audit finding: the
+// column holds 128 characters and AMQP lets the producer choose the id, so a
+// longer one used to reach the insert unchanged — a partition that retries
+// forever on MySQL in strict mode, a truncated key and a silently dropped
+// message without it. The ledger must store a stable digest while the handler
+// keeps seeing the id the producer sent.
+// TestLedgerFitsOverLongMessageIDs 是审计结论的回归测试：列宽 128 字符，而 AMQP 的
+// ID 由生产者决定，超长 ID 原先原样进入插入语句——MySQL 严格模式下分区永远重试，
+// 非严格模式下键被截断、消息被静默丢弃。台账必须存稳定摘要，而 handler 仍看到生产者
+// 发来的 ID。
+func TestLedgerFitsOverLongMessageIDs(t *testing.T) {
+	seen := make(chan string, 1)
+	proc, db := newLedgerProcessor(t, func(_ context.Context, msg Message, _ Envelope) error {
+		seen <- msg.ID
+		return nil
+	}, 3, time.Minute)
+
+	long := strings.Repeat("m", 200)
+	if err := proc.Handle(context.Background(), ledgerMessage(long)); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := <-seen; got != long {
+		t.Fatalf("handler saw id %q, want the producer's %q", got, long)
+	}
+
+	key := ledgerMessageID(long)
+	if key == long {
+		t.Fatal("ledger key was not fitted to the column")
+	}
+	if n := utf8.RuneCountInString(key); n > maxLedgerMessageID {
+		t.Fatalf("ledger key is %d characters, the column holds %d", n, maxLedgerMessageID)
+	}
+	if row := ledgerRow(t, db, key); row.Status != consumedStatusDone {
+		t.Fatalf("status = %q, want done", row.Status)
+	}
+	// A redelivery has to resolve to the same row, otherwise idempotency is gone.
+	// 重投必须落到同一行，否则幂等就不存在了。
+	if again := ledgerMessageID(long); again != key {
+		t.Fatalf("digest is not stable: %q then %q", key, again)
+	}
+}
+
+// TestLedgerMessageIDKeepsFittingIDs pins the two boundaries: an id that fits is
+// stored verbatim (so an operator can search the ledger by it), and two ids that
+// differ only past the column width stay distinct instead of colliding on the
+// unique index.
+// TestLedgerMessageIDKeepsFittingIDs 固定两个边界：放得下的 ID 原样存储（运维可以按
+// 它搜索台账），只在列宽之后才有差别的两个 ID 保持不同，不会在唯一索引上相撞。
+func TestLedgerMessageIDKeepsFittingIDs(t *testing.T) {
+	fits := strings.Repeat("a", maxLedgerMessageID)
+	if got := ledgerMessageID(fits); got != fits {
+		t.Fatalf("a %d-character id was rewritten to %q", maxLedgerMessageID, got)
+	}
+	if got := ledgerMessageID("short-id"); got != "short-id" {
+		t.Fatalf("short id = %q, want it unchanged", got)
+	}
+
+	prefix := strings.Repeat("b", maxLedgerMessageID)
+	first, second := ledgerMessageID(prefix+"-one"), ledgerMessageID(prefix+"-two")
+	if first == second {
+		t.Fatal("ids that differ only past the column width collapsed to one key")
+	}
+}
+
+// TestLedgerMessageIDCountsCharacters: VARCHAR(n) bounds characters, not bytes,
+// so an id of n multi-byte characters fits and must be stored as it is.
+// TestLedgerMessageIDCountsCharacters：VARCHAR(n) 限制的是字符数而不是字节数，因此
+// n 个多字节字符的 ID 放得下，必须原样存储。
+func TestLedgerMessageIDCountsCharacters(t *testing.T) {
+	id := strings.Repeat("订", maxLedgerMessageID) // 384 bytes, 128 characters
+	if got := ledgerMessageID(id); got != id {
+		t.Fatalf("a %d-character id was hashed although it fits the column", maxLedgerMessageID)
 	}
 }

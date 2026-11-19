@@ -12,6 +12,8 @@ import (
 //
 // Pop already deletes the messages from the ZSET, so in-flight work is
 // at-most-once: a crash between Pop and a successful handler loses that batch.
+// A cancelled context is not a crash: the batch is written back before Consume
+// returns, so a rolling restart does not discard what it had just popped.
 // Retry writes a failed message back with a fresh due time, up to MaxRetries;
 // an InFlightError writes it back after InFlightDelay without touching the
 // retry budget. ConsumeOptions.PopLimit bounds one batch; IdleDelay is the pause
@@ -22,8 +24,9 @@ import (
 // 可以共用同一个 worker 适配器（support/worker/consumer/queuesconsumer）。
 //
 // Pop 已经把消息从 ZSET 删除，在途消息因此是"至多一次"：Pop 到 handler 成功之间
-// 进程崩溃会丢这一批。失败消息由 Retry 以新的到期时间写回，受 MaxRetries 限制；
-// InFlightError 则在 InFlightDelay 之后写回且不消耗重试预算。
+// 进程崩溃会丢这一批。ctx 被取消不是崩溃：整批会在 Consume 返回前写回，一次滚动
+// 重启不会丢掉刚弹出的消息。失败消息由 Retry 以新的到期时间写回，受 MaxRetries
+// 限制；InFlightError 则在 InFlightDelay 之后写回且不消耗重试预算。
 // ConsumeOptions.PopLimit 限制单批条数；没有到期消息时按 IdleDelay 暂停，一次轮询
 // 只是一次 Lua range 查询，间隔可以设得较短。
 func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
@@ -74,12 +77,22 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 			}
 			continue
 		}
-		for _, msg := range messages {
+		for i, msg := range messages {
 			if ctx.Err() != nil {
+				// Pop already removed this batch from the ZSET, so everything
+				// from here on exists only in this slice. Leaving now without a
+				// write-back discards up to PopLimit messages.
+				// Pop 已经把这一批从 ZSET 删除，从这条起的所有消息只存在于这个切片里。
+				// 此时直接返回会丢掉最多 PopLimit 条消息。
+				q.requeueAfterCancel(ctx, opts, messages[i:]...)
 				return nil
 			}
 			if err := callHandler(ctx, handler, msg); err != nil {
 				if ctx.Err() != nil {
+					// Same reason, and the failed message is included: the
+					// failure is the cancellation, not the message.
+					// 同样的原因，失败的那条也在内：导致失败的是取消，不是消息本身。
+					q.requeueAfterCancel(ctx, opts, messages[i:]...)
 					return nil
 				}
 				if isInFlight(err) {
@@ -107,6 +120,27 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 						ErrRetryExhausted, msg.ID, q.maxRetries))
 				}
 			}
+		}
+	}
+}
+
+// requeueAfterCancel writes a popped batch back into the ZSET after the consume
+// context was cancelled. The retry budget is left untouched: a handler that
+// failed with a cancelled context says nothing about the message, and charging
+// it could drop the last copy during a shutdown. Delay zero makes the messages
+// due again at once, so the next poll anywhere picks them up.
+// requeueAfterCancel 在消费上下文取消后把已弹出的整批写回 ZSET。它不改重试预算：
+// 带着已取消的 context 失败不能说明消息有问题，扣预算可能在停机时丢掉最后一份副本。
+// 延迟为零让消息立刻重新到期，任何实例的下一次轮询都能取到。
+func (q *DelayQueue) requeueAfterCancel(ctx context.Context, opts ConsumeOptions, msgs ...*Message) {
+	if len(msgs) == 0 {
+		return
+	}
+	writeCtx, cancel := shutdownRequeue(ctx)
+	defer cancel()
+	for _, msg := range msgs {
+		if err := q.RetryInFlight(writeCtx, msg, 0); err != nil {
+			report(opts, err)
 		}
 	}
 }

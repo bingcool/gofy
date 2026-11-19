@@ -550,3 +550,75 @@ func assertTenantBind(t *testing.T, vars []any, want string) {
 	}
 	t.Fatalf("bind vars %v do not contain tenant %q", vars, want)
 }
+
+// TestTenantFilterSurvivesConditionsThatMentionTheColumn is the regression for
+// the audit finding: "the WHERE clause mentions tenant_id" used to be enough to
+// switch the automatic filter off. An inequality, a disjunction, a negation or
+// even a value that happens to spell the column name therefore read other
+// tenants' rows with no error and no log. Every case must come back scoped.
+// TestTenantFilterSurvivesConditionsThatMentionTheColumn 是审计结论的回归测试：
+// 过去只要 WHERE "提到 tenant_id" 就会关掉自动过滤。不等式、析取、取反，甚至只是一个
+// 恰好拼出列名的字面量，都能读到别的租户的行，且不报错、不留日志。每个用例都必须
+// 仍然被限定在本租户内。
+func TestTenantFilterSurvivesConditionsThatMentionTheColumn(t *testing.T) {
+	cases := []struct {
+		name  string
+		apply func(*gorm.DB) *gorm.DB
+		want  int
+	}{
+		{
+			// The exact probe from the audit: tenant a's context, both rows match.
+			// 审计里的原始探针：租户 a 的上下文，两行都满足条件。
+			name:  "inequality",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where("tenant_id <> ?", "zzz") },
+			want:  1,
+		},
+		{
+			name: "disjunction",
+			apply: func(db *gorm.DB) *gorm.DB {
+				return db.Where("tenant_id = ? OR code = ?", "a", "theirs")
+			},
+			want: 1,
+		},
+		{
+			name:  "negation",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where("NOT (tenant_id = ?)", "a") },
+			want:  0,
+		},
+		{
+			// The column name appears only as a value, so the substring check
+			// used to disable the filter without any tenant condition existing.
+			// 列名只作为字面量出现，子串检查因此在实际没有任何租户条件时关掉了过滤。
+			name:  "value mentions the column",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where("code <> ?", "tenant_id") },
+			want:  1,
+		},
+		{
+			name: "or branch on the tenant column",
+			apply: func(db *gorm.DB) *gorm.DB {
+				return db.Where("tenant_id = ?", "b").Or("code = ?", "theirs")
+			},
+			want: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openDB(t, tenant.Options{})
+			seed(t, db, order{TenantID: "a", Code: "mine"}, order{TenantID: "b", Code: "theirs"})
+
+			var rows []order
+			if err := tc.apply(db.WithContext(ctxFor("a"))).Find(&rows).Error; err != nil {
+				t.Fatalf("Find: %v", err)
+			}
+			for _, row := range rows {
+				if row.TenantID != "a" {
+					t.Fatalf("leaked tenant %q (code %q) into tenant a's query", row.TenantID, row.Code)
+				}
+			}
+			if len(rows) != tc.want {
+				t.Fatalf("rows = %d, want %d (sql: %s)", len(rows), tc.want, tc.apply(db.Session(&gorm.Session{DryRun: true}).WithContext(ctxFor("a"))).Find(&[]order{}).Statement.SQL.String())
+			}
+		})
+	}
+}

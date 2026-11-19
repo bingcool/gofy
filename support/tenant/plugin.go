@@ -179,8 +179,17 @@ func (p *Plugin) tenantID(ctx context.Context, table string, db *gorm.DB) string
 	return id
 }
 
-// filter appends the tenant condition to SELECT / UPDATE / DELETE.
+// filter adds the tenant condition to SELECT / UPDATE / DELETE.
+//
+// The condition is always ANDed with the caller's whole WHERE. When a WHERE is
+// already present it is wrapped in one AndConditions group first: GORM appends
+// a new expression to the end of the list, and `a OR b` plus `AND tenant` would
+// render as `a OR b AND tenant` — restricting the last operand, not the query.
 // filter 给 SELECT / UPDATE / DELETE 追加租户条件。
+//
+// 条件总是与调用方的整个 WHERE 用 AND 组合。已有 WHERE 时先把它包成一个
+// AndConditions 分组：GORM 会把新表达式追加到列表末尾，`a OR b` 加上 `AND tenant`
+// 会渲染成 `a OR b AND tenant`——限制的是最后一个操作数，而不是整个查询。
 func (p *Plugin) filter(db *gorm.DB) {
 	if db == nil || db.Error != nil || db.Statement == nil {
 		return
@@ -190,12 +199,22 @@ func (p *Plugin) filter(db *gorm.DB) {
 		return
 	}
 	stmt := db.Statement
-	if hasTenantCondition(stmt, p.column) {
+	scope := clause.Eq{Column: clause.Column{Name: p.column}, Value: id}
+
+	where, exists := stmt.Clauses["WHERE"]
+	existing, isWhere := where.Expression.(clause.Where)
+	if !exists || !isWhere || len(existing.Exprs) == 0 {
+		stmt.AddClause(clause.Where{Exprs: []clause.Expression{scope}})
 		return
 	}
-	stmt.AddClause(clause.Where{Exprs: []clause.Expression{
-		clause.Eq{Column: clause.Column{Name: p.column}, Value: id},
-	}})
+	if exprsConstrainColumn(existing.Exprs, p.column) {
+		return
+	}
+	where.Expression = clause.Where{Exprs: []clause.Expression{
+		clause.AndConditions{Exprs: existing.Exprs},
+		scope,
+	}}
+	stmt.Clauses["WHERE"] = where
 }
 
 // fill sets the tenant column on INSERT when the caller did not.
@@ -215,53 +234,101 @@ func (p *Plugin) fill(db *gorm.DB) {
 	stmt.SetColumn(p.column, id, true)
 }
 
-// hasTenantCondition reports whether the WHERE clause already constrains the
-// tenant column. It walks the structured expressions, so it is exact rather
-// than a regexp guess. Nested AndConditions/OrConditions are covered too.
-// hasTenantCondition 报告 WHERE 中是否已有租户列条件。遍历结构化表达式，因此是精确
-// 判断而非正则猜测；嵌套的 AndConditions/OrConditions 也覆盖。
-func hasTenantCondition(stmt *gorm.Statement, column string) bool {
-	c, ok := stmt.Clauses["WHERE"]
-	if !ok {
+// constrainsColumn walks the expression tree along the paths that restrict the
+// result set: the top-level AND chain, AndConditions groups and nested Where.
+// OrConditions and NotConditions are deliberately not descended into — a tenant
+// column inside them does not scope the statement.
+//
+// Only an equality counts, and only when it is ANDed with the rest of the
+// condition. A disjunction or a negation that happens to mention the column
+// restricts nothing, and treating it as "already filtered" is exactly what let
+// `Where("tenant_id <> ?")` and `Where("tenant_id = ? OR is_public = 1")` read
+// across tenants. Raw SQL gets the same treatment: a lone `tenant_id = ?`
+// comparison is recognised, anything else is not. A caller that really means
+// another tenant uses tenant.Without.
+// constrainsColumn 沿真正限制结果集的路径遍历表达式树：顶层 AND 链、AndConditions
+// 分组与嵌套 Where。刻意不进入 OrConditions 与 NotConditions——里面的租户列并不
+// 收窄语句范围。
+//
+// 只有等值才算，且必须是与其余条件 AND 在一起的那一个。字面上提到该列的析取或取反
+// 并不限制结果集，把它们当成"已过滤"正是 `Where("tenant_id <> ?")`、
+// `Where("tenant_id = ? OR is_public = 1")` 能跨租户读取的原因。手写 SQL 同样处理：
+// 只认单独一条 `tenant_id = ?` 比较，其它一律不认。确实要操作别的租户时请用
+// tenant.Without。
+func constrainsColumn(expr clause.Expression, column string) bool {
+	switch v := expr.(type) {
+	case nil:
 		return false
-	}
-	return exprsMentionColumn([]clause.Expression{c.Expression}, column)
-}
-
-func exprsMentionColumn(exprs []clause.Expression, column string) bool {
-	for _, expr := range exprs {
-		switch v := expr.(type) {
-		case nil:
-		case clause.Eq:
-			if columnName(v.Column) == column {
-				return true
-			}
-		case clause.AndConditions:
-			if exprsMentionColumn(v.Exprs, column) {
-				return true
-			}
-		case clause.OrConditions:
-			if exprsMentionColumn(v.Exprs, column) {
-				return true
-			}
-		case clause.NotConditions:
-			if exprsMentionColumn(v.Exprs, column) {
-				return true
-			}
-		case clause.Where:
-			if exprsMentionColumn(v.Exprs, column) {
-				return true
-			}
-		case clause.Expr:
-			// Raw SQL condition: fall back to a conservative substring check
-			// so a hand-written "tenant_id = ?" is still recognised.
-			// 原生 SQL 条件：保守地做子串检查，让手写的 "tenant_id = ?" 也能识别。
-			if strings.Contains(strings.ToLower(v.SQL), strings.ToLower(column)) {
+	case clause.Eq:
+		return columnName(v.Column) == column
+	case clause.AndConditions:
+		for _, inner := range v.Exprs {
+			if constrainsColumn(inner, column) {
 				return true
 			}
 		}
+	case clause.Where:
+		return exprsConstrainColumn(v.Exprs, column)
+	case clause.Expr:
+		return isTenantEquality(v.SQL, column)
 	}
 	return false
+}
+
+// exprsConstrainColumn walks one conjunction list from the end.
+//
+// GORM keeps the expressions in source order and renders an OrConditions as
+// "OR ...", so whatever precedes the last OrConditions is the left operand of a
+// disjunction — `Where("tenant_id = ?").Or("code = ?")` builds exactly that, and
+// the tenant equality there does not scope the query. Only expressions after it
+// are ANDed with the whole condition, so the scan stops at the first
+// OrConditions from the right.
+// exprsConstrainColumn 从末尾遍历一组合取表达式。
+//
+// GORM 按书写顺序保存表达式，并把 OrConditions 渲染成 "OR ..."，因此最后一个
+// OrConditions 之前的内容都是析取的左操作数——`Where("tenant_id = ?").Or("code = ?")`
+// 构造的正是这种形态，其中的租户等值并不收窄查询。只有它之后（索引更大）的表达式才是与
+// 整体 AND 在一起的，所以扫描在从右往左遇到的第一个 OrConditions 处停止。
+func exprsConstrainColumn(exprs []clause.Expression, column string) bool {
+	for i := len(exprs) - 1; i >= 0; i-- {
+		if _, ok := exprs[i].(clause.OrConditions); ok {
+			return false
+		}
+		if constrainsColumn(exprs[i], column) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTenantEquality reports whether sql is exactly one equality against column,
+// e.g. "tenant_id = ?", "`tenant_id` = ?" or "orders.tenant_id=?". Everything
+// else — "<>", "!=", "LIKE", "IN", a disjunction, a subquery, a literal on the
+// right-hand side — reports false so the plugin appends its own condition rather
+// than trusting a comparison that may not restrict anything.
+// isTenantEquality 报告 sql 是否恰好是一条针对 column 的等值比较，例如
+// "tenant_id = ?"、"`tenant_id` = ?" 或 "orders.tenant_id=?"。其它情况——"<>"、
+// "!="、"LIKE"、"IN"、析取、子查询、右侧为字面量——都返回 false，让插件追加自己的
+// 条件，而不是相信一条可能什么都没限制的比较。
+func isTenantEquality(sql, column string) bool {
+	// One comparison only: ">=", "<=", "!=" and an ANDed pair all fail here.
+	// 只允许一条比较：">="、"<="、"!=" 以及用 AND 连起来的另一条都在这里被拒。
+	if strings.Count(sql, "=") != 1 {
+		return false
+	}
+	left, right, _ := strings.Cut(sql, "=")
+	// The value is always a placeholder: GORM substitutes it after the plugin
+	// runs, so anything else is the caller's literal and is left to them.
+	// 值一定是占位符：GORM 在插件之后才替换它，其它写法是调用方自己的字面量，不在
+	// 这里判断。
+	if strings.TrimSpace(right) != "?" {
+		return false
+	}
+	left = strings.TrimSpace(left)
+	if dot := strings.LastIndexByte(left, '.'); dot >= 0 {
+		left = left[dot+1:]
+	}
+	return strings.EqualFold(strings.Trim(left, "`\""), column)
 }
 
 func columnName(v any) string {

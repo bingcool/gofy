@@ -25,6 +25,8 @@ package consumer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -154,7 +156,10 @@ var (
 // 结构，因此下面的处理链路只需要写一次，而不是四次。
 type Message struct {
 	// ID identifies the message across redeliveries. It is the idempotency key.
-	// ID 在多次重投之间标识同一条消息，也是幂等键。
+	// An id too long for the ledger column is stored there as a digest; the
+	// handler and the log still see this value.
+	// ID 在多次重投之间标识同一条消息，也是幂等键。超出台账列宽的 ID 在库里存成摘要，
+	// handler 与日志看到的仍是这个值。
 	ID string
 	// Source is kafka, amqp, rocketmq or queues; it lands in logs and spans.
 	// Source 取 kafka、amqp、rocketmq 或 queues，写进日志与 span。
@@ -474,6 +479,10 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		// 没有 ID 的消息无法去重，这里补一个，至少让日志与 span 能对上。
 		msg.ID = uuid.NewString()
 	}
+	// The ledger key is the id fitted to the column, kept apart from msg.ID so
+	// the handler and the log keep the producer's value.
+	// 台账键是压进列宽后的 ID，与 msg.ID 分开保存，让 handler 与日志保留生产者的原值。
+	ledgerID := ledgerMessageID(msg.ID)
 
 	ctx = p.extract(ctx, msg.Headers)
 	ctx, span := p.tracer.Start(ctx, "consume "+p.consumer,
@@ -494,6 +503,12 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		zap.String("message_id", msg.ID),
 		zap.Int32("attempt", msg.Attempt),
 	)
+	if ledgerID != msg.ID {
+		// The id was too long for the column and is stored as a digest; keep it
+		// in the log so the row can still be found from the original id.
+		// ID 超出列宽，存的是摘要；一并记进日志，才能从原始 ID 找到那一行。
+		lg = lg.With(zap.String("ledger_id", ledgerID))
+	}
 
 	// The attempt number returned by claim is the fence for every write that
 	// records this message's outcome. A redelivery that took the row over
@@ -504,7 +519,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 	// 标成失败。
 	attempt := 0
 	if p.deduper != nil {
-		c, err := p.deduper.claim(ctx, msg.ID)
+		c, err := p.deduper.claim(ctx, ledgerID)
 		if err != nil {
 			// The deduplication store being down is not a reason to drop the
 			// message: report it as retryable and let the broker redeliver.
@@ -545,7 +560,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		// succeeded. A failed write is therefore retryable, not a log line.
 		// dead 状态必须先落库，broker 才能丢掉消息：没有台账行的 ACK 会让一条从未成功
 		// 的消息不留任何痕迹。因此写失败是可重试错误，而不是一行日志。
-		parkErr := p.park(ctx, msg.ID, attempt, err)
+		parkErr := p.park(ctx, ledgerID, attempt, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "decode")
 		lg.Error("message discarded: undecodable envelope",
@@ -557,17 +572,17 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		return parkErr
 	}
 
-	err = p.runHandler(ctx, msg, env, attempt, lg)
+	err = p.runHandler(ctx, msg, env, attempt, ledgerID, lg)
 	switch {
 	case err == nil:
 		if p.deduper != nil {
-			if markErr := p.deduper.succeed(ctx, msg.ID, attempt); markErr != nil {
+			if markErr := p.deduper.succeed(ctx, ledgerID, attempt); markErr != nil {
 				// The side effect already happened, so the message is
 				// acknowledged anyway; a failed marker only means the next
 				// redelivery repeats work the handler must tolerate.
 				// 副作用已经发生，消息照样确认；标记失败只意味着下次重投会重做，
 				// 而 handler 本来就必须容忍这一点。
-				p.ledgerFailed(lg, "done", msg.ID, markErr)
+				p.ledgerFailed(lg, "done", ledgerID, markErr)
 			}
 		}
 		span.SetStatus(codes.Ok, "")
@@ -578,7 +593,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		)
 		return nil
 	case IsPermanent(err):
-		parkErr := p.park(ctx, msg.ID, attempt, err)
+		parkErr := p.park(ctx, ledgerID, attempt, err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "permanent")
 		lg.Error("message discarded: permanent failure",
@@ -591,11 +606,11 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 		return parkErr
 	default:
 		if p.deduper != nil {
-			if markErr := p.deduper.fail(ctx, msg.ID, attempt, err); markErr != nil {
+			if markErr := p.deduper.fail(ctx, ledgerID, attempt, err); markErr != nil {
 				// The redelivery still happens — the handler error is what
 				// decides that — so the lost marker only widens the retry gap.
 				// 重投照样发生——决定它的是 handler 错误——丢掉的标记只会拉长重试间隔。
-				p.ledgerFailed(lg, "failed", msg.ID, markErr)
+				p.ledgerFailed(lg, "failed", ledgerID, markErr)
 			}
 		}
 		span.RecordError(err)
@@ -622,6 +637,10 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 // The renewer goroutine always ends before this method returns: cancellation
 // plus the done channel also cover a panicking handler, so no ticker is left
 // renewing a dead claim.
+//
+// ledgerID is the claim's key, which equals msg.ID unless the id had to be
+// fitted to the ledger column; renewing a row under a different key would report
+// a stale claim on every tick and stop the lease from being kept alive.
 // runHandler 运行 handler，同时保持台账租约不过期。
 //
 // 没有续期者时，耗时超过 ProcessingLease 的 handler 会被 broker 的重投副本接管——正是台账
@@ -630,7 +649,10 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 //
 // 续期 goroutine 一定在本方法返回前结束：取消加 done 通道也覆盖 handler panic 的路径，
 // 不会漏下一个还在为死认领续期的 ticker。
-func (p *Processor) runHandler(ctx context.Context, msg Message, env Envelope, attempt int, lg *zap.Logger) error {
+//
+// ledgerID 是这次认领的键，除非 ID 需要压进台账列宽，否则与 msg.ID 相同；用另一个键续期
+// 会让每一跳都报告认领过期，租约也就无法维持。
+func (p *Processor) runHandler(ctx context.Context, msg Message, env Envelope, attempt int, ledgerID string, lg *zap.Logger) error {
 	if p.deduper == nil || p.renewInterval <= 0 {
 		return p.handler(ctx, msg, env)
 	}
@@ -645,7 +667,7 @@ func (p *Processor) runHandler(ctx context.Context, msg Message, env Envelope, a
 			case <-renewCtx.Done():
 				return
 			case <-ticker.C:
-				err := p.deduper.renew(renewCtx, msg.ID, attempt)
+				err := p.deduper.renew(renewCtx, ledgerID, attempt)
 				if err == nil {
 					continue
 				}
@@ -862,6 +884,44 @@ type messageClaim struct {
 	inFlight bool
 	attempt  int
 	reason   string
+}
+
+// maxLedgerMessageID is the width of the message_id column. The value comes from
+// the producer, so it has to be fitted rather than trusted.
+// maxLedgerMessageID 是 message_id 列的宽度。写入的值来自生产者，因此必须规整，
+// 不能直接相信它的长度。
+const maxLedgerMessageID = 128
+
+// ledgerMessageID fits a message id into the ledger column.
+//
+// AMQP's MessageId is a shortstr the sender chooses, and no adapter can bound it.
+// An over-long id reached the insert as-is, which on MySQL is one of two
+// failures: in strict mode every attempt fails with "Data too long" and the
+// message is redelivered forever (a stalled partition); without strict mode it is
+// truncated, so two ids sharing a 128-character prefix land on the same unique
+// index entry and the second message is acknowledged as a duplicate — dropped
+// silently. A digest is stable across redeliveries, unique enough to keep the
+// index honest, and always short enough.
+//
+// The length is counted in runes because that is what VARCHAR(n) bounds. The
+// prefix makes the stored value self-describing: an operator who sees "sha256:..."
+// knows why it differs from the id the producer logged.
+// ledgerMessageID 把消息 ID 压进台账列宽。
+//
+// AMQP 的 MessageId 是发送方自行选择的 shortstr，任何适配器都无法假定其长度。超长
+// ID 原样进入插入语句后，MySQL 上是两种失败之一：严格模式下每次尝试都报
+// "Data too long"，消息被无限重投（分区卡死）；非严格模式下被截断，前缀相同（前 128
+// 个字符）的两个 ID 落到同一条唯一索引上，第二条被当成重复消息确认——静默丢失。摘要
+// 在多次重投之间稳定、唯一性足够，而且一定放得下。
+//
+// 长度按字符数计算，因为 VARCHAR(n) 限制的是字符。前缀让存下来的值自解释：运维看到
+// "sha256:..." 就知道它为什么与生产者日志里的 ID 不同。
+func ledgerMessageID(id string) string {
+	if utf8.RuneCountInString(id) <= maxLedgerMessageID {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // consumedMessage is the idempotency ledger: one row per (consumer, message).

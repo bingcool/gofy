@@ -384,3 +384,55 @@ func TestConsumeReportsReadyOnceAfterFirstPop(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// TestQueueConsumeRequeuesOnShutdown is the regression for the audit finding:
+// a pop already removed the message from Redis, so returning on a cancelled
+// context after a failed handler lost it for good. It must come back, with the
+// retry budget untouched — a failure caused by the cancellation says nothing
+// about the message.
+// TestQueueConsumeRequeuesOnShutdown 是审计结论的回归测试：弹出已经从 Redis 删除
+// 了消息，因此 handler 失败后因 ctx 取消直接返回会让这条消息永久丢失。消息必须回来，
+// 且不消耗重试预算——取消导致的失败不能说明消息有问题。
+func TestQueueConsumeRequeuesOnShutdown(t *testing.T) {
+	q, c := newQueue(t, queues.Config{Key: "jobs"})
+	if _, err := q.Push(context.Background(), map[string]string{"n": "1"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	handled := make(chan struct{})
+	go func() {
+		done <- q.Consume(ctx, func(handlerCtx context.Context, _ *queues.Message) error {
+			close(handled)
+			cancel()                // the shutdown signal arrives mid-handler
+			return handlerCtx.Err() // and the handler fails because of it
+		}, queues.ConsumeOptions{IdleDelay: 10 * time.Millisecond})
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler never ran")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Consume = %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not return after cancellation")
+	}
+
+	if got := c.client.ZCard(context.Background(), q.RetryKey()).Val(); got != 1 {
+		t.Fatalf("retry ZSET size = %d, want 1: the message was dropped", got)
+	}
+	msg, ok, err := q.Pop(context.Background(), 0)
+	if err != nil || !ok {
+		t.Fatalf("Pop after shutdown = (%v, %v), want the message back", ok, err)
+	}
+	if msg.RetryNum != 0 {
+		t.Fatalf("RetryNum = %d, want 0: a shutdown must not charge the budget", msg.RetryNum)
+	}
+}

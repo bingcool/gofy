@@ -166,6 +166,12 @@ err = dq.Consume(ctx, func(ctx context.Context, msg *queues.Message) error {
 - **先删除后消费**：`Pop` 返回前消息已从 Redis 删除。消费失败必须显式调用
   `Retry`；如果进程在 `Pop` 与 `Retry` 之间崩溃，这条消息会丢失。
   需要 at-least-once 语义时应改用 Redis Streams，本包不提供消费确认。
+- **优雅停机不丢已弹出的消息**：`Consume` 发现 ctx 已取消时，会把手上没处理完
+  （以及因取消而失败）的消息用 `RetryInFlight` 写回——`Queue` 写进重试 ZSET，
+  `DelayQueue` 以零延迟写回自身 ZSET，两者都不消耗重试预算。回写用一份独立于
+  调用方 ctx 的预算（`requeueTimeout`，5s），既不让取消信号使写入必然失败，也不让
+  一个不可达的 Redis 拖住停机。**进程被强杀时仍然会丢**：这是"至多一次"的边界，
+  没有改变。
 - **重试次数**：`MaxRetries` 是失败后额外投递的次数，因此一条消息最多被投递
   `MaxRetries + 1` 次；`Retry` 返回 `false` 时消息被丢弃，由业务决定是否记录。
 - **在途重投不消耗重试预算**：`Consume` 的 handler 返回实现 `queues.InFlightError`
