@@ -89,7 +89,7 @@ otel:
 sql_log:
   enabled: true
   mode: full
-  sample_rate: 0.01
+  sample_rate: 1
   max_length: 4096
   log_schema_queries: false
   error_rate_limit: 20
@@ -109,7 +109,7 @@ db:
     conn_max_idle_time: 10m
     ping_timeout: 5s
     slow_threshold: 200ms
-    log_level: warn
+    log_level: info
     prepare_stmt: false
   # 演示多实例：order/product 复用同一套 dev 库（YAML 锚点），实际项目换成
   # 各自的 DSN；业务侧句柄见 app/io/db 的 OrderDb、ProductDb。
