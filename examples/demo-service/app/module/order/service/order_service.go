@@ -200,9 +200,13 @@ func repositoryFilter(userID uint64, f ListFilter) (repository.ListFilter, error
 	return out, nil
 }
 
-// Cancel marks an order as cancelled.
+// Cancel marks an order as cancelled. It does not check the source status: the
+// status machine lives in the worker's orderEventRules (order.cancelled), which
+// allows pending and paid only. Unifying the two means moving that set here.
 // Cancel 把订单状态置为 cancelled；订单不存在返回 ErrOrderNotFound，且只按 Debug
-// 记录——404 是预期业务结果，不该当成故障告警。
+// 记录——404 是预期业务结果，不该当成故障告警。它不校验来源状态：状态机在 worker 的
+// orderEventRules（order.cancelled）里，只允许 pending 与 paid。要统一两处，必须把
+// 那个集合搬到这里。
 func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
 	if err := s.orderRepository.UpdateStatus(ctx, id, StatusCancelled); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {

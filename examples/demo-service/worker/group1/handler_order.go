@@ -141,9 +141,15 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	// The transition condition lives in the UPDATE, not in a read-modify-write:
 	// two concurrent handlers would both pass a SELECT and both write. Only rows
 	// whose current status is a legal source move, and a redelivery to a status
-	// the order already has touches nothing.
+	// the order already has touches nothing. The legal source set is
+	// orderEventRules above, and this statement is its only executor:
+	// OrderService.Cancel writes the status unconditionally, so moving this
+	// transition into the service means adding the same source check there first.
 	// 迁移条件写在 UPDATE 里，而不是先读再写：两个并发 handler 会同时通过 SELECT 然后都
 	// 写入。只有当前状态属于合法前置集合的行会变，重复投递到已处于目标状态的行也不会改任何东西。
+	// 合法前置集合就是上面的 orderEventRules，本语句是它唯一的执行点：
+	// OrderService.Cancel 是无条件写入状态，因此把这条迁移搬进 service 之前，
+	// 必须先在那里补上同样的来源校验。
 	sources := make([]string, 0, len(rule.Sources))
 	for _, source := range rule.Sources {
 		sources = append(sources, string(source))
