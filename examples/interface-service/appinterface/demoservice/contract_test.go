@@ -174,11 +174,11 @@ func TestRouteMetadata(t *testing.T) {
 	if !cancel.NoContent || cancel.Method != "DELETE" {
 		t.Fatalf("cancel spec = %+v", cancel)
 	}
-	if orderroute.GetOrder.Spec().Auth != "required" {
-		t.Fatalf("get order auth = %q", orderroute.GetOrder.Spec().Auth)
+	if got := orderroute.GetOrder.Spec().Method; got != "GET" {
+		t.Fatalf("get order method = %q", got)
 	}
 	product := productroute.GetProduct.Spec()
-	if product.Method != "GET" || product.Auth != "required" || product.Path != "/products/{id}" {
+	if product.Method != "GET" || product.Path != "/products/{id}" {
 		t.Fatalf("get product spec = %+v", product)
 	}
 	if tags := product.Tags; len(tags) != 2 || tags[0] != productroute.ServiceTag || tags[1] != productroute.PrefixTag {

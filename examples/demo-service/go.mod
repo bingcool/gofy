@@ -8,6 +8,7 @@ require (
 	github.com/bingcool/gofy-adapter v0.0.0
 	github.com/bingcool/gofy-interface-api v0.0.0
 	github.com/gin-gonic/gin v1.12.0
+	github.com/glebarez/sqlite v1.11.0
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/pflag v1.0.6
@@ -36,7 +37,6 @@ require (
 	github.com/getkin/kin-openapi v0.153.0 // indirect
 	github.com/gin-contrib/sse v1.1.2 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
-	github.com/glebarez/sqlite v1.11.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v1.0.2 // indirect

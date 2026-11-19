@@ -2,12 +2,10 @@ package container
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 	"github.com/bingcool/gofy/support"
-	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
 )
 
@@ -56,38 +54,5 @@ func TestBindOptionsRateLimitFollowsContract(t *testing.T) {
 	}
 	if mw := opts.RateLimit(endpoint.Spec{OperationID: "GetConfig", Method: http.MethodGet}, responder); mw != nil {
 		t.Fatal("route without RateLimit got a limiter")
-	}
-}
-
-// 装配根同时给出认证声明校验：Required 认 "auth"，Optional 认独立的
-// "optional-auth"，AuthNone 不参与校验。
-func TestBindOptionsValidatesAuthDeclarations(t *testing.T) {
-	opts := NewContainer(nil).BindOptions()
-	if opts.AuthValidator == nil {
-		t.Fatal("BindOptions returned no auth validator")
-	}
-	cases := []struct {
-		name     string
-		auth     endpoint.AuthMode
-		declared []string
-		wantErr  string
-	}{
-		{name: "required-group-auth", auth: endpoint.AuthRequired, declared: []string{"audit", appmiddleware.NameAuth}},
-		{name: "required-missing", auth: endpoint.AuthRequired, declared: []string{"audit"}, wantErr: appmiddleware.NameAuth},
-		{name: "optional-auth-is-not-enough", auth: endpoint.AuthOptional, declared: []string{appmiddleware.NameAuth}, wantErr: appmiddleware.NameOptionalAuth},
-		{name: "optional-declared", auth: endpoint.AuthOptional, declared: []string{appmiddleware.NameOptionalAuth}},
-		{name: "none-unchecked", auth: endpoint.AuthNone, declared: []string{"audit"}},
-	}
-	for _, tc := range cases {
-		err := opts.AuthValidator(endpoint.Spec{OperationID: "Probe", Auth: tc.auth}, tc.declared)
-		if tc.wantErr == "" {
-			if err != nil {
-				t.Fatalf("%s: unexpected error: %v", tc.name, err)
-			}
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("%s: error = %v, want %q", tc.name, err, tc.wantErr)
-		}
 	}
 }

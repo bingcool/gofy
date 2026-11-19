@@ -6,12 +6,9 @@
 package container
 
 import (
-	"fmt"
-	"slices"
 	"sync"
 
 	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
-	"github.com/bingcool/gofy-interface-api/contracts/common/endpoint"
 
 	"github.com/yourorg/demo-service/app/config"
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
@@ -74,33 +71,12 @@ func (c *Container) orderConfig() config.OrderConfig {
 // adapter 调用回调时同时注入 Router 的 Responder，限流的 429/503 与其它
 // 错误共用同一信封。
 //
-// AuthValidator 让“契约声明需要认证、实际没有安装认证”在启动期就失败，
-// 而不是上线后才发现；它只检查声明，不创建中间件。
+// 认证不在这里：契约没有认证字段，需要登录的路由由分组或路由上的 "auth"
+// 中间件决定，公开的路由就不装。装配根因此不提供任何认证策略对象。
 func (c *Container) BindOptions() gofyadapter.BindOptions {
 	return gofyadapter.BindOptions{
-		RateLimit:     appmiddleware.RateLimiter{}.Callback(),
-		AuthValidator: authValidator,
+		RateLimit: appmiddleware.RateLimiter{}.Callback(),
 	}
-}
-
-// authValidator 要求 AuthRequired 路由在分组或路由上声明 NameAuth，
-// AuthOptional 路由声明 NameOptionalAuth。Optional 不能拿 Required 的别名
-// 顶替：前者必须支持匿名放行，后者必须拒绝匿名请求。
-//
-// AuthNone（零值）不产生认证要求，adapter 本来就不会调用到这里，显式放行
-// 是为了直接调用时语义一致。校验失败会带上路由名让启动或 Reload 中止。
-func authValidator(spec endpoint.Spec, declared []string) error {
-	if spec.Auth == endpoint.AuthNone {
-		return nil
-	}
-	want := appmiddleware.NameAuth
-	if spec.Auth == endpoint.AuthOptional {
-		want = appmiddleware.NameOptionalAuth
-	}
-	if slices.Contains(declared, want) {
-		return nil
-	}
-	return fmt.Errorf("auth %q requires middleware %q in the group or route declaration", spec.Auth, want)
 }
 
 // Init 记录本次服务 Runtime 的 logger，供后续惰性构造使用。模块工厂在取用任何

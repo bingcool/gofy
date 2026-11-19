@@ -14,11 +14,12 @@ var GetConfig *endpoint.Route[orderrequest.GetConfigRequest, orderresponse.GetCo
 
 // Config is the config route group of the order module: the group prefix is the
 // same full deployment prefix RoutePrefix, in-group paths are relative
-// (/config), so the full route is RoutePrefix + Spec.Path. Auth is declared
-// explicitly by name on the group; AuthRequired only marks OpenAPI security.
+// (/config), so the full route is RoutePrefix + Spec.Path. Authentication is the
+// group's "auth" middleware: the contract declares no auth field, so this chain
+// is the whole requirement.
 // Config 是订单模块配置路由分组：分组前缀同样使用完整部署前缀 RoutePrefix，
 // 组内路径只写相对部分（/config），完整路由 = RoutePrefix + Spec.Path。
-// 认证按名字显式声明在分组上，AuthRequired 只用于 OpenAPI 标记。
+// 认证就是本分组的 "auth" 中间件：契约没有认证字段，这条链就是要求的全部。
 var Config = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group) {
 	group.Use("auth")
 
@@ -27,7 +28,6 @@ var Config = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group)
 			spec.OperationID = "GetConfig"
 			spec.Summary = "查询订单模块配置"
 			spec.Tags = []string{ServiceTag}
-			spec.Auth = endpoint.AuthRequired
 		})
 	group.Add(GetConfig)
 })

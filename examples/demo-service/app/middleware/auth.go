@@ -9,16 +9,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// NameAuth 是认证中间件的显式别名。契约在分组或路由上声明 "auth"
-// （AuthRequired 本身只是 OpenAPI 标记），adapter 从 App 注册表取实例，
-// 模块不需要再传任何认证选项。
+// NameAuth 是认证中间件的显式别名，也是"这条路由需要登录"的唯一表达方式：
+// 契约在分组或路由上 Use("auth")，adapter 从 App 注册表取实例装进中间件链。
+// 没装的路由就是公开的——契约里没有第二个地方能声明认证。
 const NameAuth = "auth"
 
-// NameOptionalAuth 是“可选认证”中间件的逻辑名：有凭证则校验、无凭证放行。
-// demo 目前没有路由声明 AuthOptional，也没有注册该别名；容器的启动校验会用
-// 这个名字判定 Optional 路由，新增 Optional 路由前需要先注册实现，
-// 不能直接复用 NameAuth（Required 与 Optional 的放行语义不同）。
-const NameOptionalAuth = "optional-auth"
+// 需要"有凭证则校验、无凭证放行"的接口时，另外注册一个别名（例如
+// "optional-auth"）并在路由上 Use 它：Required 与 Optional 的放行语义不同，
+// 不能复用 NameAuth。框架与 adapter 都不认识这个别名，因此不在这里预声明。
 
 // JWTConfig 描述契约里显式声明的 "auth" 中间件使用的 Bearer Token 校验参数，
 // 映射到 support/jwtauth.Config。

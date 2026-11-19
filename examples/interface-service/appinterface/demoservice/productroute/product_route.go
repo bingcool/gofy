@@ -50,7 +50,6 @@ var Products = endpoint.NewRouteGroup("/api/v1/product", func(group *endpoint.Gr
 			// 两个标签：ServiceTag 让 -service demoservice 仍能聚合到本路由，
 			// PrefixTag 让 docgen 选中产品部署前缀。
 			spec.Tags = []string{ServiceTag, PrefixTag}
-			spec.Auth = endpoint.AuthRequired
 			spec.Errors = []endpoint.ErrorSpec{
 				{Code: int(producterror.ErrCodeProductNotFound), Status: 404, Message: "product not found"},
 			}
@@ -64,7 +63,6 @@ var Products = endpoint.NewRouteGroup("/api/v1/product", func(group *endpoint.Gr
 			spec.Summary = "分页查询产品"
 			spec.Description = "按创建顺序倒序分页返回产品，包含下架产品。"
 			spec.Tags = []string{ServiceTag, PrefixTag}
-			spec.Auth = endpoint.AuthRequired
 		})
 
 	group.Add(GetProduct, ListProducts)

@@ -178,28 +178,27 @@ func TestDuplicateOperationIsRejected(t *testing.T) {
 	}
 }
 
-// TestAuthModesDriveSecurityRequirements checks the security semantics produced
-// by the three AuthMode values: Required allows only the scheme, Optional allows
-// the scheme or an anonymous request, None emits no security requirement. The
-// assertions look at the parsed JSON, not at text order.
-// TestAuthModesDriveSecurityRequirements 校验三种 AuthMode 生成的 security
-// 语义：Required 只允许认证方案，Optional 允许认证方案或匿名，None 不生成
-// 认证要求。断言针对解析后的 JSON，而不是文本顺序。
-func TestAuthModesDriveSecurityRequirements(t *testing.T) {
-	type authProbeRequest struct{}
-	probe := func(operation string, auth endpoint.AuthMode, path string) endpoint.Descriptor {
-		return endpoint.Get[authProbeRequest, orderresponse.GetOrderResponse](
-			path, func(spec *endpoint.Spec) {
-				spec.OperationID = operation
-				spec.Auth = auth
-			})
-	}
-	routes := []endpoint.Descriptor{
-		probe("RequiredProbe", endpoint.AuthRequired, "/required"),
-		probe("OptionalProbe", endpoint.AuthOptional, "/optional"),
-		probe("NoneProbe", endpoint.AuthNone, "/none"),
-	}
-	spec, err := docgen.Build(routes, docgen.Config{})
+// TestDocgenEmitsNoSecurityRequirement pins the consequence of removing auth
+// from the contract: no operation carries a security requirement, and docgen
+// derives no 401, because it cannot know whether the route installs an auth
+// middleware. A 401 is declared in Spec.Errors like any other response. A
+// configured scheme is still emitted into components, so client generators can
+// see the shape even though nothing references it.
+// TestDocgenEmitsNoSecurityRequirement 固定"契约不含认证"的后果：没有 operation
+// 携带 security 要求，docgen 也不推导 401——它无法知道那条路由是否装了认证中间件。
+// 401 与其它响应一样在 Spec.Errors 里声明。显式配置的方案仍写入 components，
+// 让客户端生成器看到它的形状，尽管没有任何 operation 引用它。
+func TestDocgenEmitsNoSecurityRequirement(t *testing.T) {
+	type probeRequest struct{}
+	probe := endpoint.Get[probeRequest, orderresponse.GetOrderResponse](
+		"/probe", func(spec *endpoint.Spec) {
+			spec.OperationID = "GetProbe"
+		})
+	spec, err := docgen.Build([]endpoint.Descriptor{probe}, docgen.Config{
+		SecuritySchemes: map[string]docgen.SecurityScheme{
+			"bearerAuth": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -214,51 +213,21 @@ func TestAuthModesDriveSecurityRequirements(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	operation := func(path string) map[string]any {
-		t.Helper()
-		item, ok := doc["paths"].(map[string]any)[path].(map[string]any)["get"].(map[string]any)
-		if !ok {
-			t.Fatalf("operation %s missing", path)
-		}
-		return item
-	}
-
-	required := operation("/required")["security"].([]any)
-	if len(required) != 1 || !hasSecurityScheme(required[0], docgen.DefaultSecurityScheme) {
-		t.Fatalf("required security = %#v", required)
-	}
-
-	optional := operation("/optional")["security"].([]any)
-	if len(optional) != 2 {
-		t.Fatalf("optional security = %#v, want scheme + anonymous alternative", optional)
-	}
-	if !hasSecurityScheme(optional[0], docgen.DefaultSecurityScheme) {
-		t.Fatalf("optional first requirement = %#v", optional[0])
-	}
-	if anonymous, ok := optional[1].(map[string]any); !ok || len(anonymous) != 0 {
-		t.Fatalf("optional second requirement = %#v, want empty object", optional[1])
-	}
-
-	if _, ok := operation("/none")["security"]; ok {
-		t.Fatal("AuthNone operation has a security requirement")
-	}
-	if _, ok := operation("/none")["responses"].(map[string]any)["401"]; ok {
-		t.Fatal("AuthNone operation documents 401")
-	}
-	for _, path := range []string{"/required", "/optional"} {
-		if _, ok := operation(path)["responses"].(map[string]any)["401"]; !ok {
-			t.Fatalf("%s does not document 401", path)
-		}
-	}
-}
-
-func hasSecurityScheme(requirement any, scheme string) bool {
-	object, ok := requirement.(map[string]any)
+	operation, ok := doc["paths"].(map[string]any)["/probe"].(map[string]any)["get"].(map[string]any)
 	if !ok {
-		return false
+		t.Fatal("operation /probe missing")
 	}
-	_, ok = object[scheme]
-	return ok
+	if _, ok := operation["security"]; ok {
+		t.Fatal("operation carries a security requirement")
+	}
+	if _, ok := operation["responses"].(map[string]any)["401"]; ok {
+		t.Fatal("operation documents a derived 401")
+	}
+	components, _ := doc["components"].(map[string]any)
+	schemes, _ := components["securitySchemes"].(map[string]any)
+	if _, ok := schemes["bearerAuth"]; !ok {
+		t.Fatalf("configured scheme missing from components: %#v", components)
+	}
 }
 
 func TestNilSpec(t *testing.T) {

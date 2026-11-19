@@ -201,15 +201,17 @@ func TestBindGroupResolvesNamesFromRouterRegistry(t *testing.T) {
 	}
 }
 
-// AuthRequired 只是 OpenAPI 标记，adapter 不会自动附加认证中间件。
-func TestBindAllAuthRequiredAddsNoImplicitMiddleware(t *testing.T) {
+// 只声明 OperationID 时不装任何中间件：认证必须显式声明 "auth"，adapter 不会
+// 因为某条路由"看起来需要登录"就补一个。
+// Declaring only an operation id installs nothing: auth must be declared by
+// name, and the adapter never infers it.
+func TestBindAllAddsNoImplicitAuthMiddleware(t *testing.T) {
 	var trace []string
 	engine, router := newRouterWithRegistry(t, middleware.NewRegistry(), "/api/v1/order")
 
 	desc := endpoint.Get[orderrequest.ListOrdersRequest, paging.ListData[orderdto.OrderDTO]](
 		"/orders", func(spec *endpoint.Spec) {
 			spec.OperationID = "ListOrders"
-			spec.Auth = endpoint.AuthRequired
 		})
 	if err := gofyadapter.BindAll(router, []endpoint.Descriptor{desc}, orderImpl{}, gofyadapter.BindOptions{}); err != nil {
 		t.Fatalf("BindAll: %v", err)
@@ -238,7 +240,6 @@ func TestBindAllResolvesExplicitAuthName(t *testing.T) {
 	desc := endpoint.Get[orderrequest.ListOrdersRequest, paging.ListData[orderdto.OrderDTO]](
 		"/orders", func(spec *endpoint.Spec) {
 			spec.OperationID = "ListOrders"
-			spec.Auth = endpoint.AuthRequired
 			spec.Middleware = []string{"auth"}
 		})
 	if err := gofyadapter.BindAll(router, []endpoint.Descriptor{desc}, orderImpl{}, gofyadapter.BindOptions{}); err != nil {
