@@ -572,9 +572,14 @@ Client 当前具备：
 - Middleware map / Registry / App registry 按优先级解析；
 - 对缺失中间件在启动时失败；
 - RateLimit、Global、命名中间件、Routes 的固定装配顺序；
-- 可选 AuthValidator 校验契约声明与真实认证中间件策略是否匹配。
+- ~~可选 AuthValidator 校验契约声明与真实认证中间件策略是否匹配。~~
 
 需要注意 `Spec.Auth` 是元数据，adapter 不会根据 `AuthRequired` 自动附加认证中间件；调用方必须显式声明 auth middleware，或配置严格的 `AuthValidator`。这是一个刻意的责任边界，不是自动鉴权功能。
+
+> **2026-11-19 修订**：这条边界最终还是不够——`AuthValidator` 只比对中间件**名字**，一个放行实现
+> （demo 的 `Auth(secret: "")`）照样通过校验，因此"声明需要认证"证明不了运行时真的拒绝匿名。
+> `AuthMode` / `Spec.Auth` / `AuthValidator` 已全部删除，认证只由 `Use("auth")` 表达；
+> 本条审计结论随之作废。
 
 此外 adapter 当前明确拒绝 SSE、Download、Chunked 等非 JSON ResponseKind。虽然 interface-api Client 支持流式调用，但服务端 Gofy Adapter 并不因此自动支持流式响应。必须在接口服务文档里说明两侧能力范围，不应从 Client 能力推断 Adapter 已实现。
 

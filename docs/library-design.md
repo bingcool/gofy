@@ -905,9 +905,9 @@ func WithMiddlewareRegistrar(fn MiddlewareRegistrar) Option
   （`gofyadapter.MiddlewareRegistry` 接口），解析优先级为
   `BindOptions.Middleware`（单次覆盖）→ `BindOptions.Registry`（可选显式注入）
   → Router 携带的 App 注册表，三处都缺失时启动期报错；
-- 认证不再有特殊通道：`AuthRequired` 只是 OpenAPI 标记，需要认证的契约路由
-  显式声明 `group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`，与其他
-  别名一样从注册表解析；不存在默认别名或 `"jwt-auth"` 兜底；
+- 认证没有单独的声明字段：`group.Use("auth")` 或 `spec.Middleware =
+  []string{"auth"}` 就是"需要登录"的全部表达，与其他别名一样从注册表解析；
+  没装的路由就是公开的，不存在默认别名或 `"jwt-auth"` 兜底；
 - **注册表只服务契约路由**，不接管下面的 App 级安装顺序；把全局链里已安装的
   中间件再注册给契约路由会执行两次，只在需要按路由覆盖全局行为时才这么做。
 
@@ -3051,7 +3051,7 @@ service，产品实现直接以接口传给订单 service。`OrderConfigService`
 [module-layering-design.md](./module-layering-design.md) §3–§6、§10，以及
 [repository-composition-design.md](./repository-composition-design.md) §5.2、§5.7–§5.8。
 
-`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`；分组前缀携带完整部署前缀时 `Spec.Path` 已是组内相对路径，直接注册，分组前缀只是分组名时才按前缀裁剪。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：`AuthRequired` 只用于 OpenAPI 标记，契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`）。
+`BindGroup` 先解析分组声明的中间件名并创建 `router.Group(prefix, mw...)`，内部 `BindAll` 再校验并注册组内每条路由：路由路径、`{id}` 占位符、方法签名和中间件名都在启动时检查；任何一项不符合直接返回聚合错误。契约中的 `{id}` 会被适配器转换成 gin 的 `:id`；分组前缀携带完整部署前缀时 `Spec.Path` 已是组内相对路径，直接注册，分组前缀只是分组名时才按前缀裁剪。名字解析先查 `BindOptions.Middleware`（本次绑定的显式覆盖），再查可选的 `BindOptions.Registry`，最后查 Router 携带的 App 注册表，三处都缺失即启动失败。认证没有特殊通道：契约必须显式声明 `"auth"`（`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`），契约本身没有认证字段。
 
 最终路由：
 
@@ -3589,8 +3589,8 @@ func FixOrder() gofyscript.Script {
 实例由应用层 `app/middleware.Auth` 构造，内部调用框架
 `support/middleware.JWTAuth`（§3.4.9 的 `WithJWTAuth` 同款实现）。`Auth` 把
 `config.yaml` 的 `jwt` 段映射成 `jwtauth.Config` 后交给框架，并以别名 `auth`
-注册到 App 的共享注册表；`AuthRequired` 本身只写入 OpenAPI 标记，不会触发
-任何自动装配：
+注册到 App 的共享注册表；装配只发生在 `Use("auth")` 解析到这个实例时，契约里
+没有任何认证字段可以触发自动装配：
 
 ```go
 // app/middleware/auth.go
@@ -3690,8 +3690,8 @@ func middlewareRegistrar(cfg *config.Config) gofy.MiddlewareRegistrar {
 
 业务模块只按契约名字 `BindGroup(..., BindOptions{})`，新增别名只改
 `app/middleware`，不用改任何模块。所有名字都必须显式注册，没有默认别名或
-框架兜底：`AuthRequired` 只是 OpenAPI 标记，需要认证的路由必须在契约里写
-`group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`。
+框架兜底：需要认证的路由必须在契约里写 `group.Use("auth")` 或
+`spec.Middleware = []string{"auth"}`，没写就是公开的。
 
 ### 9.11 CLI 行为
 

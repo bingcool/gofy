@@ -1107,7 +1107,7 @@ cd examples/demo-service && make check
 | --- | --- | --- |
 | 单资源读写 | 路径参数、query/body schema、`NoBody` 响应 | `endpoint.Get[Req, Res]("/items/{id}", …)` 与对应的写方法 helper |
 | 分页列表 | `paging.ListData[T]` 的 schema 生成 | `endpoint.Get[ListReq, paging.ListData[ItemDTO]]("/items", …)` |
-| 认证与限流 | `Spec.Auth` 的 `AuthRequired` / `AuthOptional`、`Spec.RateLimit` 推导的 401 / 429 | 两条 Spec 分别设置 |
+| 认证与限流 | 认证由 `Group.Use` / `Spec.Middleware` 的别名表达（契约无认证字段）；`Spec.RateLimit` 推导的 429 | 两条 Spec 分别设置 |
 | 错误声明 | `Spec.Errors` 与 `errcode` 码段映射 | 一条带业务错、一条不带 |
 | 分组与前缀 | `Group.Use` 逻辑别名、部署前缀拼接 | `endpoint.NewRouteGroup("/api/test", func(g *endpoint.Group) { … })` |
 

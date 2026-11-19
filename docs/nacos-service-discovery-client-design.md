@@ -205,7 +205,7 @@ demo 的 `nacosCfg` 只去了三处：
   且 `enable_nacos_register: false`
 
 全仓没有 `nacos.New(...)` 的非测试调用。`adapter/gofy.BindOptions` 只含
-Global/Routes/Middleware/Registry/RateLimit/AuthValidator，没有 client/resolver 注入点。
+Global/Routes/Middleware/Registry/RateLimit，没有 client/resolver 注入点。
 
 order → product 走的是**进程内 innerapi**（`order/service/dependencies.go` 的
 `productapi.ProductAPI`），不经过 HTTP，所以它**不能**用来验证服务发现（原稿 §8 的这一步

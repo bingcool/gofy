@@ -66,8 +66,8 @@
 | P1-04 SQL 日志参数化 | 已落地 | GORM Logger 实现 `ParamsFilter`，慢查询与错误日志输出占位符模板，不展开真实参数 |
 | P1-05 Kafka 提交语义 | 已落地 | 新增 `CommitMode`，默认 manual；`DisableAutoCommit` 标记弃用；补充分区、失败消息与提交失败测试 |
 | P1-06 Contract Module 路径 | 部分落地 | 模块路径已改为 `github.com/bingcool/gofy-interface-service`，两仓库导入全部同步；打 tag、固定正式版本、移除 `replace`、独立下载验证属于发布动作，尚未执行 |
-| P2-01 认证声明校验 | 已落地 | 契约显式声明 `auth` 中间件；`AuthValidator` 在启动期校验，缺失即报错 |
-| P2-02 OpenAPI Optional Auth | 已落地 | `AuthOptional` 生成允许认证与匿名两种情况的 Security 结构 |
+| P2-01 认证声明校验 | 已撤回（2026-11-19） | 原做法是 `Spec.Auth` + `AuthValidator` 启动期校验；但校验器只比对中间件名字，证明不了那个实现真的会拒绝匿名（demo 的 `Auth(secret: "")` 就是放行实现）。契约改为不含认证字段，认证只由 `Use("auth")` 表达，见 §9.4 |
+| P2-02 OpenAPI Optional Auth | 已撤回（2026-11-19） | 随 `AuthOptional` 一并删除；没有认证字段后 docgen 不再生成 security，也不再推导 401，见 §10.4 |
 | P2-03 流式接口边界 | 已落地 | 文档化既有 `ResponseKind` 与服务端实现的边界，本轮不新增流式能力 |
 | P2-04 OTel 全局副作用 | 已落地 | 默认 `Global=false` 不触碰进程级 Provider/Propagator/ErrorHandler；导出失败经注入 logger 去重上报 |
 | P2-05 质量门禁 | 已落地 | `make check` 覆盖 fmt、vet、race、示例构建/测试、导入守卫与 cgo-free；示例模块增加 `go vet` |
@@ -909,6 +909,11 @@ Gofy 需要先有首个 release tag。开发时的本地依赖通过 `go.work` �
 
 ## 9. P2-01：完善契约认证声明与服务端绑定校验
 
+> **2026-11-19 撤回**：本节方案（`Spec.Auth` + `AuthValidator`）已删除。原因：校验器只能看到
+> 中间件**名字**，看不到实现——`AuthRequired` 配一个放行实现（`Auth(secret: "")`）照样通过
+> 启动校验，于是"认证声明"给了一种并不存在的保证。同时生产契约里只有 `Use("auth")`、没有一处
+> `Spec.Auth`，校验器从未运行过。替代方案见 §9.4：契约不声明认证，`Use` 是唯一表达。
+
 ### 9.1 当前约定
 
 `endpoint.Spec.Auth` 目前主要影响 OpenAPI 文档，不会自动安装认证中间件。实际认证必须通过 `Group.Use("auth")` 或路由级 Middleware 显式绑定。
@@ -945,9 +950,27 @@ BindGroup/BindAll 完成中间件声明解析后调用 AuthValidator：
 - 未配置 AuthValidator 时行为与现状完全一致。
 - OpenAPI Security 与实际服务端策略之间有集成测试。
 
+### 9.4 修订后的做法（2026-11-19）
+
+`Spec.Auth`、`AuthMode`（`AuthNone` / `AuthRequired` / `AuthOptional`）与
+`gofyadapter.AuthValidator` 全部删除。认证只有一条表达：在分组或路由上声明并安装中间件。
+
+| 需求 | 写法 |
+| --- | --- |
+| 需要登录 | `group.Use("auth")` 或 `spec.Middleware = []string{"auth"}` |
+| 公开路由 | 什么都不写——没有隐藏默认，也没装的路由就是公开的 |
+| 可选认证（有凭证则校验、无凭证放行） | 另注册一个别名（如 `"optional-auth"`）并 `Use` 它 |
+
+判据：**能不能证明实现真的会拒绝匿名？** 名字证明不了，装配时的实现才能。所以契约不参与
+这件事，避免"字段写了 `required`、运行时却放行"这种看起来有防线的状态。文档侧同样收敛：
+docgen 不再生成 `security`，需要 401 的路由在 `Spec.Errors` 里声明它。
+
 ---
 
 ## 10. P2-02：修正 OpenAPI AuthOptional 的语义
+
+> **2026-11-19 撤回**：`AuthOptional` 已随 `AuthMode` 删除，本节修正在新模型下不再适用。
+> §10.4 记录替代做法：docgen 不生成 security，也不推导 401。
 
 ### 10.1 当前问题
 
@@ -968,6 +991,15 @@ OpenAPI Optional Auth 应表达为“有认证方案的 Security Requirement”�
 - 分别为 Required、Optional、None 生成 OpenAPI。
 - 使用 kin-openapi Validate 验证文档合法。
 - 对生成的 JSON 做语义断言，而不是只比较文件文本。
+
+### 10.4 修订后的做法（2026-11-19）
+
+`docgen` 的 operation 不再有 `security` 字段，`Auth` 推导的 401 也一并删除：
+
+- 认证中间件对 docgen 不可见，任何自动生成的安全要求都是猜测；
+- 需要 401 的路由在 `Spec.Errors` 里显式声明，与 404 / 409 同一套机制；
+- `Config.SecuritySchemes` 仍然可用，但只写入 `components.securitySchemes`，不会被任何
+  operation 引用——它描述方案形状，不声明要求。
 
 ---
 

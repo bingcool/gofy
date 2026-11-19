@@ -1072,7 +1072,6 @@ var (
 		Summary:     "查询订单详情",
 		Description: "按订单ID查询订单；订单不存在返回 40401。",
 		Tags:        []string{"demoservice"},
-		Auth:        endpoint.AuthRequired,
 		// 契约声明多少就限多少：服务端按 Key 生成限流中间件。没有声明
 		// RateLimit 的路由不挂限流。
 		RateLimit:   &endpoint.RateLimit{Limit: 120, WindowSeconds: 60, Key: endpoint.RateKeyUser},
@@ -1088,7 +1087,6 @@ var (
 		Path:        "/orders",
 		Summary:     "分页查询订单",
 		Tags:        []string{"demoservice"},
-		Auth:        endpoint.AuthRequired,
 		RateLimit:   &endpoint.RateLimit{Limit: 100, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 	})
 
@@ -1099,7 +1097,6 @@ var (
 		Path:        "/orders",
 		Summary:     "创建订单",
 		Tags:        []string{"demoservice"},
-		Auth:        endpoint.AuthRequired,
 		RateLimit:   &endpoint.RateLimit{Limit: 60, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 		Errors: []endpoint.ErrorSpec{
 			{Code: 40001, Status: 400, Message: "invalid argument"},
@@ -1113,7 +1110,6 @@ var (
 		Path:        "/orders/{id}",
 		Summary:     "取消订单",
 		Tags:        []string{"demoservice"},
-		Auth:        endpoint.AuthRequired,
 		NoContent:   true,
 		RateLimit:   &endpoint.RateLimit{Limit: 60, WindowSeconds: 60, Key: endpoint.RateKeyUser},
 		Errors: []endpoint.ErrorSpec{
@@ -1142,7 +1138,6 @@ var GetConfig = endpoint.New[orderrequest.GetConfigRequest, orderresponse.GetCon
 	Path:        "/config",
 	Summary:     "查询订单模块配置",
 	Tags:        []string{"demoservice"},
-	Auth:        endpoint.AuthRequired,
 })
 ```
 
@@ -1255,14 +1250,8 @@ package endpoint
 
 import "reflect"
 
-// AuthMode 描述路由鉴权要求。
-type AuthMode string
-
-const (
-	AuthNone     AuthMode = ""
-	AuthRequired AuthMode = "required"
-	AuthOptional AuthMode = "optional"
-)
+// 认证不在契约里声明：2026-11-19 起 AuthMode 已删除，"需要登录"由分组或路由
+// 上的 Use("auth") 表达，见本文档的中间件章节。
 
 // RateKey 描述限流主体。
 type RateKey string
@@ -1310,7 +1299,6 @@ type Spec struct {
 	Description         string
 	Tags                []string
 	Middleware          []string // 路由级中间件逻辑名，按声明顺序执行
-	Auth                AuthMode
 	RateLimit           *RateLimit
 	NoContent           bool
 	ResponseKind        ResponseKind
@@ -1430,12 +1418,11 @@ func BindAll(
 ```go
 // appinterface/demoservice/orderroute/order_route.go
 var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
-	// 中间件（含认证）都按名字显式声明；spec.Auth 只用于 OpenAPI 标记。
+	// 中间件（含认证）都按名字显式声明；装上 "auth" 就是"本组需要登录"。
 	group.Use("audit", "auth")
 	// 路由在分组回调里内联声明，并赋值给包级变量供客户端/测试复用。
 	GetOrder = endpoint.Get[Req, Res]("/orders/{id}", func(spec *endpoint.Spec) {
 		spec.OperationID = "GetOrder"
-		spec.Auth = endpoint.AuthRequired
 	})
 	// ListOrders / CreateOrder / CancelOrder 同理…
 	group.Add(GetOrder, ListOrders, CreateOrder, CancelOrder)
@@ -1459,14 +1446,13 @@ err := gofyadapter.BindAll(orders, orderroute.Orders.Routes, impl, opts)
 
 ```go
 // 路由文件：分组级与路由级都只声明逻辑名，顺序即执行顺序；
-// 认证同样是名字（"auth"），adapter 不会因为 AuthRequired 自动补中间件。
+// 认证同样是名字（"auth"），契约里没有第二个地方能声明它。
 var Orders = endpoint.NewRouteGroup("/orders", func(group *endpoint.Group) {
 	group.Use("audit", "auth")
 
 	CreateOrder = endpoint.Post[Req, Res]("/orders", func(spec *endpoint.Spec) {
 		spec.OperationID = "CreateOrder"
 		spec.Middleware = []string{"order-audit"}
-		spec.Auth = endpoint.AuthRequired // 仅 OpenAPI 标记
 	})
 	// 等价链式写法：endpoint.Post[Req, Res]("/orders", build).Use("order-audit")
 	group.Add(GetOrder, ListOrders, CreateOrder, CancelOrder)
@@ -1511,10 +1497,9 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
   `BindOptions.Global` → 路由中间件名（按 `spec.Middleware` 顺序）→
   `Routes[OperationID]`；限流放在路由链最前面，超额请求在进入其余路由中间件
   和 handler 之前就被拒绝；
-- 所有中间件都必须显式声明并注册，不存在默认别名或内建兜底：
-  `spec.Auth = AuthRequired` 只写入 OpenAPI 的 security 标记，adapter 不会自动
-  附加认证中间件；需要认证时在契约里写 `group.Use("auth")` 或
-  `spec.Middleware = []string{"auth"}`。
+- 所有中间件都必须显式声明并注册，不存在默认别名或内建兜底：契约没有认证字段，
+  需要认证时写 `group.Use("auth")` 或 `spec.Middleware = []string{"auth"}`，
+  没写就是公开路由。
 
 `BindAll` 的行为：
 
@@ -1759,7 +1744,6 @@ var WatchOrders = endpoint.New[WatchOrdersRequest, endpoint.NoBody](endpoint.Spe
 	Path:                "/orders/watch",
 	Summary:             "订阅订单变更",
 	Tags:                []string{"demoservice"},
-	Auth:                endpoint.AuthRequired,
 	ResponseKind:        endpoint.KindSSE,
 	ResponseContentType: "text/event-stream",
 })
@@ -1770,7 +1754,6 @@ var DownloadInvoice = endpoint.New[DownloadInvoiceRequest, endpoint.NoBody](endp
 	Path:                "/orders/{id}/invoice",
 	Summary:             "下载发票",
 	Tags:                []string{"demoservice"},
-	Auth:                endpoint.AuthRequired,
 	ResponseKind:        endpoint.KindDownload,
 	ResponseContentType: "application/pdf",
 })
@@ -1800,11 +1783,9 @@ var DownloadInvoice = endpoint.New[DownloadInvoiceRequest, endpoint.NoBody](endp
 12. 中间件别名（含认证 `"auth"`）既不在 `BindOptions.Middleware`、`BindOptions.Registry`
     也未注册到 App 注册表，或解析结果为 `nil`：分组名由 `BindGroup` 报（错误带
     分组前缀），路由名由 `BindAll` 报（错误带 `OperationID`）。
-13. 配置了 `BindOptions.AuthValidator` 时，`AuthRequired` / `AuthOptional` 路由
-    的声明与回调认可的策略不一致（`AuthNone` 不触发回调）。回调收到
-    `endpoint.Spec` 和逻辑名（分组名在前、路由名在后，实例形式的 `Global` /
-    `Routes` 不在其中），只做声明校验，不创建中间件；失败即启动或 Reload 失败。
-    未配置回调时 `Spec.Auth` 仍然只是 OpenAPI 标记。
+13. （2026-11-19 删除）认证声明校验随 `AuthValidator` 一并移除：它只比对名字，
+    证明不了实现会拒绝匿名。现在没有认证声明，也就不存在"声明与实现不一致"这一
+    启动失败项。
 
 ---
 
@@ -2334,7 +2315,7 @@ go run ./apicore/cmd/gofy-openapi -all -serve :8090
 | `description` | `Spec.Description` |
 | `tags` | `Spec.Tags` |
 | `deprecated` | `Spec.Deprecated` |
-| `security` | `AuthRequired/AuthOptional` -> `[{bearerAuth: []}]` |
+| `security` | 不生成：认证由中间件安装，docgen 看不到 |
 | `parameters` | Path（`uri`）、Query（`form`，仅 GET/HEAD/DELETE）、Header（`header`）、Cookie（`cookie`） |
 | `requestBody` | POST/PUT/PATCH 的 JSON 或 multipart |
 | `responses.200` | JSON：`Envelope[Res]`；NoContent：无 body；SSE/Download/Chunked：对应 content |
@@ -3558,7 +3539,7 @@ jobs:
 | `apicore/contracts/common/paging` | `PageRequest`、`Offset()`、`ListData[T]`、`PageData[T]` |
 | `apicore/contracts/common/errcode` | `Code`、`Fault`、`New`、公共码常量 |
 | `apicore/contracts/common/types` | `Int64String`、`Uint64String`、`Date`、`Decimal` |
-| `apicore/contracts/common/endpoint` | `Spec`、`Route[Req,Res]`、`Descriptor`、`New`、`NewRouteGroup`、`Group`、`Get`/`Post`/`Put`/`Patch`/`Delete`、`NoBody`、`AuthMode`、`RateKey`、`ResponseKind`、`ErrorSpec` |
+| `apicore/contracts/common/endpoint` | `Spec`、`Route[Req,Res]`、`Descriptor`、`New`、`NewRouteGroup`、`Group`、`Get`/`Post`/`Put`/`Patch`/`Delete`、`NoBody`、`RateKey`、`ResponseKind`、`ErrorSpec` |
 | `apicore/contracts/common/enum` | `Values`、`Labels`、`Valid` 辅助 |
 | `appinterface/{domain}service` | `Service`、DTO、Request、Response、Const、Enum、`Routes()` |
 | `appinterface/{domain}service/{domain}serviceclient` | `Client`、`New`、`NewWithBaseURL`、`NewWithResolver`、各路由方法 |
@@ -3575,7 +3556,7 @@ jobs:
 | `Spec.Summary` | `summary` |
 | `Spec.Description` | `description` |
 | `Spec.Tags` | `tags` |
-| `Spec.AuthRequired` | `security: [{bearerAuth: []}]` + 401 |
+| `Spec.Errors` 里的 401 | `401` 响应（不再按认证字段推导） |
 | `Spec.RateLimit` | 429 + `X-RateLimit-*` 文档 |
 | `Spec.NoContent` | 204 无 body |
 | `Spec.ResponseKind=KindSSE` | `text/event-stream` |
