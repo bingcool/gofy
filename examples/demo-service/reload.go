@@ -14,6 +14,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/core/systemenv"
+	gofylogger "github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/yourorg/demo-service/app/appio"
@@ -49,6 +50,11 @@ type reloader struct {
 	// envFromProcess 记录 GOFY_ENV 是否由进程显式设置。未显式设置时，
 	// 热更新会让该变量跟随 config.yaml，保持 systemenv 与 Runtime.Env 一致。
 	envFromProcess bool
+	// policy is the process-wide SQL log policy, built once in main. Reload
+	// rebuilds pools and must keep handing them the same counters.
+	// policy 是 main 里构造一次的进程级 SQL 日志策略。Reload 重建连接池时必须继续把同一组
+	// 计数器交给它们。
+	policy *gofylogger.Policy
 	// app is stored after New and before Execute so the watcher callback can
 	// reach the running application.
 	// app 在 New 之后、Execute 之前存入，监听回调据此拿到运行中的应用句柄。
@@ -74,6 +80,9 @@ func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
 	// generation's pools, after the framework's tracing plugin.
 	// 租户隔离显式开启；启用时插件会装到每一代的连接池上，排在框架的链路插件之后。
 	dbOpts := tenantOpenOptions(cfg)
+	if r.policy != nil {
+		dbOpts = append(dbOpts, appdb.WithSQLPolicy(r.policy))
+	}
 	factories := []gofy.ModuleFactory{
 		appio.NewModuleFactory(cfg.DB, cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ, cfg.UUIDInt, cfg.Lock, dbOpts...),
 	}

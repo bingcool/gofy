@@ -9,6 +9,7 @@ import (
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/app/appio"
+	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/app/middleware"
 	appscript "github.com/yourorg/demo-service/script"
@@ -70,8 +71,12 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		// repository layers resolve handles through appio, so what they need is a
 		// published snapshot, not a Runtime.DB field. Broker connections are
 		// deliberately absent: consumers resolve their own instances by name.
+		dbOpts := cfg.Tenant.OpenOptions()
+		if reload.policy != nil {
+			dbOpts = append(dbOpts, appdb.WithSQLPolicy(reload.policy))
+		}
 		opts = append(opts, gofy.WithWorkerModules(
-			appio.NewDBOnlyModuleFactory(cfg.DB, cfg.Tenant.OpenOptions()...),
+			appio.NewDBOnlyModuleFactory(cfg.DB, dbOpts...),
 		))
 	}
 	// Health endpoints are a property of this deployment's configuration, not of
@@ -115,6 +120,7 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		gofy.WithMiddleware(appio.Middleware()),
 		// 应用层中间件（auth/audit/order-audit）在模块绑定路由之前注册。
 		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
+		gofy.WithSQLPolicy(reload.policy),
 		gofy.WithModuleFactories(reload.factories(cfg)...),
 		gofy.WithScripts(appscript.Register(cfg)...),
 	)

@@ -29,9 +29,15 @@ const DefaultDatabase = "default"
 // Config 的 DB 按实例名分组：框架只托管 default，其余实例由 io 模块建连。
 // Redis、AMQP、Kafka 和 RocketMQ 同样按实例名分组，由 io 模块统一建连和关闭。
 type Config struct {
-	Env      string                         `yaml:"env" default:"dev"`
-	HTTP     gofy.HTTPConfig                `yaml:"http"`
-	Log      logger.Config                  `yaml:"log"`
+	Env  string          `yaml:"env" default:"dev"`
+	HTTP gofy.HTTPConfig `yaml:"http"`
+	Log  logger.Config   `yaml:"log"`
+	// SQLLog is the top-level SQL log policy, shared by every connection. It is
+	// intentionally not per-database: masking is a compliance policy, and N
+	// pools would mean N places to get it right. See logger.SQLLogConfig.
+	// SQLLog 是顶层的 SQL 日志策略，被所有连接共享。刻意不按数据库拆分：脱敏是合规策略，
+	// 每个池一处配置就意味着有 N 处需要配对。
+	SQLLog   logger.SQLLogConfig            `yaml:"sql_log"`
 	DB       map[string]gofy.DatabaseConfig `yaml:"db"`
 	Redis    redis.Config                   `yaml:"redis"`
 	AMQP     appamqp.Config                 `yaml:"amqp"`

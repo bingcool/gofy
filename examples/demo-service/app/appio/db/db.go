@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bingcool/gofy"
+	gofylogger "github.com/bingcool/gofy/logger"
 	gofydb "github.com/bingcool/gofy/support/db"
 	gofyotel "github.com/bingcool/gofy/support/otel"
 	"github.com/bingcool/gofy/support/tenant"
@@ -111,7 +112,25 @@ func (s *Set) Instance(name string) *gorm.DB {
 type OpenOption func(*openOptions)
 
 type openOptions struct {
-	tenant *tenant.Options
+	tenant    *tenant.Options
+	sqlPolicy *gofylogger.Policy
+	sqlLogger *zap.Logger
+}
+
+// WithSQLPolicy hands the process-wide SQL log policy to every pool this
+// generation opens. The same pointer the framework got through
+// gofy.WithSQLPolicy, so named instances and the default pool report into one
+// set of counters.
+// WithSQLPolicy 把进程级 SQL 日志策略交给本代打开的每个池。它与框架通过
+// gofy.WithSQLPolicy 拿到的是同一个指针，因此命名实例与 default 池共用一组计数器。
+func WithSQLPolicy(policy *gofylogger.Policy) OpenOption {
+	return func(o *openOptions) { o.sqlPolicy = policy }
+}
+
+// WithSQLLogger sends SQL entries to the dedicated channel.
+// WithSQLLogger 把 SQL 条目送到独立通道。
+func WithSQLLogger(l *zap.Logger) OpenOption {
+	return func(o *openOptions) { o.sqlLogger = l }
 }
 
 // WithTenant installs the tenant plugin on every pool this generation opens.
@@ -218,7 +237,10 @@ func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseC
 		extra[name] = c
 	}
 
-	registry, err := gofydb.NewRegistry(extra, logger)
+	registry, err := gofydb.NewRegistry(extra, logger,
+		gofydb.WithSQLPolicy(o.sqlPolicy),
+		gofydb.WithSQLLogger(o.sqlLogger),
+	)
 	if err != nil {
 		return nil, err
 	}

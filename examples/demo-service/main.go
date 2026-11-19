@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
 	"go.uber.org/zap"
 
 	"github.com/bingcool/gofy"
+	gofylogger "github.com/bingcool/gofy/logger"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/app/config"
@@ -115,11 +117,22 @@ func main() {
 		defer func() { _ = clients.Close() }()
 	}
 
+	// The SQL log policy is built once per process: its sampler and rate
+	// limiters mean "this process writes at most N per second", so the framework
+	// and the app-side io generation must share this exact pointer.
+	// SQL 日志策略每进程只构造一次：它的采样器与限流器意味着"本进程每秒最多写 N 条"，
+	// 因此框架与应用的 io 代际必须共用这一个指针。
+	policy, err := gofylogger.NewSQLPolicy(cfg.SQLLog)
+	if err != nil {
+		fatalf("build sql log policy: %v", err)
+	}
+
 	reload := &reloader{
 		nacosCfg:       nacosCfg,
 		watch:          watchEnabled,
 		httpCfg:        cfg.HTTP,
 		envFromProcess: strings.TrimSpace(os.Getenv("GOFY_ENV")) != "",
+		policy:         policy,
 	}
 
 	// Every group is registered in one binary; `worker --group=<group>` picks
@@ -142,6 +155,24 @@ func main() {
 	if err != nil {
 		fatalf("init application: %v", err)
 	}
+	// A deployment that leaves sql_log off gets no SQL log at all, which differs
+	// from the previous behaviour (log_level: warn used to print slow
+	// statements). Say so once at startup instead of letting an operator
+	// discover it during an incident. The check is the section itself, not the
+	// per-database log_level: a missing section is the common case, and it is
+	// exactly the case that changed.
+	// 关闭 sql_log 的部署不会得到任何 SQL 日志，这与旧行为不同（以前 log_level: warn
+	// 会打印慢语句）。启动时说一次，而不是让运维在事故中才发现。判断只看这一节本身，
+	// 不看每个库的 log_level：整段缺席才是最常见、也正是行为变化的那一种。
+	// Printed rather than logged: App.Logger() is a no-op until Execute builds
+	// the real one, and this line runs before that. It matches the loader's own
+	// "warning: config: ..." line, which has the same constraint.
+	// 用打印而不是日志：App.Logger() 在 Execute 构建出真日志器之前是 no-op，而这一行
+	// 早于那个时刻。这与加载器自己那行 "warning: config: ..." 的约束相同。
+	if !cfg.SQLLog.ResolveEnabled() {
+		fmt.Fprintln(os.Stderr, "warning: sql_log is disabled: no SQL statements will be logged (set sql_log.enabled: true to restore slow/error SQL logging)")
+	}
+
 	// Publish the app before Execute starts the watcher: a config change may
 	// arrive as soon as the watcher polls, and the callback needs to find it.
 	// 必须在 Execute 启动监听之前发布 app：监听首次轮询就可能带来配置变更，

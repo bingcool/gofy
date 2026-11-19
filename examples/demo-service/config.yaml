@@ -78,6 +78,27 @@ otel:
     max_export_batch_size: 512
     export_timeout: 30s
 
+# SQL 日志（进程级，所有连接共享）。enabled 是总开关，默认 false：关闭时不产生任何
+# SQL 日志行（慢 SQL 与错误 SQL 都没有），也不校验本节其余字段。开启后 mode 决定
+# 文本形态：off 只留错误与耗时，placeholder 是模板（默认），full 是展开后的语句。
+# 脱敏是独立开关：mask.enabled 默认 false，开启后使用框架内置表 + 下面追加的项。
+# SQL logs are process-wide. enabled defaults to false; when off no SQL entry is
+# written at all. mask is an independent switch using the framework's built-in
+# table plus whatever this project appends.
+sql_log:
+  enabled: true
+  mode: placeholder
+  sample_rate: 0.01
+  max_length: 4096
+  log_schema_queries: false
+  error_rate_limit: 20
+  slow_rate_limit: 0
+  mask:
+    enabled: false
+    strategy: mask
+    # columns: [employee_no]
+    # patterns: ["re:^ORD[0-9]{12}$"]
+
 db:
   default:
     dsn: &demo_dsn swoolefy:swoolefy123@tcp(192.168.10.187:3306)/gofy?charset=utf8mb4&parseTime=True&loc=Local
