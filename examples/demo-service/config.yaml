@@ -30,7 +30,8 @@ log:
   # 日志文件由 app/config 按启动模式追加：HTTP 写 storage/log/http/<date>/，
   # 访问日志单独写 storage/log/access/<date>/access.log；脚本写
   # storage/log/script/<date>/info/ 和 error/，文件名取自脚本名
-  # （fix-order-h<H>.log、fix-order.log）；这里保留 stdout 方便本地查看。
+  # （fix-order-h<H>.log、fix-order.log）；SQL 条目在每种模式下都单独写
+  # storage/log/sql/<date>/sql-h<H>.log。这里保留 stdout 方便本地查看。
   outputs:
     - stdout
   rotation:
@@ -87,7 +88,7 @@ otel:
 # table plus whatever this project appends.
 sql_log:
   enabled: true
-  mode: placeholder
+  mode: full
   sample_rate: 0.01
   max_length: 4096
   log_schema_queries: false

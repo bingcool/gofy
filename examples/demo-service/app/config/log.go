@@ -13,7 +13,8 @@ import (
 // after the single worker it runs or "worker" when it runs a whole group. Script
 // mode writes the same layout with the script name; HTTP mode writes
 // http/{info,error,system_error}.log plus access/access.log, which only carries
-// HTTP access entries. {date} is expanded by logger at rotation time.
+// HTTP access entries. SQL entries go to sql/sql.log in every mode. {date} is
+// expanded by logger at rotation time.
 //
 // Paths are appended, not replaced, so outputs such as stdout from config.yaml
 // survive; a hot reload that loads the config again appends to the new config.
@@ -22,10 +23,23 @@ import (
 // 与 worker/{date}/error/<worker>-system_error.log：一个进程一组文件，名字取它运行的
 // 那个 worker，整组启动时用 "worker"。脚本模式用同样的布局，只是名字换成脚本名；HTTP
 // 模式写 http/{info,error,system_error}.log，以及只承载 HTTP 访问日志的
-// access/access.log。{date} 由 logger 在滚动时替换。
+// access/access.log。SQL 条目在所有模式下都写 sql/sql.log。{date} 由 logger 在滚动时
+// 替换。
 // 这里追加而不是覆盖，config.yaml 里的 stdout 等输出仍然保留；热更新重新 Load
 // 时会再次追加到新配置上。
 func applyLogPaths(cfg *Config) {
+	// SQL entries get their own tree in every mode. What a process executed is a
+	// process-level record — the same entries whether they come from a request,
+	// a worker tick or a script — and keeping statements out of info.log stops
+	// them from becoming the bulk of that file. Rotation works like any other
+	// output: storage/log/sql/{date}/sql-h<H>.log with the demo's hourly,
+	// date-directory settings.
+	// SQL 条目在所有模式下都写自己那棵树。进程执行过什么是进程级记录——无论条目来自请求、
+	// worker 的 tick 还是脚本——与 info.log 分开也让语句不再占满那个文件。滚动与其他输出
+	// 一致：按 demo 的 hourly + date_dir 配置落成 storage/log/sql/{date}/sql-h<H>.log。
+	cfg.Log.SQLOutputs = append(cfg.Log.SQLOutputs,
+		filepath.Join("storage", "log", "sql", "sql.log"))
+
 	if systemenv.IsWorkerService() {
 		// Worker logs are named after the worker that produced them, so a
 		// process running one worker writes exactly one file set and the file

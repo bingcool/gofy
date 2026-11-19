@@ -471,6 +471,13 @@ func TestApplyLogPathsFollowsServiceMode(t *testing.T) {
 					t.Fatalf("%s log = %q, want %q", check.name, check.got, check.want)
 				}
 			}
+			// Every mode writes SQL entries to the same tree: what the process
+			// executed is a process-level record, not a per-mode one.
+			// 所有模式都把 SQL 条目写进同一棵树：进程执行过什么是进程级记录，不按模式分。
+			if len(cfg.Log.SQLOutputs) != 1 ||
+				cfg.Log.SQLOutputs[0] != filepath.Join("storage", "log", "sql", "sql.log") {
+				t.Fatalf("sql outputs = %v, want one storage/log/sql/sql.log", cfg.Log.SQLOutputs)
+			}
 			if tc.access == "" {
 				if len(cfg.Log.AccessOutputs) != 0 {
 					t.Fatalf("script mode must not write an access log, got %v", cfg.Log.AccessOutputs)
@@ -498,6 +505,9 @@ func TestApplyLogPathsKeepsConfiguredOutputs(t *testing.T) {
 	}
 	if len(cfg.Log.AccessOutputs) != 1 {
 		t.Fatalf("access outputs = %v", cfg.Log.AccessOutputs)
+	}
+	if len(cfg.Log.SQLOutputs) != 1 {
+		t.Fatalf("sql outputs = %v", cfg.Log.SQLOutputs)
 	}
 }
 
