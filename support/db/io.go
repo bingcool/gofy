@@ -44,6 +44,7 @@ var (
 type Registry struct {
 	configs map[string]Config
 	logger  *zap.Logger
+	opts    []Option
 	slots   *instanceinit.Slots[*gorm.DB]
 }
 
@@ -54,8 +55,8 @@ var current atomic.Pointer[Registry]
 // ErrUnknownInstance, which lets a reload disable every instance.
 // Configure 校验命名配置，把它们安装为当前一代并返回。允许空 map：此时 NewIO
 // 返回 ErrUnknownInstance，Reload 可借此停用所有实例。
-func Configure(configs map[string]Config, logger *zap.Logger) (*Registry, error) {
-	reg, err := NewRegistry(configs, logger)
+func Configure(configs map[string]Config, logger *zap.Logger, opts ...Option) (*Registry, error) {
+	reg, err := NewRegistry(configs, logger, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,13 +81,14 @@ func Configure(configs map[string]Config, logger *zap.Logger) (*Registry, error)
 // ready, so a failed startup does not replace a working generation.
 // NewRegistry 校验命名配置但不设为当前一代。预热请通过 NewIO 完成，并在所有实例
 // 就绪后再调用 Install，避免启动失败覆盖掉原本可用的一代。
-func NewRegistry(configs map[string]Config, logger *zap.Logger) (*Registry, error) {
+func NewRegistry(configs map[string]Config, logger *zap.Logger, opts ...Option) (*Registry, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	reg := &Registry{
 		configs: make(map[string]Config, len(configs)),
 		logger:  logger,
+		opts:    opts,
 		slots: instanceinit.New(func(name string, pool *gorm.DB) error {
 			if err := Close(pool); err != nil {
 				return fmt.Errorf("db instance %q: %w", name, err)
@@ -161,7 +163,7 @@ func (r *Registry) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w %q", ErrUnknownInstance, name)
 		}
-		pool, err := New(ctx, cfg, r.logger)
+		pool, err := New(ctx, cfg, r.logger, r.opts...)
 		if err != nil {
 			return nil, fmt.Errorf("db instance %q: %w", name, err)
 		}

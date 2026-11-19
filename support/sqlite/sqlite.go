@@ -22,6 +22,8 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+
+	"github.com/bingcool/gofy/logger"
 )
 
 // ErrDSNRequired is returned when Config.DSN is empty.
@@ -114,7 +116,7 @@ func (c Config) withDefaults() Config {
 // ping. It never panics and never logs the DSN.
 // New 打开 SQLite 连接、配置 pool 并用 ping 验证；不会 panic，也不会在日志或错误
 // 里输出完整 DSN。ping 失败时会先关闭已打开的连接再返回错误。
-func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) {
+func New(ctx context.Context, cfg Config, lg *zap.Logger, opts ...Option) (*gorm.DB, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -122,11 +124,15 @@ func New(ctx context.Context, cfg Config, logger *zap.Logger) (*gorm.DB, error) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if logger == nil {
-		logger = zap.NewNop()
+	if lg == nil {
+		lg = zap.NewNop()
+	}
+	o := newOptions(opts...)
+	if o.sqlLogger == nil {
+		o.sqlLogger = lg
 	}
 
-	gormLog := newGormLogger(logger, cfg)
+	gormLog := newGormLogger(o, lg, cfg)
 	conn, err := gorm.Open(sqlite.Open(cfg.DSN), &gorm.Config{
 		Logger:                                   gormLog,
 		PrepareStmt:                              cfg.PrepareStmt,
@@ -170,86 +176,47 @@ func Close(conn *gorm.DB) error {
 	return nil
 }
 
-type gormLogger struct {
-	logger        *zap.Logger
-	level         gormlogger.LogLevel
-	slowThreshold time.Duration
-	logParameters bool
+// Option customises how a connection is opened, mirroring support/db: the
+// sql_log policy is process-wide, so it is injected rather than stored in
+// Config.
+// Option 定制连接如何打开，与 support/db 保持一致：sql_log 策略是进程级的，因此通过
+// 注入传入，而不是放进 Config。
+type Option func(*options)
+
+type options struct {
+	policy    *logger.Policy
+	sqlLogger *zap.Logger
 }
 
-var _ gorm.ParamsFilter = (*gormLogger)(nil)
-
-func newGormLogger(logger *zap.Logger, cfg Config) gormlogger.Interface {
-	level := gormlogger.Warn
-	switch strings.ToLower(strings.TrimSpace(cfg.LogLevel)) {
-	case "silent":
-		level = gormlogger.Silent
-	case "error":
-		level = gormlogger.Error
-	case "info":
-		level = gormlogger.Info
+func newOptions(opts ...Option) *options {
+	o := &options{}
+	for _, apply := range opts {
+		apply(o)
 	}
-	return &gormLogger{
-		logger:        logger.With(zap.String("component", "gorm")),
-		level:         level,
-		slowThreshold: cfg.SlowThreshold,
-		logParameters: cfg.LogParameterValues,
-	}
+	return o
 }
 
-// ParamsFilter implements gorm.ParamsFilter. Returning a nil var list makes the
-// dialector skip expansion, so Trace logs the statement template with its
-// placeholders instead of the actual arguments.
-// ParamsFilter 实现 gorm.ParamsFilter。返回 nil 参数列表会让 dialector 跳过展开，
-// 因此 Trace 记录的是带占位符的语句模板而不是实际参数。
-func (g *gormLogger) ParamsFilter(_ context.Context, sql string, params ...interface{}) (string, []interface{}) {
-	if g.logParameters {
-		return sql, params
-	}
-	return sql, nil
+// WithSQLPolicy attaches the process-wide sql_log policy.
+// WithSQLPolicy 挂上进程级 sql_log 策略。
+func WithSQLPolicy(policy *logger.Policy) Option {
+	return func(o *options) { o.policy = policy }
 }
 
-func (g *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
-	cp := *g
-	cp.level = level
-	return &cp
+// WithSQLLogger sends SQL entries to a dedicated channel.
+// WithSQLLogger 把 SQL 条目送到独立通道。
+func WithSQLLogger(l *zap.Logger) Option {
+	return func(o *options) { o.sqlLogger = l }
 }
 
-func (g *gormLogger) Info(_ context.Context, msg string, args ...interface{}) {
-	if g.level >= gormlogger.Info {
-		g.logger.Sugar().Infof(msg, args...)
+func newGormLogger(o *options, app *zap.Logger, cfg Config) gormlogger.Interface {
+	sink := o.sqlLogger
+	if sink == nil {
+		sink = app
 	}
-}
-
-func (g *gormLogger) Warn(_ context.Context, msg string, args ...interface{}) {
-	if g.level >= gormlogger.Warn {
-		g.logger.Sugar().Warnf(msg, args...)
-	}
-}
-
-func (g *gormLogger) Error(_ context.Context, msg string, args ...interface{}) {
-	if g.level >= gormlogger.Error {
-		g.logger.Sugar().Errorf(msg, args...)
-	}
-}
-
-func (g *gormLogger) Trace(_ context.Context, begin time.Time, fc func() (string, int64), err error) {
-	if g.level == gormlogger.Silent {
-		return
-	}
-	elapsed := time.Since(begin)
-	sql, rows := fc()
-	fields := []zap.Field{
-		zap.Duration("elapsed", elapsed),
-		zap.Int64("rows", rows),
-		zap.String("sql", sql),
-	}
-	switch {
-	case err != nil && g.level >= gormlogger.Error:
-		g.logger.Error("sql error", append(fields, zap.Error(err))...)
-	case g.slowThreshold > 0 && elapsed > g.slowThreshold && g.level >= gormlogger.Warn:
-		g.logger.Warn("slow sql", append(fields, zap.String("threshold", g.slowThreshold.String()))...)
-	case g.level >= gormlogger.Info:
-		g.logger.Info("sql", fields...)
-	}
+	return logger.GormLogger(sink, logger.GormLoggerConfig{
+		SlowThreshold:        cfg.SlowThreshold,
+		LogLevel:             cfg.LogLevel,
+		ParameterizedQueries: !cfg.LogParameterValues,
+		Policy:               o.policy,
+	})
 }

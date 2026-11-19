@@ -155,16 +155,17 @@ func (a *App) withRuntime(ctx context.Context, withoutDatabase bool, fn func(*Ru
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lg, system, access, ownLogger, err := a.buildLoggers()
+	logs, err := a.buildLoggers()
 	if err != nil {
 		return err
 	}
 	// Expose it to app.Logger() so main can still log script errors after Execute
 	// returns.
 	// 暴露给 app.Logger()，让 main 在 Execute 返回后仍能记录脚本错误。
-	a.setLogger(lg, system, access, ownLogger)
-	if ownLogger {
-		defer syncLoggers(lg, system, access)
+	a.setLogger(logs)
+	lg := logs.app
+	if logs.own {
+		defer syncLoggers(logs.app, logs.system, logs.access, logs.sql)
 	}
 
 	runCtx, cancel := context.WithCancelCause(ctx)

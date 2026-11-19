@@ -14,7 +14,7 @@ import (
 )
 
 func TestParamsFilterHidesValuesByDefault(t *testing.T) {
-	gl := newGormLogger(zap.NewNop(), Config{})
+	gl := newGormLogger(newOptions(), zap.NewNop(), Config{})
 	filter, ok := gl.(gorm.ParamsFilter)
 	if !ok {
 		t.Fatal("gorm logger does not implement gorm.ParamsFilter")
@@ -29,7 +29,7 @@ func TestParamsFilterHidesValuesByDefault(t *testing.T) {
 }
 
 func TestParamsFilterKeepsValuesWhenEnabled(t *testing.T) {
-	gl := newGormLogger(zap.NewNop(), Config{LogParameterValues: true})
+	gl := newGormLogger(newOptions(), zap.NewNop(), Config{LogParameterValues: true})
 	filter := gl.(gorm.ParamsFilter)
 	_, params := filter.ParamsFilter(context.Background(), "SELECT * FROM orders WHERE phone = ?", "13800000000")
 	if len(params) != 1 || params[0] != "13800000000" {
@@ -39,7 +39,7 @@ func TestParamsFilterKeepsValuesWhenEnabled(t *testing.T) {
 
 func TestTraceLogsTemplateOnError(t *testing.T) {
 	core, observed := observer.New(zapcore.ErrorLevel)
-	gl := newGormLogger(zap.New(core), Config{})
+	gl := newGormLogger(newOptions(), zap.New(core), Config{})
 	// gormLogger.Trace receives the SQL already filtered by ParamsFilter.
 	// gormLogger.Trace 收到的 SQL 已由 ParamsFilter 处理，这里再确认错误路径的日志。
 	gl.Trace(context.Background(), time.Now(), func() (string, int64) {

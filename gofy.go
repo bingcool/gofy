@@ -50,6 +50,7 @@ type App struct {
 	logger       *zap.Logger
 	systemLogger *zap.Logger
 	accessLogger *zap.Logger
+	sqlLogger    *zap.Logger
 	ownLogger    bool
 
 	mu          sync.Mutex
@@ -184,6 +185,7 @@ func New(opts ...Option) (*App, error) {
 	// 访问日志继续写主 logger。
 	a.systemLogger = a.logger
 	a.accessLogger = a.logger
+	a.sqlLogger = a.logger
 	return a, nil
 }
 
@@ -283,12 +285,13 @@ func (a *App) getState() appState {
 	return a.state
 }
 
-func (a *App) setLogger(l, system, access *zap.Logger, own bool) {
+func (a *App) setLogger(lg loggers) {
 	a.mu.Lock()
-	a.logger = l
-	a.systemLogger = system
-	a.accessLogger = access
-	a.ownLogger = own
+	a.logger = lg.app
+	a.systemLogger = lg.system
+	a.accessLogger = lg.access
+	a.sqlLogger = lg.sql
+	a.ownLogger = lg.own
 	a.mu.Unlock()
 }
 
@@ -341,31 +344,52 @@ func (a *App) resolveWorkDir() (string, error) {
 // system_error_outputs 为空时系统 logger 回退到应用 logger，access_outputs 为空
 // 时访问 logger 同样回退；后续步骤失败会先 Sync 已建好的 logger，启动中止时不会
 // 留下未刷盘的缓冲条目。
-func (a *App) buildLoggers() (lg, system, access *zap.Logger, own bool, err error) {
+// loggers is the set of channels the framework builds at startup. It is a
+// struct rather than five return values so adding a channel does not reshuffle
+// every call site.
+// loggers 是框架启动时构建的一组日志通道。用结构体而不是五个返回值，新增通道时不必
+// 改动每个调用点。
+type loggers struct {
+	app    *zap.Logger
+	system *zap.Logger
+	access *zap.Logger
+	sql    *zap.Logger
+	own    bool
+}
+
+func (a *App) buildLoggers() (loggers, error) {
 	if a.opts.logger != nil {
-		return a.opts.logger, a.opts.logger, a.opts.logger, false, nil
+		return loggers{app: a.opts.logger, system: a.opts.logger, access: a.opts.logger, sql: a.opts.logger}, nil
 	}
-	lg, err = logger.New(a.opts.logConfig)
+	lg, err := logger.New(a.opts.logConfig)
 	if err != nil {
-		return nil, nil, nil, false, fmt.Errorf("gofy: build logger: %w", err)
+		return loggers{}, fmt.Errorf("gofy: build logger: %w", err)
 	}
-	system, err = logger.NewSystem(a.opts.logConfig)
+	system, err := logger.NewSystem(a.opts.logConfig)
 	if err != nil {
 		syncLoggers(lg)
-		return nil, nil, nil, false, fmt.Errorf("gofy: build system logger: %w", err)
+		return loggers{}, fmt.Errorf("gofy: build system logger: %w", err)
 	}
 	if len(a.opts.logConfig.SystemErrorOutputs) == 0 {
 		system = lg
 	}
-	access, err = logger.NewAccess(a.opts.logConfig)
+	access, err := logger.NewAccess(a.opts.logConfig)
 	if err != nil {
 		syncLoggers(lg, system)
-		return nil, nil, nil, false, fmt.Errorf("gofy: build access logger: %w", err)
+		return loggers{}, fmt.Errorf("gofy: build access logger: %w", err)
 	}
 	if len(a.opts.logConfig.AccessOutputs) == 0 {
 		access = lg
 	}
-	return lg, system, access, true, nil
+	sqlLog, err := logger.NewSQL(a.opts.logConfig)
+	if err != nil {
+		syncLoggers(lg, system, access)
+		return loggers{}, fmt.Errorf("gofy: build sql logger: %w", err)
+	}
+	if len(a.opts.logConfig.SQLOutputs) == 0 {
+		sqlLog = lg
+	}
+	return loggers{app: lg, system: system, access: access, sql: sqlLog, own: true}, nil
 }
 
 // syncLoggers flushes every distinct logger exactly once, so fallback aliases
@@ -393,7 +417,10 @@ func (a *App) buildDB(ctx context.Context, logger *zap.Logger) (*gorm.DB, bool, 
 	if a.opts.dbConfig == nil {
 		return nil, false, nil
 	}
-	db, err := gofydb.New(ctx, *a.opts.dbConfig, logger)
+	db, err := gofydb.New(ctx, *a.opts.dbConfig, logger,
+		gofydb.WithSQLPolicy(a.opts.sqlPolicy),
+		gofydb.WithSQLLogger(a.sqlLogger),
+	)
 	if err != nil {
 		return nil, false, fmt.Errorf("gofy: connect database: %w", err)
 	}

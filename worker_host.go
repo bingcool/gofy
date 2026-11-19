@@ -80,11 +80,12 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	ctx, cancel := context.WithCancelCause(parent)
 	a.cancel = cancel
 
-	lg, system, access, own, err := a.buildLoggers()
+	logs, err := a.buildLoggers()
 	if err != nil {
 		return a.abort(err)
 	}
-	a.setLogger(lg, system, access, own)
+	a.setLogger(logs)
+	lg := logs.app
 
 	telemetry, err := a.buildTelemetry(ctx, lg)
 	if err != nil {

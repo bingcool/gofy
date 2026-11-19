@@ -12,6 +12,8 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
+	"github.com/bingcool/gofy/support/headerpropagation"
+
 	"github.com/bingcool/gofy/support/internal/inflight"
 )
 
@@ -135,6 +137,16 @@ func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) e
 	routingKey := opts.RoutingKey
 	if strings.TrimSpace(routingKey) == "" {
 		routingKey = q.cfg.routingKey()
+	}
+	// Carry the caller's trace headers; the caller's own values win.
+	// 带上调用方的链路头；调用方自己的值优先。
+	for name, value := range headerpropagation.Outgoing(ctx) {
+		if opts.Headers == nil {
+			opts.Headers = amqp091.Table{}
+		}
+		if _, ok := opts.Headers[name]; !ok {
+			opts.Headers[name] = value
+		}
 	}
 	publishing := amqp091.Publishing{
 		Headers:       opts.Headers,

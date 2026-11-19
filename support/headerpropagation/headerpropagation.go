@@ -195,6 +195,34 @@ func ContextWithoutHeader(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, ContextKey, headers)
 }
 
+// Outgoing returns the allowlisted headers that must accompany an outbound
+// message, as a plain map so a broker can merge it into its own header type.
+// Values already set by the caller win: a producer that names its own trace id
+// means it, and silently overwriting it would break the link it just built.
+//
+// Returning a map (not http.Header) is deliberate: the consumers of this
+// function are message producers, and canonicalizing keys for them would only
+// add a conversion step.
+// Outgoing 返回出站消息应携带的白名单 Header，类型是普通 map，便于各 broker 合并进
+// 自己的 Header 结构。调用方已设置的值优先：生产者自己指定的 trace id 是有意的，
+// 悄悄覆盖会破坏它刚建立的链路。
+//
+// 返回 map（而不是 http.Header）是有意的：调用方是消息生产者，为它们做键的规范化
+// 只会多一步转换。
+func Outgoing(ctx context.Context) map[string]string {
+	headers := HeadersFromContext(ctx)
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for name, values := range headers {
+		if len(values) > 0 && strings.TrimSpace(values[0]) != "" {
+			out[name] = values[0]
+		}
+	}
+	return out
+}
+
 // HeadersFromContext returns a copy of the propagated headers held by ctx; a
 // context without any propagated header yields an empty header.
 // HeadersFromContext 返回 ctx 中透传 Header 的副本；

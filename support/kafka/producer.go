@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/bingcool/gofy/support/headerpropagation"
 )
 
 // ErrTopicRequired is returned when a producer or consumer has no topic.
@@ -107,6 +109,19 @@ func (p *Producer) Publish(ctx context.Context, body []byte, opts PublishOptions
 	}
 	if topic == "" {
 		return ErrTopicRequired
+	}
+
+	// Carry the caller's trace headers so a consumed message can be attributed
+	// to the request that produced it. The caller's own values win.
+	// 带上调用方的链路头，消费端才能把消息归到产生它的请求上。调用方自己的值优先。
+	headers := headerpropagation.Outgoing(ctx)
+	for name, value := range headers {
+		if opts.Headers == nil {
+			opts.Headers = make(map[string]string, len(headers))
+		}
+		if _, ok := opts.Headers[name]; !ok {
+			opts.Headers[name] = value
+		}
 	}
 
 	record := &kgo.Record{

@@ -50,11 +50,12 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	a.cancel = cancel
 	a.setState(stateRunning)
 
-	lg, system, access, own, err := a.buildLoggers()
+	logs, err := a.buildLoggers()
 	if err != nil {
 		return nil, a.abort(err)
 	}
-	a.setLogger(lg, system, access, own)
+	a.setLogger(logs)
+	lg := logs.app
 
 	telemetry, err := a.buildTelemetry(runCtx, lg)
 	if err != nil {
@@ -85,7 +86,7 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	})
 	a.rt = rt
 
-	engine, modules, err := a.buildHTTP(rt, lg, system, access)
+	engine, modules, err := a.buildHTTP(rt, lg, logs.system, logs.access)
 	if err != nil {
 		return nil, a.abort(err)
 	}
@@ -101,11 +102,12 @@ func (a *App) run(parent context.Context) error {
 	ctx, cancel := context.WithCancelCause(parent)
 	a.cancel = cancel
 
-	lg, system, access, own, err := a.buildLoggers()
+	logs, err := a.buildLoggers()
 	if err != nil {
 		return a.abort(err)
 	}
-	a.setLogger(lg, system, access, own)
+	a.setLogger(logs)
+	lg := logs.app
 
 	telemetry, err := a.buildTelemetry(ctx, lg)
 	if err != nil {
@@ -147,7 +149,7 @@ func (a *App) run(parent context.Context) error {
 	})
 	a.rt = rt
 
-	engine, modules, err := a.buildHTTP(rt, lg, system, access)
+	engine, modules, err := a.buildHTTP(rt, lg, logs.system, logs.access)
 	if err != nil {
 		return a.abort(err)
 	}
@@ -201,7 +203,7 @@ func (a *App) run(parent context.Context) error {
 	// 一步变得可见。
 	gen.bind = composeRequestBinders(a.started)
 	gen.db, gen.ownDB = db, ownDB
-	gen.logger, gen.systemLogger, gen.accessLogger, gen.ownLogger = lg, system, access, own
+	gen.logger, gen.systemLogger, gen.accessLogger, gen.ownLogger = lg, logs.system, logs.access, logs.own
 	// The server keeps this wrapper for its whole life; Reload only swaps the
 	// generation stored inside it, so the listener is never touched.
 	// server 整个生命周期都持有这个包装器；Reload 只替换其中存放的 generation，

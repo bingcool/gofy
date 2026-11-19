@@ -42,6 +42,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/bingcool/gofy/core"
+	"github.com/bingcool/gofy/support/headerpropagation"
 	gofyotel "github.com/bingcool/gofy/support/otel"
 	gofyworker "github.com/bingcool/gofy/support/worker"
 )
@@ -658,7 +659,18 @@ func (p *Processor) extract(ctx context.Context, headers map[string]string) cont
 	if len(headers) == 0 {
 		return ctx
 	}
-	return p.propagator.Extract(ctx, propagation.MapCarrier(headers))
+	ctx = p.propagator.Extract(ctx, propagation.MapCarrier(headers))
+	// X-Trace-Id is the business id and traceparent is the OTel span: they are
+	// two systems, so continuing one does not continue the other. Writing the
+	// header into ctx here is what lets a handler's logs (and SQL entries) name
+	// the request that produced the message.
+	// X-Trace-Id 是业务链路 id，traceparent 是 OTel Span：两套体系，接续其中一个不会
+	// 接续另一个。把它写回 ctx，处理函数里的日志（与 SQL 条目）才能指向产生这条消息的请求。
+	if id := strings.TrimSpace(headers[headerpropagation.HeaderTraceID]); id != "" &&
+		headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderTraceID) == "" {
+		ctx = headerpropagation.ContextWithHeader(ctx, headerpropagation.HeaderTraceID, id)
+	}
+	return ctx
 }
 
 // consumerTracer returns the runtime's tracer, falling back to a no-op one when

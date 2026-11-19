@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -12,17 +13,33 @@ import (
 )
 
 // GormLoggerConfig configures the zap-backed GORM logger.
-// GormLoggerConfig 配置基于 zap 的 GORM 日志器；LogLevel 非法时会退化为 warn，不会中断启动。
+//
+// Mode and Policy are the sql_log-aware fields. When Policy is nil the logger
+// keeps the legacy contract (ParameterizedQueries decides whether values are
+// expanded); a non-empty Mode wins over ParameterizedQueries.
+// GormLoggerConfig 配置基于 zap 的 GORM 日志器。
+//
+// Mode 与 Policy 是感知 sql_log 的字段。Policy 为 nil 时保持旧契约（由
+// ParameterizedQueries 决定是否展开参数）；Mode 非空时优先于 ParameterizedQueries。
 type GormLoggerConfig struct {
 	SlowThreshold             time.Duration
 	LogLevel                  string // silent|error|warn|info；可选值，非法值退化为 warn
 	IgnoreRecordNotFoundError bool
 	ParameterizedQueries      bool
+	// Mode overrides ParameterizedQueries: off|placeholder|full.
+	// Mode 优先于 ParameterizedQueries：off|placeholder|full。
+	Mode string
+	// Policy is the process-wide sql_log policy. It carries sampling, rate
+	// limits, masking and the mode; handing the same pointer to every
+	// connection is what keeps those limits process-wide.
+	// Policy 是进程级 sql_log 策略，携带采样、限流、脱敏与档位；把同一个指针传给每个
+	// 连接，这些上限才是进程级的。
+	Policy *Policy
 }
 
 // GormLogger adapts a zap logger to gorm's logger interface.
 // GormLogger 把 zap logger 适配成 gorm 的日志接口；传入 nil 时使用 nop logger，
-// 因此调用方无需保证已有日志器。ParameterizedQueries 为 true 时 Trace 中不再输出 SQL 文本。
+// 因此调用方无需保证已有日志器。
 func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface {
 	if l == nil {
 		l = zap.NewNop()
@@ -33,80 +50,250 @@ func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface {
 	}
 	return &gormLogger{
 		logger:         l.With(zap.String("component", "gorm")),
-		level:          level,
+		level:          toGormLevel(level),
 		slowThreshold:  cfg.SlowThreshold,
 		ignoreNotFound: cfg.IgnoreRecordNotFoundError,
 		parameterized:  cfg.ParameterizedQueries,
+		mode:           strings.ToLower(strings.TrimSpace(cfg.Mode)),
+		policy:         cfg.Policy,
+	}
+}
+
+// toGormLevel maps a zap level onto gorm's scale. The two scales look alike but
+// are compared with gorm's own constants, so the mapping is explicit.
+// toGormLevel 把 zap 级别映射到 gorm 的刻度。两套刻度看起来相似，但比较时用的是 gorm
+// 自己的常量，因此显式映射。
+func toGormLevel(level zapcore.Level) gormlogger.LogLevel {
+	switch {
+	case level <= zapcore.InfoLevel:
+		return gormlogger.Info
+	case level <= zapcore.WarnLevel:
+		return gormlogger.Warn
+	default:
+		return gormlogger.Error
 	}
 }
 
 type gormLogger struct {
 	logger         *zap.Logger
-	level          zapcore.Level
+	level          gormlogger.LogLevel
 	slowThreshold  time.Duration
 	ignoreNotFound bool
 	parameterized  bool
+	mode           string
+	policy         *Policy
 	silent         bool
 }
 
+// ParamsFilter implements gorm.ParamsFilter. Returning a nil argument list makes
+// the dialector skip expansion, so Trace sees the template with its placeholders
+// instead of the actual arguments — that is what keeps values out of the log in
+// off and placeholder mode.
+// ParamsFilter 实现 gorm.ParamsFilter。返回 nil 参数列表会让 dialector 跳过展开，
+// Trace 因此拿到带占位符的模板而不是实际参数——这正是 off/placeholder 档不让值进入
+// 日志的方式。
+func (g *gormLogger) ParamsFilter(_ context.Context, sql string, params ...interface{}) (string, []interface{}) {
+	if g.sqlMode() == SQLModeFull {
+		return sql, params
+	}
+	return sql, nil
+}
+
+// LogMode returns a copy with another severity. The policy pointer stays shared
+// on purpose: rate limits belong to the process, not to one logger handle.
+// LogMode 返回改了严重级别的副本。policy 指针刻意保持共享：限流属于进程，不属于某个
+// logger 句柄。
 func (g *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	cp := *g
-	cp.silent = false
-	switch level {
-	case gormlogger.Silent:
-		cp.silent = true
-	case gormlogger.Error:
-		cp.level = zapcore.ErrorLevel
-	case gormlogger.Warn:
-		cp.level = zapcore.WarnLevel
-	default:
-		cp.level = zapcore.InfoLevel
-	}
+	cp.silent = level == gormlogger.Silent
+	cp.level = level
 	return &cp
 }
 
 func (g *gormLogger) Info(_ context.Context, msg string, args ...interface{}) {
-	if g.silent || g.level > zapcore.InfoLevel {
+	if !g.enabled() || g.level < gormlogger.Info {
 		return
 	}
 	g.logger.Sugar().Infof(msg, args...)
 }
 
 func (g *gormLogger) Warn(_ context.Context, msg string, args ...interface{}) {
-	if g.silent || g.level > zapcore.WarnLevel {
+	if !g.enabled() || g.level < gormlogger.Warn {
 		return
 	}
 	g.logger.Sugar().Warnf(msg, args...)
 }
 
 func (g *gormLogger) Error(_ context.Context, msg string, args ...interface{}) {
-	if g.silent {
+	if !g.enabled() || g.level < gormlogger.Error {
 		return
 	}
 	g.logger.Sugar().Errorf(msg, args...)
 }
 
-func (g *gormLogger) Trace(_ context.Context, begin time.Time, fc func() (string, int64), err error) {
-	if g.silent {
+// Trace records one statement. The order of the checks is what keeps the hot
+// path cheap: an off-mode success returns before fc() runs, so the dialector's
+// string interpolation never happens for statements that produce no log line.
+// Trace 记录一条语句。检查顺序决定了热路径的开销：off 档的成功语句在调用 fc() 之前
+// 返回，因此不产生日志的语句连 dialector 的字符串插值都不做。
+func (g *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	if !g.enabled() {
 		return
 	}
 	elapsed := time.Since(begin)
-	sql, rows := fc()
-	if g.parameterized {
-		sql = ""
+	mode := g.sqlMode()
+	slow := g.slowThreshold > 0 && elapsed > g.slowThreshold
+	if mode == SQLModeOff && err == nil && !slow {
+		return
 	}
-	fields := []zap.Field{
+
+	sql, rows := fc()
+	if !g.logSchemaQueries() && isSchemaQuery(sql) {
+		return
+	}
+
+	fields := sqlTraceFields(ctx)
+	fields = append(fields,
 		zap.Duration("elapsed", elapsed),
 		zap.Int64("rows", rows),
-		zap.String("sql", sql),
-	}
+		zap.String("sql_mode", string(mode)),
+	)
+	fields = append(fields, g.statementFields(sql, mode)...)
 
 	switch {
 	case err != nil && !(g.ignoreNotFound && errors.Is(err, gorm.ErrRecordNotFound)):
+		if g.level < gormlogger.Error {
+			return
+		}
+		ok, dropped := g.allowError()
+		if !ok {
+			return
+		}
+		g.logSuppressed("sql error suppressed", dropped)
 		g.logger.Error("sql error", append(fields, zap.Error(err))...)
-	case g.slowThreshold > 0 && elapsed > g.slowThreshold && g.level <= zapcore.WarnLevel:
-		g.logger.Warn("slow sql", append(fields, zap.String("threshold", g.slowThreshold.String()))...)
-	case g.level <= zapcore.InfoLevel:
+	case slow && g.level >= gormlogger.Warn:
+		ok, dropped := g.allowSlow()
+		if !ok {
+			return
+		}
+		g.logSuppressed("slow sql suppressed", dropped)
+		g.logger.Warn("slow sql", append(fields,
+			zap.String("threshold", g.slowThreshold.String()))...)
+	case g.level >= gormlogger.Info && g.sample():
 		g.logger.Info("sql", fields...)
 	}
+}
+
+// statementFields renders the statement for the mode and reports whether it was
+// masked. An off-mode statement contributes no fields at all — "no sql field"
+// is a state the log platform can check, an empty one is not.
+// statementFields 按档位渲染语句，并带上是否脱敏。off 档不贡献任何字段——"没有 sql
+// 字段"是日志平台可以判断的状态，空串不是。
+func (g *gormLogger) statementFields(sql string, mode SQLMode) []zap.Field {
+	if mode == SQLModeOff || sql == "" {
+		return nil
+	}
+	rendered := sanitizeControl(g.maskSQL(sql))
+	rendered, truncated := g.truncate(rendered)
+	fields := []zap.Field{zap.String("sql", rendered)}
+	if truncated {
+		fields = append(fields, zap.Bool("truncated", true))
+	}
+	if g.policy != nil && g.policy.MaskEnabled() {
+		fields = append(fields, zap.Bool("sql_masked", true))
+	}
+	return fields
+}
+
+// enabled reports whether any output is possible at all.
+// enabled 报告是否可能产生任何输出。
+func (g *gormLogger) enabled() bool {
+	if g.silent {
+		return false
+	}
+	if g.policy == nil {
+		return true
+	}
+	return !g.policy.Disabled()
+}
+
+// sqlMode resolves the mode: an active policy wins, then an explicit Mode, then
+// the legacy boolean.
+// sqlMode 解析档位：生效的策略优先，其次是显式 Mode，最后才是旧的布尔字段。
+func (g *gormLogger) sqlMode() SQLMode {
+	if g.policy != nil {
+		return g.policy.Mode()
+	}
+	if g.mode != "" {
+		if mode, err := ParseSQLMode(g.mode); err == nil {
+			return mode
+		}
+	}
+	if g.parameterized {
+		return SQLModePlaceholder
+	}
+	return SQLModeFull
+}
+
+func (g *gormLogger) logSchemaQueries() bool {
+	return g.policy == nil || g.policy.LogSchemaQueries()
+}
+
+func (g *gormLogger) allowError() (bool, int) {
+	if g.policy == nil {
+		return true, 0
+	}
+	return g.policy.AllowError()
+}
+
+func (g *gormLogger) allowSlow() (bool, int) {
+	if g.policy == nil {
+		return true, 0
+	}
+	return g.policy.AllowSlow()
+}
+
+func (g *gormLogger) sample() bool {
+	if g.policy == nil {
+		return true
+	}
+	return g.policy.SampleInfo()
+}
+
+func (g *gormLogger) maskSQL(sql string) string {
+	if g.policy == nil {
+		return sql
+	}
+	return g.policy.MaskSQL(sql)
+}
+
+func (g *gormLogger) truncate(sql string) (string, bool) {
+	if g.policy == nil {
+		return sql, false
+	}
+	return g.policy.Truncate(sql)
+}
+
+// logSuppressed writes one summary line when a limiter dropped entries in the
+// window that just closed, so "throttled" never looks like "nothing happened".
+// logSuppressed 在上一个窗口有丢弃时写一条汇总，让"被限流"不会看起来像"什么都没发生"。
+func (g *gormLogger) logSuppressed(msg string, dropped int) {
+	if dropped > 0 {
+		g.logger.Warn(msg, zap.Int("suppressed", dropped), zap.String("window", "1s"))
+	}
+}
+
+// isSchemaQuery reports whether the statement is metadata introspection, which
+// gorm emits in bulk during AutoMigrate and which nobody debugs.
+// isSchemaQuery 判断语句是否为元数据探查——AutoMigrate 会成批发出这类语句，而且没人
+// 会去排查它们。
+func isSchemaQuery(sql string) bool {
+	if sql == "" {
+		return false
+	}
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	if strings.HasPrefix(upper, "SHOW ") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(sql), "information_schema")
 }

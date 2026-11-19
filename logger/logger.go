@@ -20,16 +20,22 @@ import (
 // Config describes a zap logger.
 // Config 描述一个 zap 日志器；字段在构建前会先经 Validate 校验，非法值不会被静默纠正。
 type Config struct {
-	Level              string            `yaml:"level" default:"info"`    // debug|info|warn|error；可选值，默认 info
-	Encoding           string            `yaml:"encoding" default:"json"` // json|console；可选值，默认 json
-	Color              string            `yaml:"color" default:"auto"`    // auto|always|never，仅作用于 stdout/stderr
-	Outputs            []string          `yaml:"outputs"`                 // stdout|stderr|file path；可混用多个目标，文件路径的父目录由框架创建
-	ErrorOutputs       []string          `yaml:"error_outputs"`           // error level and above only；只接收 error 及以上级别
-	SystemErrorOutputs []string          `yaml:"system_error_outputs"`    // framework errors only；只接收框架自身产生的错误
-	AccessOutputs      []string          `yaml:"access_outputs"`          // HTTP access entries only；只接收 HTTP 访问日志条目，为空时复用应用 logger
-	TimeLayout         string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
-	Rotation           RotationConfig    `yaml:"rotation"`
-	BaseFields         map[string]string `yaml:"base_fields"`
+	Level              string   `yaml:"level" default:"info"`    // debug|info|warn|error；可选值，默认 info
+	Encoding           string   `yaml:"encoding" default:"json"` // json|console；可选值，默认 json
+	Color              string   `yaml:"color" default:"auto"`    // auto|always|never，仅作用于 stdout/stderr
+	Outputs            []string `yaml:"outputs"`                 // stdout|stderr|file path；可混用多个目标，文件路径的父目录由框架创建
+	ErrorOutputs       []string `yaml:"error_outputs"`           // error level and above only；只接收 error 及以上级别
+	SystemErrorOutputs []string `yaml:"system_error_outputs"`    // framework errors only；只接收框架自身产生的错误
+	AccessOutputs      []string `yaml:"access_outputs"`          // HTTP access entries only；只接收 HTTP 访问日志条目，为空时复用应用 logger
+	// SQLOutputs receives SQL entries only; empty means "reuse the application
+	// logger". It sits next to AccessOutputs because both are destinations:
+	// log: says where entries go, sql_log: says what a SQL entry contains.
+	// SQLOutputs 只接收 SQL 条目；为空表示复用应用 logger。它和 AccessOutputs 并列，
+	// 因为两者都是"去哪"：`log:` 管日志去哪，`sql_log:` 管 SQL 条目记什么。
+	SQLOutputs []string          `yaml:"sql_outputs"`
+	TimeLayout string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
+	Rotation   RotationConfig    `yaml:"rotation"`
+	BaseFields map[string]string `yaml:"base_fields"`
 }
 
 // RotationConfig controls file rotation.
@@ -83,7 +89,7 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.Rotation.DateLayout, `/\`) {
 		return fmt.Errorf("logger: invalid date_layout %q (must not contain path separators)", c.Rotation.DateLayout)
 	}
-	for _, out := range append(append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...), c.AccessOutputs...) {
+	for _, out := range append(append(append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...), c.AccessOutputs...), c.SQLOutputs...) {
 		if strings.TrimSpace(out) == "" {
 			return errors.New("logger: output path must not be empty")
 		}
@@ -165,6 +171,32 @@ func NewAccess(cfg Config) (*zap.Logger, error) {
 	}
 	cores := make([]zapcore.Core, 0, len(cfg.AccessOutputs))
 	for _, out := range cfg.AccessOutputs {
+		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
+		if err != nil {
+			return nil, err
+		}
+		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, zap.InfoLevel))
+	}
+	return zap.New(zapcore.NewTee(cores...), newAccessOptions(cfg)...), nil
+}
+
+// NewSQL builds the SQL log channel. It mirrors NewAccess: a dedicated file (or
+// files), info level, and no stacktrace — a SQL entry records a statement, not a
+// failure site. An empty SQLOutputs returns a no-op logger, which makes "not
+// configured" mean "fall back to the application logger" at the call site
+// instead of here.
+// NewSQL 构建 SQL 日志通道。与 NewAccess 同构：独立文件、info 级别、不带调用栈——
+// SQL 条目记录的是语句而不是出错位置。SQLOutputs 为空时返回 no-op logger，于是
+// "未配置 = 回落到应用 logger"由调用方决定，而不是在这里猜。
+func NewSQL(cfg Config) (*zap.Logger, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if len(cfg.SQLOutputs) == 0 {
+		return Nop(), nil
+	}
+	cores := make([]zapcore.Core, 0, len(cfg.SQLOutputs))
+	for _, out := range cfg.SQLOutputs {
 		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
 		if err != nil {
 			return nil, err

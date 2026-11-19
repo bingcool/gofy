@@ -24,7 +24,7 @@ const (
 
 func TestSlowSQLLogKeepsTemplateWithoutValues(t *testing.T) {
 	core, observed := observer.New(zapcore.WarnLevel)
-	gdb := dryRunGorm(t, newGormLogger(zap.New(core), Config{SlowThreshold: time.Nanosecond}))
+	gdb := dryRunGorm(t, newGormLogger(newOptions(), zap.New(core), Config{SlowThreshold: time.Nanosecond}))
 
 	var rows []struct{ ID int64 }
 	err := gdb.Table("orders").
@@ -58,7 +58,7 @@ func TestSlowSQLLogKeepsTemplateWithoutValues(t *testing.T) {
 
 func TestSQLErrorLogKeepsTemplateWithoutValues(t *testing.T) {
 	core, observed := observer.New(zapcore.ErrorLevel)
-	gl := newGormLogger(zap.New(core), Config{})
+	gl := newGormLogger(newOptions(), zap.New(core), Config{})
 
 	template := "SELECT * FROM orders WHERE phone = ?"
 	gl.Trace(context.Background(), time.Now(), func() (string, int64) {
@@ -79,7 +79,7 @@ func TestSQLErrorLogKeepsTemplateWithoutValues(t *testing.T) {
 
 func TestLogParameterValuesOptsIntoExpansion(t *testing.T) {
 	core, observed := observer.New(zapcore.WarnLevel)
-	gdb := dryRunGorm(t, newGormLogger(zap.New(core), Config{
+	gdb := dryRunGorm(t, newGormLogger(newOptions(), zap.New(core), Config{
 		SlowThreshold:      time.Nanosecond,
 		LogParameterValues: true,
 	}))

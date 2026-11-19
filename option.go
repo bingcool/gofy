@@ -92,8 +92,9 @@ type options struct {
 	pidRefresh time.Duration // pid 文件刷新间隔；0 表示不刷新
 	workDir    string        // 工作目录，也是相对 pid 路径的基准
 
-	dbConfig *gofydb.Config // App 自建、持有并负责关闭的数据库配置
-	db       *gorm.DB       // 外部注入的数据库；App 不 Ping 也不关闭
+	dbConfig  *gofydb.Config // App 自建、持有并负责关闭的数据库配置
+	sqlPolicy *logger.Policy // 进程级 SQL 日志策略；nil 表示按连接旧行为，不采样不脱敏
+	db        *gorm.DB       // 外部注入的数据库；App 不 Ping 也不关闭
 
 	// nacosRegistration registers this instance with Nacos naming when
 	// Register.Enabled is true: it registers once the HTTP listener is ready and
@@ -381,6 +382,29 @@ func WithDatabase(cfg gofydb.Config) Option {
 			return err
 		}
 		o.dbConfig = &c
+		return nil
+	}
+}
+
+// WithSQLPolicy attaches the process-wide SQL log policy (logger.NewSQLPolicy).
+// One policy per process on purpose: its sampler and rate limiters mean "this
+// process writes at most N per second", so handing a different instance to each
+// connection would multiply the configured limits.
+//
+// A nil policy keeps the legacy behaviour: every connection logs by its own
+// log_level, with no sampling, masks or limits. An application that exposes
+// sql_log should build the policy once and pass the same pointer here and to
+// appdb.Open, so both paths report into the same counters.
+// WithSQLPolicy 挂上进程级 SQL 日志策略（logger.NewSQLPolicy）。每进程一份是有意的：
+// 它的采样器与限流器意味着"本进程每秒最多写 N 条"，给每个连接传不同实例会让配置的上限
+// 成倍放大。
+//
+// 传 nil 保持旧行为：每个连接按自己的 log_level 输出，不采样、不脱敏、不限流。对外暴露
+// sql_log 的应用应当只构造一次策略，并把同一个指针同时传给这里与 appdb.Open，两条路径
+// 才会共用同一组计数器。
+func WithSQLPolicy(policy *logger.Policy) Option {
+	return func(o *options) error {
+		o.sqlPolicy = policy
 		return nil
 	}
 }
