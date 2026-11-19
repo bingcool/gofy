@@ -85,19 +85,20 @@ while IFS='|' read -r pkg imports; do
 
     case "$layer" in
       controller)
-        # 白名单：本模块 service、HTTP 契约、adapter/gofy 的错误映射、gofy/apperr
-        # 与日志。controller 负责把契约错误码映射成业务错误，因此 adapter/gofy
-        # 与 apperr 是职责的一部分，不是泄漏；model/repository/innerapi/appio、
-        # client 与 adapter 的其它包都不在名单里。
+        # 入口层：HTTP controller、script、worker 是三种平权入口，各自封装入口细节
+        # （绑定与响应、命令行与信号、订阅与 drain），底层业务代码复用。因此 controller
+        # 不再被限制"只能依赖自己的 service"：appio、config、query、repository、model、
+        # 裸 SQL、框架与第三方库都可以直接用。
+        #
+        # 唯一保留的边界是模块边界：跨模块只走对方 innerapi 或 HTTP 契约。否则模块之间
+        # 就没有边界，改一个模块会牵动所有入口。
         case "$token" in
-          stdlib | contract | apicontract | adapter_gofy | apperr | logging) ;;
+          stdlib | appio | appconfig | support | framework | gorm | logging | other | \
+          contract | apicontract | adapter_gofy | adapter | apperr | client) ;;
           module)
-            if [ "$dep_owner" != "$owner" ] || [ "$dep_layer" != "service" ]; then
-              fail "$pkg must not import $imp: controllers depend on their own service only"
+            if [ "$dep_owner" != "$owner" ] && [ "$dep_layer" != "innerapi" ]; then
+              fail "$pkg must not import $imp: cross-module calls go through innerapi or the HTTP contract"
             fi
-            ;;
-          *)
-            fail "$pkg must not import $imp: controllers may import own service, HTTP contracts, adapter/gofy, apperr and logging only"
             ;;
         esac
         ;;

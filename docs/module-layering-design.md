@@ -4,14 +4,18 @@
   收敛到 `app/container`：每代新建容器，构造期显式注入仓库与 service，跨模块只传
   innerapi 接口；不再有包级服务单例、module getter 或工厂顺序约束。每个模块固定
   `controller / service / innerapi / repository / model`，跨模块只走对方 innerapi。
+  **2026-11-19 修订**：`controller` 从"只能依赖本模块 service"改为与 `script`、`worker`
+  平权的入口层——三种入口各自封装入口细节，底层业务代码复用，因此入口可以有选择地
+  直达任意层（含 appio、config、query、repository、裸 SQL）。模块边界不变。
 - 范围：`examples/demo-service/app/module/{order,product}` 的分层（新增 `innerapi`）、
   装配方式、跨模块调用；`examples/demo-service/shell/check-imports.sh` 规则；
   `gofy/support/registry` 仍作为可选的「名字 → 实例」工具存在，demo 不再使用
 - 关联：[repository-composition-design.md](./repository-composition-design.md)（本文取代其
   §5.3–§5.6 的取用模式与 §8 的 import 规则）、[library-design.md](./library-design.md) §9
 - 一句话目标：每个模块固定 `controller / service / innerapi / repository / model`，
-  模块内调用链 `controller → service → repository → model` 单向向下；**模块之间一律
-  通过对方的 `innerapi` 调用，不再直接依赖对方 service**（`order.service →
+  `controller → service → repository → model` 是**推荐**链路而不是强制链路：三种入口
+  （HTTP controller、script、worker）平权，可以按场景跳过 service 直接读库；
+  **模块之间一律通过对方的 `innerapi` 调用，不再直接依赖对方 service**（`order.service →
   product.innerapi`）。repository 与 model 永远不出模块。
 
 ## 1. 改造前问题（带证据，2026-11-11 之前）
@@ -74,7 +78,7 @@
 
 | 包 | 职责 | 输入类型 | 输出类型 | 禁止 |
 | --- | --- | --- | --- | --- |
-| `controller` | 契约 ↔ service 映射、错误→HTTP 码、记录意外错误 | 契约 request | 契约 response/DTO | import model / repository / innerapi / 其他模块任何包 |
+| `controller` | HTTP 入口：契约 ↔ service 映射、错误→HTTP 码；与 script/worker 平权，可直接取句柄、读配置、查库 | 契约 request | 契约 response/DTO | import 其他模块的 service / repository / model / controller |
 | `service` | 业务规则、用例编排、事务边界、日志；实现本模块 innerapi | 本模块 model + plain 入参 + 其他模块 innerapi | 本模块 innerapi 视图 | import HTTP 契约；import 其他模块 service / repository / model |
 | `innerapi` | **模块对外发布的内部 API 契约**：接口 + 只读视图 + 哨兵错误 | — | — | import 任何模块的 service / repository / model / controller、HTTP 契约、app/appio |
 | `repository` | 单聚合数据访问（GORM） | 本模块 model | 本模块 model | import service / innerapi / 契约 / 其他模块任何包 |
@@ -90,12 +94,17 @@ service/repository/model，也不 import HTTP 契约。消费方 import 它时�
 
 | 调用方 \ 被调方 | 本模块 model | 本模块 repository | 本模块 service | 本模块 innerapi | 其他模块 innerapi | 其他模块 service/repository/model | HTTP 契约 | app/appio 句柄 | app/config |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| controller | × | × | √ | × | × | × | √ | × | × |
+| controller | √ | √ | √ | √ | √ | × | √ | √（取句柄） | √ |
 | service | √ | √ | — | √（实现） | √（调用） | × | × | √（开事务） | √（本模块配置段） |
 | innerapi | × | × | × | — | × | × | × | × | × |
 | repository | √ | — | × | × | × | × | × | √（解析连接） | × |
 | query | √ | × | × | × | × | × | × | √（解析连接） | × |
 | model | — | × | × | × | × | × | × | × | × |
+
+矩阵里 controller 一行是 2026-11-19 的修订：它原本被限制为"只依赖本模块 service"，
+这与 script、worker 的地位不一致——同一段业务在三种入口下被复用，入口本身不该被迫
+隔着一层。放开后仍有一个约束：**跨模块只走 innerapi 或 HTTP 契约**，入口的"自由"
+止于模块边界。
 
 关键变化：**跨模块只允许 `service → 其他模块 innerapi`**；service 不再 import 其他
 模块 service/repository/model，也不再 import HTTP 契约。依赖图无环由 `go build` 兜底
