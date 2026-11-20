@@ -160,13 +160,14 @@ entgo.io/ent/dialect/sql
 
 ---
 
-## 六、三条集成路线
+## 六、四条集成路线
 
 | 路线 | 做法 | 判断 |
 |---|---|---|
 | **A. 替换 gorm** | 用 ent 做 ORM，全量改写 repository | **否**。`support/claim`、`support/consumer` 幂等台账、`support/otel`、`logger.GormLogger` 都深度绑定 gorm；2026-11-15 已论证过理由 |
 | **B. 只借构造器** | builder 生成 `(sql, args)`，交给 `db.Raw()` / `db.Where()` 执行 | **选** |
 | **C. 用 ent 自己的 Driver** | `entsql.Open(driver, dsn)` 建第二套连接 | **否**。会出现第二套连接池、第二套事务、第二套日志，且绕过 appio 的代际管理 |
+| **D. 从 gorm 取 `*sql.DB` 执行** | builder 给出 `(sql, args)`，`db.DB().QueryContext()` 执行 | **否**。`db.DB()` 在事务上返回的是连接池而非事务，同时丢掉日志与代际，见 9.6 |
 
 路线 B 的具体收益，逐项对齐现有机制：
 
@@ -410,7 +411,43 @@ if err := db.WithContext(ctx).Raw(stmt, args...).Scan(&rows).Error; err != nil {
 }
 ```
 
-### 9.6 行锁
+### 9.6 为什么不从 gorm 取 `*sql.DB` 执行
+
+既然 builder 已经给出 `(query, args)`，一个自然的想法是：从 gorm 拿到底层 `*sql.DB`，直接 `QueryContext` 更"原生"：
+
+```go
+pool, _ := db.DB()
+rows, _ := pool.QueryContext(ctx, query, args...)
+```
+
+**不要这样做。** `db.DB()` 返回的不是当前事务：即便 `db` 实际是一个 `*sql.Tx` 包装，gorm 也会用 unsafe 反射把里面的 `db` 字段抠出来，返回连接池本身（`gorm.go:431-433`）：
+
+```go
+if tx, ok := connPool.(*sql.Tx); ok && tx != nil {
+    return (*sql.DB)(reflect.ValueOf(tx).Elem().FieldByName("db").UnsafePointer()), nil
+}
+```
+
+实测 `tx.DB() == db.DB()` 为 `true`——两者是同一个池指针，事务状态完全丢失。
+
+四个后果，按严重程度排：
+
+| 后果 | 说明 |
+|---|---|
+| **丢事务** | 事务内的查询跑到另一条连接上：读不到未提交数据，失败也不会随事务回滚。单测（无事务）看不出来，生产上才暴露 |
+| **丢日志** | `logger.GormLogger` 的 Trace 只挂在 gorm 的 callback 上。SQL 日志、脱敏、`X-Trace-Id`、慢 SQL 统计全部不记录 |
+| **丢代际** | `db.DB()` 返回当前代的 `*sql.DB`；Reload 调用 `gofydb.Close` 之后指针失效，报 `sql: database is closed` |
+| **要自己扫** | `*sql.Rows` → struct 需要反射或 sqlx，gorm 的 `Scan` 已经做了这件事 |
+
+如果目的是**流式读大结果集**，不需要绕开 gorm：
+
+```go
+rows, err := db.WithContext(ctx).Raw(stmt, args...).Rows() // *sql.Rows，逐行 Scan
+```
+
+它同样返回 `*sql.Rows`、同样不把结果全部载入内存，但事务、日志、代际都还在。
+
+### 9.7 行锁
 
 ```go
 stmt, args, _ := sqlbuilder.Build(
