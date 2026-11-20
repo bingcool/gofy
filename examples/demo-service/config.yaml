@@ -297,29 +297,36 @@ client:
   inner_external_base_uri: ''
   timeout: 5s
 
-# 行级租户隔离（support/tenant）。默认开启：装上插件后，只有声明了 tenant_id 列的
-# 模型会被自动追加 WHERE 条件 / 填充 INSERT 列，其它表保持普通 GORM 行为。
+# 行级租户隔离（support/tenant）。装上插件后，只有声明了 tenant_id 列的模型会被自动
+# 追加 WHERE 条件 / 填充 INSERT 列，其它表保持普通 GORM 行为。
 # 租户 ID 来自 frameworkcontext（本地 JWT 身份优先，其次可信上游的 X-Tenant-Id 透传），
 # 因此业务代码不用把租户号一层层传进 repository。目标表需要隔离却没有租户 ID 时
 # 操作会被拒绝（失败关闭），不会退化成"不过滤"。运维脚本要跨租户请用 tenant.Without(ctx)。
 #
+# 开关有两层，含义不同：
+#
+#   - 整段不配置：这套部署完全不用租户隔离，插件不装、构造器也不加条件；
+#   - 段在，但 enabled: false：同样不装，只是把"有租户列、先不隔离"写明；
+#   - 段在，而没写 enabled：开启。写了 tenant 段就是在用租户，少写一个键不该把过滤
+#     去掉——那样带租户列的表会不加过滤地返回所有租户的数据，而且不报错。
+#
+# 只想用默认值、又要表达"启用"时写 `tenant: {}`。裸的 `tenant:` 在 YAML 里是 null，
+# 与整段缺失无法区分，会被当成不配置。
+#
 # enabled 同时管两条路径：GORM 插件，以及 support/sqlmodel（构造器里按模型取表名的那条
-# 路）。关掉后两处都不加租户条件；只关一处会得到"仓储读到所有租户、构造器还在过滤"。
+# 路）。只关一处会得到"仓储读到所有租户、构造器还在过滤"，而配置里看不出这种半开状态。
 #
-# **不写 enabled 就是开启**（nil 视为 true），这是安全的默认值：漏配一段不该悄悄去掉过滤。
-# 关掉是显式动作，只对完全没有租户列的库才合理——关掉后带租户列的表会不加过滤地返回所有
-# 租户的数据，而且不报错。
+# 行为矩阵：
 #
-# 行为矩阵（enabled 管住两条路径）：
-#
-#   enabled      模型有 tenant_id  GORM 仓储                    构造器（support/sqlmodel）
-#   -----------  ----------------  ---------------------------  ----------------------------------
-#   不写 / true  有                过滤 + 填充，缺租户失败关闭  同上（WHERE 或 ErrTenantRequired）
-#   不写 / true  无                原样                         原样
-#   false        有 / 无           不改写                       Disabled: true，不加条件、不报错
-
+#   tenant 段         模型有 tenant_id  GORM 仓储                    构造器（support/sqlmodel）
+#   ----------------  ----------------  ---------------------------  ----------------------------------
+#   整段缺失(不配置)    有 / 无           不改写                       Disabled: true，不加条件、不报错
+#   在，不写 enabled    有                过滤 + 填充，缺租户失败关闭  同上（WHERE 或 ErrTenantRequired）
+#   在，不写 enabled    无                原样                         原样
+#   enabled: false    有 / 无           不改写                       Disabled: true，不加条件、不报错
+#   ----------------  ----------------  ---------------------------  ----------------------------------
 tenant:
-  enabled: false             # demo 的表没有租户列，显式关掉；不写这个键默认开启
+  enabled: false             # demo 的表没有租户列，显式关掉；整段删掉同样是关闭
   column: tenant_id          # 与模型的 gorm column 标签一致
   overwrite_explicit: false  # true 时 INSERT 强制使用当前租户，忽略调用方显式赋值
 

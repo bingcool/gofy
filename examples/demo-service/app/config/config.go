@@ -58,7 +58,7 @@ type Config struct {
 	// unaffected. The demo exercises it from worker/group3/ai_check.go instead
 	// of exposing routes.
 	LLMAI   supportai.Config     `yaml:"llm_ai"`
-	Tenant  TenantConfig         `yaml:"tenant"`
+	Tenant  *TenantConfig        `yaml:"tenant"` // nil 表示这套部署完全不用租户隔离
 	PIDFile string               `yaml:"pid_file"`
 	JWT     middleware.JWTConfig `yaml:"jwt"`
 }

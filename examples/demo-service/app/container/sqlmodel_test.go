@@ -22,7 +22,7 @@ func (tenantModel) TableName() string { return "tenant_models" }
 // enabled=true 时缺租户报 ErrTenantRequired，带租户才追加条件。两边共用
 // tenantConfig().SQLModelOptions()，不会出现「插件关了、构造器还过滤」。
 func TestSQLModelFollowsTenantConfig(t *testing.T) {
-	off := NewContainer(&config.Config{Tenant: config.TenantConfig{Enabled: boolPtr(false)}})
+	off := NewContainer(&config.Config{Tenant: &config.TenantConfig{Enabled: boolPtr(false)}})
 	ref, scope, err := off.SQLModel().Table(context.Background(), tenantModel{})
 	if err != nil {
 		t.Fatalf("disabled resolver: %v", err)
@@ -34,7 +34,13 @@ func TestSQLModelFollowsTenantConfig(t *testing.T) {
 		t.Fatalf("ref.C(id) = %q", ref.C("id"))
 	}
 
-	on := NewContainer(&config.Config{Tenant: config.TenantConfig{Enabled: boolPtr(true)}})
+	// 整段没有 tenant 时，nil 接收者就是关闭：这套部署不用租户隔离，构造器也不加条件。
+	absent := NewContainer(&config.Config{})
+	if _, scope, err := absent.SQLModel().Table(context.Background(), tenantModel{}); err != nil || scope != nil {
+		t.Fatalf("absent tenant section: scope = %v, err = %v", scope, err)
+	}
+
+	on := NewContainer(&config.Config{Tenant: &config.TenantConfig{Enabled: boolPtr(true)}})
 	if _, _, err := on.SQLModel().Table(context.Background(), tenantModel{}); !errors.Is(err, tenant.ErrTenantRequired) {
 		t.Fatalf("enabled resolver without a tenant: err = %v, want tenant.ErrTenantRequired", err)
 	}

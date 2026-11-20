@@ -56,10 +56,10 @@ http:
 		t.Fatalf("optional IO sections decoded non-empty: redis=%v amqp=%v kafka=%v rocketmq=%v",
 			cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ)
 	}
-	// tenant 是唯一默认开启的段：它不是"可选能力"，漏配等于关掉隔离，那会让带租户列的
-	// 表静默返回所有租户的数据。其余开关仍然默认关闭，用到才配。
-	if !cfg.Tenant.IsEnabled() {
-		t.Fatal("tenant isolation is off for a file without a tenant section")
+	// 整段缺失表示这套部署不用租户隔离，与其它可选段一致；区别在于"段在而没写 enabled"
+	// 视为开启，见 TestTenantSectionDefault。
+	if cfg.Tenant.IsEnabled() {
+		t.Fatal("tenant isolation is on for a file without a tenant section")
 	}
 	if cfg.UUIDInt.Enabled || cfg.Lock.Enabled || cfg.LLMAI.Enabled {
 		t.Fatalf("optional switches enabled by default: uuidint=%v lock=%v llm=%v",
@@ -516,21 +516,53 @@ func TestApplyLogPathsKeepsConfiguredOutputs(t *testing.T) {
 	}
 }
 
+// tenant 段有三态：整段缺失 = 不用租户隔离；段在而没写 enabled = 开启；false = 关闭。
+// 第二态必须保持开启——写了 tenant 段就是在用租户，少写一个键不该把过滤去掉。
+func TestTenantSectionDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "absent section", body: "", want: false},
+		{name: "empty mapping", body: "tenant: {}\n", want: true},
+		{name: "section without enabled", body: "tenant:\n  column: org_id\n", want: true},
+		{name: "explicit false", body: "tenant:\n  enabled: false\n", want: false},
+		{name: "explicit true", body: "tenant:\n  enabled: true\n", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, "http:\n  host: 127.0.0.1\n  port: 8080\n"+tc.body)
+			cfg, err := Load(context.Background(), path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.Tenant.IsEnabled(); got != tc.want {
+				t.Fatalf("IsEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTenantConfigOptions(t *testing.T) {
-	// Enabled by default: an absent key must not remove the filter, or a
-	// deployment that forgot the section would read every tenant's rows.
-	// 默认开启：漏配这个键不能等于去掉过滤，否则忘记配一段的部署会读到所有租户的数据。
-	if _, ok := (TenantConfig{}).Options(); !ok {
-		t.Fatal("zero TenantConfig disabled the tenant plugin")
+	// 段缺失（nil 接收者）是关闭。
+	var absent *TenantConfig
+	if _, ok := absent.Options(); ok {
+		t.Fatal("a missing tenant section enabled the plugin")
+	}
+
+	// 段在而没写 enabled 是开启：少写一个键不能等于去掉过滤。
+	if _, ok := (&TenantConfig{}).Options(); !ok {
+		t.Fatal("a section without the enabled key disabled the plugin")
 	}
 
 	off := false
-	if _, ok := (TenantConfig{Enabled: &off, Column: "org_id"}).Options(); ok {
+	if _, ok := (&TenantConfig{Enabled: &off, Column: "org_id"}).Options(); ok {
 		t.Fatal("explicitly disabled config still enabled the plugin")
 	}
 
 	on := true
-	opts, ok := (TenantConfig{Enabled: &on}).Options()
+	opts, ok := (&TenantConfig{Enabled: &on}).Options()
 	if !ok {
 		t.Fatal("enabled config did not enable the plugin")
 	}
@@ -541,7 +573,7 @@ func TestTenantConfigOptions(t *testing.T) {
 		t.Fatal("OverwriteExplicit must default to false")
 	}
 
-	custom, ok := (TenantConfig{Enabled: &on, Column: "org_id", OverwriteExplicit: true}).Options()
+	custom, ok := (&TenantConfig{Enabled: &on, Column: "org_id", OverwriteExplicit: true}).Options()
 	if !ok {
 		t.Fatal("custom config disabled")
 	}

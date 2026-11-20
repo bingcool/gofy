@@ -39,14 +39,15 @@ stmt, args, err := sqlbuilder.Build(sel)
 
 | 连接侧（`tenant` 段） | 构造器侧 |
 | --- | --- |
-| 不写（默认开启） | `Options.Disabled: false`（零值） |
+| 整段缺失（不用租户） | `Options.Disabled: true` |
+| 段在，不写 `enabled`（开启） | `Options.Disabled: false`（零值） |
 | `enabled: false` | `Options.Disabled: true` |
 | `column: org_id` | `Options.Handler: tenant.FuncHandler{ColumnName: "org_id", ...}` |
 | `*gorm.Config.NamingStrategy` | `Options.Namer` |
 | 方言（db 驱动） | `Options.Dialect` |
 
-两侧的默认值一致：都没有"关"的零值。构造器侧的零值是 `Disabled: false`，也就是开启；
-连接侧不写 `enabled` 也是开启。前两行不配对的后果最重：`enabled: false` 而构造器开着，会在“租户已关闭”的部署里返回
+构造器侧没有"段"的概念，只有一个开关：`Disabled: false` 是开启，也是它的零值。连接侧
+"段在而没写 `enabled`"同样落在开启上。这些行不配对的后果最重：`enabled: false` 而构造器开着，会在“租户已关闭”的部署里返回
 `ErrTenantRequired`；反过来则是构造器不设防。demo 用一处 `TenantConfig.SQLModelOptions()`
 同时喂给两边。
 

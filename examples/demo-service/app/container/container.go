@@ -64,11 +64,12 @@ func (c *Container) orderConfig() config.OrderConfig {
 	return c.cfg.Order
 }
 
-// tenantConfig 返回本次装配的租户配置。与其它访问器一样，它只交出本代的一段配置，
+// tenantConfig 返回本次装配的租户配置，整段缺失时为 nil——nil 表示这套部署不用租户隔离，
+// TenantConfig 的方法在 nil 接收者上返回"关闭"。与其它访问器一样，它只交出本代的一段配置，
 // 业务包看不到整份 config.Config。
-func (c *Container) tenantConfig() config.TenantConfig {
+func (c *Container) tenantConfig() *config.TenantConfig {
 	if c == nil || c.cfg == nil {
-		return config.TenantConfig{}
+		return nil
 	}
 	return c.cfg.Tenant
 }
