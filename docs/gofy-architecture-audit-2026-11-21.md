@@ -71,7 +71,7 @@
 | P2-08 | P2 | K8s Lease `Close` 不等待在途 API 操作 | 成立 | **已修复** | `Close()` 只置 `closed` 并清空 `held`（`k8slease.go:294`），无 in-flight 计数 |
 
 **"复核结论"列的口径**：成立＝按当前代码可以复现；不成立＝当前代码里已不存在该机制或结论
-与代码相反。**"复核结论"对照审计基线；"状态"列反映本轮修复后的工作区**（三个仓库均未提交、未推送）。
+与代码相反。**"复核结论"对照审计基线；"状态"列反映本轮修复后的工作区**（三个仓库均已提交、未推送：gofy `511ac0a`、gofy-adapter `3902e63`、gofy-interface-api `c722e00`）。
 P1-03 是**机制被删除**（不是缺陷被修好）；§5 的"已改善"表属于上一轮，不在本表。
 
 动手前有三个约束值得先定：
@@ -117,7 +117,7 @@ P1-03 是**机制被删除**（不是缺陷被修好）；§5 的"已改善"表�
 
 验证：gofy `go build ./...`、`go vet ./...`、`check-imports.sh`、`go test -count=1 ./...`，
 demo `make check`；gofy-adapter 与 gofy-interface-api 各自 `go build` / `go vet` /
-`go test -count=1 ./...`，全部通过。三个仓库均**未提交、未推送**。
+`go test -count=1 ./...`，全部通过。三个仓库均已提交、未推送：`511ac0a`（gofy）、`3902e63`（gofy-adapter）、`c722e00`（gofy-interface-api）。
 
 # 3. P1：需要优先修复
 
