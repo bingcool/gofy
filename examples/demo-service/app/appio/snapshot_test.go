@@ -9,7 +9,9 @@ import (
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	gofyredis "github.com/bingcool/gofy/support/redis"
+	"github.com/bingcool/gofy/support/sqlite"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -107,5 +109,68 @@ func TestDBIOResolvesTheFrameworkDefault(t *testing.T) {
 	PublishDB(nil)
 	if _, err := Current().DBIO(ctx, "default"); !errors.Is(err, gofydb.ErrNotConfigured) {
 		t.Fatalf("DBIO(default) without a default DB = %v, want ErrNotConfigured", err)
+	}
+}
+
+// TestDBConnectJoinsTheAmbientTransaction pins the only difference between
+// DBConnect and DBIO, and the reason both exist: DBConnect obeys the transaction
+// carried by ctx, DBIO deliberately ignores it.
+// TestDBConnectJoinsTheAmbientTransaction 固定 DBConnect 与 DBIO 唯一的区别，也是
+// 两者并存的原因：DBConnect 服从 ctx 中的事务，DBIO 刻意忽略它。
+func TestDBConnectJoinsTheAmbientTransaction(t *testing.T) {
+	prev := Current()
+	t.Cleanup(func() { Publish(prev) })
+
+	db, err := sqlite.New(context.Background(), sqlite.Config{DSN: ":memory:", LogLevel: "silent"}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sqlite.Close(db); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
+	PublishDB(db)
+
+	// 没有事务：返回这一代的连接，并且已经绑定 ctx，调用方不必再补 WithContext。
+	plain, err := Current().DBConnect(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("DBConnect without a transaction: %v", err)
+	}
+	if plain.Statement.ConnPool != db.Statement.ConnPool {
+		t.Fatal("DBConnect outside a transaction did not use the generation's connection")
+	}
+	if plain.Statement.Context == nil {
+		t.Fatal("DBConnect returned a handle without a context bound")
+	}
+
+	// 有事务：返回同一个事务，而不是连接池。
+	err = gofydb.Transaction(context.Background(), db, func(ctx context.Context) error {
+		tx := gofydb.WithContext(ctx, nil)
+		if tx == nil {
+			t.Fatal("Transaction did not put a handle into ctx")
+		}
+		inTx, err := Current().DBConnect(ctx, "default")
+		if err != nil {
+			return err
+		}
+		if inTx.Statement.ConnPool != tx.Statement.ConnPool {
+			t.Fatal("DBConnect did not return the ambient transaction")
+		}
+		if inTx.Statement.ConnPool == db.Statement.ConnPool {
+			t.Fatal("DBConnect returned the pool instead of the transaction")
+		}
+		// DBIO 在同一个 ctx 下仍然只给本代连接——这不是缺陷，是它存在的理由。
+		own, err := Current().DBIO(ctx, "default")
+		if err != nil {
+			return err
+		}
+		if own != db {
+			t.Fatal("DBIO should ignore the ambient transaction")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Transaction: %v", err)
 	}
 }

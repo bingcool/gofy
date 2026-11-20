@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/module/product/model/productmodel"
@@ -35,14 +34,14 @@ type ProductRepository struct{}
 // conn 优先使用 ctx 中的事务；没有事务时用请求快照的默认数据库。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 //
-// 句柄统一经 DBIO 解析：默认库是框架托管的特例，但名字仍走同一条入口，仓库
-// 不需要记住"默认库走另一条路"。
+// DBConnect 同时完成「取本代连接」「ctx 有事务则用事务」「绑定本次 ctx」三步，
+// 仓库不需要自己调 gofydb.WithContext，也就不会漏掉其中任何一步。
 func (r *ProductRepository) conn(ctx context.Context) (*gorm.DB, error) {
-	db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+	db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
 	if err != nil {
 		return nil, fmt.Errorf("resolve default database: %w", err)
 	}
-	return gofydb.WithContext(ctx, db), nil
+	return db, nil
 }
 
 // FindByID returns one product or ErrNotFound.
@@ -54,7 +53,7 @@ func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*productmo
 		return nil, err
 	}
 	var p productmodel.Product
-	err = db.WithContext(ctx).First(&p, id).Error
+	err = db.First(&p, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
@@ -78,7 +77,7 @@ func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[ui
 		return nil, err
 	}
 	var rows []productmodel.Product
-	if err := db.WithContext(ctx).Where(productmodel.ID+" IN ?", ids).Find(&rows).Error; err != nil {
+	if err := db.Where(productmodel.ID+" IN ?", ids).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list products: %w", err)
 	}
 	for _, row := range rows {
@@ -99,7 +98,7 @@ func (r *ProductRepository) List(ctx context.Context, offset, limit int) ([]prod
 		return nil, 0, err
 	}
 	q := func() *gorm.DB {
-		return db.WithContext(ctx).Model(&productmodel.Product{})
+		return db.Model(&productmodel.Product{})
 	}
 	if err := q().Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count products: %w", err)
@@ -121,7 +120,7 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 	if err != nil {
 		return 0, err
 	}
-	res := db.WithContext(ctx).
+	res := db.
 		Model(&productmodel.Product{}).
 		Where(productmodel.ID+" = ? AND "+productmodel.Status+" = ? AND "+productmodel.Stock+" >= ?", id, StatusOnSale, num).
 		Update(productmodel.Stock, gorm.Expr(productmodel.Stock+" - ?", num))

@@ -27,18 +27,43 @@ func TestConnResolvesInstalledSnapshot(t *testing.T) {
 		_, _ = r.conn(context.Background())
 	}()
 
-	db := &gorm.DB{}
+	db := openTestDB(t)
 	appio.PublishDB(db)
-	if got, err := r.conn(context.Background()); err != nil || got != db {
-		t.Fatalf("conn = %v, %v; want the published snapshot", got, err)
+	got, err := r.conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	// DBConnect 会把本次 ctx 绑到句柄上（返回同一条连接上的新句柄），所以比较
+	// ConnPool 而不是指针：指针不同不代表换了连接。
+	if got.Statement.ConnPool != db.Statement.ConnPool {
+		t.Fatal("conn did not use the published snapshot")
 	}
 
-	pinned := &gorm.DB{}
+	pinned := openTestDB(t)
 	ctx := appio.WithSnapshot(context.Background(), appio.Current())
 	appio.PublishDB(pinned)
-	if got, err := r.conn(ctx); err != nil || got != db {
-		t.Fatalf("conn = %v, %v; want the snapshot pinned to the request", got, err)
+	got, err = r.conn(ctx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
 	}
+	if got.Statement.ConnPool != db.Statement.ConnPool {
+		t.Fatal("conn did not keep the snapshot pinned to the request")
+	}
+}
+
+// openTestDB 返回一个独立的纯 Go SQLite 连接，仅用于需要真实 *gorm.DB 的断言。
+func openTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := sqlite.New(context.Background(), sqlite.Config{DSN: ":memory:", LogLevel: "silent"}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sqlite.Close(db); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
+	return db
 }
 
 func TestListAppliesStatusAndTimeWindow(t *testing.T) {

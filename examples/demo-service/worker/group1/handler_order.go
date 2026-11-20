@@ -89,8 +89,8 @@ type orderEventPayload struct {
 // The database is resolved per delivery through the generation the process
 // assembled at startup, not captured when the handler is built: a consumer
 // config is a package value, and its handler must not hold a pool. The handle
-// therefore arrives the same way a request gets one — appio.DBIO("default") —
-// instead of the Runtime holding a pool for it.
+// therefore arrives the same way a request gets one — appio.DBConnect(ctx,
+// "default") — instead of the Runtime holding a pool for it.
 // applyOrderEvent 是本分组内所有消费者共用的业务分支。
 //
 // 它接收已解码的信封，因此每个消费者文件把自己的消息类型适配到它——需要位点、投递
@@ -98,7 +98,7 @@ type orderEventPayload struct {
 //
 // 数据库在每次投递时经进程启动时装配的那一代解析，而不是在构造 handler 时捕获：
 // 消费者配置是包级值，它的 handler 不应该持有一个连接池。句柄因此和请求走同一条
-// 路——appio.DBIO("default")——而不是让 Runtime 替它持有一个池。
+// 路——appio.DBConnect(ctx, "default")——而不是让 Runtime 替它持有一个池。
 func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	rt, ok := gofyworker.RuntimeFrom(ctx)
 	if !ok {
@@ -110,7 +110,7 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	// started with for its whole life.
 	// 句柄来自 worker 进程启动时装配的那一代，解析方式与请求完全一致。不需要固定：
 	// worker 进程从不热更新，已发布的那一代就是它整个生命周期使用的那一代。
-	db, dbErr := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+	db, dbErr := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
 	if dbErr != nil {
 		return dbErr
 	}

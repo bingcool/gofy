@@ -47,12 +47,12 @@ SQL 里写表名**：表结构是数据库契约，跨模块的 Go 依赖才需�
 `Queries` 不持有连接，每次调用都从 ctx 解析本代连接：
 
 ```go
-db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
-return gofydb.WithContext(ctx, db).WithContext(ctx)
+db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
+return db, nil
 ```
 
 - `appio.WithContext(ctx)` 取请求入口固定的一代快照，Reload 期间的旧请求继续用旧代；
-- `gofydb.WithContext(ctx, db)` 优先返回 ctx 中的事务。因此 service 里
+- `DBConnect` 优先返回 ctx 中的事务。因此 service 里
 
   ```go
   gofydb.Transaction(ctx, rt.DB, func(ctx context.Context) error {
@@ -76,7 +76,9 @@ return gofydb.WithContext(ctx, db).WithContext(ctx)
    `orders.user_id` 已有索引；新增查询前先看 `EXPLAIN`，慢查询会进
    `component=gorm` 的 `slow sql` 日志。
 6. **只读账号可选**：如果报表查询压力大，可给 query 层单独配一个只读实例
-   （`db.<name>`），用 `DBIO(ctx, "report")` 解析，不影响写库。
+   （`db.<name>`），用 `DBIO(ctx, "report")` 解析，不影响写库。这里必须用 `DBIO`：
+   报表要落在只读库上，不能被 ctx 里 `db.default` 的事务接管——`DBConnect` 只按 ctx
+   判断有没有事务，不区分实例。
 
 ## 调用方式
 

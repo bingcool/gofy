@@ -66,7 +66,7 @@ func newScanWorker(cfg ScanWorkerConfig) gofyworker.Worker {
 		// if it starts before any consumer receives a message.
 		// 句柄来自本进程在分组启动之前装配的那一代，解析方式与请求一致。租户插件也在
 		// 那里装好，因此即使本循环早于任何消费者收到消息，它也不会裸查。
-		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
 		if err != nil {
 			return err
 		}

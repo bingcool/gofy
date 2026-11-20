@@ -73,6 +73,9 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 		return nil, err
 	}
 	var created *ordermodel.Order
+	// DBIO 而不是 DBConnect：开启事务需要一个不带事务的连接。DBConnect 会把 ctx 里
+	// 已有的事务交回来，传进 Transaction 虽然不会重复开（它先查 ctx），但读代码时
+	// 看不出这里到底是"开事务"还是"加入别人的"。
 	db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
 	if err != nil {
 		return nil, fmt.Errorf("resolve default database: %w", err)

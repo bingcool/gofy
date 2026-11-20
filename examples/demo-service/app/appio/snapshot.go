@@ -151,6 +151,40 @@ func (s *Snapshot) DBIO(ctx context.Context, name string) (*gorm.DB, error) {
 	return s.db.NewIO(ctx, name)
 }
 
+// DBConnect returns the connection this call should use, already bound to ctx:
+// the transaction in ctx when present, otherwise this generation's connection.
+// Queries and writes go through here, so a caller inside gofydb.Transaction
+// transparently joins it and nobody has to remember a second WithContext.
+//
+// DBIO stays the "connection of this generation, no transaction" accessor on
+// purpose. Opening a transaction and writing something that must commit on its
+// own (a consumer's idempotency ledger, an audit row) both need a handle that
+// ignores ctx; folding the two into one method would make those cases the ones
+// that have to work around the default.
+//
+// DBConnect 返回本次调用应使用的连接，并且已经绑定 ctx：ctx 中有事务时返回该事务，
+// 否则返回本代的连接。查询与写入走这里，于是处于 gofydb.Transaction 内的调用会
+// 自动加入事务，调用方也不需要再补一次 WithContext。
+//
+// DBIO 刻意保持「本代连接、不解析事务」的语义：开启事务，以及必须独立提交的写入
+// （消费者幂等台账、审计行）都需要一个忽略 ctx 的句柄；把两者合成一个方法，会让
+// 这些场景反过来变成需要绕开的特例。
+//
+// Note that the transaction check is by ctx only, not by instance: a transaction
+// opened on db.default is returned for DBConnect(ctx, "order") as well. Keep one
+// transaction per instance per request, or use DBIO when a named instance must
+// stay outside the ambient transaction.
+// 注意：事务只按 ctx 判断，不区分实例，db.default 上的事务对
+// DBConnect(ctx, "order") 同样会被返回。一次请求内请只在一个实例上开事务；
+// 需要某命名实例脱离当前事务时用 DBIO。
+func (s *Snapshot) DBConnect(ctx context.Context, name string) (*gorm.DB, error) {
+	db, err := s.DBIO(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return gofydb.WithContext(ctx, db).WithContext(ctx), nil
+}
+
 // RedisIO 在本代 Registry 中按别名解析 Redis 客户端（首次访问才建连）。
 func (s *Snapshot) RedisIO(ctx context.Context, name string) (*goredis.Client, error) {
 	if s == nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
@@ -30,14 +29,15 @@ type OrderRepository struct{}
 // conn 优先使用 ctx 中的事务；没有事务时用请求快照的默认数据库。跨模块调用
 // 因此自动共享最外层 service 开启的事务。
 //
-// 句柄统一经 DBIO 解析：默认库是框架托管的特例，但名字仍走同一条入口（见
-// Snapshot.DBIO），仓库因此不需要记住"默认库走另一条路"。
+// 句柄统一经 DBConnect 解析：它同时完成「取本代连接」与「ctx 有事务则用事务」两步，
+// 默认库只是本代连接里的一个特例（见 Snapshot.DBIO）。仓库不需要再自己调
+// gofydb.WithContext，也就不会漏掉那一步。
 func (r *OrderRepository) conn(ctx context.Context) (*gorm.DB, error) {
-	db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+	db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
 	if err != nil {
 		return nil, fmt.Errorf("resolve default database: %w", err)
 	}
-	return gofydb.WithContext(ctx, db), nil
+	return db, nil
 }
 
 // FindByID returns one order or ErrNotFound.
@@ -49,7 +49,7 @@ func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*ordermodel.
 		return nil, err
 	}
 	var o ordermodel.Order
-	err = db.WithContext(ctx).First(&o, id).Error
+	err = db.First(&o, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
@@ -67,7 +67,7 @@ func (r *OrderRepository) Create(ctx context.Context, o *ordermodel.Order) (*ord
 	if err != nil {
 		return nil, err
 	}
-	if err := db.WithContext(ctx).Create(o).Error; err != nil {
+	if err := db.Create(o).Error; err != nil {
 		return nil, fmt.Errorf("create order: %w", err)
 	}
 	return o, nil
@@ -99,7 +99,7 @@ func (r *OrderRepository) List(ctx context.Context, filter ListFilter, offset, l
 		total int64
 	)
 	q := func() *gorm.DB {
-		query := db.WithContext(ctx).Model(&ordermodel.Order{}).Where(ordermodel.UserID+" = ?", filter.UserID)
+		query := db.Model(&ordermodel.Order{}).Where(ordermodel.UserID+" = ?", filter.UserID)
 		if filter.Status != "" {
 			query = query.Where(ordermodel.Status+" = ?", filter.Status)
 		}
@@ -128,7 +128,7 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status st
 	if err != nil {
 		return err
 	}
-	res := db.WithContext(ctx).Model(&ordermodel.Order{}).Where(ordermodel.ID+" = ?", id).Update(ordermodel.Status, status)
+	res := db.Model(&ordermodel.Order{}).Where(ordermodel.ID+" = ?", id).Update(ordermodel.Status, status)
 	if res.Error != nil {
 		return fmt.Errorf("update order %d: %w", id, res.Error)
 	}
@@ -146,7 +146,7 @@ func (r *OrderRepository) CancelPending(ctx context.Context, id uint64, from, to
 	if err != nil {
 		return 0, err
 	}
-	res := db.WithContext(ctx).
+	res := db.
 		Model(&ordermodel.Order{}).
 		Where(ordermodel.ID+" = ? AND "+ordermodel.Status+" = ?", id, from).
 		Update(ordermodel.Status, to)

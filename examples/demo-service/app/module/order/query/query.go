@@ -32,7 +32,6 @@ import (
 	"errors"
 	"fmt"
 
-	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"gorm.io/gorm"
@@ -60,19 +59,20 @@ type Queries struct{}
 func New() *Queries { return &Queries{} }
 
 // conn resolves the connection for one call: the transaction carried by ctx when
-// present, otherwise the db.default of the request-pinned generation.
+// present, otherwise the db.default of the request-pinned generation. DBConnect
+// also binds ctx to the handle, so Raw/Scan cancellation and trace work without
+// a second WithContext at each call site.
 //
 // conn 解析本次调用应使用的连接：ctx 中有事务时用事务，否则用请求固定的那一
-// 代 db.default。和 repository 走同一条解析路径，两者的读写才会落在同一个事务
-// 与同一代连接上。
+// 代 db.default。DBConnect 同时把 ctx 绑到句柄上，Raw/Scan 的取消与 trace 因此
+// 不需要在每个调用处再补一次 WithContext。和 repository 走同一条解析路径，
+// 两者的读写才会落在同一个事务与同一代连接上。
 func (q *Queries) conn(ctx context.Context) (*gorm.DB, error) {
-	db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+	db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
 	if err != nil {
 		return nil, fmt.Errorf("query: resolve default database: %w", err)
 	}
-	// WithContext 再包一层：Raw/Scan 的取消与 trace 都依赖 Statement.Context，
-	// 事务句柄上是外层开启事务时的 ctx，这里统一成本次调用的 ctx。
-	return gofydb.WithContext(ctx, db).WithContext(ctx), nil
+	return db, nil
 }
 
 // clampLimit keeps a caller-supplied page size inside [1, maxLimit].

@@ -1,7 +1,7 @@
 // Package db exposes the demo's named MySQL-protocol connections.
 //
 // 业务代码不直接读包级变量：一律通过 app/appio 的快照取连接
-// （appio.WithContext(ctx).DBIO(ctx, "default")），脚本、守护进程与请求走同一条
+// （appio.WithContext(ctx).DBConnect(ctx, "default")），脚本、守护进程与请求走同一条
 // 路径。当前一代的 Set 用 atomic.Pointer 整体发布，读写不再共享可变包变量。
 //
 // Db 就是框架托管的 db.default（Runtime.DB），order、product 由 app/appio 包
