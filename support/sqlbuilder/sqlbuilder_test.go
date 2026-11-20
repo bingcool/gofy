@@ -42,6 +42,107 @@ func TestBuildDynamicPredicate(t *testing.T) {
 	}
 }
 
+// TestInSlice covers the filter shape a request actually produces. A []string
+// cannot be spread into In's ...any, and passing it whole is the silent trap: it
+// compiles, and the statement carries one argument holding a slice, which only
+// survives because gorm re-expands it later. The empty cases keep the upstream
+// behaviour: In with no arguments renders FALSE, NotIn renders NOT FALSE.
+// TestInSlice 覆盖请求真正产生的过滤形态。[]string 摊不进 In 的 ...any，整个传进去则是
+// 静默的坑：能编译，语句里是一个装着 slice 的参数，只有靠 gorm 之后重新展开才成立。两条空
+// 分支保持上游行为：In 无参数渲染 FALSE，NotIn 渲染 NOT FALSE。
+func TestInSlice(t *testing.T) {
+	orders := sqlbuilder.Table("orders")
+
+	stmt, args, err := sqlbuilder.Build(
+		sqlbuilder.Select(orders.C("id")).From(orders).
+			Where(sqlbuilder.InSlice(orders.C("status"), []string{"paid", "shipped"})),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const want = "SELECT `orders`.`id` FROM `orders` WHERE `orders`.`status` IN (?, ?)"
+	if stmt != want {
+		t.Fatalf("stmt =\n%s\nwant\n%s", stmt, want)
+	}
+	if len(args) != 2 || args[0] != "paid" || args[1] != "shipped" {
+		t.Fatalf("args = %#v, want [paid shipped]", args)
+	}
+
+	// An empty filter narrows to zero rows instead of disappearing.
+	stmt, _, err = sqlbuilder.Build(sqlbuilder.InSlice[string](orders.C("status"), nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if stmt != "FALSE" {
+		t.Fatalf("empty InSlice rendered %q, want FALSE", stmt)
+	}
+
+	stmt, _, err = sqlbuilder.Build(sqlbuilder.NotInSlice[int64](orders.C("id"), nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if stmt != "NOT (FALSE)" {
+		t.Fatalf("empty NotInSlice rendered %q, want NOT (FALSE)", stmt)
+	}
+}
+
+// TestConditionalWhere is the shape filters should be written in: start the
+// statement, add a clause only when the parameter carries a value, and let
+// repeated Where calls AND themselves — no outer And wrapper, no empty predicate.
+// The last case pins why the outer And is dangerous: Where(And()) leaves a bare
+// WHERE behind and produces a statement that cannot run.
+// TestConditionalWhere 是过滤条件应有的写法：先建语句，参数有值时才加子句，多次 Where
+// 之间自动 AND——不需要外层 And，也不该挂空谓词。最后一段固定外层 And 的危险之处：
+// Where(And()) 留下一个光秃秃的 WHERE，语句根本跑不了。
+func TestConditionalWhere(t *testing.T) {
+	orders := sqlbuilder.Table("orders")
+
+	build := func(status []string, userID int64, keyword string) (string, []any) {
+		sel := sqlbuilder.Select(orders.C("id"), orders.C("user_id")).From(orders)
+		if len(status) > 0 {
+			sel = sel.Where(sqlbuilder.InSlice(orders.C("status"), status))
+		}
+		if userID > 0 {
+			sel = sel.Where(sqlbuilder.GT(orders.C("user_id"), userID))
+		}
+		if keyword != "" {
+			sel = sel.Where(sqlbuilder.Contains(orders.C("name"), keyword))
+		}
+		stmt, args, err := sqlbuilder.Build(sel)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		return stmt, args
+	}
+
+	stmt, args := build([]string{"paid"}, 7, "")
+	const want = "SELECT `orders`.`id`, `orders`.`user_id` FROM `orders` " +
+		"WHERE `orders`.`status` IN (?) AND `orders`.`user_id` > ?"
+	if stmt != want {
+		t.Fatalf("stmt =\n%s\nwant\n%s", stmt, want)
+	}
+	if len(args) != 2 || args[0] != "paid" || args[1] != int64(7) {
+		t.Fatalf("args = %#v, want [paid 7]", args)
+	}
+
+	// No parameter set: the statement keeps no WHERE at all.
+	stmt, args = build(nil, 0, "")
+	if stmt != "SELECT `orders`.`id`, `orders`.`user_id` FROM `orders`" || len(args) != 0 {
+		t.Fatalf("unfiltered stmt =\n%s\nargs = %#v", stmt, args)
+	}
+
+	// The trap: an outer And with nothing in it is not "no filter".
+	broken, _, err := sqlbuilder.Build(
+		sqlbuilder.Select(orders.C("id")).From(orders).Where(sqlbuilder.And()),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !strings.HasSuffix(broken, " WHERE ") {
+		t.Fatalf("Where(And()) rendered %q, expected the documented bare WHERE", broken)
+	}
+}
+
 // TestBuildCTE covers the capability gorm has no clause for: gorm's clause.With
 // is an empty struct with no Build method, so this statement could only be a
 // hand-written Raw string before. The args order (CTE first, then HAVING) is

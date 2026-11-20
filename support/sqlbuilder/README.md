@@ -23,7 +23,7 @@ UNION**：`clause/with.go` 全文只有 `type With struct{}`（没有 `Build` �
 | --- | --- |
 | 语句 | `Select` / `SelectExpr` / `With` / `WithRecursive` / `Union`（方法）/ `Window` / `RowNumber` / `Raw` / `Expr` |
 | 写语句 | `Insert` / `Update` / `Delete`，upsert 的 `ConflictColumns` / `ConflictConstraint` / `ConflictWhere` / `UpdateWhere` / `DoNothing` / `ResolveWithIgnore` / `ResolveWithNewValues` / `ResolveWith` |
-| 谓词 | `And` / `Or` / `Not` / `EQ` / `NEQ` / `GT` / `GTE` / `LT` / `LTE` / `In` / `NotIn` / `IsNull` / `NotNull` / `Like` / `HasPrefix` / `HasSuffix` / `Contains` / `EqualFold` / `ContainsFold` / `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ` / `ColumnsLT` / `ColumnsLTE` / `ColumnsGT` / `ColumnsGTE` / `CompositeGT` / `CompositeLT` / `IsTrue` / `IsFalse` / `False` |
+| 谓词 | `And` / `Or` / `Not` / `EQ` / `NEQ` / `GT` / `GTE` / `LT` / `LTE` / `In` / `InSlice` / `NotIn` / `NotInSlice` / `IsNull` / `NotNull` / `Like` / `HasPrefix` / `HasSuffix` / `Contains` / `EqualFold` / `ContainsFold` / `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ` / `ColumnsLT` / `ColumnsLTE` / `ColumnsGT` / `ColumnsGTE` / `CompositeGT` / `CompositeLT` / `IsTrue` / `IsFalse` / `False` |
 | 逃生口 | `P`（直接写 builder）、`ExprP`（片段 + 参数）、`Raw`（无参数片段） |
 | 聚合与列表达式 | `Count` / `Sum` / `Max` / `Min` / `Avg` / `Lower` / `As` / `Distinct` / `Asc` / `Desc` / `DescExpr` |
 | 行锁 | `WithLockAction` / `WithLockTables` / `WithLockClause`，动作 `SkipLocked` / `NoWait` |
@@ -58,6 +58,53 @@ err = db.Raw(stmt, args...).Scan(&rows).Error // DBConnect 已绑 ctx
 返回的也是连接池（它把 `*sql.Tx` 里的字段掏出来），会同时丢掉事务、SQL 日志（脱敏 /
 `X-Trace-Id` / 慢 SQL）与连接代际。要流式读大结果集用 `Raw(stmt, args...).Rows()`。
 
+## 条件拼接
+
+条件加不加取决于参数有没有值：先建语句，再按需 `Where`。**`Where` 可以调用多次，每次之间
+都是 AND**，不需要自己套一层 `And`，更不要在无条件时挂一个空 `And()`。
+
+```go
+sel := sqlbuilder.Select(orders.C("id"), orders.C("user_id")).From(orders)
+
+if len(status) > 0 {
+    sel = sel.Where(sqlbuilder.InSlice(orders.C("status"), status))
+}
+if userID > 0 {
+    sel = sel.Where(sqlbuilder.GT(orders.C("user_id"), userID))
+}
+if keyword != "" {
+    sel = sel.Where(sqlbuilder.Contains(orders.C("name"), keyword))
+}
+
+stmt, args, err := sqlbuilder.Build(sel)
+```
+
+条件多到一个函数里放不下时，先攒谓词再一次性挂上（`And` 只有一个参数时不加括号，多个时
+加括号，语义一致）：
+
+```go
+preds := make([]*sqlbuilder.Predicate, 0, 4)
+if len(status) > 0 {
+    preds = append(preds, sqlbuilder.InSlice(orders.C("status"), status))
+}
+if userID > 0 {
+    preds = append(preds, sqlbuilder.GT(orders.C("user_id"), userID))
+}
+if len(preds) > 0 {
+    sel = sel.Where(sqlbuilder.And(preds...))
+}
+```
+
+两条规则：
+
+1. **`[]string` 传不进 `In`。** `In` 收 `...any`，`In(col, status...)` 要求 `status` 是
+   `[]any`。整个传 `In(col, status)` 虽然能编译，但语句里只有一个装着 slice 的参数，只在
+   gorm 之后又把它展开时才成立，PostgreSQL 方言下还会打乱占位符编号。用 `InSlice` /
+   `NotInSlice`。
+2. **空列表的语义要自己定。** `InSlice` 传空 slice 得到 `FALSE`（与 `In` 不带参数一致），
+   意思是「匹配零行」；要「不过滤」就在 `len > 0` 里跳过谓词。`Where(And())` 不属于任何
+   一种：它留下一个空的 `WHERE`，语句直接无效——`TestConditionalWhere` 钉住了这个行为。
+
 ## 写语句与 upsert
 
 `Insert` / `Update` / `Delete` 是为 gorm 链式表达不了的语句准备的（批量 upsert 且新值要计算、
@@ -88,7 +135,7 @@ stmt, args, err := sqlbuilder.Build(
    `*Predicate` 被两个 goroutine 同时 `Query()` 就是 data race，跨请求缓存同样危险。
    谓词在函数内构造、函数内消费，不存字段、不跨 goroutine。
 2. **不要把 slice 传给 `EQ`。** 构造器把它当一个参数，gorm 的 `Raw` 又把它当 `IN` 展开，
-   两种解释会打架。列表条件用 `In(col, vals...)`。
+   两种解释会打架。列表条件用 `InSlice(col, vals)`（`[]string` 也摊不进 `In` 的 `...any`）。
 3. **表名不经过 gorm 的 `NamingStrategy`。** `Table("orders")` 就是字面量。配了表前缀或
    复数化的项目必须从 `model.TableName()` / 列常量取，不要手写。
 4. **方言要显式决定，SQLite 不能显式传**（见下表）。

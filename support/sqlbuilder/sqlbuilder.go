@@ -415,6 +415,50 @@ func In(col string, args ...any) *Predicate { return entsql.In(col, args...) }
 // NotIn 是 In 的否定。
 func NotIn(col string, args ...any) *Predicate { return entsql.NotIn(col, args...) }
 
+// InSlice is In for a typed slice, which is the shape a filter arrives in: a
+// []string from a request cannot be spread into In's ...any, and passing it
+// whole compiles but yields one argument that holds a slice — it only works if
+// gorm later re-expands it, and under the PostgreSQL dialect it also throws the
+// placeholder numbering off.
+//
+// An empty slice keeps In's own behaviour (no arguments, which renders FALSE), so
+// an empty filter still means "match nothing". Where empty should instead mean
+// "do not filter", skip the predicate at the call site — see the README section
+// on conditional building.
+// InSlice 是 In 的带类型 slice 版本，也是过滤条件实际出现的形态：请求里的 []string 摊不进
+// In 的 ...any，整个传进去虽然能编译，却是一个装着 slice 的参数——只有在 gorm 之后又把它
+// 展开时才成立，而在 PostgreSQL 方言下还会打乱占位符编号。
+//
+// 空 slice 沿用 In 自己的行为（无参数，渲染成 FALSE），空过滤因此仍然表示「匹配零行」。
+// 若空过滤应当表示「不筛」，就在调用处跳过这个谓词——见 README 的条件拼接一节。
+func InSlice[T any](col string, vals []T) *Predicate {
+	return entsql.In(col, spread(vals)...)
+}
+
+// NotInSlice is the negated InSlice. An empty slice renders NOT (FALSE), matching
+// NotIn with no arguments: "exclude nothing".
+// NotInSlice 是 InSlice 的否定。空 slice 渲染 NOT (FALSE)，与不带参数的 NotIn 一致：
+// 「不排除任何行」。
+func NotInSlice[T any](col string, vals []T) *Predicate {
+	return entsql.NotIn(col, spread(vals)...)
+}
+
+// spread boxes a typed slice into the []any the upstream builders take, and keeps
+// nil rather than an empty slice for the empty case, so the upstream branch for
+// "no arguments" stays the single definition of what an empty list matches.
+// spread 把带类型的 slice 装箱成上游构造器接收的 []any；空的情况保持 nil 而不是空 slice，
+// 让上游「无参数」的那个分支成为「空列表匹配什么」的唯一定义。
+func spread[T any](vals []T) []any {
+	if len(vals) == 0 {
+		return nil
+	}
+	args := make([]any, len(vals))
+	for i, v := range vals {
+		args[i] = v
+	}
+	return args
+}
+
 // IsNull and NotNull test for NULL.
 // IsNull 与 NotNull 判断 NULL。
 func IsNull(col string) *Predicate { return entsql.IsNull(col) }
@@ -470,10 +514,11 @@ func P(fns ...func(*Builder)) *Predicate { return entsql.P(fns...) }
 func ExprP(expr string, args ...any) *Predicate { return entsql.ExprP(expr, args...) }
 
 // False renders a predicate that matches nothing. It is how an empty filter list
-// is expressed: And() with no arguments renders nothing at all, which silently
-// widens the query instead of narrowing it to zero rows.
-// False 渲染一个不匹配任何行的谓词。空过滤列表就用它表达：不带参数的 And() 什么也不
-// 渲染，那会静默放宽查询，而不是收窄到零行。
+// is expressed: And() with no arguments renders no condition at all while the
+// selector still emits WHERE, so the statement comes out invalid rather than
+// narrowed to zero rows.
+// False 渲染一个不匹配任何行的谓词。空过滤列表就用它表达：不带参数的 And() 不渲染任何
+// 条件，而 Selector 仍会输出 WHERE，结果是语句无效，而不是收窄到零行。
 func False() *Predicate { return entsql.False() }
 
 // IsTrue and IsFalse compare a column with TRUE / FALSE.
