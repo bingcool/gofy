@@ -72,6 +72,23 @@ All notable changes to this project are documented here. The format follows
   address, and a startup error when both endpoint groups are disabled. A port
   conflict fails the application start rather than leaving a scrape config that
   answers nothing.
+- `support/sqlbuilder` builds SQL without executing it. It re-exports
+  `entgo.io/ent/dialect/sql` and adds `Build`, because `Query()` returns no error
+  and construction errors would otherwise be dropped silently. Execution stays on
+  gorm — the statement goes to `db.Raw` / `db.Where` on a handle from `DBConnect`
+  — so the transaction in ctx, the SQL log with masking and trace ids, slow-SQL
+  timing and the generation pinning keep working. Only `entgo.io/ent/dialect` and
+  `dialect/sql` enter the build graph: no atlas, no codegen, no `*ent.Client`.
+  The reason it exists is narrow: gorm 1.31 has no CTE and no UNION clause
+  (`clause/with.go` is `type With struct{}` with no `Build` method, and there is
+  no `Union` type), so those statements were one hand-written `Raw` string with
+  the `?`-to-args mapping counted by hand. `TenantScope` covers the other gap —
+  `Raw` does not pass through `support/tenant`, so statements over a table with a
+  tenant column have to carry the condition themselves. `Predicate` is stateful
+  and must not be cached or shared between goroutines; the dialect names are
+  re-exported except SQLite, which must not be passed at all (it renders nested
+  quoting and fails with "no such column" while the column exists). A guard keeps
+  gorm out of the package, so it cannot grow into a second execution stack.
 
 ### Fixed
 

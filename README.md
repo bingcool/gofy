@@ -575,6 +575,13 @@ modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默�
 三个包共用同一套 SQL 日志行为：`log_level`、`slow_threshold` 与
 `log_parameter_values` 语义一致，慢查询与错误日志同样只输出占位符模板。
 
+需要 CTE、UNION、窗口函数或可组合的谓词树时用 `support/sqlbuilder`：它是 ent 的 SQL
+构造器，只产出 `(sql, args)`，语句仍交给 `db.Raw` / `db.Where` 执行——事务、SQL 日志
+与脱敏、连接代际都不变。引入它的原因很窄：gorm 1.31 没有 CTE 与 UNION 的 clause
+（`clause/with.go` 只是空结构，也没有 `Union` 类型），这两类语句否则只能整条手写 `Raw`
+并把 `?` 与参数人肉对齐。见
+[support/sqlbuilder/README.md](support/sqlbuilder/README.md)。
+
 Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
 客户端之上的缓存与队列门面。AMQP（RabbitMQ）用 `support/amqp`：支持多 host
 回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、断线重连，以及基于
@@ -1028,6 +1035,7 @@ logger/       zap 日志构建（主/system/access）、滚动策略与 GORM 适
 support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、安全头、透传、契约别名注册表
 support/registry/ 通用 name -> instance 注册表（可选；单实现由 app/container 注入）
 support/generation/ 当前一代句柄的原子发布与请求级固定（跨 Reload 不换资源）
+support/sqlbuilder/ SQL 构造器（CTE/UNION/谓词树；只产出 SQL 与参数，执行仍走 gorm）
 support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
 support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
 support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）

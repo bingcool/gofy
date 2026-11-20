@@ -187,7 +187,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`support/sqlbuilder`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -220,6 +220,7 @@ gofy (root)
  ├── support/jwtauth
  ├── support/headerpropagation
  ├── support/frameworkcontext ──> support/headerpropagation, support/jwtauth
+ ├── support/sqlbuilder ──> entgo.io/ent/dialect/sql（只用构造器）, support/frameworkcontext
  └── config
 
 gofytest ──> gofy, support
@@ -242,6 +243,7 @@ internal/* ──> core
 | `support/phpoffice` 不依赖 `logger` | 错误通过哨兵错误返回，日志由业务决定 |
 | `support/image` 不依赖 `logger` | 错误通过哨兵错误返回，日志由业务决定 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
+| `support/sqlbuilder` 不依赖 gorm、不依赖 `logger` | 它只构造 SQL 字符串；引入 gorm 就说明有人在里面搭第二套执行栈。租户列名用 `DefaultTenantColumn` 复制而非 import `support/tenant`（那会带进 gorm），由测试钉住两边一致 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
 
@@ -1742,6 +1744,32 @@ snapshot := current.WithContext(ctx)             // 共享代码：只读固定�
   `currentSnapshot = generation.NewSet[Snapshot]("app/appio")`，导出的
   `Current` / `Publish` / `WithSnapshot` / `WithContext` / `Middleware` 只是
   薄封装。
+
+### 3.7.10 `support/sqlbuilder`
+
+SQL 构造器：`entgo.io/ent/dialect/sql` 的转发层，只产出 `(sql, args)`，不执行、不持有
+连接、不定义模型。数据访问仍走 gorm——语句交给 `db.Raw` / `db.Where` 执行，事务、
+SQL 日志与脱敏、`X-Trace-Id`、慢 SQL、连接代际全部不变（`docs/sql-builder-design.md`）。
+
+- 存在的理由只有一条：gorm 1.31 没有 CTE 与 UNION 的 clause（`clause/with.go` 只有
+  `type With struct{}`，`clause` 包没有 `Union` 类型），这两类语句否则只能整条手写
+  `Raw` 并把 `?` 与 args 人肉对齐；
+- 导出类型别名 `Selector` / `SelectTable` / `Predicate` / `Builder` / `Querier` /
+  `LockOption` / `LockAction`；构造器 `Select` / `SelectExpr` / `Table` / `Expr` /
+  `Count` / `With` / `WithRecursive` / `Dialect`；谓词 `And` / `Or` / `Not` / `EQ` /
+  `NEQ` / `GT` / `GTE` / `LT` / `LTE` / `In` / `NotIn` / `IsNull` / `NotNull` / `Like` /
+  `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ`；行锁 `WithLockAction` /
+  `WithLockTables` / `SkipLocked` / `NoWait`；方言名 `DialectMySQL` /
+  `DialectPostgres`（**不导出 SQLite**：传了会生成嵌套引号，见包注释）；
+- `Build(Querier) (string, []any, error)`：`Query()` 不返回错误，构造期错误收在
+  builder 里，必须经 `Build` 取；出错时不返回半成品语句；
+- `TenantScope(ctx, table) (*Predicate, bool)`：`Raw` 不经过 `support/tenant` 插件，
+  含租户列的表要显式带上条件；ctx 没有租户时返回 `false`，由调用方决定报错还是跳过；
+- 约束：`Predicate` 有状态（`Query()` 会 Reset 自己），不能缓存或跨 goroutine 共用；
+  不要把 slice 传给 `EQ`（用 `In`）；表名不经过 gorm 的 `NamingStrategy`，要从
+  `TableName()` 取；
+- 边界：不含 ent 的 ORM、schema DSL、codegen、`*ent.Client`、`entsql.Open`；守卫脚本
+  禁止本包依赖 gorm，避免有人在里面搭第二套执行栈。
 
 ### 3.8 `script`
 

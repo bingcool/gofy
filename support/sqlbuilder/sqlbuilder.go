@@ -32,8 +32,7 @@
 // db.DB() 即使在事务里返回的也是连接池（它把 *sql.Tx 里的字段掏了出来），会同时丢掉
 // 事务、SQL 日志与代际固定。
 //
-// # Constraints
-// # 使用约束
+// # Constraints 使用约束
 //
 // A Predicate is stateful: Query resets it and replays its callbacks. Calling
 // Query twice concurrently on the same *Predicate is a data race, and caching one
@@ -73,8 +72,7 @@
 // Query() 不返回错误，构造期错误被收集在 builder 里，所以一律走 Build；直接调用
 // sel.Query() 会静默吞掉错误。
 //
-// # Multi-tenancy
-// # 多租户
+// # Multi-tenancy 多租户
 //
 // support/tenant hooks Query/Update/Delete/Create and deliberately not Raw, so a
 // statement passed to db.Raw gets no automatic tenant_id condition. A predicate

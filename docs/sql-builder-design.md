@@ -1,8 +1,31 @@
 # SQL 构造器：引入 `entgo.io/ent/dialect/sql` 的方案
 
-**状态**：方案，尚未编码
+**状态**：已落地（`6682626`）
 **日期**：2026-11-20
 **关联**：`docs/module-layering-design.md`（query / repository 分工）、`support/db`（连接与事务）
+
+---
+
+## 落地记录
+
+6 个步骤全部完成（`6682626`），与文档的差异集中在第 8 节和落地后新发现的两点。
+
+| 步骤 | 结果 |
+|---|---|
+| 1 包与 `Build` | `support/sqlbuilder/sqlbuilder.go`：re-export + `Build` + `TenantScope`；`go vet`、`gofmt` 干净 |
+| 2 依赖 | go.mod +2 行（`entgo.io/ent` 直接、`go.opencensus.io` 版本提升），go.sum +18 行，与第五节实测一致；依赖图里只有 `entgo.io/ent/dialect` 与 `dialect/sql` |
+| 3 README | 五条规则、方言表、租户约定、什么时候不该用、依赖成本与退出成本 |
+| 4 示例与对照测试 | `ListUnsoldProductsWithBuilder` 与 Raw 版本并列；`TestListUnsoldProductsBuilderMatchesRaw` 在 4 个 limit 值上比对两者，再断言已知答案 |
+| 5 分层文档 | `module-layering-design.md` §3.5 增加「复杂报表可选 `support/sqlbuilder`」，顺带修正该节过时的 `NewDBIO` + `gofydb.WithContext` 写法（`DBConnect` 已取代两步） |
+| 6 守卫检查 | `controller` 当前没有 import 它；**没有加禁令**，理由见下 |
+
+三个落地时才定下来的点：
+
+1. **多导出了 `DialectMySQL` / `DialectPostgres`**。第 8 节的草图只有 `Dialect`，但 PostgreSQL 需要传方言名才能切换到双引号，调用方就得 `import "entgo.io/ent/dialect"`——第 8 节自己写的「`entgo.io/ent` 的名字不会散落到业务代码里」当场不成立。SQLite 的方言名刻意不导出，理由见第十节第 4 条。`LockAction` 类型也一并转发，`WithLockAction` 的入参需要它。
+2. **第 6 步不加守卫**。`controller` 的白名单里 `support` 是放行的，因此它「可以」import 构造器。但入口平权已经明确 controller 可以直接写裸 SQL，只禁构造器而放开裸 SQL 是自相矛盾。约定保留在 §3.5（构造 SQL 属于 query / repository），要真正拦住得同时禁掉入口层的裸 SQL 拼接——那与入口平权冲突，需要单独决策。
+3. **`go.sum` 里 `mattn/go-sqlite3` 从 1.14.22 提到 1.14.28**（MVS 取 ent 的下限）。本仓库不编译它：`go mod why` 只能经 `gorm.io/gorm.test` 走到，`go list -deps ./...` 里也没有。属于 go.sum 记账，不是新依赖。
+
+另外在框架守卫里加了一条：`support/sqlbuilder` 不得依赖 gorm（`shell/check-imports.sh`）。一旦它引入 gorm，就说明有人在构造器包里搭第二套执行栈——连接、事务、日志都要重新接一遍，那时它已经不是构造器了。
 
 ---
 
@@ -271,6 +294,12 @@ var (
 	NoWait         = entsql.NoWait
 )
 
+// 方言名：PostgreSQL 需要显式切换，MySQL 用默认的反引号
+const (
+	DialectMySQL    = dialect.MySQL
+	DialectPostgres = dialect.Postgres
+)
+
 // Build 返回 SQL 与参数，并把构造期的错误显式带出来。
 // ent 的 Query() 只返回 (string, []any)，错误记在内部，容易被静默丢弃。
 func Build(q Querier) (string, []any, error) {
@@ -288,6 +317,7 @@ func Build(q Querier) (string, []any, error) {
 
 - **好处**：调用方只 import `support/sqlbuilder`，未来若换构造器（goqu 或自研），只需要改一个文件；`entgo.io/ent` 的名字不会散落到业务代码里。
 - **代价**：需要维护这份 var 清单；上游新增 API 不会自动出现。清单只覆盖实际用到的部分，缺了就在用的时候加——不追求完整镜像。
+- **落地时比草图多导出了三项**：`LockAction` 类型、`DialectMySQL` / `DialectPostgres` 常量、以及第十一节的 `TenantScope` 与 `DefaultTenantColumn`。前两项的理由是让「调用方只 import 一个包」这条真的成立；`TenantScope` 是第十一节对策的第 2 条。
 
 ---
 
@@ -540,8 +570,8 @@ sqlbuilder 与这三条没有冲突：事务内用 builder，只要 `db` 来自 
 
 | 目标库 | 建议 | 原因 |
 |---|---|---|
-| MySQL | 默认（不设置）或 `Dialect(dialect.MySQL)` | 默认用反引号，正确 |
-| PostgreSQL | `Dialect(dialect.Postgres)` | `Quote` 会把反引号替换成双引号 |
+| MySQL | 默认（不设置）或 `Dialect(DialectMySQL)` | 默认用反引号，正确 |
+| PostgreSQL | `Dialect(DialectPostgres)` | `Quote` 会把反引号替换成双引号 |
 | SQLite | **不要传 `dialect.SQLite`** | 两个问题，见下 |
 
 SQLite 的两个问题都是实测出来的：
@@ -549,7 +579,7 @@ SQLite 的两个问题都是实测出来的：
 1. 生成 `` `"orders"."id"` ``——反引号套双引号。SQLite 反引号是合法的标识符引号，于是它去找一个名为 `"orders"."id"` 的列，报 `no such column: "orders"."id"`。列明明存在，报错却说没有，这类信息很难和"方言传错了"联系起来。
 2. `Selector.For` / `ForUpdate` 在 SQLite 方言下直接 `AddError("sql: SELECT .. FOR UPDATE/SHARE not supported in SQLite")`，于是 `Build` 返回错误。
 
-SQLite 只出现在测试里，用默认方言即可（SQLite 也接受反引号）。这一条必须写进包注释：否则下一个人照着 `dialect.SQLite` 写，测试要么静默空结果，要么报一个看起来与 SQL 无关的错误。
+SQLite 只出现在测试里，用默认方言即可（SQLite 也接受反引号）。本包因此**不导出** SQLite 的方言名：拿不到它，就少一条「照着写」的路。这一条写进了包注释和 README，否则下一个人从上游文档抄 `dialect.SQLite` 过来，测试要么静默空结果，要么报一个看起来与 SQL 无关的错误。
 
 **5. `Query()` 不返回 error。** 构造期的错误记在 `Builder.errs` 里，必须用 `Build()` 取。直接调 `sel.Query()` 会静默吞掉错误。
 
@@ -576,16 +606,22 @@ SQLite 只出现在测试里，用默认方言即可（SQLite 也接受反引号
 2. **提供 helper**：
 
 ```go
-// TenantScope 返回当前请求的租户等值谓词；ctx 里没有租户时返回 (nil, false)，
-// 由调用方决定是报错还是跳过。列名固定为 tenant_id，与 support/tenant 的默认列一致。
-func TenantScope(ctx context.Context, table *entsql.SelectTable) (*Predicate, bool) {
+// DefaultTenantColumn 是 TenantScope 使用的租户列。它与 tenant.DefaultColumn 一致，
+// 用测试互相钉住而不是互相 import：support/tenant 会带进 gorm，而本包不能依赖它。
+const DefaultTenantColumn = "tenant_id"
+
+func TenantScope(ctx context.Context, table *SelectTable) (*Predicate, bool) {
 	tid := frameworkcontext.TenantID(ctx)
 	if tid == "" {
 		return nil, false
 	}
-	return EQ(table.C("tenant_id"), tid), true
+	return EQ(table.C(DefaultTenantColumn), tid), true
 }
 ```
+
+列名没有直接引用 `tenant.DefaultColumn`，而是复制一份并用
+`TestDefaultTenantColumnMatchesTenant` 钉住——`support/tenant` 依赖 gorm，import 它会把
+ORM 带进一个从不执行 SQL 的包，也会让守卫里「sqlbuilder 不得依赖 gorm」那条失效。
 
 3. （可选）在 `query` 层的测试里加一条断言：对含租户列的表，生成的 SQL 必须包含 `tenant_id`。这需要一张表名到租户列的映射，成本较高，先不做。
 
@@ -617,6 +653,8 @@ func TenantScope(ctx context.Context, table *entsql.SelectTable) (*Predicate, bo
 | 6 | 检查 `shell/check-imports.sh`：controller 不引入 `sqlbuilder`（构造 SQL 不属于入口层） | `make check` |
 
 第 4 步的"两条实现跑同一组断言"是这个方案的关键验证：如果 builder 版本与 Raw 版本在 SQLite 上返回不同结果，就说明方言或参数展开有问题，宁可放弃方案也不能带着不确定性上线。
+
+落地结果见开头的「落地记录」：6 步全部完成，builder 与 Raw 在 SQLite 上返回一致（4 个 limit 值逐一比对）。第 6 步的守卫没有加，理由记录在那里。
 
 ---
 
