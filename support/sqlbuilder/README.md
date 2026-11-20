@@ -105,6 +105,61 @@ if len(preds) > 0 {
    意思是「匹配零行」；要「不过滤」就在 `len > 0` 里跳过谓词。`Where(And())` 不属于任何
    一种：它留下一个空的 `WHERE`，语句直接无效——`TestConditionalWhere` 钉住了这个行为。
 
+## 谓词挂到哪里
+
+`*Predicate` 只是条件树，不构成语句，落点只有下面几处。**位置不会报错**——挂错地方通常只是
+条件没生效：
+
+| 落点 | 语义 |
+| --- | --- |
+| `Select(...).Where(p)` | WHERE，多次调用之间 AND |
+| `Select(...).Having(p)` | HAVING，聚合之后的过滤 |
+| `Join(t).OnP(p)` / `.On(c1, c2)` | JOIN 的 ON；`On` 只做列等值，复合条件用 `OnP(And(...))` |
+| `Update(t).Where(p)` / `Delete(t).Where(p)` | 写语句的 WHERE |
+| `Insert(t).ConflictWhere(p)` / `UpdateWhere(p)` | upsert 的冲突范围与 DO UPDATE 条件 |
+| `Build(p)` → `db.Where(stmt, args...)` | 单独渲染，塞回 gorm 的链式语句复用 |
+
+`Or()` / `Not()` 装饰**下一条** `Where`：`Where(a).Or().Where(b).Where(c)` 得到
+`(a OR b) AND c`，只影响紧随其后的那一次。
+
+谓词里要套语句时，`Exists(sel)` / `NotExists(sel)` 收整条 `*Selector`，`In(col, sel)` 的第一个
+参数是 `*Selector` 时按子查询渲染（不是列表）：
+
+```go
+sub := sqlbuilder.Select(items.C("order_id")).From(items).
+    Where(sqlbuilder.EQ(items.C("status"), "ok"))
+
+sel := sqlbuilder.Select(orders.C("id")).From(orders).
+    Where(sqlbuilder.In(orders.C("id"), sub))
+// WHERE `o`.`id` IN (SELECT `i`.`order_id` FROM `order_items` AS `i` WHERE `i`.`status` = ?)
+```
+
+**JOIN 的别名在 `C()` 调用那一刻就固定了，而实参先于 `Join` 求值。** `Join` 会给没有别名的
+表自动分配 `t1`、`t2`…，`C()` 把当时的别名烘进字符串；函数实参在 `Join` 运行之前就求完了，
+所以连下面这条「一条链」的写法都是错的：
+
+```go
+users := sqlbuilder.Table("users")
+
+sel := sqlbuilder.Select(users.C("id")).From(orders).Join(users)
+// SELECT `users`.`id` FROM `orders` JOIN `users` AS `t1`
+//          ^^^^^^^^^^ FROM 里这张表已经叫 t1 了，运行时报「未知列」
+```
+
+`Join` 跑完之后同一个 `users.C("id")` 才变成 `` `t1`.`id` ``——同一张表前后取到不同字符串，
+所以重跑一遍偶然而已。显式起别名不受求值顺序影响，这是唯一稳的写法
+（`TestJoinAliasIsFixedWhenCIsCalled` 钉住这两段行为）：
+
+```go
+orders := sqlbuilder.Table("orders").As("o")
+users := sqlbuilder.Table("users").As("u")
+
+sqlbuilder.Select(orders.C("id"), users.C("name")).
+    From(orders).
+    Join(users).On(orders.C("user_id"), users.C("id"))
+// SELECT `o`.`id`, `u`.`name` FROM `orders` AS `o` JOIN `users` AS `u` ON `o`.`user_id` = `u`.`id`
+```
+
 ## 写语句与 upsert
 
 `Insert` / `Update` / `Delete` 是为 gorm 链式表达不了的语句准备的（批量 upsert 且新值要计算、
@@ -129,19 +184,26 @@ stmt, args, err := sqlbuilder.Build(
 且不报错**——上游按方言分支渲染，没有 default 分支。`TestUpsertWithoutDialectIsInvalid` 钉住了
 这个行为。
 
-## 七条规则
+## 八条规则
 
-1. **`Predicate` 有状态，不能并发复用。** `Query()` 会先 `Reset()` 自己再重放回调。同一个
-   `*Predicate` 被两个 goroutine 同时 `Query()` 就是 data race，跨请求缓存同样危险。
-   谓词在函数内构造、函数内消费，不存字段、不跨 goroutine。
-2. **不要把 slice 传给 `EQ`。** 构造器把它当一个参数，gorm 的 `Raw` 又把它当 `IN` 展开，
+1. **`Predicate` 有状态，不能并发复用。** 它内部是 `{Builder, depth, fns}`：`Query()` 往自己的
+   缓冲区里写、写之前先 `Reset()`，`And`/`Or` 渲染时还会回写子谓词的 `depth`。同一个
+   `*Predicate` 被两个 goroutine 同时 `Query()`，`-race` 会在 `mayWrap` 的 `preds[i].depth = …`
+   处报 data race。跨请求缓存同样危险，而且**单线程也会错**。谓词在函数内构造、函数内消费，
+   不存字段、不跨 goroutine。
+2. **`Predicate` 自身不带运算符，不是可复用的模板。** 组合只发生在 `And`/`Or` 里（它们负责在
+   操作数之间写 `AND`/`OR`）。在已有谓词上调 `p.In(...)` / `p.EQ(...)` 是往同一个输出流里追加
+   片段，没有分隔符：`` `status` = ?`id` IN (?, ?) ``，参数还会累积
+   （`TestSharedPredicateIsNotATemplate`）。要加条件就重新 `And(...)` 一个新的。
+3. **不要把 slice 传给 `EQ`。** 构造器把它当一个参数，gorm 的 `Raw` 又把它当 `IN` 展开，
    两种解释会打架。列表条件用 `InSlice(col, vals)`（`[]string` 也摊不进 `In` 的 `...any`）。
-3. **表名不经过 gorm 的 `NamingStrategy`。** `Table("orders")` 就是字面量。配了表前缀或
+4. **表名不经过 gorm 的 `NamingStrategy`。** `Table("orders")` 就是字面量。配了表前缀或
    复数化的项目必须从 `model.TableName()` / 列常量取，不要手写。
-4. **方言要显式决定，SQLite 不能显式传**（见下表）。
-5. **`Build` 出错时语句与参数都为空**，不要执行半成品。
-6. **`*SelectTable` 有状态**：与语句一起构造，不缓存、不跨方言复用（见「方言」一节）。
-7. **upsert 走 `Dialect(...).Insert(...)`**：不带方言时冲突子句不会渲染，也不报错。
+5. **方言要显式决定，SQLite 不能显式传**（见下表）。
+6. **`Build` 出错时语句与参数都为空**，不要执行半成品。
+7. **`*SelectTable` 有状态**：与语句一起构造，不缓存、不跨方言复用（见「方言」一节）；
+   别名也会被 `Join` 自动分配并被 `C()` 固化（见「谓词挂到哪里」）。
+8. **upsert 走 `Dialect(...).Insert(...)`**：不带方言时冲突子句不会渲染，也不报错。
 
 ## 方言
 

@@ -263,6 +263,99 @@ func TestBuildReportsConstructionError(t *testing.T) {
 	}
 }
 
+// TestJoinAliasIsFixedWhenCIsCalled pins the footgun behind "build tables next to
+// the statement": Join assigns t1, t2, ... to a table that has no alias, and C
+// bakes whatever alias exists at the moment it is called. Function arguments are
+// evaluated before Join runs, so even the one-expression form renders a SELECT
+// list pointing at `users` while the FROM clause has renamed it to t1 — a
+// statement that fails at run time with "unknown column". An explicit As makes
+// the two agree regardless of evaluation order.
+// TestJoinAliasIsFixedWhenCIsCalled 固定「表对象与语句一起构造」背后的坑：Join 会给没有
+// 别名的表分配 t1、t2…，而 C 在调用那一刻就把当时的别名烘进字符串。函数实参在 Join 之前
+// 求值，所以即使写成一条链，SELECT 列表里仍是 `users`，而 FROM 已经把这张表改名为 t1——
+// 运行时报「未知列」。显式 As 之后两次取值一致，与求值顺序无关。
+func TestJoinAliasIsFixedWhenCIsCalled(t *testing.T) {
+	users := sqlbuilder.Table("users")
+	before := users.C("name")
+	if before != "`users`.`name`" {
+		t.Fatalf("C before Join = %q, want `users`.`name`", before)
+	}
+
+	stmt, _, err := sqlbuilder.Build(
+		sqlbuilder.Select(users.C("id")).From(sqlbuilder.Table("orders")).Join(users),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const wantBroken = "SELECT `users`.`id` FROM `orders` JOIN `users` AS `t1`"
+	if stmt != wantBroken {
+		t.Fatalf("stmt =\n%s\nwant\n%s", stmt, wantBroken)
+	}
+
+	// After the join the same helper renders the alias, so a statement rebuilt
+	// from here happens to be correct — which is exactly why the ordering bug is
+	// so easy to miss.
+	if after := users.C("id"); after != "`t1`.`id`" {
+		t.Fatalf("C after Join = %q, want `t1`.`id`", after)
+	}
+
+	aliased := sqlbuilder.Table("users").As("u")
+	first := aliased.C("name")
+	stmt, _, err = sqlbuilder.Build(
+		sqlbuilder.Select(aliased.C("id")).From(sqlbuilder.Table("orders")).Join(aliased),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const wantAliased = "SELECT `u`.`id` FROM `orders` JOIN `users` AS `u`"
+	if stmt != wantAliased {
+		t.Fatalf("stmt =\n%s\nwant\n%s", stmt, wantAliased)
+	}
+	if aliased.C("name") != first {
+		t.Fatalf("an explicit alias changed after Join: %q then %q", first, aliased.C("name"))
+	}
+}
+
+// TestSharedPredicateIsNotATemplate pins what "keep a predicate in a field and
+// add conditions per request" actually does. A Predicate carries no operator:
+// combining happens in And/Or, which wrap their operands. Calling p.In(...) on an
+// existing predicate appends an unseparated fragment to the same stream, so every
+// reuse leaves the statement longer and invalid, with the args still accumulating.
+// Concurrent reuse never gets that far — Build renders into the predicate's own
+// Builder and mayWrap writes the child's depth, which -race reports at mayWrap.
+// TestSharedPredicateIsNotATemplate 固定「把谓词存进字段、每次请求往上加条件」的真实后果。
+// Predicate 自身不带运算符：组合由 And/Or 完成（它们会包住操作数）。在已有谓词上调用
+// p.In(...) 只是往同一个输出流里追加一段没有分隔符的片段，因此每次复用都让语句更长且无效，
+// 参数也一起累积。并发复用更早出问题——Build 渲染进谓词自己的 Builder，mayWrap 还会写子谓词
+// 的 depth，-race 会在 mayWrap 处报数据竞争。
+func TestSharedPredicateIsNotATemplate(t *testing.T) {
+	tpl := sqlbuilder.EQ("status", "paid")
+
+	first, firstArgs, err := sqlbuilder.Build(tpl.In("id", 1, 2))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const wantFirst = "`status` = ?`id` IN (?, ?)"
+	if first != wantFirst {
+		t.Fatalf("first reuse =\n%s\nwant\n%s", first, wantFirst)
+	}
+	if len(firstArgs) != 3 || firstArgs[0] != "paid" || firstArgs[1] != 1 || firstArgs[2] != 2 {
+		t.Fatalf("first args = %#v, want [paid 1 2]", firstArgs)
+	}
+
+	second, secondArgs, err := sqlbuilder.Build(tpl.In("id", 3, 4))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const wantSecond = "`status` = ?`id` IN (?, ?)`id` IN (?, ?)"
+	if second != wantSecond {
+		t.Fatalf("second reuse =\n%s\nwant\n%s", second, wantSecond)
+	}
+	if len(secondArgs) != 5 {
+		t.Fatalf("second args = %#v, want the first call's args still in there", secondArgs)
+	}
+}
+
 // TestDialectQuoting pins the three quoting behaviours the package doc warns
 // about. The SQLite case asserts a defect on purpose: ent renders the column as
 // backticks around a double-quoted name, which SQLite reads as one column named
