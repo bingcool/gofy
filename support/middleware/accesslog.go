@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -94,6 +95,20 @@ func DefaultSensitiveQueryKeys() []string {
 	}
 }
 
+// Validate rejects an option set AccessLog cannot honour. Only MaxPathLength has
+// an invalid value: a negative limit makes the truncation test always true and
+// the slice expression panic, so it is reported here instead of at the first
+// request. Zero is valid and means "use the default".
+// Validate 拒绝 AccessLog 无法执行的配置。只有 MaxPathLength 存在非法值：负数会让
+// 截断判断恒真、切片表达式 panic，所以在这里报错而不是等到第一个请求。零值合法，
+// 表示使用默认值。
+func (o AccessLogOptions) Validate() error {
+	if o.MaxPathLength < 0 {
+		return fmt.Errorf("middleware: access log max path length must not be negative, got %d", o.MaxPathLength)
+	}
+	return nil
+}
+
 // withDefaults fills the zero-value fields with defaults. Slices are checked
 // with nil rather than len==0, so a caller can pass an explicit empty slice to
 // turn the matching capability off (for example an empty SensitiveQuery means
@@ -109,7 +124,13 @@ func (o AccessLogOptions) withDefaults() AccessLogOptions {
 	if out.SlowThreshold == 0 {
 		out.SlowThreshold = 500 * time.Millisecond
 	}
-	if out.MaxPathLength == 0 {
+	// Non-positive, not just zero: AccessLog cannot return an error, and a
+	// negative limit would panic on every request. Validate rejects it at
+	// construction time for configured apps; this clamp keeps a direct caller
+	// that skipped Validate from taking the process down.
+	// 判非正而不只是零：AccessLog 无法返回错误，负数会在每个请求上 panic。配置过的应用
+	// 由 Validate 在构造时报错；这里的兜底让跳过 Validate 的直接调用方不至于打挂进程。
+	if out.MaxPathLength <= 0 {
 		out.MaxPathLength = 1024
 	}
 	if out.SensitiveQuery == nil {

@@ -487,10 +487,6 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system, access *zap.Logger, fa
 	return engine, modules, nil
 }
 
-func (a *App) buildModules(rt *core.Runtime) ([]support.Module, error) {
-	return a.buildModulesWith(rt, a.opts.moduleFactories, a.opts.modules)
-}
-
 func (a *App) buildModulesWith(rt *core.Runtime, factories []support.ModuleFactory, injected []support.Module) ([]support.Module, error) {
 	modules := make([]support.Module, 0, len(factories)+len(injected))
 	seen := make(map[string]struct{}, cap(modules))

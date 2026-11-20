@@ -113,6 +113,12 @@ func TestDDLQuotesTableAndAddsClaimIndex(t *testing.T) {
 		"fail_handle_time   DATETIME NULL DEFAULT NULL COMMENT '最近一次失败时间'",
 		"created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人'",
 		"deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间'",
+		// created_at must not carry ON UPDATE: every claim, renewal and write-back
+		// touches the row, so the column would stop meaning "when the job was
+		// created" and any ops query sorted by it would be wrong.
+		// created_at 不能带 ON UPDATE：每次认领、续期、回写都会碰这一行，带上的话它
+		// 就不再表示"任务创建时间"，任何按它排序的运维查询都是错的。
+		"created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'",
 		"updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'",
 	} {
 		if !strings.Contains(ddl, want) {

@@ -21,8 +21,6 @@ import (
 //go:embed all:templates
 var templatesFS embed.FS
 
-const gofyModule = "github.com/bingcool/gofy"
-
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 type scaffold struct {

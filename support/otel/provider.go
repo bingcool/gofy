@@ -110,14 +110,19 @@ func WithSpanExporter(exporter sdktrace.SpanExporter) Option {
 	}
 }
 
-// New validates cfg and builds the tracing pipeline. It does not connect to
-// the collector; export failures are retried in the background and reported
-// through the logger. A disabled Config returns a disabled Provider without
-// creating an exporter.
+// New validates cfg and builds the tracing pipeline. It does not wait for the
+// collector to be reachable; export failures are retried in the background and
+// reported through the logger. ctx is handed to the OTLP exporter constructor,
+// which uses it while establishing its client — the previous version accepted a
+// ctx and then ignored it, so a caller could not bound construction at all. A
+// disabled Config returns a disabled Provider without creating an exporter.
 //
 // 进程级全局设置（ErrorHandler、TracerProvider、TextMapPropagator）只在
 // Config.Global 为 true 时安装；Global=false 时创建和关闭 Provider 都不会
 // 改动它们。同一进程如果要运行多个互不干扰的 App，必须保持 Global=false。
+//
+// ctx 交给 OTLP exporter 的构造函数，由它在建立客户端时使用；此前这个参数被接收
+// 后完全没有读取，调用方无法对构造过程施加任何约束。New 仍不等待 collector 可达。
 func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -162,7 +167,7 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*Provider, error) {
 	exporter := po.exporter
 	if exporter == nil {
 		var err error
-		exporter, err = newExporter(cfg)
+		exporter, err = newExporter(ctx, cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -364,14 +369,14 @@ func sortedKeys(values map[string]string) []string {
 	return keys
 }
 
-func newExporter(cfg Config) (sdktrace.SpanExporter, error) {
+func newExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, error) {
 	if cfg.Protocol == ProtocolHTTP {
-		return newHTTPExporter(cfg)
+		return newHTTPExporter(ctx, cfg)
 	}
-	return newGRPCExporter(cfg)
+	return newGRPCExporter(ctx, cfg)
 }
 
-func newGRPCExporter(cfg Config) (sdktrace.SpanExporter, error) {
+func newGRPCExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, error) {
 	opts := []otlptracegrpc.Option{otlptracegrpc.WithTimeout(cfg.Timeout)}
 	if len(cfg.Headers) > 0 {
 		opts = append(opts, otlptracegrpc.WithHeaders(cfg.Headers))
@@ -393,10 +398,10 @@ func newGRPCExporter(cfg Config) (sdktrace.SpanExporter, error) {
 		}
 		opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
 	}
-	return otlptracegrpc.New(context.Background(), opts...)
+	return otlptracegrpc.New(ctx, opts...)
 }
 
-func newHTTPExporter(cfg Config) (sdktrace.SpanExporter, error) {
+func newHTTPExporter(ctx context.Context, cfg Config) (sdktrace.SpanExporter, error) {
 	opts := []otlptracehttp.Option{otlptracehttp.WithTimeout(cfg.Timeout)}
 	if len(cfg.Headers) > 0 {
 		opts = append(opts, otlptracehttp.WithHeaders(cfg.Headers))
@@ -420,7 +425,7 @@ func newHTTPExporter(cfg Config) (sdktrace.SpanExporter, error) {
 		}
 		opts = append(opts, otlptracehttp.WithTLSClientConfig(tlsCfg))
 	}
-	return otlptracehttp.New(context.Background(), opts...)
+	return otlptracehttp.New(ctx, opts...)
 }
 
 func (c Config) tlsConfig() (*tls.Config, error) {

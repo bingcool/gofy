@@ -19,6 +19,11 @@
 --
 -- 时间列用普通 DATETIME（秒精度）：claim 在 Go 侧把租约与退避向上取整到整秒，
 -- SQL 里的过期比较仍用 NOW(3)，两种精度都能正确比较。
+--
+-- 存量表迁移：早期版本的 created_at 带 ON UPDATE，每次认领都会把"创建时间"刷新成
+-- 当前时间。已经建过表的库执行下面这条（表名按实际替换），新建表直接用本文件：
+--   ALTER TABLE `claim_job_task`
+--     MODIFY COLUMN `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间';
 CREATE TABLE IF NOT EXISTS `claim_job_task` (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   job_type    VARCHAR(64)  NOT NULL COMMENT '任务类型',
@@ -34,7 +39,7 @@ CREATE TABLE IF NOT EXISTS `claim_job_task` (
   finish_handle_time DATETIME NULL DEFAULT NULL COMMENT '状态改为2(已完成)的时间',
   fail_handle_time   DATETIME NULL DEFAULT NULL COMMENT '最近一次失败时间',
   created_by  VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '创建人',
-  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '创建时间',
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   deleted_at  DATETIME     NULL DEFAULT NULL COMMENT '删除时间',
   PRIMARY KEY (id),

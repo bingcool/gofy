@@ -66,16 +66,6 @@ func redactError(err error, secrets []string) error {
 	return &redactedError{err: err, secrets: secrets}
 }
 
-// redactValue is the log-side counterpart: it never returns any part of the
-// input, only whether a value was present.
-// redactValue 是日志侧的做法：不返回输入的任何一个字符，只表明有没有值。
-func redactValue(v string) string {
-	if v == "" {
-		return ""
-	}
-	return redacted
-}
-
 // truncate collapses s to one line and cuts it to n runes, appending an
 // ellipsis when something was dropped. Rune-based so a multi-byte character is
 // never split in half.

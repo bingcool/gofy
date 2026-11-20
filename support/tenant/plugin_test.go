@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bingcool/gofy/support/frameworkcontext"
@@ -14,6 +15,15 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
+
+// tenantDBCounter names the in-memory databases. The name has to be unique per
+// open, not per test: -count=2 re-runs the same test name in one process and
+// cache=shared would hand the second run the first run's tables and rows,
+// turning a clean test into a fake cross-tenant leak.
+// tenantDBCounter 给内存库起名。名字必须每次打开都唯一，而不只是每个测试唯一：
+// -count=2 会在同一进程里重跑同名测试，cache=shared 会把第一轮的表和数据交给第二轮，
+// 让一条干净的测试伪装成跨租户泄漏。
+var tenantDBCounter atomic.Int64
 
 // order is tenant-aware: it declares tenant_id. cargo is not, so the plugin
 // must leave it alone.
@@ -52,13 +62,22 @@ func upstreamCtx(id string) context.Context {
 
 func openDB(t *testing.T, opts tenant.Options) *gorm.DB {
 	t.Helper()
-	// Each test gets its own in-memory database; a shared DSN plus sqlite's
-	// pooling would otherwise leak tables between cases.
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())),
+	// Each call gets its own in-memory database, and the handle is closed when
+	// the test ends: a shared DSN plus sqlite's pooling would otherwise leak
+	// tables between cases, and between repeated runs of the same case.
+	// 每次调用一个独立内存库，并在测试结束时关闭句柄：共享 DSN 加上 sqlite 的连接池
+	// 会让表在用例之间、以及同一用例的重复运行之间泄漏。
+	dsn := fmt.Sprintf("file:tenant_%d?mode=memory&cache=shared", tenantDBCounter.Add(1))
+	db, err := gorm.Open(sqlite.Open(dsn),
 		&gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sqlite handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&order{}, &cargo{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

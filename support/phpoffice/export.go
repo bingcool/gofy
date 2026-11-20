@@ -209,7 +209,7 @@ func Export(ctx context.Context, dir string, spec ExportSpec) (*ExportResult, er
 	if err != nil {
 		return nil, err
 	}
-	dir, path := plan.dir, plan.path
+	path := plan.path
 	headers, sheetName := plan.headers, plan.sheetName
 	fileName, widths := plan.fileName, plan.widths
 	freezeRows, layout := plan.freezeRows, plan.layout

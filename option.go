@@ -732,6 +732,9 @@ func WithAccessLog(enabled bool) Option {
 // SensitiveQuery）或默认数值（SlowThreshold、MaxPathLength）。
 func WithAccessLogOptions(opts middleware.AccessLogOptions) Option {
 	return func(o *options) error {
+		if err := opts.Validate(); err != nil {
+			return err
+		}
 		o.accessLog = true
 		o.accessLogOptions = &opts
 		return nil

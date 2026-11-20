@@ -510,3 +510,37 @@ func TestCORSRejectsInvalidPatterns(t *testing.T) {
 		}
 	}
 }
+
+// TestAccessLogRejectsNegativeMaxPathLength: a negative cap used to flip the
+// truncation test and panic on path[:negative] for every request. It has to be
+// reported at construction, not at the first request.
+// TestAccessLogRejectsNegativeMaxPathLength：负数上限会让截断判断恒真，并对每个
+// 请求执行 path[:负数] 而 panic。必须在构造时报错，而不是等到第一个请求。
+func TestAccessLogRejectsNegativeMaxPathLength(t *testing.T) {
+	opts := middleware.DefaultAccessLogOptions()
+	opts.MaxPathLength = -1
+	if err := opts.Validate(); err == nil {
+		t.Fatal("Validate accepted a negative max path length")
+	}
+
+	// AccessLog cannot return an error, so it must at least clamp instead of
+	// panicking when a direct caller skipped Validate.
+	// AccessLog 无法返回错误，至少要在直接调用方跳过 Validate 时收敛到默认值而不是 panic。
+	core, logs := observer.New(zapcore.InfoLevel)
+	engine := newGin()
+	engine.Use(middleware.AccessLog(zap.New(core), opts))
+	engine.GET("/orders", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/orders", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	entries := logs.FilterMessage("http access").All()
+	if len(entries) != 1 {
+		t.Fatalf("access log entries = %d, want 1", len(entries))
+	}
+	if got := entries[0].ContextMap()["path"]; got != "/orders" {
+		t.Fatalf("path = %v, want /orders", got)
+	}
+}

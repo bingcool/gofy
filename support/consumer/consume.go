@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -768,7 +769,7 @@ func (p *Processor) extract(ctx context.Context, headers map[string]string) cont
 // panic。
 func consumerTracer(rt *core.Runtime) trace.Tracer {
 	if rt.TracerProvider == nil {
-		return trace.NewNoopTracerProvider().Tracer("gofy/support/consumer")
+		return noop.NewTracerProvider().Tracer("gofy/support/consumer")
 	}
 	return rt.TracerProvider.Tracer("gofy/support/consumer")
 }
