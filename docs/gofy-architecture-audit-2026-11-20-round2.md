@@ -7,7 +7,9 @@ adapter 约 4.5k 行）\
 **审计原则：** 不新增功能。只报告 Bug、正确性缺陷、并发与生命周期问题、资源泄漏、安全隐患、
 明显的性能与一致性缺陷。\
 **修复进度：** §3 的 8 组 P0/P1 **全部已修**（`a697efd`：§3.1(a)、§3.2、§3.3、§3.4；
-`cd6aa3c`：§3.1(b)(c)、§3.5–§3.8）。§4 的 P2 未动。已修项在标题上标注，正文末尾附修复依据。
+`cd6aa3c`：§3.1(b)(c)、§3.5–§3.8）。§4 的 6 组 P2 **全部已修**（`d44fd18` 修 gofy 侧的
+§4.1、§4.2、§4.4–§4.6；`c25e272`@gofy-interface-api 修 §4.3）。已修项在标题上标注，
+正文末尾附修复依据。
 
 ## 1. 方法与边界
 
@@ -35,14 +37,15 @@ adapter 约 4.5k 行）\
 | --- | --- | --- | --- |
 | P0 | 1 | 1 | 延迟队列在停机瞬间永久丢消息（一次正常发布即触发） |
 | P1 | 7 | 7 | 租户隔离、普通队列停机丢消息、消息 ID 长度、Nacos 配置变更丢失、reload 丢 SQL 策略、worker 模式 Shutdown 无效、`silent` 语义失效 |
-| P2 | 6 组 | 0 | DDL 时间戳、Slice 越界、JSON null、测试不可重复、死代码与过时 API、OTEL 未用 ctx |
+| P2 | 6 组 | 6 | DDL 时间戳、Slice 越界、JSON null、测试不可重复、死代码与过时 API、OTEL 未用 ctx |
 
 **两批修完 §3 全部 P0/P1**：`a697efd` 修了 §3.1(a)、§3.2、§3.3、§3.4；`cd6aa3c` 修了写入侧
 的 §3.1(b)(c) 与 §3.5–§3.8。每条都补了能在旧代码上失败的回归测试，失败信息里带着现场
 （`ZCARD = 0`、"leaked tenant b"、`tenant=""`）。
 
-§4 的 6 组 P2 仍未动；其中最值得先做的是 4.1 的 `created_at` 与 4.4 的测试可重复性——前者影响
-运维判断，后者影响后续租户相关改动的可信度。
+§4 的 6 组 P2 已全部修复：`d44fd18` 修 gofy 侧五组，`c25e272`@gofy-interface-api 修 JSON null。
+其中 4.1 的 `created_at` 与 4.4 的测试可重复性先做——前者影响运维判断，后者影响后续租户相关
+改动的可信度。
 
 ---
 
@@ -404,7 +407,7 @@ warn，但错误信息现在列出 `silent` 作为合法取值。
 
 ## 4. P2
 
-### 4.1 `claim` 的 DDL 让 `created_at` 每次更新都变
+### 4.1 `claim` 的 DDL 让 `created_at` 每次更新都变（已修复）
 
 - **位置**：`support/claim/claim.go:827`
 - **证据**：`created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`
@@ -413,7 +416,13 @@ warn，但错误信息现在列出 `silent` 作为合法取值。
 - **建议**：去掉 `created_at` 的 `ON UPDATE`。表由应用自己建，改 DDL 常量的同时要在 README
   标出迁移语句。
 
-### 4.2 AccessLog 的 `MaxPathLength` 为负数时 panic
+**修复（`d44fd18`）**：`DDL()` 常量与 `claim.sql` 同时去掉 `created_at` 的 `ON UPDATE`，
+`updated_at` 保持不变。存量表在 `claim.sql` 顶部给出迁移语句
+（`ALTER TABLE ... MODIFY COLUMN created_at ...`）——表由应用维护，框架不会自动改结构。
+`TestDDLQuotesTableAndAddsClaimIndex` 增加一条断言：DDL 必须包含不带 `ON UPDATE` 的
+`created_at` 行，旧文本下这条断言直接失败。
+
+### 4.2 AccessLog 的 `MaxPathLength` 为负数时 panic（已修复）
 
 - **位置**：`support/middleware/accesslog.go:166`、`:182`；`withDefaults`（`:112`）只处理 0
 - **证据**：`if len(path) > opts.MaxPathLength { path = path[:opts.MaxPathLength] }` —— 负数时条件
@@ -421,7 +430,14 @@ warn，但错误信息现在列出 `silent` 作为合法取值。
 - **影响**：配置写错一个符号，每个请求都 panic（有 Recovery 时变成全站 500）。
 - **建议**：构造时校验 `MaxPathLength > 0`，非法直接返回错误。
 
-### 4.3 契约类型不接受 JSON `null`
+**修复（`d44fd18`）**：新增 `AccessLogOptions.Validate()`，`MaxPathLength < 0` 返回错误；
+`WithAccessLogOptions` 是会返回 error 的 Option，在配置生效前调用它，非法值因此变成启动错误。
+`AccessLog` 返回 `gin.HandlerFunc`、无法报错，所以 `withDefaults` 把非正值收敛为默认的 1024：
+跳过 `Validate` 的直接调用方不会在每个请求上 panic。
+`TestAccessLogRejectsNegativeMaxPathLength` 同时钉住两半：`Validate` 报错，以及绕过校验时
+请求仍返回 200 且留下访问日志。
+
+### 4.3 契约类型不接受 JSON `null`（已修复）
 
 - **位置**：`gofy-interface-api/contracts/common/types/date.go:46`、`int64_string.go:26`/`:62`
 - **证据**：`strings.Trim(string(b), `"`)` 之后直接 `time.Parse` / `ParseUint`，`null` 会解析失败。
@@ -429,7 +445,12 @@ warn，但错误信息现在列出 `silent` 作为合法取值。
   契约的兼容性缺口。
 - **建议**：`UnmarshalJSON` 首行判 `bytes.Equal(b, []byte("null"))` 时置零并返回 nil。
 
-### 4.4 `support/tenant` 的测试不可重复，且失败信息会冒充隔离缺陷
+**修复（`c25e272`@gofy-interface-api）**：`Date`、`Uint64String`、`Int64String` 的
+`UnmarshalJSON` 首行判 `null`，置零后返回 nil；原有的字符串/裸数字形态与错误信息不变。
+新增 `contracts/common/types/types_test.go`：null 落零值，`2026-11-20`、uint64 最大值、
+int64 最小值仍能往返，非法输入仍然报错。
+
+### 4.4 `support/tenant` 的测试不可重复，且失败信息会冒充隔离缺陷（已修复）
 
 - **位置**：`support/tenant/plugin_test.go:57`
 - **证据**：内存库名取自 `t.Name()`，重复运行时同名库被复用：
@@ -448,7 +469,11 @@ $ go test -count=2 ./support/tenant/
 - **建议**：库名加进程内自增序号（或用 `time.Now().UnixNano()`，与 `support/consumer` 的写法
   一致），并 `t.Cleanup` 关闭连接。
 
-### 4.5 死代码与过时 API
+**修复（`d44fd18`）**：库名从 `t.Name()` 改为进程内自增序号（`tenant_<n>`），每次 `openDB`
+都拿到独立内存库；并用 `t.Cleanup` 关闭底层 `*sql.DB`，句柄不再留到进程结束。
+`go test -count=2 ./support/tenant/` 现在通过。
+
+### 4.5 死代码与过时 API（已修复）
 
 | 位置 | 内容 |
 | --- | --- |
@@ -461,13 +486,21 @@ $ go test -count=2 ./support/tenant/
 - **影响**：无功能影响，但前三条会误导阅读者以为存在第二条路径。
 - **建议**：删除或接上；废弃 API 换成 `noop.NewTracerProvider()`。
 
-### 4.6 OTEL 的 `New(ctx, ...)` 接受 context 却从不使用
+**修复（`d44fd18`）**：`buildModules`、`gofyModule`、`redactValue`、office 导出里未使用的
+`dir` 全部删除；`trace.NewNoopTracerProvider` 换成 `noop.NewTracerProvider()`。
+`go build ./...`、`go vet ./...` 与全量测试均通过。
+
+### 4.6 OTEL 的 `New(ctx, ...)` 接受 context 却从不使用（已修复）
 
 - **位置**：`support/otel/provider.go:122`
 - **证据**：`if ctx == nil { ctx = context.Background() }`，之后整个函数再未读 `ctx`
   （staticcheck SA4006/SA4017）。
 - **影响**：调用方以为可以用 ctx 控制初始化超时，实际不能；导出器建连超时只能靠自身配置。
 - **建议**：要么把 ctx 传给 `newExporter`（OTLP 建连用它），要么去掉这个参数并在文档里说清。
+
+**修复（`d44fd18`）**：`ctx` 一路传到 `newExporter` → `newGRPCExporter` / `newHTTPExporter`，
+OTLP 的 gRPC 与 HTTP 构造函数改用调用方 ctx（原来各自写 `context.Background()`）。
+`New` 仍不等待 collector 可达，注释里写清它约束的是 exporter 构造而不是建连结果。
 
 ---
 
@@ -505,5 +538,5 @@ $ go test -count=2 ./support/tenant/
 4. ~~**§3.5 / §3.6 配置与重载**（排查成本最高的两类：静默用旧配置、重载后行为变化）。~~
    **已完成**（`cd6aa3c`）。
 5. ~~**§3.7 / §3.8 生命周期与日志语义**。~~ **已完成**（`cd6aa3c`）。
-6. **§4 的 P2**（当前仅剩的部分），其中 4.1 的 `created_at` 与 4.4 的测试可重复性建议尽早做
-   ——前者影响运维判断，后者影响后续所有租户相关改动的可信度。
+6. ~~**§4 的 P2**（当前仅剩的部分），其中 4.1 的 `created_at` 与 4.4 的测试可重复性建议尽早做。~~
+   **已完成**（`d44fd18`、`c25e272`@gofy-interface-api）。
