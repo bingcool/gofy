@@ -73,7 +73,7 @@ if err != nil {
 
 | | `support/registry` | `support/middleware.Registry` |
 | --- | --- | --- |
-| 存放内容 | 任意跨模块实例 | 只存 `support.Middleware` |
+| 存放内容 | 任意跨模块实例 | 只存 `support.MiddlewareFunc` |
 | 类型 | `any` + 泛型 `Get[T]` | 强类型 |
 | 使用方 | 应用装配期登记，按名取用 | Router / adapter 解析契约中间件名 |
 

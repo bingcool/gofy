@@ -21,7 +21,7 @@ Gin 中间件集合：请求 ID、访问日志、异常恢复、Body 上限、CO
 | `SecurityHeaders` | `NameSecurityHeaders` = `security-headers` | `SecurityHeaders(cfg)` | `WithSecurityHeaders(cfg)` | `X-Content-Type-Options`、`X-Frame-Options`、Referrer-Policy、HSTS、CSP、Permissions-Policy 与自定义头 |
 | `HeaderPropagation` | `NameHeaderPropagation` = `header-propagation` | `HeaderPropagation(trustedProxies)` | `WithHeaderPropagation(true)` | 把入口白名单头写入 context；身份头只采信可信代理，`Authorization`/`Cookie` 永不透传 |
 
-`support.Middleware` 就是 `gin.HandlerFunc`，因此自定义 gin 中间件可以直接
+`support.MiddlewareFunc` 就是 `gin.HandlerFunc`，因此自定义 gin 中间件可以直接
 传给 `gofy.WithMiddleware(...)` 或 `support.Router.Use(...)`。
 
 别名常量只是**名字**，不会自动注册，也不改变 App 级安装顺序：全局链仍由
@@ -172,15 +172,15 @@ func (m *Module) Register(r *support.Router) error {
     h := controller.NewOrderController(m.svc, m.logger)
     opts := gofyadapter.BindOptions{
         // 只对契约路由生效的通用中间件，不走名字。
-        Global: []support.Middleware{
+        Global: []support.MiddlewareFunc{
             gofymiddleware.RequestID(support.DefaultRequestIDHeader),
         },
         // 也可以绕过名字，直接按 OperationID 追加实例。
-        Routes: map[string][]support.Middleware{
+        Routes: map[string][]support.MiddlewareFunc{
             "CreateOrder": {auditMiddleware},
         },
         // 契约声明 RateLimit 时按 spec 生成限流中间件。
-        RateLimit: func(spec endpoint.Spec) support.Middleware {
+        RateLimit: func(spec endpoint.Spec) support.MiddlewareFunc {
             return limiter.For(spec.OperationID)
         },
     }
@@ -219,7 +219,7 @@ func (m *Module) Register(r *support.Router) error {
 | `NewRegistry()` | 创建空注册表；由 App 在每次装配（启动 / `Reload`）时创建，不是包级全局 |
 | `Register(name, mw) error` | 别名去首尾空白后不能为空、实例不能为 nil、同名不可覆盖，违反任一条返回错误 |
 | `MustRegister(name, mw)` | `Register` 的 panic 版本，用于启动期装配，别名写错立刻失败 |
-| `Lookup(name) (support.Middleware, bool)` | 按别名查实例；名字不存在、值为 nil 或注册表本身为 nil 都返回 `(nil, false)` |
+| `Lookup(name) (support.MiddlewareFunc, bool)` | 按别名查实例；名字不存在、值为 nil 或注册表本身为 nil 都返回 `(nil, false)` |
 | `Names() []string` | 已注册别名的排序副本，用于启动日志与排查 |
 
 规则与取舍：
@@ -238,7 +238,7 @@ func (m *Module) Register(r *support.Router) error {
   分组名带 `group "<prefix>"` 前缀、路由名带 OperationID 前缀，路由不会带着
   缺失的中间件上线。
 - **adapter 不依赖具体类型**：`gofyadapter.MiddlewareRegistry` 只要求
-  `Lookup(name string) (support.Middleware, bool)`，因此可以注入自己的实现。
+  `Lookup(name string) (support.MiddlewareFunc, bool)`，因此可以注入自己的实现。
 - **只服务契约路由**：App 级全局链仍由 `gofy.With*` 选项安装，注册表不接管它。
   把已在全局链安装的中间件（如 `NameCORS`）再注册给契约路由会执行两次，
   只在确实需要「按路由覆盖全局行为」时才这么做。
