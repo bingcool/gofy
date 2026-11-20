@@ -14,12 +14,12 @@
 |---|---|
 | 1 包与 `Build` | `support/sqlbuilder/sqlbuilder.go`：re-export + `Build` + `TenantScope`；`go vet`、`gofmt` 干净 |
 | 2 依赖 | go.mod +2 行（`entgo.io/ent` 直接、`go.opencensus.io` 版本提升），go.sum +18 行，与第五节实测一致；依赖图里只有 `entgo.io/ent/dialect` 与 `dialect/sql` |
-| 3 README | 五条规则、方言表、租户约定、什么时候不该用、依赖成本与退出成本 |
+| 3 README | 覆盖范围、七条规则、方言表、写语句与 upsert、租户约定、什么时候不该用、依赖成本与退出成本 |
 | 4 示例与对照测试 | `ListUnsoldProductsWithBuilder` 与 Raw 版本并列；`TestListUnsoldProductsBuilderMatchesRaw` 在 4 个 limit 值上比对两者，再断言已知答案 |
 | 5 分层文档 | `module-layering-design.md` §3.5 增加「复杂报表可选 `support/sqlbuilder`」，顺带修正该节过时的 `NewDBIO` + `gofydb.WithContext` 写法（`DBConnect` 已取代两步） |
 | 6 守卫检查 | `controller` 当前没有 import 它；**没有加禁令**，理由见下 |
 
-四个落地时才定下来的点：
+五个落地时才定下来的点：
 
 1. **多导出了 `DialectMySQL` / `DialectPostgres`**。第 8 节的草图只有 `Dialect`，但 PostgreSQL 需要传方言名才能切换到双引号，调用方就得 `import "entgo.io/ent/dialect"`——第 8 节自己写的「`entgo.io/ent` 的名字不会散落到业务代码里」当场不成立。SQLite 的方言名刻意不导出，理由见第十节第 4 条。`LockAction` 类型也一并转发，`WithLockAction` 的入参需要它。
 2. **第 6 步不加守卫**。`controller` 的白名单里 `support` 是放行的，因此它「可以」import 构造器。但入口平权已经明确 controller 可以直接写裸 SQL，只禁构造器而放开裸 SQL 是自相矛盾。约定保留在 §3.5（构造 SQL 属于 query / repository），要真正拦住得同时禁掉入口层的裸 SQL 拼接——那与入口平权冲突，需要单独决策。
@@ -29,6 +29,13 @@
    随后改掉：包级函数值从包外可赋值，而且 godoc / IDE 的符号列表把它归在「变量」下——作者
    本人第一次就没有找到 `Table`。改动只在第 8 节代码块里体现，调用处写法完全不变。
 
+5. **导出范围扩到写语句与窗口**。初版只覆盖 SELECT 侧的构造与谓词；随后按「把能构造的都放进来」
+   补齐了 `Insert` / `Update` / `Delete`、冲突选项、聚合、窗口、转义 LIKE、复合比较与三个逃生口。
+   这不动第十二节的结论：写路径默认仍是 gorm 链式，builder 只在语句本身是难点时使用。
+   补全的过程中实测出三个上游陷阱，都写进了包注释与 README：冲突子句必须带方言（否则静默产出
+   无效 SQL）、PostgreSQL 方言会把占位符换成 `$n`（不能与 `?` 片段混用）、`*SelectTable` 会被
+   `From` 写回方言（跨方言复用会渲染嵌套引号）。
+
 另外在框架守卫里加了一条：`support/sqlbuilder` 不得依赖 gorm（`shell/check-imports.sh`）。一旦它引入 gorm，就说明有人在构造器包里搭第二套执行栈——连接、事务、日志都要重新接一遍，那时它已经不是构造器了。
 
 ---
@@ -36,7 +43,7 @@
 ## 一、结论
 
 1. **引入 `entgo.io/ent/dialect/sql`，只用它的 SQL 构造能力。** 不用 ent 的 ORM、schema DSL、codegen、migration、`*ent.Client`。这是与 2026-11-15「数据访问只用 gorm」决策不冲突的一步：引进的是构造器，不是第二套运行时。
-2. **定位：`query` 只读层的可选构造器。** 产出 `(sql string, args []any)`，交给 **gorm 的 `Raw`/`Where`** 执行。事务仍由 ctx 携带，连接仍从 `appio` 快照取，SQL 日志、脱敏、trace-id、慢 SQL 全部继续生效。
+2. **定位：`query` 层的可选构造器，含写语句。** 产出 `(sql string, args []any)`，交给 **gorm 的 `Raw`/`Where`/`Exec`** 执行。事务仍由 ctx 携带，连接仍从 `appio` 快照取，SQL 日志、脱敏、trace-id、慢 SQL 全部继续生效。写路径**默认仍走 gorm 链式**，`Insert`/`Update`/`Delete` 只在语句本身是难点（批量 upsert、SET 读本行、带关联子查询的 DELETE）时才用。
 3. **不封装成新 DSL。** 新增 `support/sqlbuilder`，只做 re-export 加一个 `Build` 辅助，API 就是 ent 的 API，文档指向上游。
 
 一句话：**只借它的拼装能力，不借它的执行栈。**
@@ -290,6 +297,21 @@ func Build(q Querier) (string, []any, error) {
 }
 ```
 
+落地后按「覆盖 SQL 构造能力、不碰 DDL / ORM」补全了清单，在上面的骨架之外新增：
+
+| 类别 | 新增 |
+|---|---|
+| 写语句 | `Insert` / `Update` / `Delete`，`InsertBuilder` / `UpdateBuilder` / `UpdateSet` / `DeleteBuilder`，冲突选项 `ConflictColumns` / `ConflictConstraint` / `ConflictWhere` / `UpdateWhere` / `DoNothing` / `ResolveWithIgnore` / `ResolveWithNewValues` / `ResolveWith` |
+| 聚合与列表达式 | `Sum` / `Max` / `Min` / `Avg` / `Lower` / `As` / `Distinct` / `Asc` / `Desc` / `DescExpr` |
+| 谓词 | `P` / `ExprP` / `False` / `IsTrue` / `IsFalse` / `HasPrefix` / `HasSuffix` / `Contains` / `EqualFold` / `ContainsFold` / `ColumnsLT` / `ColumnsLTE` / `ColumnsGT` / `ColumnsGTE` / `CompositeGT` / `CompositeLT` |
+| 窗口 | `Window` / `RowNumber`，类型 `WindowBuilder` |
+| 其它 | `Raw`，`WithLockClause`，类型 `TableView` / `LockStrength` |
+
+不导出，以及为什么：`CreateView` / `Column` 是 DDL，与「不用 builder 做 schema」冲突；
+`Wrapper` / `Func` / `Queries` 是上游的装配细节；`InInts` / `InValues` 是 `In` 的窄类型版本，
+`In` 已经覆盖；`HasPrefixFold` / `HasSuffixFold` / `ColumnsHasPrefix` 目前没有场景（后两者依赖
+列排序规则），需要时各加一行。
+
 **为什么是包装函数而不是 `var Table = entsql.Table`。** 后者同样能编译、同样能用，但有三处代价：
 包级函数值从包外可赋值（`sqlbuilder.Table = 别的函数`，只读 API 变成可变全局）；godoc 与 IDE
 的符号列表把它归在「变量」下，按函数去找永远看不到——落地时原作者就是这样没找到 `Table`
@@ -541,7 +563,7 @@ sqlbuilder 与这三条没有冲突：事务内用 builder，只要 `db` 来自 
 
 ---
 
-## 十、五个必须写进包注释的约束
+## 十、包注释里的约束
 
 前三条是实测发现的，不是理论风险。
 
@@ -567,6 +589,12 @@ SQLite 的两个问题都是实测出来的：
 SQLite 只出现在测试里，用默认方言即可（SQLite 也接受反引号）。本包因此**不导出** SQLite 的方言名：拿不到它，就少一条「照着写」的路。这一条写进了包注释和 README，否则下一个人从上游文档抄 `dialect.SQLite` 过来，测试要么静默空结果，要么报一个看起来与 SQL 无关的错误。
 
 **5. `Query()` 不返回 error。** 构造期的错误记在 `Builder.errs` 里，必须用 `Build()` 取。直接调 `sel.Query()` 会静默吞掉错误。
+
+**6. 方言会改占位符。** `Dialect(DialectPostgres)` 渲染 `$1, $2`，而 `Expr` / `ExprP` / `Raw` 里写死的 `?` 原样保留。一条语句里混用两种占位符，gorm 会把 `?` 从 1 重新编号并与 `$1` 撞车，绑定错位且不报错。
+
+**7. upsert 必须带方言。** 上游的冲突子句按 `Dialect()` 分支渲染且没有 default 分支：`Insert(table)` 之后再 `OnConflict(...)` 不输出 `ON DUPLICATE KEY UPDATE` / `ON CONFLICT`，产出无效 SQL 且不记录错误。正确写法是 `Dialect(DialectMySQL).Insert(...)`。
+
+**8. `*SelectTable` 有状态。** `From` / `Join` 会把语句的方言写回表对象，因此同一个表值跨方言复用会渲染出嵌套引号（`` `"orders"."id"` ``）。表对象与语句一起构造，不缓存、不存字段。
 
 ---
 
@@ -620,7 +648,7 @@ ORM 带进一个从不执行 SQL 的包，也会让守卫里「sqlbuilder 不得
 |---|---|
 | ent 的 schema DSL / `ent generate` | 会引入 codegen 和 atlas，与 gorm 的 AutoMigrate 形成两套模型定义 |
 | `*ent.Client` / `entsql.Open` | 第二套连接与事务，绕过 appio 代际 |
-| 用 builder 做 INSERT / UPDATE 的默认路径 | 写路径继续走 gorm，`clause.OnConflict` 已经够用；只在批量 upsert 场景评估 |
+| 用 builder 做 INSERT / UPDATE 的默认路径 | 写路径继续走 gorm，`clause.OnConflict` 已经够用。`Insert` / `Update` / `Delete` 已导出，但只是「语句本身是难点」时的可选手段（见第八节） |
 | 封装完整 DSL（`sqlbuilder.Q().Where(...).OrderBy(...)`） | 增加一层要维护的 API，收益只是换个名字 |
 | 替换 `support/claim` 的裸 SQL | claim 的 SQL 依赖方言细节（`FOR UPDATE SKIP LOCKED` / `NOW(3)`），已经稳定，改动无收益 |
 

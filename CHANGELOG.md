@@ -92,6 +92,18 @@ All notable changes to this project are documented here. The format follows
   re-exported except SQLite, which must not be passed at all (it renders nested
   quoting and fails with "no such column" while the column exists). A guard keeps
   gorm out of the package, so it cannot grow into a second execution stack.
+  Coverage is everything that constructs a statement, and nothing that defines
+  one: SELECT / CTE / UNION / window, the full predicate toolkit, aggregates and
+  column expressions, row locks, and `Insert` / `Update` / `Delete` with upsert
+  options. The write builders are not the default path — repositories stay on
+  gorm — but a batch upsert with computed values and an UPDATE whose SET reads the
+  row now have a typed form instead of a string. Three upstream traps are
+  documented because they fail silently: a conflict clause only renders when the
+  dialect is known (`Dialect(DialectMySQL).Insert(...)`), PostgreSQL rewrites
+  placeholders to `$n` so a `?` fragment cannot be mixed into the same statement,
+  and `From` writes the statement's dialect back into the `*SelectTable`, so a
+  table value reused under another dialect renders nested quotes. Tests pin all
+  three, and each fails if upstream ever changes the behaviour.
 
 ### Fixed
 

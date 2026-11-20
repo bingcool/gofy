@@ -1754,24 +1754,38 @@ SQL 日志与脱敏、`X-Trace-Id`、慢 SQL、连接代际全部不变（`docs/
 - 存在的理由只有一条：gorm 1.31 没有 CTE 与 UNION 的 clause（`clause/with.go` 只有
   `type With struct{}`，`clause` 包没有 `Union` 类型），这两类语句否则只能整条手写
   `Raw` 并把 `?` 与 args 人肉对齐；
-- 导出类型别名 `Selector` / `SelectTable` / `Predicate` / `Builder` / `Querier` /
-  `LockOption` / `LockAction` / `WithBuilder` / `DialectBuilder`；构造器与谓词都是
-  **包装函数**（不是 `var X = entsql.X`：函数值从包外可赋值，且被 godoc/IDE 归到变量下），
-  调用写法与上游一致。构造器 `Select` / `SelectExpr` / `Table` / `Expr` /
-  `Count` / `With` / `WithRecursive` / `Dialect`；谓词 `And` / `Or` / `Not` / `EQ` /
-  `NEQ` / `GT` / `GTE` / `LT` / `LTE` / `In` / `NotIn` / `IsNull` / `NotNull` / `Like` /
-  `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ`；行锁 `WithLockAction` /
-  `WithLockTables` / `SkipLocked` / `NoWait`；方言名 `DialectMySQL` /
-  `DialectPostgres`（**不导出 SQLite**：传了会生成嵌套引号，见包注释）；
+- 导出类型别名 `Selector` / `SelectTable` / `TableView` / `Predicate` / `Builder` /
+  `Querier` / `LockOption` / `LockAction` / `LockStrength` / `WithBuilder` /
+  `DialectBuilder` / `InsertBuilder` / `UpdateBuilder` / `UpdateSet` / `DeleteBuilder` /
+  `ConflictOption` / `WindowBuilder`；构造器与谓词都是**包装函数**（不是
+  `var X = entsql.X`：函数值从包外可赋值，且被 godoc/IDE 归到变量下），调用写法与上游一致；
+- 覆盖范围：SELECT 侧 `Select` / `SelectExpr` / `Table` / `Expr` / `Raw` / `With` /
+  `WithRecursive` / `Window` / `RowNumber` / `Dialect`；写语句 `Insert` / `Update` /
+  `Delete` 与冲突选项 `ConflictColumns` / `ConflictConstraint` / `ConflictWhere` /
+  `UpdateWhere` / `DoNothing` / `ResolveWithIgnore` / `ResolveWithNewValues` /
+  `ResolveWith`；谓词 `And` / `Or` / `Not` / `EQ` / `NEQ` / `GT` / `GTE` / `LT` / `LTE` /
+  `In` / `NotIn` / `IsNull` / `NotNull` / `Like` / `HasPrefix` / `HasSuffix` / `Contains` /
+  `EqualFold` / `ContainsFold` / `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ` /
+  `ColumnsLT` / `ColumnsLTE` / `ColumnsGT` / `ColumnsGTE` / `CompositeGT` / `CompositeLT` /
+  `IsTrue` / `IsFalse` / `False`；逃生口 `P` / `ExprP`；聚合与列表达式 `Count` / `Sum` /
+  `Max` / `Min` / `Avg` / `Lower` / `As` / `Distinct` / `Asc` / `Desc` / `DescExpr`；
+  行锁 `WithLockAction` / `WithLockTables` / `WithLockClause`，动作 `SkipLocked` /
+  `NoWait`；方言名 `DialectMySQL` / `DialectPostgres`（**不导出 SQLite**：传了会生成嵌套
+  引号，见包注释）；
 - `Build(Querier) (string, []any, error)`：`Query()` 不返回错误，构造期错误收在
   builder 里，必须经 `Build` 取；出错时不返回半成品语句；
 - `TenantScope(ctx, table) (*Predicate, bool)`：`Raw` 不经过 `support/tenant` 插件，
   含租户列的表要显式带上条件；ctx 没有租户时返回 `false`，由调用方决定报错还是跳过；
 - 约束：`Predicate` 有状态（`Query()` 会 Reset 自己），不能缓存或跨 goroutine 共用；
-  不要把 slice 传给 `EQ`（用 `In`）；表名不经过 gorm 的 `NamingStrategy`，要从
-  `TableName()` 取；
-- 边界：不含 ent 的 ORM、schema DSL、codegen、`*ent.Client`、`entsql.Open`；守卫脚本
-  禁止本包依赖 gorm，避免有人在里面搭第二套执行栈。
+  `*SelectTable` 同样有状态（`From` / `Join` 会把方言写回表），不跨方言复用；冲突子句必须
+  带方言（`Dialect(DialectMySQL).Insert(...)`），否则静默产出无效 SQL；PostgreSQL 方言下
+  占位符是 `$n`，不能与 `?` 片段混用；不要把 slice 传给 `EQ`（用 `In`）；表名不经过 gorm
+  的 `NamingStrategy`，要从 `TableName()` 取；
+- 写语句**不是默认写路径**：仓储仍走 gorm 链式，builder 只在语句本身是难点时使用；执行一律
+  `Build` → `db.Raw` / `db.Exec`，句柄来自 `DBConnect`，事务与日志照旧；
+- 边界：不含 ent 的 ORM、schema DSL、codegen、`*ent.Client`、`entsql.Open`，也不含
+  DDL（`CreateView` / `Column` 未导出）；守卫脚本禁止本包依赖 gorm，避免有人在里面搭
+  第二套执行栈。
 
 ### 3.8 `script`
 

@@ -67,6 +67,32 @@
 // SQLite 于是去找一个名为 `"orders"."id"` 的列，报 "no such column"，而列明明存在；
 // 该方言下 ForUpdate 还会记录错误，让 Build 失败。SQLite 只出现在测试里，用默认方言。
 //
+// The dialect also changes the placeholders: under DialectPostgres the builder
+// writes $1, $2 instead of ?. A fragment built with Expr, ExprP or a literal "?"
+// inside Raw keeps its question marks, so mixing them into a PostgreSQL-dialect
+// statement produces both kinds at once. Do not mix; a statement is either shaped
+// for PostgreSQL throughout or not at all.
+// 方言还会改变占位符：DialectPostgres 下构造器写 $1、$2，而不是 ?。用 Expr、ExprP 或
+// Raw 里写死 "?" 的片段仍保留问号，混进 PostgreSQL 方言的语句就会同时出现两种占位符。
+// 不要混用：一条语句要么整体按 PostgreSQL 的形态构造，要么整体不这么做。
+//
+// Conflict resolution needs the dialect: write Dialect(DialectMySQL).Insert(...).
+// Insert(table) on its own builds a plain INSERT, and adding OnConflict to it
+// emits no ON DUPLICATE KEY UPDATE / ON CONFLICT clause at all — upstream switches
+// on the dialect and has no default branch — so the statement is invalid without
+// any error being recorded.
+// 冲突处理需要方言：写成 Dialect(DialectMySQL).Insert(...)。单独用 Insert(table) 造的是
+// 普通 INSERT，再挂 OnConflict 也不会输出 ON DUPLICATE KEY UPDATE / ON CONFLICT 子句——
+// 上游按方言分支且没有 default 分支——语句因此无效，而且不会记录任何错误。
+//
+// A *SelectTable is stateful too: From and Join copy the statement's dialect into
+// the table, so one table value must not be reused across statements of different
+// dialects. Reusing it produces nested quoting (`"orders"."id"` wrapped in
+// backticks). Build tables next to the statement that uses them.
+// *SelectTable 同样是有状态的：From 与 Join 会把语句的方言写回表对象，因此同一个表值不能
+// 跨不同方言的语句复用，复用会产出嵌套引号（`"orders"."id"` 外面再套反引号）。表对象应当
+// 与使用它的语句一起构造。
+//
 // Query() returns no error. Construction errors are collected in the builder, so
 // always go through Build; calling sel.Query() directly drops them silently.
 // Query() 不返回错误，构造期错误被收集在 builder 里，所以一律走 Build；直接调用
@@ -131,6 +157,30 @@ type (
 	// DialectBuilder starts a statement that quotes for one dialect.
 	// DialectBuilder 开始一条按指定方言加引号的语句。
 	DialectBuilder = entsql.DialectBuilder
+	// TableView is what Union accepts: a table, a selector or a CTE.
+	// TableView 是 Union 接受的实参：表、SELECT 或 CTE。
+	TableView = entsql.TableView
+	// LockStrength is the strength Selector.For takes ("UPDATE", "SHARE").
+	// LockStrength 是 Selector.For 接受的锁强度（"UPDATE"、"SHARE"）。
+	LockStrength = entsql.LockStrength
+	// InsertBuilder builds an INSERT, optionally with an upsert clause.
+	// InsertBuilder 构造 INSERT，可带 upsert 子句。
+	InsertBuilder = entsql.InsertBuilder
+	// UpdateBuilder builds an UPDATE.
+	// UpdateBuilder 构造 UPDATE。
+	UpdateBuilder = entsql.UpdateBuilder
+	// UpdateSet is the new-values side of a resolving upsert.
+	// UpdateSet 是 upsert 冲突时的「新值」侧。
+	UpdateSet = entsql.UpdateSet
+	// DeleteBuilder builds a DELETE.
+	// DeleteBuilder 构造 DELETE。
+	DeleteBuilder = entsql.DeleteBuilder
+	// ConflictOption configures an upsert conflict clause.
+	// ConflictOption 配置 upsert 的冲突子句。
+	ConflictOption = entsql.ConflictOption
+	// WindowBuilder builds a window specification.
+	// WindowBuilder 构造窗口定义。
+	WindowBuilder = entsql.WindowBuilder
 )
 
 // Statement constructors.
@@ -164,11 +214,6 @@ func Table(name string) *SelectTable { return entsql.Table(name) }
 // Expr 把一段裸 SQL 片段和它自己的参数包起来。
 func Expr(expr string, args ...any) Querier { return entsql.Expr(expr, args...) }
 
-// Count renders COUNT(ident) and returns the string, so it can be passed to
-// Select, SelectExpr or a comparison.
-// Count 渲染 COUNT(ident) 并返回字符串，因此可以直接交给 Select、SelectExpr 或比较。
-func Count(ident string) string { return entsql.Count(ident) }
-
 // With starts a common table expression; it must be attached to the statement
 // with Prefix. WithRecursive additionally allows the CTE to reference itself.
 // With 开始一个 CTE，必须经 Prefix 挂到语句上。WithRecursive 额外允许自引用。
@@ -188,6 +233,136 @@ func WithRecursive(name string, columns ...string) *WithBuilder {
 // Dialect 开始一条按该方言给标识符加引号的语句。见包注释：默认值对 MySQL 与 SQLite
 // 都正确，真正需要它的是 PostgreSQL。
 func Dialect(name string) *DialectBuilder { return entsql.Dialect(name) }
+
+// Raw wraps a SQL fragment that carries no arguments; use Expr when it has any.
+// Raw 包装一段不带参数的 SQL 片段；带参数时用 Expr。
+func Raw(s string) Querier { return entsql.Raw(s) }
+
+// Window builds a window specification for AppendSelectExprAs; RowNumber is the
+// common ROW_NUMBER() OVER (...) case, spelled out so it does not have to be a
+// hand-written string.
+// Window 构造窗口定义，交给 AppendSelectExprAs；RowNumber 是最常见的
+// ROW_NUMBER() OVER (...) 写法，不必再手写字符串。
+func Window(fn func(*Builder)) *WindowBuilder { return entsql.Window(fn) }
+
+// RowNumber returns ROW_NUMBER() OVER (...).
+// RowNumber 返回 ROW_NUMBER() OVER (...)。
+func RowNumber() *WindowBuilder { return entsql.RowNumber() }
+
+// Write statements.
+//
+// These are here because the repository needs them for what gorm's chain cannot
+// express — a batch upsert with computed new values, an UPDATE whose SET reads
+// the row, a DELETE with a correlated subquery. They are not the default write
+// path: repositories keep using gorm, and these only earn their place when the
+// statement itself is the hard part.
+//
+// Execution is the same as for a SELECT: Build, then db.Raw / db.Exec on a handle
+// from DBConnect, so the statement joins the ambient transaction and is logged
+// like any other.
+// 写语句。
+//
+// 放在这里是因为仓储确实有 gorm 链式表达不了的情况——批量 upsert 且新值要计算、
+// SET 里要读本行、DELETE 带关联子查询。它们不是默认写路径：仓储仍走 gorm，只有语句本身
+// 才是难点时才用。
+//
+// 执行与 SELECT 一致：Build 之后交给 db.Raw / db.Exec，句柄来自 DBConnect，因此语句
+// 会加入当前事务并被照常记录。
+
+// Insert starts an INSERT statement. OnConflict only renders when the dialect is
+// known, so a conflict-resolving insert is written as
+// Dialect(DialectMySQL).Insert(...) — see the package doc.
+// Insert 开始一条 INSERT 语句。OnConflict 只有在方言已知时才会渲染，因此带冲突处理的
+// INSERT 要写成 Dialect(DialectMySQL).Insert(...)——见包注释。
+func Insert(table string) *InsertBuilder { return entsql.Insert(table) }
+
+// Update starts an UPDATE statement.
+// Update 开始一条 UPDATE 语句。
+func Update(table string) *UpdateBuilder { return entsql.Update(table) }
+
+// Delete starts a DELETE statement. Without Where it deletes every row, which is
+// why the builder keeps the predicate explicit.
+// Delete 开始一条 DELETE 语句。不带 Where 会删除全表，因此条件必须显式给出。
+func Delete(table string) *DeleteBuilder { return entsql.Delete(table) }
+
+// Conflict options for InsertBuilder.OnConflict.
+// InsertBuilder.OnConflict 的冲突选项。
+func ConflictColumns(names ...string) ConflictOption { return entsql.ConflictColumns(names...) }
+
+// ConflictConstraint targets a named constraint instead of columns.
+// ConflictConstraint 指定约束名而不是列。
+func ConflictConstraint(name string) ConflictOption { return entsql.ConflictConstraint(name) }
+
+// ConflictWhere limits which conflicting rows are handled.
+// ConflictWhere 限定哪些冲突行会被处理。
+func ConflictWhere(p *Predicate) ConflictOption { return entsql.ConflictWhere(p) }
+
+// UpdateWhere adds a WHERE to the DO UPDATE part of an upsert.
+// UpdateWhere 给 upsert 的 DO UPDATE 部分加 WHERE。
+func UpdateWhere(p *Predicate) ConflictOption { return entsql.UpdateWhere(p) }
+
+// DoNothing turns the conflict into DO NOTHING.
+// DoNothing 把冲突处理变成 DO NOTHING。
+func DoNothing() ConflictOption { return entsql.DoNothing() }
+
+// ResolveWithIgnore keeps the existing row on conflict.
+// ResolveWithIgnore 冲突时保留已有行。
+func ResolveWithIgnore() ConflictOption { return entsql.ResolveWithIgnore() }
+
+// ResolveWithNewValues overwrites with the values proposed by the INSERT.
+// ResolveWithNewValues 用 INSERT 提供的新值覆盖。
+func ResolveWithNewValues() ConflictOption { return entsql.ResolveWithNewValues() }
+
+// ResolveWith builds the new-values side by hand, for "col = col + excluded.col".
+// ResolveWith 手写「新值」侧，用于 col = col + excluded.col 这类场景。
+func ResolveWith(fn func(*UpdateSet)) ConflictOption { return entsql.ResolveWith(fn) }
+
+// Column expressions and aggregates. Each renders a SQL fragment and returns it as
+// a string, so it can be passed to Select, SelectExpr, OrderBy or a comparison —
+// the same shape Count has.
+// 列表达式与聚合。每个都渲染 SQL 片段并以字符串返回，可以直接交给 Select、
+// SelectExpr、OrderBy 或比较——与 Count 的形态一致。
+func Count(ident string) string { return entsql.Count(ident) }
+
+// Sum wraps the identifier with SUM(...).
+// Sum 用 SUM(...) 包住标识符。
+func Sum(ident string) string { return entsql.Sum(ident) }
+
+// Max wraps the identifier with MAX(...).
+// Max 用 MAX(...) 包住标识符。
+func Max(ident string) string { return entsql.Max(ident) }
+
+// Min wraps the identifier with MIN(...).
+// Min 用 MIN(...) 包住标识符。
+func Min(ident string) string { return entsql.Min(ident) }
+
+// Avg wraps the identifier with AVG(...).
+// Avg 用 AVG(...) 包住标识符。
+func Avg(ident string) string { return entsql.Avg(ident) }
+
+// Lower wraps the identifier with LOWER(...).
+// Lower 用 LOWER(...) 包住标识符。
+func Lower(ident string) string { return entsql.Lower(ident) }
+
+// As aliases a column or expression: `a` AS `b`.
+// As 给列或表达式起别名：`a` AS `b`。
+func As(ident string, as string) string { return entsql.As(ident, as) }
+
+// Distinct prefixes the columns with DISTINCT.
+// Distinct 给列加上 DISTINCT。
+func Distinct(idents ...string) string { return entsql.Distinct(idents...) }
+
+// Asc and Desc render an ORDER BY term.
+// Asc 与 Desc 渲染 ORDER BY 的一项。
+func Asc(column string) string { return entsql.Asc(column) }
+
+// Desc renders a descending ORDER BY term.
+// Desc 渲染降序的 ORDER BY 项。
+func Desc(column string) string { return entsql.Desc(column) }
+
+// DescExpr is Desc for an expression rather than a column name.
+// DescExpr 是 Desc 的表达式版本，入参不是列名。
+func DescExpr(x Querier) Querier { return entsql.DescExpr(x) }
 
 // Condition combinators and comparisons. Each returns a Predicate tree that can
 // be nested freely; Build renders it, or gorm renders it when passed to Where.
@@ -252,6 +427,63 @@ func NotNull(col string) *Predicate { return entsql.NotNull(col) }
 // Like 用模式匹配列；百分号由调用方自己给出。
 func Like(col, pattern string) *Predicate { return entsql.Like(col, pattern) }
 
+// HasPrefix, HasSuffix and Contains build the LIKE pattern for you and escape the
+// value first, so a % or _ inside it is matched literally instead of turning into
+// a wildcard. Hand-writing Like("%"+s+"%") gets that wrong for exactly the inputs
+// a search box receives.
+// HasPrefix、HasSuffix 与 Contains 替你拼 LIKE 模式，并先转义取值——值里的 % 或 _
+// 会按字面匹配，不会变成通配符。手写 Like("%"+s+"%") 恰恰在搜索框最常收到的输入上出错。
+func HasPrefix(col, prefix string) *Predicate { return entsql.HasPrefix(col, prefix) }
+
+// HasSuffix matches a suffix.
+// HasSuffix 匹配后缀。
+func HasSuffix(col, suffix string) *Predicate { return entsql.HasSuffix(col, suffix) }
+
+// Contains matches a substring.
+// Contains 匹配子串。
+func Contains(col, sub string) *Predicate { return entsql.Contains(col, sub) }
+
+// EqualFold and ContainsFold compare case-insensitively. Their SQL differs per
+// dialect (MySQL compares with a case-insensitive collation, PostgreSQL uses
+// ILIKE, SQLite wraps LOWER), which is the reason to call them instead of
+// hand-writing a LIKE that only works on one database.
+// EqualFold 与 ContainsFold 做大小写不敏感的比较。两者的 SQL 因方言而异（MySQL 用
+// 不区分大小写的排序规则、PostgreSQL 用 ILIKE、SQLite 套 LOWER），这正是要调用它们
+// 而不是手写一条只在某个库上成立 LIKE 的原因。
+func EqualFold(col, sub string) *Predicate { return entsql.EqualFold(col, sub) }
+
+// ContainsFold matches a substring case-insensitively.
+// ContainsFold 大小写不敏感地匹配子串。
+func ContainsFold(col, sub string) *Predicate { return entsql.ContainsFold(col, sub) }
+
+// P is the escape hatch: it takes callbacks on the underlying Builder, for a
+// predicate that has no helper. ExprP is the same for a SQL fragment with its own
+// arguments. Both are the last resort — a helper that exists is always better,
+// because a callback writes SQL the compiler cannot check.
+// P 是逃生口：它接收作用于底层 Builder 的回调，用于没有对应辅助函数的谓词。ExprP 是
+// 同一件事的「片段 + 参数」版本。两者都是最后手段——有辅助函数就用辅助函数，因为回调里
+// 写的 SQL 编译器检查不到。
+func P(fns ...func(*Builder)) *Predicate { return entsql.P(fns...) }
+
+// ExprP builds a predicate from a SQL fragment and its arguments.
+// ExprP 用一段 SQL 片段及其参数构造谓词。
+func ExprP(expr string, args ...any) *Predicate { return entsql.ExprP(expr, args...) }
+
+// False renders a predicate that matches nothing. It is how an empty filter list
+// is expressed: And() with no arguments renders nothing at all, which silently
+// widens the query instead of narrowing it to zero rows.
+// False 渲染一个不匹配任何行的谓词。空过滤列表就用它表达：不带参数的 And() 什么也不
+// 渲染，那会静默放宽查询，而不是收窄到零行。
+func False() *Predicate { return entsql.False() }
+
+// IsTrue and IsFalse compare a column with TRUE / FALSE.
+// IsTrue 与 IsFalse 把列与 TRUE / FALSE 比较。
+func IsTrue(col string) *Predicate { return entsql.IsTrue(col) }
+
+// IsFalse compares a column with FALSE.
+// IsFalse 把列与 FALSE 比较。
+func IsFalse(col string) *Predicate { return entsql.IsFalse(col) }
+
 // Exists and NotExists take a subquery. Select columns with SelectExpr(Expr("1"))
 // rather than Select("1"), which would quote the constant as an identifier.
 // Exists 与 NotExists 接收子查询。列要用 SelectExpr(Expr("1")) 选，不能用
@@ -271,6 +503,39 @@ func ColumnsEQ(col1, col2 string) *Predicate { return entsql.ColumnsEQ(col1, col
 // ColumnsNEQ 是 ColumnsEQ 的否定。
 func ColumnsNEQ(col1, col2 string) *Predicate { return entsql.ColumnsNEQ(col1, col2) }
 
+// ColumnsLT, ColumnsLTE, ColumnsGT and ColumnsGTE are the ordered variants, for
+// comparing one column with another instead of with a value.
+// ColumnsLT、ColumnsLTE、ColumnsGT、ColumnsGTE 是有序版本，用于两个列之间而不是列与值
+// 之间的比较。
+func ColumnsLT(col1, col2 string) *Predicate { return entsql.ColumnsLT(col1, col2) }
+
+// ColumnsLTE compares two columns with <=.
+// ColumnsLTE 用 <= 比较两个列。
+func ColumnsLTE(col1, col2 string) *Predicate { return entsql.ColumnsLTE(col1, col2) }
+
+// ColumnsGT compares two columns with >.
+// ColumnsGT 用 > 比较两个列。
+func ColumnsGT(col1, col2 string) *Predicate { return entsql.ColumnsGT(col1, col2) }
+
+// ColumnsGTE compares two columns with >=.
+// ColumnsGTE 用 >= 比较两个列。
+func ColumnsGTE(col1, col2 string) *Predicate { return entsql.ColumnsGTE(col1, col2) }
+
+// CompositeGT and CompositeLT compare row values — (a, b) > (?, ?) — which is what
+// keyset pagination needs and what a set of ANDed comparisons cannot express:
+// (a, b) > (1, 2) is not a > 1 AND b > 2.
+// CompositeGT 与 CompositeLT 比较行值——(a, b) > (?, ?)——这是键集分页需要、而一组用 AND
+// 连接的比较表达不了的：(a, b) > (1, 2) 并不等于 a > 1 AND b > 2。
+func CompositeGT(columns []string, args ...any) *Predicate {
+	return entsql.CompositeGT(columns, args...)
+}
+
+// CompositeLT is the less-than form of CompositeGT.
+// CompositeLT 是 CompositeGT 的小于版本。
+func CompositeLT(columns []string, args ...any) *Predicate {
+	return entsql.CompositeLT(columns, args...)
+}
+
 // Row lock options. A lock only holds until the surrounding transaction ends, so
 // a locking statement must run on a handle that is inside one.
 // 行锁选项。锁只持有到事务结束，因此加锁语句必须跑在事务内的句柄上。
@@ -279,6 +544,13 @@ func WithLockAction(action LockAction) LockOption { return entsql.WithLockAction
 // WithLockTables scopes the lock to the named tables.
 // WithLockTables 把锁限定到指定表。
 func WithLockTables(tables ...string) LockOption { return entsql.WithLockTables(tables...) }
+
+// WithLockClause passes a raw lock clause for what the options above cannot
+// express — locking a table alias, for instance. It is the last resort, and it is
+// not portable: the caller is writing the clause the database expects.
+// WithLockClause 传入裸锁子句，用于上面两个选项表达不了的场景——例如锁定表别名。这是
+// 最后手段，且不可移植：调用方写的就是数据库期望的那段子句。
+func WithLockClause(clause string) LockOption { return entsql.WithLockClause(clause) }
 
 // Lock actions accepted by WithLockAction.
 // WithLockAction 接受的动作。

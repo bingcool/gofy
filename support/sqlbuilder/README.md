@@ -17,6 +17,19 @@ UNION**：`clause/with.go` 全文只有 `type With struct{}`（没有 `Build` �
 
 构造器把这件事变成数据结构：条件可以按 `if` 追加，参数顺序由它维护。
 
+## 覆盖范围
+
+| 类别 | 内容 |
+| --- | --- |
+| 语句 | `Select` / `SelectExpr` / `With` / `WithRecursive` / `Union`（方法）/ `Window` / `RowNumber` / `Raw` / `Expr` |
+| 写语句 | `Insert` / `Update` / `Delete`，upsert 的 `ConflictColumns` / `ConflictConstraint` / `ConflictWhere` / `UpdateWhere` / `DoNothing` / `ResolveWithIgnore` / `ResolveWithNewValues` / `ResolveWith` |
+| 谓词 | `And` / `Or` / `Not` / `EQ` / `NEQ` / `GT` / `GTE` / `LT` / `LTE` / `In` / `NotIn` / `IsNull` / `NotNull` / `Like` / `HasPrefix` / `HasSuffix` / `Contains` / `EqualFold` / `ContainsFold` / `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ` / `ColumnsLT` / `ColumnsLTE` / `ColumnsGT` / `ColumnsGTE` / `CompositeGT` / `CompositeLT` / `IsTrue` / `IsFalse` / `False` |
+| 逃生口 | `P`（直接写 builder）、`ExprP`（片段 + 参数）、`Raw`（无参数片段） |
+| 聚合与列表达式 | `Count` / `Sum` / `Max` / `Min` / `Avg` / `Lower` / `As` / `Distinct` / `Asc` / `Desc` / `DescExpr` |
+| 行锁 | `WithLockAction` / `WithLockTables` / `WithLockClause`，动作 `SkipLocked` / `NoWait` |
+
+不做：DDL、`CreateView`、schema、migration、任何 ORM 能力。
+
 ## 快速开始
 
 ```go
@@ -45,7 +58,31 @@ err = db.Raw(stmt, args...).Scan(&rows).Error // DBConnect 已绑 ctx
 返回的也是连接池（它把 `*sql.Tx` 里的字段掏出来），会同时丢掉事务、SQL 日志（脱敏 /
 `X-Trace-Id` / 慢 SQL）与连接代际。要流式读大结果集用 `Raw(stmt, args...).Rows()`。
 
-## 五条规则
+## 写语句与 upsert
+
+`Insert` / `Update` / `Delete` 是为 gorm 链式表达不了的语句准备的（批量 upsert 且新值要计算、
+SET 里读本行、带关联子查询的 DELETE），**不是默认写路径**：仓储仍走 gorm。用的时候执行方式与
+SELECT 一致——`Build` 之后 `db.Raw` / `db.Exec`，句柄来自 `DBConnect`，事务与日志照旧。
+
+**upsert 必须显式带方言**：
+
+```go
+stmt, args, err := sqlbuilder.Build(
+    sqlbuilder.Dialect(sqlbuilder.DialectMySQL).
+        Insert("orders").
+        Columns("id", "status", "amount").
+        Values(1, "paid", 100).
+        OnConflict(sqlbuilder.ConflictColumns("id"), sqlbuilder.ResolveWithNewValues()),
+)
+// INSERT INTO `orders` (`id`, `status`, `amount`) VALUES (?, ?, ?)
+//   ON DUPLICATE KEY UPDATE `id` = VALUES(`id`), ...
+```
+
+写成 `sqlbuilder.Insert(...).OnConflict(...)`（不带方言）会得到**一条没有冲突子句的无效 SQL，
+且不报错**——上游按方言分支渲染，没有 default 分支。`TestUpsertWithoutDialectIsInvalid` 钉住了
+这个行为。
+
+## 七条规则
 
 1. **`Predicate` 有状态，不能并发复用。** `Query()` 会先 `Reset()` 自己再重放回调。同一个
    `*Predicate` 被两个 goroutine 同时 `Query()` 就是 data race，跨请求缓存同样危险。
@@ -56,17 +93,27 @@ err = db.Raw(stmt, args...).Scan(&rows).Error // DBConnect 已绑 ctx
    复数化的项目必须从 `model.TableName()` / 列常量取，不要手写。
 4. **方言要显式决定，SQLite 不能显式传**（见下表）。
 5. **`Build` 出错时语句与参数都为空**，不要执行半成品。
+6. **`*SelectTable` 有状态**：与语句一起构造，不缓存、不跨方言复用（见「方言」一节）。
+7. **upsert 走 `Dialect(...).Insert(...)`**：不带方言时冲突子句不会渲染，也不报错。
 
 ## 方言
 
 | 目标库 | 写法 | 说明 |
 | --- | --- | --- |
 | MySQL | 默认（不设置） | 默认用反引号，正确 |
-| PostgreSQL | `sqlbuilder.Dialect(DialectPostgres)` | 反引号换成双引号 |
+| PostgreSQL | `sqlbuilder.Dialect(DialectPostgres)` | 反引号换成双引号，**占位符变成 `$1, $2`** |
 | SQLite | **不要传 `dialect.SQLite`** | 列会渲染成 `` `"orders"."id"` ``（反引号套双引号），SQLite 把它当成名为 `"orders"."id"` 的列，报 `no such column`；该方言下 `ForUpdate` 还会记录错误，`Build` 直接失败 |
 
 SQLite 只出现在测试里，用默认方言即可（反引号 SQLite 也接受）。这条不是洁癖：
 两种失败方式都很难和「方言传错了」联系起来。
+
+**占位符随方言变化，因此不要混用。** PostgreSQL 方言下构造器写 `$1, $2`，而 `Expr` /
+`ExprP` / `Raw` 里写死的 `?` 会原样保留。两者混在一条语句里，gorm 会把 `?` 从 1 重新编号，
+与已有的 `$1` 撞车，绑定错位且不报错。一条语句要么整体按 PostgreSQL 形态构造，要么整体不。
+
+**表对象带状态。** `From` / `Join` 会把语句的方言写回 `*SelectTable`，所以同一个表值不能跨方言
+复用：先用 PostgreSQL 方言跑一次，再拿同一个表构造 MySQL 语句，会渲染出
+`` `"orders"."id"` ``（反引号套双引号）。表对象与使用它的语句一起构造，不要存字段。
 
 ## 多租户
 
