@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/bingcool/gofy/support/sqlmodel"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"gorm.io/gorm"
@@ -51,12 +52,26 @@ const (
 // 连接，因此可以在请求、脚本、后台任务之间共享同一个实例，也可以在装配根
 // 构造一次后按需注入。
 //
+// 它唯一持有的东西是 sqlmodel 解析器，而且必须由装配根传入：租户开关来自配置，
+// 用包级默认值会让构造器路径绕开那个开关——插件关着、这里还过滤（或者反过来）。
+//
 // Queries is the stateless entry point of the read-only query layer.
-type Queries struct{}
+type Queries struct {
+	models *sqlmodel.Resolver
+}
 
-// New returns a stateless query entry point.
-// New 返回只读查询入口；它不建立连接，连接在每次调用时从 ctx 解析。
-func New() *Queries { return &Queries{} }
+// New returns a read-only query entry point. The resolver is required: it carries
+// the deployment's tenant switch and column, which the assembly root derives from
+// the same config section the GORM plugin is installed with.
+//
+// New 返回只读查询入口。解析器是必需参数：它带着本次部署的租户开关与列名，由装配根从
+// 「安装插件所用的同一段配置」推导出来。
+func New(models *sqlmodel.Resolver) *Queries {
+	if models == nil {
+		panic("query: sqlmodel resolver is required")
+	}
+	return &Queries{models: models}
+}
 
 // conn resolves the connection for one call: the transaction carried by ctx when
 // present, otherwise the db.default of the request-pinned generation. DBConnect

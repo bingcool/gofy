@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/bingcool/gofy/support/sqlbuilder"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 )
 
 // OrderLine 是一行订单明细读模型，由 orders ⋈ order_items ⋈ products 三表
@@ -154,6 +155,10 @@ func (q *Queries) ListUnsoldProductsWithBuilder(ctx context.Context, limit int) 
 // service 各存一份而漂移。需要“是否存在任意订单”时另写一条不带 status 条件的
 // 查询，不要传空字符串——那会变成 status = ” 的静默空结果。
 //
+// 表名与列名取自 ordermodel，租户条件由 sqlmodel 按模型判定：这条查询因此不必记住
+// orders 与它的列名；开启租户隔离后也不会漏掉 tenant_id——谓词由解析器给出，表带租户列
+// 而 ctx 没有租户时直接返回错误，而不是悄悄读全表。
+//
 // 用 EXISTS 而不是 COUNT(*)：命中第一条就返回，不会扫描该用户的全部订单。
 //
 // UserHasOrder reports whether the user owns at least one order in that status.
@@ -162,17 +167,29 @@ func (q *Queries) UserHasOrder(ctx context.Context, userID uint64, status string
 	if err != nil {
 		return false, err
 	}
-	const stmt = `
-SELECT EXISTS (
-    SELECT 1 FROM orders o WHERE o.user_id = ? AND o.status = ?
-) AS has_order`
-	var out struct {
-		HasOrder bool `gorm:"column:has_order"`
+
+	orders, tenantScope, err := q.models.Table(ctx, ordermodel.Order{})
+	if err != nil {
+		return false, err
 	}
-	if err := db.Raw(stmt, userID, status).Scan(&out).Error; err != nil {
+	exists := sqlbuilder.SelectExpr(sqlbuilder.Expr("1")).
+		From(orders).
+		Where(sqlbuilder.EQ(orders.C(ordermodel.UserID), userID)).
+		Where(sqlbuilder.EQ(orders.C(ordermodel.Status), status))
+	if tenantScope != nil {
+		exists = exists.Where(tenantScope)
+	}
+	stmt, args, err := sqlbuilder.Build(sqlbuilder.SelectExpr(sqlbuilder.Exists(exists)))
+	if err != nil {
+		return false, err
+	}
+
+	// 一列一行，直接扫进 bool：EXISTS 总是返回一行，不需要区分 sql.ErrNoRows。
+	var has bool
+	if err := db.Raw(stmt, args...).Row().Scan(&has); err != nil {
 		return false, fmt.Errorf("query user %d order status %q: %w", userID, status, err)
 	}
-	return out.HasOrder, nil
+	return has, nil
 }
 
 // UserOrderStat 是一个用户的订单汇总。

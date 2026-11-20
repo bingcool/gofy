@@ -56,9 +56,14 @@ http:
 		t.Fatalf("optional IO sections decoded non-empty: redis=%v amqp=%v kafka=%v rocketmq=%v",
 			cfg.Redis, cfg.AMQP, cfg.Kafka, cfg.RocketMQ)
 	}
-	if cfg.Tenant.Enabled || cfg.UUIDInt.Enabled || cfg.Lock.Enabled || cfg.LLMAI.Enabled {
-		t.Fatalf("optional switches enabled by default: tenant=%v uuidint=%v lock=%v llm=%v",
-			cfg.Tenant.Enabled, cfg.UUIDInt.Enabled, cfg.Lock.Enabled, cfg.LLMAI.Enabled)
+	// tenant 是唯一默认开启的段：它不是"可选能力"，漏配等于关掉隔离，那会让带租户列的
+	// 表静默返回所有租户的数据。其余开关仍然默认关闭，用到才配。
+	if !cfg.Tenant.IsEnabled() {
+		t.Fatal("tenant isolation is off for a file without a tenant section")
+	}
+	if cfg.UUIDInt.Enabled || cfg.Lock.Enabled || cfg.LLMAI.Enabled {
+		t.Fatalf("optional switches enabled by default: uuidint=%v lock=%v llm=%v",
+			cfg.UUIDInt.Enabled, cfg.Lock.Enabled, cfg.LLMAI.Enabled)
 	}
 }
 
@@ -512,17 +517,20 @@ func TestApplyLogPathsKeepsConfiguredOutputs(t *testing.T) {
 }
 
 func TestTenantConfigOptions(t *testing.T) {
-	// Disabled by default: a deployment without multi-tenancy must not install
-	// the plugin at all.
-	// 默认关闭：没有多租户的部署不应安装插件。
-	if _, ok := (TenantConfig{}).Options(); ok {
-		t.Fatal("zero TenantConfig enabled the tenant plugin")
-	}
-	if _, ok := (TenantConfig{Enabled: false, Column: "org_id"}).Options(); ok {
-		t.Fatal("disabled config enabled the tenant plugin")
+	// Enabled by default: an absent key must not remove the filter, or a
+	// deployment that forgot the section would read every tenant's rows.
+	// 默认开启：漏配这个键不能等于去掉过滤，否则忘记配一段的部署会读到所有租户的数据。
+	if _, ok := (TenantConfig{}).Options(); !ok {
+		t.Fatal("zero TenantConfig disabled the tenant plugin")
 	}
 
-	opts, ok := (TenantConfig{Enabled: true}).Options()
+	off := false
+	if _, ok := (TenantConfig{Enabled: &off, Column: "org_id"}).Options(); ok {
+		t.Fatal("explicitly disabled config still enabled the plugin")
+	}
+
+	on := true
+	opts, ok := (TenantConfig{Enabled: &on}).Options()
 	if !ok {
 		t.Fatal("enabled config did not enable the plugin")
 	}
@@ -533,7 +541,7 @@ func TestTenantConfigOptions(t *testing.T) {
 		t.Fatal("OverwriteExplicit must default to false")
 	}
 
-	custom, ok := (TenantConfig{Enabled: true, Column: "org_id", OverwriteExplicit: true}).Options()
+	custom, ok := (TenantConfig{Enabled: &on, Column: "org_id", OverwriteExplicit: true}).Options()
 	if !ok {
 		t.Fatal("custom config disabled")
 	}

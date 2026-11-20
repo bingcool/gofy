@@ -10,6 +10,7 @@ import (
 
 	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
 
+	"github.com/bingcool/gofy/support/sqlmodel"
 	"github.com/yourorg/demo-service/app/config"
 	appmiddleware "github.com/yourorg/demo-service/app/middleware"
 	"go.uber.org/zap"
@@ -25,6 +26,7 @@ type Container struct {
 	cfg      *config.Config
 	repos    RepositoryDeclare
 	services ServiceDeclare
+	models   lazyValue[*sqlmodel.Resolver]
 
 	loggerMu  sync.Mutex
 	zapLogger *zap.Logger
@@ -46,6 +48,7 @@ func NewContainer(cfg *config.Config) *Container {
 		cfg:      cfg,
 		repos:    NewRepositoryDeclare(),
 		services: NewServiceDeclare(),
+		models:   newLazyValue[*sqlmodel.Resolver]("sqlmodel resolver"),
 	}
 }
 
@@ -59,6 +62,26 @@ func (c *Container) orderConfig() config.OrderConfig {
 		return config.OrderConfig{}
 	}
 	return c.cfg.Order
+}
+
+// tenantConfig 返回本次装配的租户配置。与其它访问器一样，它只交出本代的一段配置，
+// 业务包看不到整份 config.Config。
+func (c *Container) tenantConfig() config.TenantConfig {
+	if c == nil || c.cfg == nil {
+		return config.TenantConfig{}
+	}
+	return c.cfg.Tenant
+}
+
+// SQLModel 返回本次装配的构造器解析器：表名与租户条件都从这里来，供 query 层注入。
+//
+// 它每代只构造一次——解析器缓存 model 的 schema，而租户开关在构造时读一次，与插件在
+// Open 时安装一次同理。选项由 tenantConfig().SQLModelOptions() 给出，因此「插件关了、
+// 构造器还开着」这种半开状态不会出现。
+func (c *Container) SQLModel() *sqlmodel.Resolver {
+	return c.models.Get(func() *sqlmodel.Resolver {
+		return sqlmodel.New(c.tenantConfig().SQLModelOptions())
+	})
 }
 
 // BindOptions 返回契约路由的绑定选项，与具体模块无关，所有模块共用。

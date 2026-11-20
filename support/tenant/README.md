@@ -34,6 +34,33 @@ db.WithContext(ctx).Create(&Order{...})
 租户 ID 默认取 `frameworkcontext.TenantID(ctx)`：本地 JWT 身份优先，其次可信上游的
 `X-Tenant-Id` 透传头。与框架其余部分共用同一身份来源。
 
+## 开关：装上才生效
+
+本包没有 `enabled` 这种字段：`Instrument` 被调用就是开启，不调用就是**完全没装**——四个
+回调一个都没注册，SQL 一条都不会被改写。部署侧的 `enabled` 表达的只是"要不要调用
+`Instrument`"，不是插件里的一个分支。
+
+**不写这个键就是开启。** demo 的 `TenantConfig.IsEnabled()` 把 `nil` 当 `true`，因为漏配
+一段不该悄悄去掉过滤——那是本包唯一会静默失效的方向。关掉是显式动作，只对完全没有租户列
+的库才合理。
+
+| 部署开关 | 模型有 `tenant_id` | GORM 仓储 | 构造器（`support/sqlmodel`） |
+| --- | --- | --- | --- |
+| 不写 / `true` | 有 | 过滤 + 填充，缺租户失败关闭 | 同上（`WHERE` 或 `ErrTenantRequired`） |
+| 不写 / `true` | 无 | 原样 | 原样 |
+| `false` | 有 / 无 | 不改写 | `Disabled: true`，不加条件、缺租户也不报错 |
+
+最后一列的两个"原样"原因不同：开着的插件是按 `LookUpField` 判定后主动跳过，关着是因为
+根本没有回调。
+
+最后一行要和"安全兜底"区分开：关掉插件后，带租户列的表就是**全租户可见**，没有过滤也没有
+报错。安全来自开启的时候——那时的失败关闭才是"缺租户即拒绝"。
+
+**两条路径必须一起开关。** `support/sqlmodel` 走的是构造器（按模型取表名再拼 SQL），插件
+装不装它并不知道，所以它有自己的 `Options.Disabled`。只关一处会得到"仓储读到所有租户、
+构造器还在过滤"（或反过来），而配置文件里看不出这种半开状态。demo 里
+`TenantConfig.SQLModelOptions()` 用同一段配置同时喂给两边。
+
 ## 配置
 
 | `tenant.Options` 字段 | 默认 | 说明 |
@@ -81,6 +108,15 @@ ctx = tenant.WithTenant(ctx, "t-42")   // 脚本/worker/测试直接指定租户
 绕过标记在 `context.Context` 上，作用范围是一条语句链，不污染池化连接。
 `Without` 优先于一切判定，包括无 Schema 的语句。
 只应给运维脚本、数据迁移、跨租户报表使用；请求 handler 禁止调用。
+
+这两个标记也以只读形式导出，供别的隔离路径（`support/sqlmodel`）判断同一件事：
+
+```go
+tenant.Bypassed(ctx)          // ctx 是否被 Without 标记
+tenant.OverrideTenant(ctx)    // WithTenant 设置的显式租户，以及是否存在
+```
+
+插件内部也走这两个函数，因此"构造器认为该绕过、插件认为不该"这种分歧不会出现。
 
 ## 语句覆盖
 

@@ -9,6 +9,7 @@ import (
 
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/sqlite"
+	"github.com/bingcool/gofy/support/sqlmodel"
 	"github.com/yourorg/demo-service/app/appio"
 	"github.com/yourorg/demo-service/app/module/order/query"
 	"go.uber.org/zap"
@@ -101,7 +102,10 @@ func newQueries(t *testing.T) (*query.Queries, *gorm.DB) {
 	prev := appio.Current()
 	appio.PublishDB(conn)
 	t.Cleanup(func() { appio.Publish(prev) })
-	return query.New(), conn
+
+	// 与 config.yaml 的 tenant.enabled=false 一致：测试里的连接没有装租户插件，
+	// 解析器也必须关着，否则构造器路径会比它查询的连接多一层过滤。
+	return query.New(sqlmodel.New(sqlmodel.Options{Disabled: true})), conn
 }
 
 func TestListOrderLines(t *testing.T) {

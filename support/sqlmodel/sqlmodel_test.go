@@ -251,6 +251,40 @@ func TestTableReturnsPredicate(t *testing.T) {
 	}
 }
 
+// TestSelectDisabled covers the deployment switch: a resolver built with
+// Disabled behaves like a connection without the plugin — no condition, and no
+// error when the context carries no tenant. This is what keeps both isolation
+// paths on one switch.
+// TestSelectDisabled 覆盖部署开关：以 Disabled 构造的 Resolver 与未装插件的连接行为一致
+// ——不加条件，ctx 无租户也不报错。两条隔离路径共用同一个开关靠的就是它。
+func TestSelectDisabled(t *testing.T) {
+	r := sqlmodel.New(sqlmodel.Options{Disabled: true})
+
+	sel, err := r.Select(context.Background(), order{}, "id")
+	if err != nil {
+		t.Fatalf("Select with Disabled: %v", err)
+	}
+	stmt, args := build(t, sel)
+	const want = "SELECT `orders`.`id` FROM `orders`"
+	if stmt != want {
+		t.Fatalf("stmt = %q, want %q", stmt, want)
+	}
+	if len(args) != 0 {
+		t.Fatalf("args = %#v, want none", args)
+	}
+
+	// A tenant in ctx changes nothing either: the switch is not a per-request
+	// decision.
+	ctx := tenant.WithTenant(context.Background(), "t-1")
+	sel, err = r.Select(ctx, order{}, "id")
+	if err != nil {
+		t.Fatalf("Select with Disabled and a tenant: %v", err)
+	}
+	if stmt, args := build(t, sel); stmt != want || len(args) != 0 {
+		t.Fatalf("stmt = %q args = %#v, want the unfiltered statement", stmt, args)
+	}
+}
+
 // TestModelRequired: nil, a typed nil pointer and an empty table name all fail
 // with the same error instead of panicking or building `FROM`.
 // TestModelRequired：nil、带类型的 nil 指针、空表名都返回同一个错误，而不是 panic 或

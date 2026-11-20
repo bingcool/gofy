@@ -242,10 +242,10 @@ _ = tenant.Instrument(gormDB, tenant.Options{Handler: myHandler}) // 新增：�
 1. 实现 `support/tenant`：Handler 接口、默认 ContextHandler、Plugin、Without/WithTenant、
    ErrTenantRequired。
 2. 写 §7 的集成测试（sqlite）与并发 race 测试。
-3. 在 demo 的 appio 装配代里接入（与 otel 插件并列，默认关闭），并在
+3. 在 demo 的 appio 装配代里接入（与 otel 插件并列；当时默认关闭，2026-11-20 改为默认开启），并在
    `support/tenant` 用 `frameworkcontext` 的 `X-Tenant-Id` 透传路径验证请求身份确实是
    租户来源（`TestUpstreamHeaderIsIdentitySource`）。
-4. 更新 `support/tenant/README.md` 与本文档状态，写明「默认不启用、如何启用、绕过是特权」。
+4. 更新 `support/tenant/README.md` 与本文档状态，写明「如何启用、缺省即启用、绕过是特权」。
 
 ## 10. 一句话总结
 
@@ -284,8 +284,9 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
 3. **§5 的装配位置落在应用装配代，而非框架 `gofy.go`。** 框架在 `start.go` 给自持的
    `db.default` 装 otel，之后模块 `Start` 才打开额外实例；demo 在
    `app/appio/db.Open` 里用可选参数 `WithTenant(...)` 于 otel **之后**安装，同时覆盖
-   `db.default` 与 eager 实例。这保持了方案「默认不启用」的要求：
-   `tenant.enabled: false`（或整段缺失）时完全不装插件。
+   `db.default` 与 eager 实例。只有显式的 `tenant.enabled: false` 才完全不装插件；
+   **整段缺失视为启用**（2026-11-20 调整）。原先"整段缺失即关闭"与失败关闭的方向相反：
+   漏配一段的部署会静默读到所有租户的数据，且没有任何报错。
 
 4. **`installTenant` 是幂等的。** 方案只说重复 `db.Use` 应报错；但 `db.default` 由框架
    持有、跨 Reload 代复用，`Open` 会对同一个 `*gorm.DB` 调用多次。因此装配层先用
