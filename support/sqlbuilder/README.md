@@ -3,7 +3,8 @@
 把 SQL 拼出来的构造器：只产出 `(sql, args)`，不执行、不持有连接、不定义模型。
 
 它是 [`entgo.io/ent/dialect/sql`](https://entgo.io/docs/sql-builders) 的转发层，加一个带
-error 的 `Build`。**不含** ent 运行时的任何部分：没有 ORM、schema DSL、codegen、migration、
+error 的 `Build`。构造器与谓词都是包装函数（不是函数值变量），因此只读，并且在 IDE 与
+godoc 的函数分组里能看到 `Table`、`Select` 这些名字。**不含** ent 运行时的任何部分：没有 ORM、schema DSL、codegen、migration、
 `*ent.Client`、`entsql.Open`。数据访问仍然走 gorm（2026-11-15「不引入 ent client」的决策
 不变），本包只解决「语句怎么被拼出来」。
 

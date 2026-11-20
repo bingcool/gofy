@@ -72,9 +72,12 @@ All notable changes to this project are documented here. The format follows
   address, and a startup error when both endpoint groups are disabled. A port
   conflict fails the application start rather than leaving a scrape config that
   answers nothing.
-- `support/sqlbuilder` builds SQL without executing it. It re-exports
-  `entgo.io/ent/dialect/sql` and adds `Build`, because `Query()` returns no error
-  and construction errors would otherwise be dropped silently. Execution stays on
+- `support/sqlbuilder` builds SQL without executing it. It wraps the constructor
+  and predicate functions of `entgo.io/ent/dialect/sql` (wrappers, not
+  func-typed variables: a package-level function value is assignable from outside
+  and is filed under variables by godoc and IDEs) and adds `Build`, because
+  `Query()` returns no error and construction errors would otherwise be dropped
+  silently. Execution stays on
   gorm — the statement goes to `db.Raw` / `db.Where` on a handle from `DBConnect`
   — so the transaction in ctx, the SQL log with masking and trace ids, slow-SQL
   timing and the generation pinning keep working. Only `entgo.io/ent/dialect` and

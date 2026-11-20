@@ -125,52 +125,166 @@ type (
 	// LockAction is the action of a row lock, such as SkipLocked.
 	// LockAction 是行锁的动作，例如 SkipLocked。
 	LockAction = entsql.LockAction
+	// WithBuilder builds a CTE; it is what With and WithRecursive return.
+	// WithBuilder 构造 CTE；With 与 WithRecursive 返回它。
+	WithBuilder = entsql.WithBuilder
+	// DialectBuilder starts a statement that quotes for one dialect.
+	// DialectBuilder 开始一条按指定方言加引号的语句。
+	DialectBuilder = entsql.DialectBuilder
 )
 
 // Statement constructors.
+//
+// These are wrappers rather than aliases. `var Table = entsql.Table` compiles
+// just as well, but a package-level function value is assignable from outside the
+// package (`sqlbuilder.Table = somethingElse`) and both godoc and the IDE symbol
+// list file it under variables, so it is never found where a function is
+// expected. A wrapper costs one line and keeps the API read-only and listed under
+// functions; it also fails to compile if upstream changes a signature, which is
+// exactly when this package must be looked at.
 // 语句构造器。
-var (
-	Select        = entsql.Select
-	SelectExpr    = entsql.SelectExpr
-	Table         = entsql.Table
-	Expr          = entsql.Expr
-	Count         = entsql.Count
-	With          = entsql.With
-	WithRecursive = entsql.WithRecursive
-	Dialect       = entsql.Dialect
-)
+//
+// 这些是包装函数而不是别名。写成 `var Table = entsql.Table` 同样能编译，但包级函数值
+// 从包外可赋值（`sqlbuilder.Table = 别的函数`），而且 godoc 与 IDE 的符号列表把它归在
+// 变量下——按「找函数」的思路永远看不到它。包装只多一行，换来只读的 API、在函数分组里
+// 可见，以及上游改签名时编译失败（那正是必须有人来看这个包的时候）。
+func Select(columns ...string) *Selector { return entsql.Select(columns...) }
 
-// Condition combinators and comparisons.
-// 条件组合与比较。
-var (
-	And        = entsql.And
-	Or         = entsql.Or
-	Not        = entsql.Not
-	EQ         = entsql.EQ
-	NEQ        = entsql.NEQ
-	GT         = entsql.GT
-	GTE        = entsql.GTE
-	LT         = entsql.LT
-	LTE        = entsql.LTE
-	In         = entsql.In
-	NotIn      = entsql.NotIn
-	IsNull     = entsql.IsNull
-	NotNull    = entsql.NotNull
-	Like       = entsql.Like
-	Exists     = entsql.Exists
-	NotExists  = entsql.NotExists
-	ColumnsEQ  = entsql.ColumnsEQ
-	ColumnsNEQ = entsql.ColumnsNEQ
-)
+// SelectExpr selects arbitrary queriers, for expressions without a dedicated
+// builder (window functions, for example).
+// SelectExpr 选择任意 Querier，用于没有专用构造器的表达式（例如窗口函数）。
+func SelectExpr(exprs ...Querier) *Selector { return entsql.SelectExpr(exprs...) }
 
-// Row lock options. They only hold until the surrounding transaction ends, so a
-// locking statement must run on a handle that is inside one.
+// Table references a table by name. The name is a literal and does not go
+// through gorm's NamingStrategy.
+// Table 按名字引用一张表。名字是字面量，不经过 gorm 的 NamingStrategy。
+func Table(name string) *SelectTable { return entsql.Table(name) }
+
+// Expr wraps a raw SQL fragment with its own arguments.
+// Expr 把一段裸 SQL 片段和它自己的参数包起来。
+func Expr(expr string, args ...any) Querier { return entsql.Expr(expr, args...) }
+
+// Count renders COUNT(ident) and returns the string, so it can be passed to
+// Select, SelectExpr or a comparison.
+// Count 渲染 COUNT(ident) 并返回字符串，因此可以直接交给 Select、SelectExpr 或比较。
+func Count(ident string) string { return entsql.Count(ident) }
+
+// With starts a common table expression; it must be attached to the statement
+// with Prefix. WithRecursive additionally allows the CTE to reference itself.
+// With 开始一个 CTE，必须经 Prefix 挂到语句上。WithRecursive 额外允许自引用。
+func With(name string, columns ...string) *WithBuilder {
+	return entsql.With(name, columns...)
+}
+
+// WithRecursive is With plus the RECURSIVE keyword.
+// WithRecursive 是 With 加 RECURSIVE 关键字。
+func WithRecursive(name string, columns ...string) *WithBuilder {
+	return entsql.WithRecursive(name, columns...)
+}
+
+// Dialect starts a statement whose identifiers are quoted for that dialect. See
+// the package doc: the default is correct for MySQL and SQLite, and PostgreSQL
+// is the one case that needs this.
+// Dialect 开始一条按该方言给标识符加引号的语句。见包注释：默认值对 MySQL 与 SQLite
+// 都正确，真正需要它的是 PostgreSQL。
+func Dialect(name string) *DialectBuilder { return entsql.Dialect(name) }
+
+// Condition combinators and comparisons. Each returns a Predicate tree that can
+// be nested freely; Build renders it, or gorm renders it when passed to Where.
+// 条件组合与比较。每个都返回可自由嵌套的谓词树：由 Build 渲染，或交给 gorm 的 Where
+// 由 gorm 渲染。
+func And(preds ...*Predicate) *Predicate { return entsql.And(preds...) }
+
+// Or groups predicates as alternatives; the parentheses are emitted, so it can
+// sit inside And without changing meaning.
+// Or 把谓词组合成「或」；括号会一起输出，因此嵌在 And 里不会改变语义。
+func Or(preds ...*Predicate) *Predicate { return entsql.Or(preds...) }
+
+// Not negates one predicate or a group.
+// Not 对一个谓词或一组谓词取反。
+func Not(pred *Predicate) *Predicate { return entsql.Not(pred) }
+
+// EQ, NEQ, GT, GTE, LT and LTE compare a column with one value. The column is
+// quoted as written, so it may carry a table prefix ("orders.id").
+// EQ、NEQ、GT、GTE、LT、LTE 把列与一个值比较。列按原样加引号，因此可以带表前缀
+// （"orders.id"）。
+func EQ(col string, value any) *Predicate { return entsql.EQ(col, value) }
+
+// NEQ is the inequality comparison.
+// NEQ 是不等比较。
+func NEQ(col string, value any) *Predicate { return entsql.NEQ(col, value) }
+
+// GT is the greater-than comparison.
+// GT 是大于比较。
+func GT(col string, value any) *Predicate { return entsql.GT(col, value) }
+
+// GTE is the greater-than-or-equal comparison.
+// GTE 是大于等于比较。
+func GTE(col string, value any) *Predicate { return entsql.GTE(col, value) }
+
+// LT is the less-than comparison.
+// LT 是小于比较。
+func LT(col string, value any) *Predicate { return entsql.LT(col, value) }
+
+// LTE is the less-than-or-equal comparison.
+// LTE 是小于等于比较。
+func LTE(col string, value any) *Predicate { return entsql.LTE(col, value) }
+
+// In matches a column against a list; it is the only way to build IN — passing a
+// slice to EQ would be read as one argument here and as a list by gorm.
+// In 用一个列表匹配列；构造 IN 只能用它——把 slice 传给 EQ，这里会当成一个参数，
+// gorm 那边又会当成列表。
+func In(col string, args ...any) *Predicate { return entsql.In(col, args...) }
+
+// NotIn is the negated In.
+// NotIn 是 In 的否定。
+func NotIn(col string, args ...any) *Predicate { return entsql.NotIn(col, args...) }
+
+// IsNull and NotNull test for NULL.
+// IsNull 与 NotNull 判断 NULL。
+func IsNull(col string) *Predicate { return entsql.IsNull(col) }
+
+// NotNull tests for a non-NULL value.
+// NotNull 判断非 NULL。
+func NotNull(col string) *Predicate { return entsql.NotNull(col) }
+
+// Like matches a column against a pattern; the caller supplies the % signs.
+// Like 用模式匹配列；百分号由调用方自己给出。
+func Like(col, pattern string) *Predicate { return entsql.Like(col, pattern) }
+
+// Exists and NotExists take a subquery. Select columns with SelectExpr(Expr("1"))
+// rather than Select("1"), which would quote the constant as an identifier.
+// Exists 与 NotExists 接收子查询。列要用 SelectExpr(Expr("1")) 选，不能用
+// Select("1")——后者会把常量当成标识符加引号。
+func Exists(query Querier) *Predicate { return entsql.Exists(query) }
+
+// NotExists is the negated Exists.
+// NotExists 是 Exists 的否定。
+func NotExists(query Querier) *Predicate { return entsql.NotExists(query) }
+
+// ColumnsEQ and ColumnsNEQ compare two columns instead of a column and a value;
+// they are what correlated subqueries need.
+// ColumnsEQ 与 ColumnsNEQ 比较两个列而不是列与值；关联子查询需要它们。
+func ColumnsEQ(col1, col2 string) *Predicate { return entsql.ColumnsEQ(col1, col2) }
+
+// ColumnsNEQ is the negated ColumnsEQ.
+// ColumnsNEQ 是 ColumnsEQ 的否定。
+func ColumnsNEQ(col1, col2 string) *Predicate { return entsql.ColumnsNEQ(col1, col2) }
+
+// Row lock options. A lock only holds until the surrounding transaction ends, so
+// a locking statement must run on a handle that is inside one.
 // 行锁选项。锁只持有到事务结束，因此加锁语句必须跑在事务内的句柄上。
-var (
-	WithLockAction = entsql.WithLockAction
-	WithLockTables = entsql.WithLockTables
-	SkipLocked     = entsql.SkipLocked
-	NoWait         = entsql.NoWait
+func WithLockAction(action LockAction) LockOption { return entsql.WithLockAction(action) }
+
+// WithLockTables scopes the lock to the named tables.
+// WithLockTables 把锁限定到指定表。
+func WithLockTables(tables ...string) LockOption { return entsql.WithLockTables(tables...) }
+
+// Lock actions accepted by WithLockAction.
+// WithLockAction 接受的动作。
+const (
+	SkipLocked = entsql.SkipLocked
+	NoWait     = entsql.NoWait
 )
 
 // Dialect names Dialect accepts, so a project targeting PostgreSQL does not

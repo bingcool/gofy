@@ -1755,7 +1755,9 @@ SQL 日志与脱敏、`X-Trace-Id`、慢 SQL、连接代际全部不变（`docs/
   `type With struct{}`，`clause` 包没有 `Union` 类型），这两类语句否则只能整条手写
   `Raw` 并把 `?` 与 args 人肉对齐；
 - 导出类型别名 `Selector` / `SelectTable` / `Predicate` / `Builder` / `Querier` /
-  `LockOption` / `LockAction`；构造器 `Select` / `SelectExpr` / `Table` / `Expr` /
+  `LockOption` / `LockAction` / `WithBuilder` / `DialectBuilder`；构造器与谓词都是
+  **包装函数**（不是 `var X = entsql.X`：函数值从包外可赋值，且被 godoc/IDE 归到变量下），
+  调用写法与上游一致。构造器 `Select` / `SelectExpr` / `Table` / `Expr` /
   `Count` / `With` / `WithRecursive` / `Dialect`；谓词 `And` / `Or` / `Not` / `EQ` /
   `NEQ` / `GT` / `GTE` / `LT` / `LTE` / `In` / `NotIn` / `IsNull` / `NotNull` / `Like` /
   `Exists` / `NotExists` / `ColumnsEQ` / `ColumnsNEQ`；行锁 `WithLockAction` /

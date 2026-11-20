@@ -19,11 +19,15 @@
 | 5 分层文档 | `module-layering-design.md` §3.5 增加「复杂报表可选 `support/sqlbuilder`」，顺带修正该节过时的 `NewDBIO` + `gofydb.WithContext` 写法（`DBConnect` 已取代两步） |
 | 6 守卫检查 | `controller` 当前没有 import 它；**没有加禁令**，理由见下 |
 
-三个落地时才定下来的点：
+四个落地时才定下来的点：
 
 1. **多导出了 `DialectMySQL` / `DialectPostgres`**。第 8 节的草图只有 `Dialect`，但 PostgreSQL 需要传方言名才能切换到双引号，调用方就得 `import "entgo.io/ent/dialect"`——第 8 节自己写的「`entgo.io/ent` 的名字不会散落到业务代码里」当场不成立。SQLite 的方言名刻意不导出，理由见第十节第 4 条。`LockAction` 类型也一并转发，`WithLockAction` 的入参需要它。
 2. **第 6 步不加守卫**。`controller` 的白名单里 `support` 是放行的，因此它「可以」import 构造器。但入口平权已经明确 controller 可以直接写裸 SQL，只禁构造器而放开裸 SQL 是自相矛盾。约定保留在 §3.5（构造 SQL 属于 query / repository），要真正拦住得同时禁掉入口层的裸 SQL 拼接——那与入口平权冲突，需要单独决策。
 3. **`go.sum` 里 `mattn/go-sqlite3` 从 1.14.22 提到 1.14.28**（MVS 取 ent 的下限）。本仓库不编译它：`go mod why` 只能经 `gorm.io/gorm.test` 走到，`go list -deps ./...` 里也没有。属于 go.sum 记账，不是新依赖。
+
+4. **构造器是包装函数，不是 `var Select = entsql.Select`。** 草图画的是变量，先按变量实现，
+   随后改掉：包级函数值从包外可赋值，而且 godoc / IDE 的符号列表把它归在「变量」下——作者
+   本人第一次就没有找到 `Table`。改动只在第 8 节代码块里体现，调用处写法完全不变。
 
 另外在框架守卫里加了一条：`support/sqlbuilder` 不得依赖 gorm（`shell/check-imports.sh`）。一旦它引入 gorm，就说明有人在构造器包里搭第二套执行栈——连接、事务、日志都要重新接一遍，那时它已经不是构造器了。
 
@@ -229,73 +233,46 @@ support/
 
 ## 八、API 形态
 
-不造新 DSL。`support/sqlbuilder` 的内容是 re-export 加一个 `Build`：
+不造新 DSL。`support/sqlbuilder` 的内容是包装函数加一个 `Build`。下面是落地后的实际形态：
 
 ```go
 // Package sqlbuilder 只做两件事：把 ent 的 SQL 构造器引到一处，
 // 以及提供带 error 的 Build。它不是一套新的 DSL。
 package sqlbuilder
 
-import (
-	"fmt"
-
-	entsql "entgo.io/ent/dialect/sql"
-)
-
 type (
-	Selector    = entsql.Selector
-	SelectTable = entsql.SelectTable
-	Predicate   = entsql.Predicate
-	Builder     = entsql.Builder
-	Querier     = entsql.Querier
-	LockOption  = entsql.LockOption
+	Selector       = entsql.Selector
+	SelectTable    = entsql.SelectTable
+	Predicate      = entsql.Predicate
+	Builder        = entsql.Builder
+	Querier        = entsql.Querier
+	LockOption     = entsql.LockOption
+	LockAction     = entsql.LockAction
+	WithBuilder    = entsql.WithBuilder
+	DialectBuilder = entsql.DialectBuilder
 )
 
-// 构造
-var (
-	Select        = entsql.Select
-	SelectExpr    = entsql.SelectExpr
-	Table         = entsql.Table
-	Expr          = entsql.Expr
-	Count         = entsql.Count
-	With          = entsql.With
-	WithRecursive = entsql.WithRecursive
-	Dialect       = entsql.Dialect
-)
+// 构造：包装函数，不是 `var Select = entsql.Select`
+func Select(columns ...string) *Selector                       { return entsql.Select(columns...) }
+func SelectExpr(exprs ...Querier) *Selector                    { return entsql.SelectExpr(exprs...) }
+func Table(name string) *SelectTable                           { return entsql.Table(name) }
+func Expr(expr string, args ...any) Querier                    { return entsql.Expr(expr, args...) }
+func Count(ident string) string                                { return entsql.Count(ident) }
+func With(name string, columns ...string) *WithBuilder         { return entsql.With(name, columns...) }
+func WithRecursive(name string, columns ...string) *WithBuilder { return entsql.WithRecursive(name, columns...) }
+func Dialect(name string) *DialectBuilder                      { return entsql.Dialect(name) }
 
-// 谓词
-var (
-	P         = entsql.P
-	And       = entsql.And
-	Or        = entsql.Or
-	Not       = entsql.Not
-	EQ        = entsql.EQ
-	NEQ       = entsql.NEQ
-	GT        = entsql.GT
-	GTE       = entsql.GTE
-	LT        = entsql.LT
-	LTE       = entsql.LTE
-	In        = entsql.In
-	NotIn     = entsql.NotIn
-	IsNull    = entsql.IsNull
-	NotNull   = entsql.NotNull
-	Like      = entsql.Like
-	Exists    = entsql.Exists
-	NotExists = entsql.NotExists
-	ColumnsEQ = entsql.ColumnsEQ
-	ColumnsNEQ = entsql.ColumnsNEQ
-)
+// 谓词：And / Or / Not / EQ / NEQ / GT / GTE / LT / LTE / In / NotIn /
+// IsNull / NotNull / Like / Exists / NotExists / ColumnsEQ / ColumnsNEQ
+// 每个都是同构的一行包装，签名与上游一致，这里不展开。
 
-// 行锁
-var (
-	WithLockAction = entsql.WithLockAction
-	WithLockTables = entsql.WithLockTables
-	SkipLocked     = entsql.SkipLocked
-	NoWait         = entsql.NoWait
-)
+// 行锁与方言名
+func WithLockAction(action LockAction) LockOption { return entsql.WithLockAction(action) }
+func WithLockTables(tables ...string) LockOption  { return entsql.WithLockTables(tables...) }
 
-// 方言名：PostgreSQL 需要显式切换，MySQL 用默认的反引号
 const (
+	SkipLocked      = entsql.SkipLocked
+	NoWait          = entsql.NoWait
 	DialectMySQL    = dialect.MySQL
 	DialectPostgres = dialect.Postgres
 )
@@ -313,10 +290,18 @@ func Build(q Querier) (string, []any, error) {
 }
 ```
 
+**为什么是包装函数而不是 `var Table = entsql.Table`。** 后者同样能编译、同样能用，但有三处代价：
+包级函数值从包外可赋值（`sqlbuilder.Table = 别的函数`，只读 API 变成可变全局）；godoc 与 IDE
+的符号列表把它归在「变量」下，按函数去找永远看不到——落地时原作者就是这样没找到 `Table`
+的；godoc 也不展示它的签名。包装只多一行，换来只读、在函数分组里可见，以及上游改签名时
+编译失败。
+
+上游的 `P`（用回调直接操作 `Builder` 的底层入口）没有导出：目前没有场景需要它，真需要时再加。
+
 这样做的取舍：
 
 - **好处**：调用方只 import `support/sqlbuilder`，未来若换构造器（goqu 或自研），只需要改一个文件；`entgo.io/ent` 的名字不会散落到业务代码里。
-- **代价**：需要维护这份 var 清单；上游新增 API 不会自动出现。清单只覆盖实际用到的部分，缺了就在用的时候加——不追求完整镜像。
+- **代价**：需要维护这份包装清单；上游新增 API 不会自动出现，上游改签名会让本包编译失败（这正是要来看一眼的信号）。清单只覆盖实际用到的部分，缺了就在用的时候加——不追求完整镜像。
 - **落地时比草图多导出了三项**：`LockAction` 类型、`DialectMySQL` / `DialectPostgres` 常量、以及第十一节的 `TenantScope` 与 `DefaultTenantColumn`。前两项的理由是让「调用方只 import 一个包」这条真的成立；`TenantScope` 是第十一节对策的第 2 条。
 
 ---
