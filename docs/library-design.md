@@ -2812,8 +2812,8 @@ func Load(ctx context.Context, path string) (*Config, error) {
 // app/appio/snapshot.go —— 本代句柄的只读视图
 //
 // 取句柄只有一条路：按别名解析本代 Registry，一律返回 (句柄, error)。
-// "default" 由框架托管、不在 Registry 里，DBIO 认这个名字并返回默认库。
-func (s *Snapshot) DBIO(context.Context, string) (*gorm.DB, error)
+// "default" 由框架托管、不在 Registry 里，NewDBIO 认这个名字并返回默认库。
+func (s *Snapshot) NewDBIO(context.Context, string) (*gorm.DB, error)
 func (s *Snapshot) RedisIO(context.Context, string) (*goredis.Client, error)
 func (s *Snapshot) AMQPIO(context.Context, string) (*amqp.Client, error)
 func (s *Snapshot) KafkaIO(context.Context, string) (*kafka.Client, error)
@@ -2826,7 +2826,7 @@ func Middleware() support.MiddlewareFunc         // 请求入口固定当前一�
 ```
 
 ```go
-db, err := appio.WithContext(ctx).DBIO(ctx, "order")        // 命名库；"default" 解析到框架托管的默认库
+db, err := appio.WithContext(ctx).NewDBIO(ctx, "order")        // 命名库；"default" 解析到框架托管的默认库
 cache, err := appio.WithContext(ctx).RedisIO(ctx, "cache") // 首次访问才建连
 ```
 
@@ -2841,7 +2841,7 @@ rocketmq、uuidint 的 `Set`（各自用本代 `NewRegistry` 建连），全部�
 本代 `Set`。`Set.Close` 关闭本代注册表，旧代不会误清或误关新句柄。
 
 `db` 的其它实例名（如 `selectDb`，可指向任何兼容 MySQL 协议的服务器）只注册不
-预建连，业务首次 `DBIO` / `db.NewIO` 时才打开，也不会自动安装 GORM tracing
+预建连，业务首次 `NewDBIO` / `db.NewIO` 时才打开，也不会自动安装 GORM tracing
 插件。`uuidint` 生成器绑定本代 Redis 客户端（`support/uuidint.WithClient`），
 取号不再依赖包级 Registry。RocketMQ 的 `app/appio` 只发布 producer 句柄；需要消费时
 业务用配置里的 `Config` 调用 `rocketmq.NewConsumer`。

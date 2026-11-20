@@ -63,7 +63,7 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 		// 全部分组，`worker --group=<分组>` 只运行其中一个。
 		opts = append(opts, gofy.WithWorkerGroups(groups...))
 		// worker 进程的 IO 代际：只装数据库。worker 复用 service 与 repository，
-		// 两层都通过 appio.WithContext(ctx).DBIO 取句柄，因此它们需要的不是一条
+		// 两层都通过 appio.WithContext(ctx).NewDBIO 取句柄，因此它们需要的不是一条
 		// Runtime.DB，而是一代已发布的快照。broker 连接不在这里装配——消费者按名字
 		// 解析自己的实例（见 worker/connections.go），再开一套只会重复建连。
 		//

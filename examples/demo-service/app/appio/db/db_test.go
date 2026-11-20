@@ -40,10 +40,10 @@ func TestOpenPublishesDefaultOnly(t *testing.T) {
 
 // A deployment may configure no db.default at all. Open still builds a
 // generation — named instances work — and Default stays nil, which is the state
-// the framework already tolerates: /readyz answers 200 and DBIO("default")
+// the framework already tolerates: /readyz answers 200 and NewDBIO("default")
 // reports ErrNotConfigured instead of the process refusing to boot.
 // 部署可以完全不给 db.default。Open 仍然构建一代（命名实例可用），Default 保持
-// nil——框架本就接受这个状态：/readyz 返回 200，DBIO("default") 报
+// nil——框架本就接受这个状态：/readyz 返回 200，NewDBIO("default") 报
 // ErrNotConfigured，而不是进程拒绝启动。
 func TestOpenAllowsNilDefault(t *testing.T) {
 	set, err := Open(context.Background(), nil, nil, nil)

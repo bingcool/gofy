@@ -64,8 +64,8 @@ func TestStartInstallsAndStopClearsHandles(t *testing.T) {
 	if Current() == nil {
 		t.Fatal("no snapshot was published")
 	}
-	if got, err := Current().DBIO(ctx, appdb.DefaultInstance); err != nil || got != rt.DB {
-		t.Fatalf("snapshot DBIO(default) = %v, %v; want the runtime connection", got, err)
+	if got, err := Current().NewDBIO(ctx, appdb.DefaultInstance); err != nil || got != rt.DB {
+		t.Fatalf("snapshot NewDBIO(default) = %v, %v; want the runtime connection", got, err)
 	}
 	if appredis.RateLimit() == nil {
 		t.Fatal("redis.RateLimit was not installed")

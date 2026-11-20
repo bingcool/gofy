@@ -30,7 +30,7 @@ import (
 //
 // Snapshot 本身不可变：字段只在 Start 组装时写入，发布后不再修改。
 //
-// 取句柄只有一条路：DBIO / RedisIO / AMQPIO / KafkaIO / RocketMQIO，按别名解析
+// 取句柄只有一条路：NewDBIO / RedisIO / AMQPIO / KafkaIO / RocketMQIO，按别名解析
 // 本代 Registry，一律返回 (句柄, error)。没有"已经打开的句柄"快捷方法——那会让
 // 同一件事有两种写法，也让"实例没配置"时而 nil、时而 error。UUID 与 RedisLock 是
 // 例外：生成器和锁都不是连接，没有 Registry 可解析，仍由 UUID() / RedisLock() 直接
@@ -67,14 +67,14 @@ func Publish(s *Snapshot) { currentSnapshot.Publish(s) }
 //
 // The Set owns no extra pool — NewSet only wraps the handle — so closing this
 // generation never closes db. Named instances are not reachable through it:
-// NewSet has no registry, so DBIO reports ErrUnknownInstance for any other name.
+// NewSet has no registry, so NewDBIO reports ErrUnknownInstance for any other name.
 // NewSnapshotDB 构造只带框架托管的 default 池的一代。它服务于不运行 io 模块、却想用
 // 同一种方式取连接的入口：单测发布自己打开的池，只需要默认库的脚本也可以这么做。
 // worker 进程不用它——那一代来自 NewDBOnlyModuleFactory，有 registry，因此复用的
 // service 需要的命名实例也在。
 //
 // 这个 Set 不拥有额外连接池——NewSet 只是包装句柄——因此关闭这一代永远不会关闭 db。
-// 它取不到命名实例：NewSet 没有 registry，其它名字的 DBIO 返回 ErrUnknownInstance。
+// 它取不到命名实例：NewSet 没有 registry，其它名字的 NewDBIO 返回 ErrUnknownInstance。
 func NewSnapshotDB(db *gorm.DB) *Snapshot {
 	return &Snapshot{db: appdb.NewSet(db)}
 }
@@ -127,18 +127,43 @@ func (s *Snapshot) RedisLock() *gofylock.Locker {
 // WithContext(ctx) 拿到固定的 Snapshot 再解析，避免解析发生在 Reload 边界、读到
 // 下一代 Registry。
 
-// DBIO 在本代 Registry 中按别名解析数据库连接（首次访问才建连）。
+// NewDBIO resolves a database connection by alias in this generation's Registry,
+// opening it on first use. What it returns is the generation's own connection:
+// no transaction from ctx is applied to it, so statements run on it take effect
+// on their own (autocommit) and a failure rolls back only that statement —
+// nothing already committed is undone, and nothing that follows is affected.
 //
-// "default" 是特例：它由框架打开、刻意不在 registry 里，因此这里直接返回本代的
-// defaultDB，而不是交给 Set.NewIO。没有它，调用方就得记住"默认库走另一条路"，
-// 而这正是统一入口要消除的东西。
-// DBIO resolves a database connection by alias in this generation's Registry,
-// opening it on first use.
+// That independence is the point, not an oversight. Two callers need it:
+// opening a transaction (gofydb.Transaction wants a handle that is not already
+// inside one), and writes that must commit regardless of the caller's
+// transaction (a consumer's idempotency ledger, a claim ledger).
+//
+// Two consequences to know before reaching for it:
+//   - The handle is not bound to ctx. Executing on it directly ignores
+//     cancellation and deadlines; call .WithContext(ctx) if you want them.
+//   - "No rollback" holds only while no transaction is opened on it. Handing it
+//     to gofydb.Transaction restores the usual rollback semantics.
+//
+// NewDBIO 在本代 Registry 中按别名解析数据库连接（首次访问才建连）。返回的是本代
+// 自己的连接：**不叠加 ctx 中的任何事务**，因此在它上面执行的语句独立生效
+// （autocommit），一条失败只回滚这一条——之前已提交的不会撤销，后续操作也不受影响。
+//
+// 这种独立性是刻意保留的，不是疏漏。两类调用需要它：开启事务
+// （gofydb.Transaction 需要一个尚未处于事务中的连接），以及必须独立提交的写入
+// （消费者幂等台账、claim 台账）。
+//
+// 用它之前要知道两个后果：
+//   - 句柄未绑定 ctx：直接执行不响应取消与超时，需要时自己 .WithContext(ctx)；
+//   - 「不回滚」只在不开启事务时成立：交给 gofydb.Transaction 后回滚语义照旧。
 //
 // "default" is the one special case: the framework opens it and deliberately
 // keeps it out of the registry, so it resolves to this generation's defaultDB
 // instead of going through Set.NewIO.
-func (s *Snapshot) DBIO(ctx context.Context, name string) (*gorm.DB, error) {
+//
+// "default" 是特例：它由框架打开、刻意不在 registry 里，因此这里直接返回本代的
+// defaultDB，而不是交给 Set.NewIO。没有它，调用方就得记住"默认库走另一条路"，
+// 而这正是统一入口要消除的东西。
+func (s *Snapshot) NewDBIO(ctx context.Context, name string) (*gorm.DB, error) {
 	if s == nil {
 		return nil, gofydb.ErrNotConfigured
 	}
@@ -156,8 +181,8 @@ func (s *Snapshot) DBIO(ctx context.Context, name string) (*gorm.DB, error) {
 // Queries and writes go through here, so a caller inside gofydb.Transaction
 // transparently joins it and nobody has to remember a second WithContext.
 //
-// DBIO stays the "connection of this generation, no transaction" accessor on
-// purpose. Opening a transaction and writing something that must commit on its
+// NewDBIO is deliberately the "connection of this generation, no transaction"
+// accessor. Opening a transaction and writing something that must commit on its
 // own (a consumer's idempotency ledger, an audit row) both need a handle that
 // ignores ctx; folding the two into one method would make those cases the ones
 // that have to work around the default.
@@ -166,19 +191,19 @@ func (s *Snapshot) DBIO(ctx context.Context, name string) (*gorm.DB, error) {
 // 否则返回本代的连接。查询与写入走这里，于是处于 gofydb.Transaction 内的调用会
 // 自动加入事务，调用方也不需要再补一次 WithContext。
 //
-// DBIO 刻意保持「本代连接、不解析事务」的语义：开启事务，以及必须独立提交的写入
+// NewDBIO 刻意保持「本代连接、不解析事务」的语义：开启事务，以及必须独立提交的写入
 // （消费者幂等台账、审计行）都需要一个忽略 ctx 的句柄；把两者合成一个方法，会让
 // 这些场景反过来变成需要绕开的特例。
 //
 // Note that the transaction check is by ctx only, not by instance: a transaction
 // opened on db.default is returned for DBConnect(ctx, "order") as well. Keep one
-// transaction per instance per request, or use DBIO when a named instance must
+// transaction per instance per request, or use NewDBIO when a named instance must
 // stay outside the ambient transaction.
 // 注意：事务只按 ctx 判断，不区分实例，db.default 上的事务对
 // DBConnect(ctx, "order") 同样会被返回。一次请求内请只在一个实例上开事务；
-// 需要某命名实例脱离当前事务时用 DBIO。
+// 需要某命名实例脱离当前事务时用 NewDBIO。
 func (s *Snapshot) DBConnect(ctx context.Context, name string) (*gorm.DB, error) {
-	db, err := s.DBIO(ctx, name)
+	db, err := s.NewDBIO(ctx, name)
 	if err != nil {
 		return nil, err
 	}

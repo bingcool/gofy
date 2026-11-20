@@ -12,11 +12,11 @@ import (
 
 // dbModule assembles one generation that carries the database and nothing else.
 // It exists for worker processes: they reuse the service and repository layer,
-// which resolves handles through appio.WithContext(ctx).DBIO, but they do not
+// which resolves handles through appio.WithContext(ctx).NewDBIO, but they do not
 // need the broker connections the full Module opens — a consumer builds its own.
 //
 // 只装配数据库的模块。它服务 worker 进程：worker 复用 service 与 repository，
-// 那些层通过 appio.WithContext(ctx).DBIO 取句柄；但 worker 不需要完整 Module 打开的
+// 那些层通过 appio.WithContext(ctx).NewDBIO 取句柄；但 worker 不需要完整 Module 打开的
 // broker 连接——消费者自己会建。
 type dbModule struct {
 	rt   *gofy.Runtime
@@ -33,7 +33,7 @@ type dbModule struct {
 // The default pool is the framework's (Runtime.DB) and is only published, not
 // owned: Stop closes the extra instances this generation opened and never the
 // pool the App will close itself. A deployment without a `db` section still
-// assembles: the generation has no default handle and DBIO reports
+// assembles: the generation has no default handle and NewDBIO reports
 // ErrNotConfigured at the point of use, which is the same answer a request gets.
 //
 // Named instances (db.order, db.product) are opened here exactly as they are in
@@ -44,7 +44,7 @@ type dbModule struct {
 //
 // default 池归框架（Runtime.DB），这里只发布、不拥有：Stop 关闭本代打开的额外实例，
 // 从不关闭 App 自己要关的池。没有 `db` 段的部署同样能装配：这一代没有 default 句柄，
-// DBIO 在使用处返回 ErrNotConfigured——与请求得到的答案是同一个。
+// NewDBIO 在使用处返回 ErrNotConfigured——与请求得到的答案是同一个。
 //
 // 命名实例（db.order、db.product）在这里与 HTTP 路径一样打开，因此复用了依赖某个实例的
 // service 的 worker 不需要第二条接线。

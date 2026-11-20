@@ -174,7 +174,7 @@ entgo.io/ent/dialect/sql
 | 机制 | 走 B 之后 |
 |---|---|
 | 事务 | `db.Raw()` 作用在 `gofydb.WithContext(ctx, db)` 上，ctx 里有 tx 就用 tx，跨模块同事务照旧 |
-| 连接代 | 句柄仍从 `appio.WithContext(ctx).DBIO(...)` 取，Reload 后不会跨代 |
+| 连接代 | 句柄仍从 `appio.WithContext(ctx).NewDBIO(...)` 取，Reload 后不会跨代 |
 | SQL 日志 / 脱敏 / trace-id / 慢 SQL | 最终由 gorm 发出，`logger.GormLogger` 全链路生效，配置项一个都不用改 |
 | 多租户 | ⚠️ 见第十一节，Raw 不经过插件回调 |
 | 脚本 / worker / controller | 三种入口平权，都能用；不新增 import 边界 |
@@ -483,8 +483,8 @@ if err := db.Raw(query, args...).Scan(&rows).Error; err != nil { // 已绑 ctx
 三个注意点：
 
 1. **`DBConnect` 需要实例名**（`appdb.DefaultInstance` 或 `"order"`）。
-2. **要一条不带事务的连接时用 `DBIO`**：开启事务（`gofydb.Transaction` 的第一个参数），以及必须独立提交的写入（消费者幂等台账、claim 认领）。`DBIO` 仍然只做"取本代连接"这一件事。
-3. **事务只按 ctx 判断，不区分实例**：`db.default` 上开的事务，对 `DBConnect(ctx, "order")` 同样会被返回。要访问另一个库且不参与当前事务（只读报表库、独立提交），用 `DBIO`。
+2. **要一条不带事务的连接时用 `NewDBIO`**：开启事务（`gofydb.Transaction` 的第一个参数），以及必须独立提交的写入（消费者幂等台账、claim 认领）。`NewDBIO` 仍然只做"取本代连接"这一件事。
+3. **事务只按 ctx 判断，不区分实例**：`db.default` 上开的事务，对 `DBConnect(ctx, "order")` 同样会被返回。要访问另一个库且不参与当前事务（只读报表库、独立提交），用 `NewDBIO`。
 
 `repository` 与 `query` 的 `conn(ctx)` 就是这一行，业务代码直接调 `conn(ctx)` 即可。
 
@@ -500,7 +500,7 @@ if err := db.Raw(query, args...).Scan(&rows).Error; err != nil { // 已绑 ctx
 标准形态（`order_service.go:72-96`）：
 
 ```go
-db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+db, err := appio.WithContext(ctx).NewDBIO(ctx, appdb.DefaultInstance)
 if err != nil {
 	return nil, fmt.Errorf("resolve default database: %w", err)
 }
@@ -520,7 +520,7 @@ err = gofydb.Transaction(ctx, db, func(ctx context.Context) error {
 
 1. **事务通过 ctx 向下传**。product 模块的 repository 与 order 的 repository 都用 `gofydb.WithContext(ctx, ...)` 取连接，于是跨模块的两次写落在同一个事务里，同提交同回滚——调用方不需要把 `*gorm.DB` 当参数一路传下去。
 2. **嵌套调用复用外层，不建 savepoint**。内层 `Transaction` 看到 ctx 里已有事务就直接执行 `fn`，内层返回的错误冒泡到最外层，由最外层统一回滚。
-3. **`conn` 参数直接传 `DBIO` 的返回值**，不要先经过 `gofydb.WithContext`。`Transaction` 内部第一件事就是检查 ctx：有事务则复用（`conn` 完全不参与），没有才在 `conn` 上开启。提前解析反而会掩盖"我以为在开事务，其实在复用别人的"这种情况。
+3. **`conn` 参数直接传 `NewDBIO` 的返回值**，不要先经过 `gofydb.WithContext`。`Transaction` 内部第一件事就是检查 ctx：有事务则复用（`conn` 完全不参与），没有才在 `conn` 上开启。提前解析反而会掩盖"我以为在开事务，其实在复用别人的"这种情况。
 
 sqlbuilder 与这三条没有冲突：事务内用 builder，只要 `db` 来自 `conn(ctx)` 或 `gofydb.WithContext`，`Raw` 就在事务里执行，`ForUpdate` 的锁也才真正持有到提交。
 

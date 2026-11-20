@@ -76,7 +76,7 @@ return db, nil
    `orders.user_id` 已有索引；新增查询前先看 `EXPLAIN`，慢查询会进
    `component=gorm` 的 `slow sql` 日志。
 6. **只读账号可选**：如果报表查询压力大，可给 query 层单独配一个只读实例
-   （`db.<name>`），用 `DBIO(ctx, "report")` 解析，不影响写库。这里必须用 `DBIO`：
+   （`db.<name>`），用 `NewDBIO(ctx, "report")` 解析，不影响写库。这里必须用 `NewDBIO`：
    报表要落在只读库上，不能被 ctx 里 `db.default` 的事务接管——`DBConnect` 只按 ctx
    判断有没有事务，不区分实例。
 

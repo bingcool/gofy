@@ -309,7 +309,7 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
    `tenantguard.Ensure` 惰性安装。它有两个说不通的地方——插件装在池上而不是 context 上，
    于是"装"这件事要靠每个入口各做一次才完整（扫描循环可能早于任何消息启动）；而它依赖
    `Runtime.DB` 存在，等于让 worker 的业务路径认识 Runtime 的连接字段。装配入口解决了两者：
-   插件先于任何 worker 存在，业务只认 `appio.WithContext(ctx).DBIO`，`Runtime.DB` 只在
+   插件先于任何 worker 存在，业务只认 `appio.WithContext(ctx).NewDBIO`，`Runtime.DB` 只在
    装配层出现（`shell/check-io-access.sh` 对该目录无豁免地拦住直读）。
    消费者只负责一件事：把事件携带的 `tenant_id` 用 `tenant.WithTenant` 注入 ctx。
    **跨租户聚合要显式 `Without`**：`Count(&int64)`、`Table("x")` 配匿名指标这类语句没有模型

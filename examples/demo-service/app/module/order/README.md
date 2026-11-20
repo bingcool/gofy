@@ -407,7 +407,7 @@ func (r *OrderRepository) conn(ctx context.Context) (*gorm.DB, error) {
 ```
 
 默认库是唯一特例：它由框架打开、不在 Registry 里，但 `DBConnect` 认这个名字（内部仍
-走 `DBIO` 解析），所以仓库仍只有一条取句柄的路径。`DBConnect` 顺带绑定 ctx，仓库
+走 `NewDBIO` 解析），所以仓库仍只有一条取句柄的路径。`DBConnect` 顺带绑定 ctx，仓库
 不需要再补 `gofydb.WithContext`——漏掉那一步就会在事务外执行。
 
 `appio.WithContext(ctx)` 优先取请求进入时固定的快照，没有时回退到当前已发布的
@@ -415,13 +415,13 @@ func (r *OrderRepository) conn(ctx context.Context) (*gorm.DB, error) {
 入口没有发布本代，直接 panic，不会把 nil 连接交给下游。
 
 订单 service 的 `Create` 用 `gofydb.Transaction(ctx, db, fn)` 开启事务。这里的 `db` 来自
-`DBIO(ctx, "default")` 而不是 `DBConnect`：开启事务需要一个**不带事务**的连接，
+`NewDBIO(ctx, "default")` 而不是 `DBConnect`：开启事务需要一个**不带事务**的连接，
 而 `DBConnect` 会把 ctx 里已有的事务交回来，对这个场景是错的（`Transaction` 会先
 检查 ctx，所以即便传错也不会重复开，但读代码时看不出意图）。事务会放进传给 `fn`
 的 context；扣库存与建订单都在 `fn` 里用同一个 ctx，产品仓库从 ctx 取到同一个事务：
 
 ```go
-db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+db, err := appio.WithContext(ctx).NewDBIO(ctx, appdb.DefaultInstance)
 if err != nil {
     return nil, fmt.Errorf("resolve default database: %w", err)
 }

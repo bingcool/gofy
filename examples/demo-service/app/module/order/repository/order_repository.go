@@ -30,7 +30,7 @@ type OrderRepository struct{}
 // 因此自动共享最外层 service 开启的事务。
 //
 // 句柄统一经 DBConnect 解析：它同时完成「取本代连接」与「ctx 有事务则用事务」两步，
-// 默认库只是本代连接里的一个特例（见 Snapshot.DBIO）。仓库不需要再自己调
+// 默认库只是本代连接里的一个特例（见 Snapshot.NewDBIO）。仓库不需要再自己调
 // gofydb.WithContext，也就不会漏掉那一步。
 func (r *OrderRepository) conn(ctx context.Context) (*gorm.DB, error) {
 	db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)

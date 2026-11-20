@@ -182,9 +182,9 @@ func newClaimScanProducer(cfg ClaimScanConfig) gofyworker.Worker {
 		// 生产者写的是队列自己的表，因此它与消费者用同一代际取句柄——就是本进程在分组
 		// 启动之前装配的那一代。
 		//
-		// 这里用 DBIO 而不是 DBConnect：claim 台账独立提交，不能被 ctx 里恰好存在的
+		// 这里用 NewDBIO 而不是 DBConnect：claim 台账独立提交，不能被 ctx 里恰好存在的
 		// 业务事务接管——认领之后任务由 Runner 的生命周期管理，不该随业务 tx 回滚。
-		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		db, err := appio.WithContext(ctx).NewDBIO(ctx, appdb.DefaultInstance)
 		if err != nil {
 			return err
 		}
@@ -325,9 +325,9 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 		if !ok {
 			return errors.New("order-settle-consumer: runtime is required")
 		}
-		// DBIO 而非 DBConnect：认领与写回由 claim 在独立事务里完成，句柄不应被
+		// NewDBIO 而非 DBConnect：认领与写回由 claim 在独立事务里完成，句柄不应被
 		// ctx 中可能存在的业务事务接管。原因见同文件生产者的说明。
-		db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+		db, err := appio.WithContext(ctx).NewDBIO(ctx, appdb.DefaultInstance)
 		if err != nil {
 			return err
 		}

@@ -10,7 +10,7 @@
 | worker | `demo-service worker --group=<g>` | 常驻，不监听业务端口 | 扫表、MQ 消费、定时汇总 |
 
 worker 进程没有 HTTP 栈，也不注册路由。轮询类任务通过框架注入的 `Runtime` 拿 logger；数据库句柄则经
-`appio.WithContext(ctx).DBIO(ctx, "default")` 解析，与 HTTP 请求和脚本同一条路径。
+`appio.WithContext(ctx).NewDBIO(ctx, "default")` 解析，与 HTTP 请求和脚本同一条路径。
 
 代际由进程装配，不由 worker 入口发布：`main.go` 用 `gofy.WithWorkerModules` 注册
 `appio.NewDBOnlyModuleFactory(cfg.DB, cfg.Tenant.OpenOptions()...)`，框架在 Runtime 就绪之后、

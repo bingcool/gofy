@@ -56,12 +56,12 @@ func TestDBOnlyModulePublishesTheDefaultHandle(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mod.(*dbModule).Stop(context.Background()) })
 
-	got, err := WithContext(context.Background()).DBIO(context.Background(), appdb.DefaultInstance)
+	got, err := WithContext(context.Background()).NewDBIO(context.Background(), appdb.DefaultInstance)
 	if err != nil {
-		t.Fatalf("DBIO: %v", err)
+		t.Fatalf("NewDBIO: %v", err)
 	}
 	if got != pool {
-		t.Fatalf("DBIO returned a different pool than Runtime.DB")
+		t.Fatalf("NewDBIO returned a different pool than Runtime.DB")
 	}
 }
 
@@ -85,8 +85,8 @@ func TestDBOnlyModuleLeavesOtherSectionsUnconfigured(t *testing.T) {
 	if _, err := snap.RedisIO(context.Background(), "cache"); !errors.Is(err, gofyredis.ErrNotConfigured) {
 		t.Fatalf("RedisIO error = %v, want ErrNotConfigured", err)
 	}
-	if _, err := snap.DBIO(context.Background(), "order"); !errors.Is(err, gofydb.ErrUnknownInstance) {
-		t.Fatalf("DBIO(order) error = %v, want ErrUnknownInstance", err)
+	if _, err := snap.NewDBIO(context.Background(), "order"); !errors.Is(err, gofydb.ErrUnknownInstance) {
+		t.Fatalf("NewDBIO(order) error = %v, want ErrUnknownInstance", err)
 	}
 }
 
@@ -130,8 +130,8 @@ func TestDBOnlyModuleWithoutDefaultStillAssembles(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mod.(*dbModule).Stop(context.Background()) })
 
-	if _, err := WithContext(context.Background()).DBIO(context.Background(), appdb.DefaultInstance); !errors.Is(err, gofydb.ErrNotConfigured) {
-		t.Fatalf("DBIO error = %v, want ErrNotConfigured", err)
+	if _, err := WithContext(context.Background()).NewDBIO(context.Background(), appdb.DefaultInstance); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("NewDBIO error = %v, want ErrNotConfigured", err)
 	}
 }
 
@@ -154,9 +154,9 @@ func TestDBOnlyModuleInstallsTenantPluginAtAssembly(t *testing.T) {
 	t.Cleanup(func() { _ = mod.(*dbModule).Stop(context.Background()) })
 
 	var n int64
-	db, err := WithContext(context.Background()).DBIO(context.Background(), appdb.DefaultInstance)
+	db, err := WithContext(context.Background()).NewDBIO(context.Background(), appdb.DefaultInstance)
 	if err != nil {
-		t.Fatalf("DBIO: %v", err)
+		t.Fatalf("NewDBIO: %v", err)
 	}
 	if got := db.WithContext(context.Background()).Table("orders").Count(&n).Error; !errors.Is(got, tenant.ErrTenantRequired) {
 		t.Fatalf("schema-less aggregate on an assembled pool = %v, want ErrTenantRequired", got)

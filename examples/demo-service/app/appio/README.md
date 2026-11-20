@@ -11,7 +11,7 @@ mu, err := appio.WithContext(ctx).RedisLock().Lock(ctx, "order:123")
 ```
 
 `DBConnect` 返回**本次调用应使用的连接**：ctx 里带事务就用事务，否则用本代连接，
-并且已经绑定 ctx。要开启事务、或需要一条不被 ctx 中事务接管的连接时用 `DBIO`。
+并且已经绑定 ctx。要开启事务、或需要一条不被 ctx 中事务接管的连接时用 `NewDBIO`。
 
 一句话分工：**`support` 回答「一种连接怎么建、怎么用」，`app/appio` 回答「这个应用连哪几个、
 什么时候连、当前是哪一代」。**
@@ -130,8 +130,8 @@ db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.InstanceOrder)
 if errors.Is(err, gofydb.ErrUnknownInstance) { ... }  // 别名不在本代配置里
 if errors.Is(err, gofydb.ErrNotConfigured)  { ... }  // 快照或 Registry 缺失
 
-// 需要一条不带事务的连接（开启事务、独立提交）时用 DBIO
-base, err := appio.WithContext(ctx).DBIO(ctx, appdb.InstanceOrder)
+// 需要一条不带事务的连接（开启事务、独立提交）时用 NewDBIO
+base, err := appio.WithContext(ctx).NewDBIO(ctx, appdb.InstanceOrder)
 
 // 不是连接的两个例外
 gen := appio.WithContext(ctx).UUID()       // 未启用时为 nil
@@ -162,22 +162,26 @@ Registry，按名字解析返回 `ErrUnknownInstance`；`db` 没有这个开关�
 - `lock.enabled: true` 但 `lock.redis_instance_name` 指向的 Redis 没启用 → 报错。它有
   Registry 可查，缺客户端说明配置自相矛盾，不能拖到第一次加锁。
 
-## `DBConnect` 与 `DBIO` 的分工
+## `DBConnect` 与 `NewDBIO` 的分工
 
 | 方法 | 返回什么 | 用在哪 |
 | --- | --- | --- |
 | `DBConnect(ctx, name)` | ctx 有事务则返回该事务，否则本代连接；已绑定 ctx | 查询与写入，绝大多数场景 |
-| `DBIO(ctx, name)` | 本代连接，**不解析事务**，不绑 ctx | 开启事务；必须独立提交的写入（消费者幂等台账、claim 认领） |
+| `NewDBIO(ctx, name)` | 本代连接，**不解析事务**，不绑 ctx | 开启事务；必须独立提交的写入（消费者幂等台账、claim 认领） |
 
 两者都按名字从本代 Registry 解析，`default` 对两者都是同一个特例。区别只有一条：
 **要不要服从 ctx 里的事务**。
+
+`New` 前缀只出现在数据库上。它强调「一个新的、独立的连接对象」：不叠加 ctx 中的事务，
+语句在上面独立生效（autocommit），一条失败只回滚这一条。Redis / AMQP / Kafka / RocketMQ
+没有事务语义，一个 `RedisIO` 就够，不需要区分两种取法。
 
 合成一个方法看起来更省事，但「必须独立提交」的写入会因此变成需要绕开的特例
 （详见 `support/consumer` 的幂等台账与 `support/claim`），所以保持两个入口。
 
 ## 为什么 `UUID()` 和 `RedisLock()` 没有 `IO` 后缀
 
-`DBIO` / `RedisIO` / `AMQPIO` / `KafkaIO` / `RocketMQIO` 返回 `(句柄, error)`，因为它们
+`NewDBIO` / `RedisIO` / `AMQPIO` / `KafkaIO` / `RocketMQIO` 返回 `(句柄, error)`，因为它们
 要按别名在本代 Registry 里解析，可能失败。生成器和锁不是「连接」，没有 Registry 可按名字
 解析，启用与否在 `Start` 时已经决定，所以直接返回句柄、未启用为 nil。
 

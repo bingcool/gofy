@@ -134,7 +134,7 @@ SQLite 测试（沿用既有决策）。innerapi 不同：它是**模块间的�
 
 - 只读：不提供 `Create` / `Update` / `Delete`，写路径仍归本模块 repository；
 - 返回本包定义的 row 结构，不复用持久化 model 做投影，也不参与迁移；
-- 连接解析与 repository 完全一致：`appio.WithContext(ctx).DBIO(...)` +
+- 连接解析与 repository 完全一致：`appio.WithContext(ctx).NewDBIO(...)` +
   `gofydb.WithContext(ctx, db)`，因此与写操作共享同一个 ctx 事务，并在
   Reload 边界固定在请求进入时的那一代；
 - 调用方向是 `service → query`，反向禁止：query 不依赖 service、controller、

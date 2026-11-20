@@ -63,8 +63,8 @@ func TestSnapshotNewIORequiresGenerationRegistry(t *testing.T) {
 	ctx := context.Background()
 
 	var absent *Snapshot
-	if _, err := absent.DBIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
-		t.Fatalf("nil snapshot DBIO = %v, want ErrNotConfigured", err)
+	if _, err := absent.NewDBIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("nil snapshot NewDBIO = %v, want ErrNotConfigured", err)
 	}
 	if _, err := absent.RedisIO(ctx, "ratelimit"); !errors.Is(err, gofyredis.ErrNotConfigured) {
 		t.Fatalf("nil snapshot RedisIO = %v, want ErrNotConfigured", err)
@@ -72,8 +72,8 @@ func TestSnapshotNewIORequiresGenerationRegistry(t *testing.T) {
 
 	// 脚本/单测发布只带 db.default 的快照，没有命名实例注册表。
 	PublishDB(&gorm.DB{})
-	if _, err := Current().DBIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
-		t.Fatalf("DBIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
+	if _, err := Current().NewDBIO(ctx, "order"); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("NewDBIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
 	}
 	if _, err := Current().RedisIO(ctx, "ratelimit"); !errors.Is(err, gofyredis.ErrNotConfigured) {
 		t.Fatalf("RedisIO on a registry-less snapshot = %v, want ErrNotConfigured", err)
@@ -82,9 +82,9 @@ func TestSnapshotNewIORequiresGenerationRegistry(t *testing.T) {
 
 // TestDBIOResolvesTheFrameworkDefault pins the one special case in the unified
 // entry point: "default" is opened by the framework and stays out of the
-// registry, so DBIO has to resolve it from the generation itself.
+// registry, so NewDBIO has to resolve it from the generation itself.
 // TestDBIOResolvesTheFrameworkDefault 固定统一入口里唯一的特例："default" 由框架
-// 打开、不在 registry 里，因此 DBIO 必须从这一代自身解析它。
+// 打开、不在 registry 里，因此 NewDBIO 必须从这一代自身解析它。
 func TestDBIOResolvesTheFrameworkDefault(t *testing.T) {
 	prev := Current()
 	t.Cleanup(func() { Publish(prev) })
@@ -93,30 +93,30 @@ func TestDBIOResolvesTheFrameworkDefault(t *testing.T) {
 	PublishDB(defaultDB)
 	ctx := context.Background()
 
-	got, err := Current().DBIO(ctx, "default")
+	got, err := Current().NewDBIO(ctx, "default")
 	if err != nil {
-		t.Fatalf("DBIO(default): %v", err)
+		t.Fatalf("NewDBIO(default): %v", err)
 	}
 	if got != defaultDB {
-		t.Fatal("DBIO(default) returned a different handle than the framework default")
+		t.Fatal("NewDBIO(default) returned a different handle than the framework default")
 	}
 	// 名字两侧空白会被裁剪，调用方不必自己 trim。
-	if got, err := Current().DBIO(ctx, " default "); err != nil || got != defaultDB {
-		t.Fatalf("DBIO(\" default \") = %v, %v", got, err)
+	if got, err := Current().NewDBIO(ctx, " default "); err != nil || got != defaultDB {
+		t.Fatalf("NewDBIO(\" default \") = %v, %v", got, err)
 	}
 
 	// 没有默认库的快照（NewSet(nil)）仍然报未配置，而不是返回 nil 句柄。
 	PublishDB(nil)
-	if _, err := Current().DBIO(ctx, "default"); !errors.Is(err, gofydb.ErrNotConfigured) {
-		t.Fatalf("DBIO(default) without a default DB = %v, want ErrNotConfigured", err)
+	if _, err := Current().NewDBIO(ctx, "default"); !errors.Is(err, gofydb.ErrNotConfigured) {
+		t.Fatalf("NewDBIO(default) without a default DB = %v, want ErrNotConfigured", err)
 	}
 }
 
 // TestDBConnectJoinsTheAmbientTransaction pins the only difference between
-// DBConnect and DBIO, and the reason both exist: DBConnect obeys the transaction
-// carried by ctx, DBIO deliberately ignores it.
-// TestDBConnectJoinsTheAmbientTransaction 固定 DBConnect 与 DBIO 唯一的区别，也是
-// 两者并存的原因：DBConnect 服从 ctx 中的事务，DBIO 刻意忽略它。
+// DBConnect and NewDBIO, and the reason both exist: DBConnect obeys the transaction
+// carried by ctx, NewDBIO deliberately ignores it.
+// TestDBConnectJoinsTheAmbientTransaction 固定 DBConnect 与 NewDBIO 唯一的区别，也是
+// 两者并存的原因：DBConnect 服从 ctx 中的事务，NewDBIO 刻意忽略它。
 func TestDBConnectJoinsTheAmbientTransaction(t *testing.T) {
 	prev := Current()
 	t.Cleanup(func() { Publish(prev) })
@@ -160,13 +160,13 @@ func TestDBConnectJoinsTheAmbientTransaction(t *testing.T) {
 		if inTx.Statement.ConnPool == db.Statement.ConnPool {
 			t.Fatal("DBConnect returned the pool instead of the transaction")
 		}
-		// DBIO 在同一个 ctx 下仍然只给本代连接——这不是缺陷，是它存在的理由。
-		own, err := Current().DBIO(ctx, "default")
+		// NewDBIO 在同一个 ctx 下仍然只给本代连接——这不是缺陷，是它存在的理由。
+		own, err := Current().NewDBIO(ctx, "default")
 		if err != nil {
 			return err
 		}
 		if own != db {
-			t.Fatal("DBIO should ignore the ambient transaction")
+			t.Fatal("NewDBIO should ignore the ambient transaction")
 		}
 		return nil
 	})
