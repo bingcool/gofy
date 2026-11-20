@@ -8,7 +8,7 @@ import (
 	"github.com/bingcool/gofy/support/sqlite"
 	"github.com/yourorg/demo-service/app/appio"
 	productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
-	productmodel "github.com/yourorg/demo-service/app/module/product/model"
+	"github.com/yourorg/demo-service/app/module/product/model/productmodel"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"github.com/yourorg/demo-service/app/module/product/service"
 	"go.uber.org/zap"

@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
-	"github.com/yourorg/demo-service/app/module/product/model"
+	"github.com/yourorg/demo-service/app/module/product/model/productmodel"
 	"github.com/yourorg/demo-service/app/module/product/repository"
 	"go.uber.org/zap"
 )
@@ -118,7 +118,7 @@ func (s *ProductService) DecreaseStock(ctx context.Context, id uint64, num int) 
 }
 
 // toProduct 把持久化模型换算成跨模块只读视图，状态码在这里转成 bool OnSale。
-func toProduct(p *model.Product) productapi.Product {
+func toProduct(p *productmodel.Product) productapi.Product {
 	return productapi.Product{
 		ID:     p.ID,
 		Name:   p.Name,

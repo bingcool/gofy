@@ -8,7 +8,7 @@ import (
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
-	"github.com/yourorg/demo-service/app/module/product/model"
+	"github.com/yourorg/demo-service/app/module/product/model/productmodel"
 	"gorm.io/gorm"
 )
 
@@ -23,7 +23,7 @@ var ErrNotFound = errors.New("product not found")
 const StatusOnSale int8 = 1
 
 // ProductRepository reads and updates products with GORM. 仓库只返回本模块的
-// 持久化模型 model.Product，不再导出跨模块视图：跨模块契约由 innerapi 承担，
+// 持久化模型 productmodel.Product，不再导出跨模块视图：跨模块契约由 innerapi 承担，
 // model 永远不出模块。仓库不声明接口，只有一种 GORM 实现，测试用纯 Go SQLite
 // 跑真实 SQL。
 //
@@ -48,12 +48,12 @@ func (r *ProductRepository) conn(ctx context.Context) (*gorm.DB, error) {
 // FindByID returns one product or ErrNotFound.
 // FindByID 按主键取一条产品；记录缺失返回 ErrNotFound，其它失败带上产品 id 包装，
 // 便于上层定位是哪一次查询出错。
-func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*model.Product, error) {
+func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*productmodel.Product, error) {
 	db, err := r.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var p model.Product
+	var p productmodel.Product
 	err = db.WithContext(ctx).First(&p, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
@@ -68,8 +68,8 @@ func (r *ProductRepository) FindByID(ctx context.Context, id uint64) (*model.Pro
 // absent from the result; an empty input returns an empty map without querying.
 // ListByIDs 批量取存在的产品并按 id 索引：缺失的 id 直接缺席而非占位，调用方据此
 // 判断哪个 SKU 不存在；空入参不发 SQL，直接返回空 map。
-func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[uint64]model.Product, error) {
-	items := make(map[uint64]model.Product, len(ids))
+func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[uint64]productmodel.Product, error) {
+	items := make(map[uint64]productmodel.Product, len(ids))
 	if len(ids) == 0 {
 		return items, nil
 	}
@@ -77,8 +77,8 @@ func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[ui
 	if err != nil {
 		return nil, err
 	}
-	var rows []model.Product
-	if err := db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+	var rows []productmodel.Product
+	if err := db.WithContext(ctx).Where(productmodel.ID+" IN ?", ids).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list products: %w", err)
 	}
 	for _, row := range rows {
@@ -89,9 +89,9 @@ func (r *ProductRepository) ListByIDs(ctx context.Context, ids []uint64) (map[ui
 
 // List 返回按 id 倒序的一页产品和总数。列表包含已下架产品，是否可售由
 // service 换算成视图的 OnSale，调用方自行过滤。
-func (r *ProductRepository) List(ctx context.Context, offset, limit int) ([]model.Product, int64, error) {
+func (r *ProductRepository) List(ctx context.Context, offset, limit int) ([]productmodel.Product, int64, error) {
 	var (
-		items []model.Product
+		items []productmodel.Product
 		total int64
 	)
 	db, err := r.conn(ctx)
@@ -99,12 +99,12 @@ func (r *ProductRepository) List(ctx context.Context, offset, limit int) ([]mode
 		return nil, 0, err
 	}
 	q := func() *gorm.DB {
-		return db.WithContext(ctx).Model(&model.Product{})
+		return db.WithContext(ctx).Model(&productmodel.Product{})
 	}
 	if err := q().Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count products: %w", err)
 	}
-	if err := q().Order("id DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
+	if err := q().Order(productmodel.ID + " DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
 		return nil, 0, fmt.Errorf("list products: %w", err)
 	}
 	return items, total, nil
@@ -122,9 +122,9 @@ func (r *ProductRepository) DecreaseStock(ctx context.Context, id uint64, num in
 		return 0, err
 	}
 	res := db.WithContext(ctx).
-		Model(&model.Product{}).
-		Where("id = ? AND status = ? AND stock >= ?", id, StatusOnSale, num).
-		Update("stock", gorm.Expr("stock - ?", num))
+		Model(&productmodel.Product{}).
+		Where(productmodel.ID+" = ? AND "+productmodel.Status+" = ? AND "+productmodel.Stock+" >= ?", id, StatusOnSale, num).
+		Update(productmodel.Stock, gorm.Expr(productmodel.Stock+" - ?", num))
 	if res.Error != nil {
 		return 0, fmt.Errorf("decrease product %d stock: %w", id, res.Error)
 	}

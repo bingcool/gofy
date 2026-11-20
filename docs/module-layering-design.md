@@ -175,9 +175,10 @@ examples/demo-service/app/
     │   ├── innerapi/
     │   │   └── innerapi.go         # 订单对外契约：OrderAPI 接口 + Order 视图 + 错误
     │   ├── repository/
-    │   │   └── order_repository.go # GORM，返回 model；状态由参数传入
+    │   │   └── order_repository.go # GORM，返回 ordermodel；状态由参数传入
     │   └── model/
-    │       └── order.go            # 表结构
+    │       └── ordermodel/          # 一表一包：表名 + model
+    │           └── order_model.go   # 表结构 + 列名常量（ID = "id"）
     └── product/
         ├── module.go               # 模块根：NewModule/Register；Prefix() 返回 ""
         ├── controller/
@@ -188,9 +189,10 @@ examples/demo-service/app/
         ├── innerapi/
         │   └── innerapi.go         # ProductAPI 接口 + Product 视图 + 错误
         ├── repository/
-        │   └── product_repository.go # GORM，返回 model（ProductView 迁出）
+        │   └── product_repository.go # GORM，返回 productmodel（ProductView 迁出）
         └── model/
-            └── product.go
+            └── productmodel/
+                └── product_model.go
 ```
 
 `a_init_repository.go` / 包级 `RepoDeps` 删除，由 `service/dependencies.go` 的 `Dependencies`

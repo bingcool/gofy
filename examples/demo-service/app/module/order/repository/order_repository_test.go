@@ -7,7 +7,7 @@ import (
 
 	"github.com/bingcool/gofy/support/sqlite"
 	"github.com/yourorg/demo-service/app/appio"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -51,10 +51,10 @@ func TestListAppliesStatusAndTimeWindow(t *testing.T) {
 			t.Errorf("close sqlite: %v", err)
 		}
 	})
-	if err := conn.AutoMigrate(&model.Order{}); err != nil {
+	if err := conn.AutoMigrate(&ordermodel.Order{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	seeds := []model.Order{
+	seeds := []ordermodel.Order{
 		{ID: 1, UserID: 102, Amount: 1000, Status: "paid", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 		{ID: 2, UserID: 102, Amount: 2000, Status: "pending", CreatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
 		{ID: 3, UserID: 100, Amount: 3000, Status: "paid", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},

@@ -14,7 +14,7 @@ import (
 	"github.com/yourorg/demo-service/app/container"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/product"
-	"github.com/yourorg/demo-service/app/module/product/model"
+	"github.com/yourorg/demo-service/app/module/product/model/productmodel"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"github.com/yourorg/interface-service/appinterface/demoservice/productdto"
 	"go.uber.org/zap"
@@ -38,10 +38,10 @@ func newTestApp(t *testing.T) *gofytest.App {
 			t.Errorf("close sqlite: %v", err)
 		}
 	})
-	if err := conn.AutoMigrate(&model.Product{}); err != nil {
+	if err := conn.AutoMigrate(&productmodel.Product{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	seeds := []model.Product{
+	seeds := []productmodel.Product{
 		{ID: 1, Name: "Gofy T-Shirt", Price: 9900, Stock: 120, Status: productrepo.StatusOnSale},
 		{ID: 2, Name: "Retired Mug", Price: 3900, Stock: 0, Status: 0},
 	}

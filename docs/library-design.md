@@ -3096,7 +3096,7 @@ replace github.com/bingcool/gofy-interface-service => ../../../gofy-interface-se
 | controller | 契约 `orderrequest` / `orderresponse` / `orderdto` | 协议转换 + 视图↔DTO/状态/错误码映射；只 import 本模块 `service` 与契约，不导入 `model`/`repository`/`innerapi` |
 | service | 普通值入参，返回 `innerapi` 领域视图（`orderapi.Order`） | 实现本模块 `innerapi`，只在 `toOrderView` 中接触 `model`；不 import HTTP 契约 |
 | innerapi | 接口 + 只读视图 + 入参 + 哨兵错误 + `Name` | 纯契约，只允许标准库（必要时 `support` 纯类型）；模块间唯一耦合点 |
-| repository | 返回 `model.Order` | 导出具体类型（不声明接口）并持有 `model`，是唯一直接操作 `model` 的层 |
+| repository | 返回 `ordermodel.Order` | 导出具体类型（不声明接口）并持有 `ordermodel`，是唯一直接操作它的层 |
 | model | 仅 repository 内部使用 | 不得出现在 handler、module 或 script 中 |
 
 HTTP 载荷类型来自公共契约层，跨模块只读视图来自各模块 `innerapi`，两者不混用：
@@ -3237,7 +3237,7 @@ import (
     gofydb "github.com/bingcool/gofy/support/db"
     appdb "github.com/yourorg/demo-service/app/appio/db"
     orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
-    "github.com/yourorg/demo-service/app/module/order/model"
+    "github.com/yourorg/demo-service/app/module/order/model/ordermodel"
     "github.com/yourorg/demo-service/app/module/order/repository"
     productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
     "go.uber.org/zap"
@@ -3271,14 +3271,14 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
     if err != nil {
         return nil, err
     }
-    var created *model.Order
+    var created *ordermodel.Order
     err = gofydb.Transaction(ctx, appdb.Db, func(ctx context.Context) error {
         for _, it := range items {
             if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
                 return translateProductErr(it.SkuID, err)
             }
         }
-        o, err := s.orderRepository.Create(ctx, &model.Order{
+        o, err := s.orderRepository.Create(ctx, &ordermodel.Order{
             UserID: userID,
             Amount: amount,
             Status: StatusPending,
@@ -3358,7 +3358,7 @@ func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
 }
 
 // toOrderView 把持久化模型换算成跨模块只读视图，model 不出 service 边界。
-func toOrderView(o *model.Order) *orderapi.Order {
+func toOrderView(o *ordermodel.Order) *orderapi.Order {
     return &orderapi.Order{
         ID:        o.ID,
         UserID:    o.UserID,
@@ -3412,7 +3412,7 @@ import (
 
     gofydb "github.com/bingcool/gofy/support/db"
     appdb "github.com/yourorg/demo-service/app/appio/db"
-    "github.com/yourorg/demo-service/app/module/order/model"
+    "github.com/yourorg/demo-service/app/module/order/model/ordermodel"
     "gorm.io/gorm"
 )
 
@@ -3428,8 +3428,8 @@ func (r *OrderRepository) conn(ctx context.Context) *gorm.DB {
     return gofydb.WithContext(ctx, appdb.Db)
 }
 
-func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order, error) {
-    var o model.Order
+func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*ordermodel.Order, error) {
+    var o ordermodel.Order
     err := r.conn(ctx).WithContext(ctx).First(&o, id).Error
     if errors.Is(err, gorm.ErrRecordNotFound) {
         return nil, ErrNotFound
@@ -3440,20 +3440,20 @@ func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order
     return &o, nil
 }
 
-func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Order, error) {
+func (r *OrderRepository) Create(ctx context.Context, o *ordermodel.Order) (*ordermodel.Order, error) {
     if err := r.conn(ctx).WithContext(ctx).Create(o).Error; err != nil {
         return nil, fmt.Errorf("create order: %w", err)
     }
     return o, nil
 }
 
-func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset, limit int) ([]model.Order, int64, error) {
+func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset, limit int) ([]ordermodel.Order, int64, error) {
     var (
-        items []model.Order
+        items []ordermodel.Order
         total int64
     )
     q := func() *gorm.DB {
-        return r.conn(ctx).WithContext(ctx).Model(&model.Order{}).Where("user_id = ?", userID)
+        return r.conn(ctx).WithContext(ctx).Model(&ordermodel.Order{}).Where("user_id = ?", userID)
     }
     if err := q().Count(&total).Error; err != nil {
         return nil, 0, fmt.Errorf("count orders: %w", err)
@@ -3465,7 +3465,7 @@ func (r *OrderRepository) ListByUser(ctx context.Context, userID uint64, offset,
 }
 
 func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status string) error {
-    res := r.conn(ctx).WithContext(ctx).Model(&model.Order{}).Where("id = ?", id).Update("status", status)
+    res := r.conn(ctx).WithContext(ctx).Model(&ordermodel.Order{}).Where("id = ?", id).Update("status", status)
     if res.Error != nil {
         return fmt.Errorf("update order %d: %w", id, res.Error)
     }
@@ -3479,7 +3479,7 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status st
 // 传入（service 的领域常量），仓库不 import HTTP 契约枚举。
 func (r *OrderRepository) CancelPending(ctx context.Context, id uint64, from, to string) (int64, error) {
     res := r.conn(ctx).WithContext(ctx).
-        Model(&model.Order{}).
+        Model(&ordermodel.Order{}).
         Where("id = ? AND status = ?", id, from).
         Update("status", to)
     if res.Error != nil {

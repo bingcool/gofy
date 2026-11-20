@@ -9,7 +9,7 @@ import (
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 	"gorm.io/gorm"
 )
 
@@ -43,12 +43,12 @@ func (r *OrderRepository) conn(ctx context.Context) (*gorm.DB, error) {
 // FindByID returns one order or ErrNotFound.
 // FindByID 按主键取一条订单；记录缺失返回 ErrNotFound，其它失败带上订单 id 包装，
 // 便于上层定位是哪一条查询出错。
-func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order, error) {
+func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*ordermodel.Order, error) {
 	db, err := r.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var o model.Order
+	var o ordermodel.Order
 	err = db.WithContext(ctx).First(&o, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
@@ -62,7 +62,7 @@ func (r *OrderRepository) FindByID(ctx context.Context, id uint64) (*model.Order
 // Create inserts o and fills its generated ID.
 // Create 插入订单并把自增主键回填到入参 o；事务由 ctx 携带，调用方不用显式传 tx，
 // 因此跨模块扣库存与建单能同提交同回滚。
-func (r *OrderRepository) Create(ctx context.Context, o *model.Order) (*model.Order, error) {
+func (r *OrderRepository) Create(ctx context.Context, o *ordermodel.Order) (*ordermodel.Order, error) {
 	db, err := r.conn(ctx)
 	if err != nil {
 		return nil, err
@@ -89,32 +89,32 @@ type ListFilter struct {
 // transaction or connection generation.
 // List 按筛选条件分页返回订单与过滤后的总数；计数与列表两条 SQL 都从同一个
 // ctx 连接发出，保证它们落在同一事务或同一代连接上。
-func (r *OrderRepository) List(ctx context.Context, filter ListFilter, offset, limit int) ([]model.Order, int64, error) {
+func (r *OrderRepository) List(ctx context.Context, filter ListFilter, offset, limit int) ([]ordermodel.Order, int64, error) {
 	db, err := r.conn(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 	var (
-		items []model.Order
+		items []ordermodel.Order
 		total int64
 	)
 	q := func() *gorm.DB {
-		query := db.WithContext(ctx).Model(&model.Order{}).Where("user_id = ?", filter.UserID)
+		query := db.WithContext(ctx).Model(&ordermodel.Order{}).Where(ordermodel.UserID+" = ?", filter.UserID)
 		if filter.Status != "" {
-			query = query.Where("status = ?", filter.Status)
+			query = query.Where(ordermodel.Status+" = ?", filter.Status)
 		}
 		if filter.CreatedFrom != nil {
-			query = query.Where("created_at >= ?", *filter.CreatedFrom)
+			query = query.Where(ordermodel.CreatedAt+" >= ?", *filter.CreatedFrom)
 		}
 		if filter.CreatedTo != nil {
-			query = query.Where("created_at <= ?", *filter.CreatedTo)
+			query = query.Where(ordermodel.CreatedAt+" <= ?", *filter.CreatedTo)
 		}
 		return query
 	}
 	if err := q().Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count orders: %w", err)
 	}
-	if err := q().Order("id DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
+	if err := q().Order(ordermodel.ID + " DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
 		return nil, 0, fmt.Errorf("list orders: %w", err)
 	}
 	return items, total, nil
@@ -128,7 +128,7 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, id uint64, status st
 	if err != nil {
 		return err
 	}
-	res := db.WithContext(ctx).Model(&model.Order{}).Where("id = ?", id).Update("status", status)
+	res := db.WithContext(ctx).Model(&ordermodel.Order{}).Where(ordermodel.ID+" = ?", id).Update(ordermodel.Status, status)
 	if res.Error != nil {
 		return fmt.Errorf("update order %d: %w", id, res.Error)
 	}
@@ -147,9 +147,9 @@ func (r *OrderRepository) CancelPending(ctx context.Context, id uint64, from, to
 		return 0, err
 	}
 	res := db.WithContext(ctx).
-		Model(&model.Order{}).
-		Where("id = ? AND status = ?", id, from).
-		Update("status", to)
+		Model(&ordermodel.Order{}).
+		Where(ordermodel.ID+" = ? AND "+ordermodel.Status+" = ?", id, from).
+		Update(ordermodel.Status, to)
 	if res.Error != nil {
 		return 0, fmt.Errorf("cancel pending order %d: %w", id, res.Error)
 	}

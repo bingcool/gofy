@@ -25,9 +25,9 @@ import (
 	"github.com/yourorg/demo-service/app/container"
 	"github.com/yourorg/demo-service/app/middleware"
 	"github.com/yourorg/demo-service/app/module/order"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 	"github.com/yourorg/demo-service/app/module/order/service"
-	productmodel "github.com/yourorg/demo-service/app/module/product/model"
+	"github.com/yourorg/demo-service/app/module/product/model/productmodel"
 	productrepo "github.com/yourorg/demo-service/app/module/product/repository"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderdto"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
@@ -60,14 +60,14 @@ func newTestDB(t *testing.T) *gorm.DB {
 			t.Errorf("close sqlite: %v", err)
 		}
 	})
-	if err := conn.AutoMigrate(&model.Order{}, &productmodel.Product{}); err != nil {
+	if err := conn.AutoMigrate(&ordermodel.Order{}, &productmodel.Product{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	seeds := []any{
-		&model.Order{ID: 1, UserID: 100, Amount: 9900, Status: string(orderenum.OrderStatusPaid)},
+		&ordermodel.Order{ID: 1, UserID: 100, Amount: 9900, Status: string(orderenum.OrderStatusPaid)},
 		// 用户 102 的两笔订单固定创建时间，供列表筛选用例断言时间窗。
-		&model.Order{ID: 2, UserID: 102, Amount: 1000, Status: string(orderenum.OrderStatusPaid), CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
-		&model.Order{ID: 3, UserID: 102, Amount: 2000, Status: string(orderenum.OrderStatusPending), CreatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+		&ordermodel.Order{ID: 2, UserID: 102, Amount: 1000, Status: string(orderenum.OrderStatusPaid), CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		&ordermodel.Order{ID: 3, UserID: 102, Amount: 2000, Status: string(orderenum.OrderStatusPending), CreatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
 		&productmodel.Product{ID: 90001, Name: "Gofy Demo SKU", Price: 1000, Stock: 999, Status: productrepo.StatusOnSale},
 		&productmodel.Product{ID: 90002, Name: "Retired SKU", Price: 500, Stock: 0, Status: 0},
 	}

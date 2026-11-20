@@ -14,7 +14,7 @@ import (
 
 	"github.com/bingcool/gofy/core"
 	"github.com/yourorg/demo-service/app/appio"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -46,7 +46,7 @@ func newOrderHandlerContext(t *testing.T) (context.Context, *gorm.DB) {
 			t.Errorf("close sqlite: %v", err)
 		}
 	})
-	if err := db.AutoMigrate(&model.Order{}); err != nil {
+	if err := db.AutoMigrate(&ordermodel.Order{}); err != nil {
 		t.Fatalf("migrate orders: %v", err)
 	}
 	// Every test case gets a clean table; the shared cache keeps one database
@@ -73,14 +73,14 @@ func newOrderHandlerContext(t *testing.T) (context.Context, *gorm.DB) {
 
 func seedOrder(t *testing.T, db *gorm.DB, id uint64, status orderenum.OrderStatus) {
 	t.Helper()
-	if err := db.Create(&model.Order{ID: id, UserID: 7, Amount: 100, Status: string(status)}).Error; err != nil {
+	if err := db.Create(&ordermodel.Order{ID: id, UserID: 7, Amount: 100, Status: string(status)}).Error; err != nil {
 		t.Fatalf("seed order %d: %v", id, err)
 	}
 }
 
 func orderStatusOf(t *testing.T, db *gorm.DB, id uint64) string {
 	t.Helper()
-	var order model.Order
+	var order ordermodel.Order
 	if err := db.First(&order, id).Error; err != nil {
 		t.Fatalf("read order %d: %v", id, err)
 	}

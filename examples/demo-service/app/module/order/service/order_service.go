@@ -13,7 +13,7 @@ import (
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	orderapi "github.com/yourorg/demo-service/app/module/order/innerapi"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 	"github.com/yourorg/demo-service/app/module/order/repository"
 	productapi "github.com/yourorg/demo-service/app/module/product/innerapi"
 	"go.uber.org/zap"
@@ -72,7 +72,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 	if err != nil {
 		return nil, err
 	}
-	var created *model.Order
+	var created *ordermodel.Order
 	db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
 	if err != nil {
 		return nil, fmt.Errorf("resolve default database: %w", err)
@@ -83,7 +83,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint64, amount int64, 
 				return translateProductErr(it.SkuID, err)
 			}
 		}
-		o, err := s.orderRepository.Create(ctx, &model.Order{
+		o, err := s.orderRepository.Create(ctx, &ordermodel.Order{
 			UserID: userID,
 			Amount: amount,
 			Status: StatusPending,
@@ -221,7 +221,7 @@ func (s *OrderService) Cancel(ctx context.Context, id uint64) error {
 }
 
 // toOrderView 把持久化模型换算成跨模块只读视图，model 不出 service 边界。
-func toOrderView(o *model.Order) *orderapi.Order {
+func toOrderView(o *ordermodel.Order) *orderapi.Order {
 	return &orderapi.Order{
 		ID:        o.ID,
 		UserID:    o.UserID,

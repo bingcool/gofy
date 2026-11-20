@@ -16,7 +16,7 @@ import (
 
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
-	"github.com/yourorg/demo-service/app/module/order/model"
+	"github.com/yourorg/demo-service/app/module/order/model/ordermodel"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderenum"
 )
 
@@ -154,7 +154,7 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	for _, source := range rule.Sources {
 		sources = append(sources, string(source))
 	}
-	res := db.WithContext(ctx).Model(&model.Order{}).
+	res := db.WithContext(ctx).Model(&ordermodel.Order{}).
 		Where("id = ? AND status IN ?", payload.OrderID, sources).
 		Update("status", string(target))
 	if res.Error != nil {
@@ -170,8 +170,8 @@ func applyOrderEvent(ctx context.Context, event gofyconsumer.Envelope) error {
 	// cannot change the outcome). Only a read can tell them apart.
 	// 0 行有三种原因，必须分清：订单还没落库（重试）、已经是目标状态（幂等成功）、事件过期
 	// 且迁移不被允许（忽略——重试改变不了结果）。只有读一次才能区分。
-	var current model.Order
-	err := db.WithContext(ctx).Model(&model.Order{}).
+	var current ordermodel.Order
+	err := db.WithContext(ctx).Model(&ordermodel.Order{}).
 		Select("status").
 		Where("id = ?", payload.OrderID).
 		Take(&current).Error
