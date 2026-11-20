@@ -45,13 +45,23 @@ func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface {
 	if l == nil {
 		l = zap.NewNop()
 	}
-	level, err := parseLevel(cfg.LogLevel)
+	level, silent, err := parseLevel(cfg.LogLevel)
 	if err != nil {
-		level = zap.WarnLevel
+		level, silent = zap.WarnLevel, false
+	}
+	gormLevel := toGormLevel(level)
+	if silent {
+		// "silent" is gorm's "log nothing", which has no zap equivalent; it is
+		// carried separately so the level comparisons below cannot let a slow
+		// or failed statement through.
+		// "silent" 是 gorm 的"什么都不打"，在 zap 里没有对应级别；它单独承载，下面按
+		// 级别判断的分支因此不会漏出慢语句或失败语句。
+		gormLevel = gormlogger.Silent
 	}
 	return &gormLogger{
 		logger:         l.With(zap.String("component", "gorm")),
-		level:          toGormLevel(level),
+		level:          gormLevel,
+		silent:         silent,
 		slowThreshold:  cfg.SlowThreshold,
 		ignoreNotFound: cfg.IgnoreRecordNotFoundError,
 		parameterized:  cfg.ParameterizedQueries,
@@ -71,18 +81,27 @@ func GormLogger(l *zap.Logger, cfg GormLoggerConfig) gormlogger.Interface {
 // parseLevel 把配置里的 log_level 转成 zap 级别。它是 logger 包同名解析器的本地副本：
 // support/sqllog 不能 import logger，否则每个引用 sqllog 的数据库包都会经由依赖图把
 // 框架的日志装配重新拉回来。
-func parseLevel(level string) (zapcore.Level, error) {
+func parseLevel(level string) (zapcore.Level, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "", "info":
-		return zap.InfoLevel, nil
+		return zap.InfoLevel, false, nil
 	case "debug":
-		return zap.DebugLevel, nil
+		return zap.DebugLevel, false, nil
 	case "warn", "warning":
-		return zap.WarnLevel, nil
+		return zap.WarnLevel, false, nil
 	case "error":
-		return zap.ErrorLevel, nil
+		return zap.ErrorLevel, false, nil
+	case "silent":
+		// Every caller's config validator accepts "silent", and the field
+		// documents it, so rejecting it here silently rewrote the operator's
+		// intent: the constructor fell back to warn and a pool that asked for no
+		// SQL logging kept emitting slow and failed statements.
+		// 各调用方的配置校验都接受 "silent"，字段注释也写着它，因此在这里拒收等于静默
+		// 改写运维的意图：构造函数退化成 warn，声明"不要打 SQL"的连接池照样输出慢语句
+		// 与失败语句。
+		return zap.ErrorLevel, true, nil
 	default:
-		return zap.InfoLevel, fmt.Errorf("sqllog: invalid level %q (want debug, info, warn or error)", level)
+		return zap.InfoLevel, false, fmt.Errorf("sqllog: invalid level %q (want debug, info, warn, error or silent)", level)
 	}
 }
 

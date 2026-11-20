@@ -54,7 +54,13 @@ type generation struct {
 	logger       *zap.Logger
 	systemLogger *zap.Logger
 	accessLogger *zap.Logger
-	ownLogger    bool
+	// sqlLogger is the SQL channel the generation's pool writes to. It is a
+	// separate sink from the application logger when sql_outputs is set, so
+	// retirement has to flush it too.
+	// sqlLogger 是本代连接池写入的 SQL 通道。配置了 sql_outputs 时它与应用 logger 是
+	// 不同的 sink，退役时同样要刷盘。
+	sqlLogger *zap.Logger
+	ownLogger bool
 }
 
 func newGeneration(id uint64, handler http.Handler) *generation {
@@ -289,7 +295,7 @@ func retireGeneration(ctx context.Context, gen, successor *generation, timeout t
 		}
 	}
 	if gen.ownLogger && gen.logger != nil && (successor == nil || gen.logger != successor.logger) {
-		syncLoggers(gen.logger, gen.systemLogger, gen.accessLogger)
+		syncLoggers(gen.logger, gen.systemLogger, gen.accessLogger, gen.sqlLogger)
 	}
 	return errs
 }

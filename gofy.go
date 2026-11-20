@@ -417,14 +417,30 @@ func (a *App) buildDB(ctx context.Context, logger *zap.Logger) (*gorm.DB, bool, 
 	if a.opts.dbConfig == nil {
 		return nil, false, nil
 	}
-	db, err := gofydb.New(ctx, *a.opts.dbConfig, logger,
-		gofydb.WithSQLPolicy(a.opts.sqlPolicy),
-		gofydb.WithSQLLogger(a.sqlLogger),
-	)
+	db, err := gofydb.New(ctx, *a.opts.dbConfig, logger, a.databaseOptions(a.sqlLogger)...)
 	if err != nil {
 		return nil, false, fmt.Errorf("gofy: connect database: %w", err)
 	}
 	return db, true, nil
+}
+
+// databaseOptions are the options every pool the App opens must carry.
+//
+// Startup and Reload both go through here, because they used to differ: Reload
+// built its pool with neither option, so a reloaded process lost SQL masking,
+// sampling and the rate limits, and its SQL entries fell back to the
+// application logger. Nothing failed — the process simply behaved differently
+// after a config change, which is the hardest kind of difference to attribute.
+// databaseOptions 是 App 打开的每个连接池都必须带的选项。
+//
+// 启动与 Reload 都经由这里，因为它们曾经不一致：Reload 建池时两个选项都没带，重载后的
+// 进程因此失去 SQL 脱敏、采样与限流，SQL 条目回落到应用 logger。没有任何报错——进程只是
+// 在配置变更之后行为不同，而这是最难归因的一类差异。
+func (a *App) databaseOptions(sqlLogger *zap.Logger) []gofydb.Option {
+	return []gofydb.Option{
+		gofydb.WithSQLPolicy(a.opts.sqlPolicy),
+		gofydb.WithSQLLogger(sqlLogger),
+	}
 }
 
 // buildTelemetry builds the tracing pipeline. A nil telemetry config leaves

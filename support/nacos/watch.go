@@ -185,6 +185,15 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if err != nil && ctx.Err() == nil {
 		w.logger.Warn("nacos initial sync failed", zap.Error(err))
 	}
+	// applied is the digest whose content this process has actually acted on.
+	// It trails current while a change keeps failing to apply, and that gap is
+	// what makes the retry below possible: Sync only reports Changed when it
+	// rewrote the local file, and a failed apply leaves the new content already
+	// written, so Changed is false on every retry.
+	// applied 是进程真正应用过的内容摘要。变更应用失败时它落后于 current，正是这个差值
+	// 让下面的重试成立：Sync 只在重写本地文件时置 Changed，而 apply 失败时新内容已经写
+	// 好，重试时 Changed 恒为 false。
+	applied := current
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -227,14 +236,33 @@ func (w *Watcher) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		current = result.Digest
-		if !result.Changed {
+		if result.Digest == applied {
+			// Nothing to act on: either the content is what this process already
+			// applied, or the server reported a change that Sync found identical
+			// to the local file. Either way the cursor can move forward.
+			// 没有需要执行的内容：要么这份内容本进程已经应用过，要么服务端报的变更在
+			// Sync 看来与本地文件一致。无论哪种，游标都可以往前走。
+			current = result.Digest
 			continue
 		}
 		w.logger.Info("nacos config updated", zap.String("file", result.File))
 		if err := w.apply(ctx, result); err != nil {
+			// The change must not be lost. Keeping the cursor where it is makes
+			// the next Listen report the change again (the server compares the
+			// digest it is given with its own), so the apply is replayed; the
+			// backoff keeps a handler that fails for a persistent reason — an
+			// unreachable dependency, a bad value it cannot accept — from
+			// spinning.
+			// 变更不能丢。游标留在原处，下一次 Listen 会再次报出这次变更（服务端比对收到
+			// 的摘要与自己的），apply 因此被重放；退避则避免持续失败的 handler（依赖不可达、
+			// 某个值无法接受）紧循环。
 			w.logger.Error("nacos config change handler failed", zap.Error(err))
+			if !sleep(ctx, cfg.RetryDelay) {
+				return ctx.Err()
+			}
+			continue
 		}
+		current, applied = result.Digest, result.Digest
 	}
 }
 

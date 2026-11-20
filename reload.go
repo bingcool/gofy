@@ -136,6 +136,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	lg, ownLogger := a.logger, a.ownLogger
 	systemLogger := a.systemLogger
 	accessLogger := a.accessLogger
+	sqlLogger := a.sqlLogger
 	db, ownDB := a.db, a.ownDB
 	startedAt := a.rt.StartedAt
 	runCtx := a.rt.Context()
@@ -199,20 +200,37 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		if len(spec.Log.AccessOutputs) == 0 {
 			newAccess = newLogger
 		}
-		lg, systemLogger, accessLogger, ownLogger, rebuiltLogger = newLogger, newSystem, newAccess, true, true
+		newSQL, err := logger.NewSQL(*spec.Log)
+		if err != nil {
+			syncLoggers(newLogger, newSystem, newAccess)
+			return fmt.Errorf("gofy: reload sql logger: %w", err)
+		}
+		if len(spec.Log.SQLOutputs) == 0 {
+			newSQL = newLogger
+		}
+		lg, systemLogger, accessLogger, sqlLogger = newLogger, newSystem, newAccess, newSQL
+		ownLogger, rebuiltLogger = true, true
 	}
 
 	rebuiltDB := false
 	if spec.Database != nil {
-		newDB, err := gofydb.New(ctx, *spec.Database, lg)
+		// The same two options the start-up path passes. Without them the new
+		// pool has no policy and no SQL channel: masking, sampling and the rate
+		// limits disappear, and SQL entries fall back to the application logger
+		// — a process that behaves differently before and after a reload, which
+		// is the hardest kind of difference to attribute.
+		// 与启动路径相同的两个选项。少了它们，新连接池就没有策略、也没有 SQL 通道：
+		// 脱敏、采样与限流全部消失，SQL 条目回落到应用 logger——同一个进程在重载前后
+		// 行为不同，而这是最难归因的一类差异。
+		newDB, err := gofydb.New(ctx, *spec.Database, lg, a.databaseOptions(sqlLogger)...)
 		if err != nil {
-			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger, accessLogger)
+			discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger, accessLogger, sqlLogger)
 			return fmt.Errorf("gofy: reload database: %w", err)
 		}
 		db, ownDB, rebuiltDB = newDB, true, true
 	}
 	discard := func() {
-		discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger, accessLogger)
+		discardReloadResources(rebuiltDB, rebuiltLogger, db, lg, systemLogger, accessLogger, sqlLogger)
 	}
 
 	rt := core.NewRuntime(core.RuntimeConfig{
@@ -287,6 +305,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	a.logger, a.ownLogger = lg, ownLogger
 	a.systemLogger = systemLogger
 	a.accessLogger = accessLogger
+	a.sqlLogger = sqlLogger
 	a.db, a.ownDB = db, ownDB
 	a.rt = rt
 	a.modules = modules
@@ -302,7 +321,7 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	// 失败都到不了这里，正在服务那一代的 binder 与状态因此不受影响。
 	newGen.bind = composeRequestBinders(allStarted)
 	newGen.db, newGen.ownDB = db, ownDB
-	newGen.logger, newGen.systemLogger, newGen.accessLogger, newGen.ownLogger = lg, systemLogger, accessLogger, ownLogger
+	newGen.logger, newGen.systemLogger, newGen.accessLogger, newGen.sqlLogger, newGen.ownLogger = lg, systemLogger, accessLogger, sqlLogger, ownLogger
 	a.gen = newGen
 	a.handlerRef.Store(newGen)
 	a.mu.Unlock()
@@ -329,12 +348,12 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 // rejected reload never closes the live database or syncs the live logger.
 // discardReloadResources 只释放本次 Reload 构建的资源，被拒绝的 Reload 因此不会
 // 关闭线上数据库或 Sync 线上 logger。
-func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, system, access *zap.Logger) {
+func discardReloadResources(rebuiltDB, rebuiltLogger bool, db *gorm.DB, lg, system, access, sql *zap.Logger) {
 	if rebuiltDB && db != nil {
 		_ = gofydb.Close(db)
 	}
 	if rebuiltLogger {
-		syncLoggers(lg, system, access)
+		syncLoggers(lg, system, access, sql)
 	}
 }
 

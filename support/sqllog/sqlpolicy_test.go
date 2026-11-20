@@ -285,3 +285,35 @@ func TestPolicyRateLimitDropsAndSummarizes(t *testing.T) {
 		t.Fatalf("sql error entries = %d, want 2", errors)
 	}
 }
+
+// TestGormLoggerHonoursSilent is the regression for the audit finding: every
+// config validator accepted log_level: silent and the field documents it, but
+// the parser did not know the value, so the constructor fell back to warn. A
+// pool that had explicitly asked for no SQL logging kept emitting slow and
+// failed statements — statement text included, parameters included in full
+// mode.
+// TestGormLoggerHonoursSilent 是审计结论的回归测试：各配置校验都接受
+// log_level: silent 且字段注释写着它，但解析器不认识这个值，构造函数退化成 warn。
+// 明确声明"不要打 SQL"的连接池照样输出慢语句与失败语句——带语句文本，full 档还带参数。
+func TestGormLoggerHonoursSilent(t *testing.T) {
+	trace := func(t *testing.T, cfg GormLoggerConfig) int {
+		t.Helper()
+		core, observed := observer.New(zapcore.DebugLevel)
+		gl := GormLogger(zap.New(core), cfg)
+		gl.Trace(context.Background(), time.Now().Add(-time.Second), func() (string, int64) {
+			return "SELECT * FROM orders WHERE token = 'a1'", 1
+		}, nil)
+		return len(observed.All())
+	}
+
+	if got := trace(t, GormLoggerConfig{SlowThreshold: time.Nanosecond, LogLevel: "silent"}); got != 0 {
+		t.Fatalf("silent logger wrote %d entries, want 0", got)
+	}
+	// Control: the same statement at warn level does produce a line, so the
+	// assertion above is about the level, not about Trace never firing.
+	// 对照：同一条语句在 warn 级别下确实会产出一行，因此上面的断言检验的是级别，而不是
+	// Trace 根本没被调用。
+	if got := trace(t, GormLoggerConfig{SlowThreshold: time.Nanosecond, LogLevel: "warn"}); got == 0 {
+		t.Fatal("warn logger wrote nothing: the silent case would prove nothing")
+	}
+}

@@ -75,6 +75,51 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/tenant`: the two write-side ways of losing a tenant are closed.
+  `Save` and `Select("*").Updates` build their SET list from every field of the
+  destination, so the ordinary "primary key plus the fields being changed"
+  struct also wrote an empty `tenant_id`: the row stayed in the table but
+  belonged to no tenant and was invisible to every scoped query. UPDATE now
+  omits the tenant column from assignments; the WHERE already pins the row to
+  the context tenant, and `tenant.Without` still allows an administrator to
+  move rows across tenants. INSERT also fills per row instead of treating a
+  batch as "explicit" when any one row had a value — GORM reads each row's
+  field to build the VALUES clause, so the batch-wide `SetColumn` the old
+  comment relied on could not have filled the other rows anyway. Explicit
+  values (struct slices and map slices alike) are kept; only empty ones are
+  filled.
+- `support/nacos`: a config change whose apply failed is retried. The watcher
+  advanced `current` before calling the handler, but `Sync` only reports
+  `Changed` when it rewrites the local file — and a failed apply had already
+  written it — so every later long-poll answered "no change" and the process
+  ran the old configuration while the file held the new one. A separate
+  `applied` digest now trails `current` until the handler succeeds, failed
+  applies back off by `RetryDelay`, and the change is replayed even when
+  `Changed` is false. `TestWatcherRetriesAFailedApply` models Nacos answering
+  immediately whenever the client's digest differs from the server's.
+- `gofy`: a Reload that rebuilds the database no longer drops the SQL logging
+  policy. Startup passes `WithSQLPolicy` and `WithSQLLogger`; Reload passed
+  neither, so masking, sampling and rate limits silently disappeared after a
+  config change and SQL entries fell back to the application logger. Both
+  paths now go through `App.databaseOptions`, and a reload that rebuilds the
+  logger also rebuilds its SQL channel and installs it on the new generation.
+  The retired generation flushes that channel too (`generation.sqlLogger`).
+  `TestReloadRebuildsTheSQLLogger` covers it.
+- `gofy`: programmatic `App.Shutdown` now stops a worker process. `Shutdown`
+  closes `stopCh` and waits for `done`, but only the HTTP `run()` loop listened
+  on `stopCh`; `runWorker` never reached that code, so a host that followed the
+  documented path waited out its deadline (or blocked forever with a background
+  context) while consumers kept running. The worker select now handles
+  `stopCh`, cancels the runners through the same drain path as a signal, and
+  disarms that case so the runner errors end the loop.
+  `TestShutdownStopsAWorkerProcess` covers it.
+- `support/sqllog`: `log_level: silent` is actually silent now. `parseLevel`
+  rejected it (the message did not even list it), `GormLogger` fell back to
+  warn, and slow or failed statements kept reaching the log — with expanded
+  parameters when `mode: full` was set. `parseLevel` returns a separate silent
+  flag, the logger maps it to `gormlogger.Silent`, and the flag is preserved by
+  `LogMode` so the level comparisons cannot let a statement through.
+  `TestGormLoggerHonoursSilent` covers it.
 - `support/queues`: a shutdown no longer discards popped messages. Both consume
   loops returned as soon as `ctx.Err()` was non-nil, but `Pop` had already
   removed the message from Redis — `DelayQueue` removed the whole due batch, up
@@ -671,6 +716,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `support/tenant`: UPDATE statements no longer include `tenant_id` in their
+  SET list, and batch inserts fill empty tenant values per row. Applications
+  that used a tenant-scoped `Save`/`Select("*").Updates` to move a row to
+  another tenant must switch to `tenant.Without` (that path is unchanged).
 - `support/tenant`: statements whose only tenant condition was a disjunction, a
   negation or an inequality are now filtered to the context tenant. Such
   conditions never restricted the result set, so the plugin used to skip its own

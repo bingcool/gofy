@@ -732,6 +732,62 @@ func TestReloadRebuildsAccessLogger(t *testing.T) {
 	}
 }
 
+// TestReloadRebuildsTheSQLLogger is half of the audit finding about reload
+// losing the SQL layer: the reload built the application, system and access
+// loggers but not the SQL channel, so a process that configured sql_outputs
+// kept writing SQL entries to the loggers from before the reload. The sink is
+// opened when the logger is built, so its existence proves the channel was
+// rebuilt.
+// TestReloadRebuildsTheSQLLogger 是"重载丢掉 SQL 层"这一审计结论的一半：Reload 建了
+// 应用、系统与访问 logger，唯独没建 SQL 通道，配置了 sql_outputs 的进程因此继续往重载
+// 之前的 logger 写 SQL 条目。sink 在 logger 构建时就已打开，文件存在即证明通道被重建。
+func TestReloadRebuildsTheSQLLogger(t *testing.T) {
+	port := freePort(t)
+	dir := t.TempDir()
+	firstInfo := filepath.Join(dir, "first", "info.log")
+	secondInfo := filepath.Join(dir, "second", "info.log")
+	sqlPath := filepath.Join(dir, "sql", "sql.log")
+
+	app, err := gofy.New(
+		gofy.WithName("reload-sql-log"),
+		withTestHTTP(t, port),
+		gofy.WithHealthEndpoints(true),
+		gofy.WithModuleFactories(reloadFactory("v1", &recorder{})),
+		gofy.WithShutdownTimeout(2*time.Second),
+		gofy.WithLogConfig(logger.Config{Outputs: []string{firstInfo}}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }()
+	waitForServer(t, port)
+
+	err = app.Reload(context.Background(), gofy.ReloadSpec{
+		Log: &logger.Config{Outputs: []string{secondInfo}, SQLOutputs: []string{sqlPath}},
+	})
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	if _, statErr := os.Stat(sqlPath); statErr != nil {
+		t.Fatalf("SQL log sink was not rebuilt by the reload: %v", statErr)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
 func TestModulesStartInOrderAndStopInReverse(t *testing.T) {
 	rec := &recorder{}
 	port := freePort(t)

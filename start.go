@@ -203,7 +203,7 @@ func (a *App) run(parent context.Context) error {
 	// 一步变得可见。
 	gen.bind = composeRequestBinders(a.started)
 	gen.db, gen.ownDB = db, ownDB
-	gen.logger, gen.systemLogger, gen.accessLogger, gen.ownLogger = lg, logs.system, logs.access, logs.own
+	gen.logger, gen.systemLogger, gen.accessLogger, gen.sqlLogger, gen.ownLogger = lg, logs.system, logs.access, logs.sql, logs.own
 	// The server keeps this wrapper for its whole life; Reload only swaps the
 	// generation stored inside it, so the listener is never touched.
 	// server 整个生命周期都持有这个包装器；Reload 只替换其中存放的 generation，

@@ -71,13 +71,23 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.mu.Lock()
-		f.lastListen = r.PostForm.Get("Listening-Configs")
+		listening := r.PostForm.Get("Listening-Configs")
+		f.lastListen = listening
 		f.lastHoldTime = r.Header.Get("Long-Pulling-Timeout")
+		content := f.content
 		changed := f.changed
 		f.changed = false
 		f.listenCount++
 		f.mu.Unlock()
-		if changed {
+		// Real Nacos answers at once when the digest in Listening-Configs does
+		// not match its own, and only holds the request when it does. Modelling
+		// that is what lets a test tell whether the watcher replays a change it
+		// failed to apply: a watcher that moved its cursor would ask about the
+		// new digest and be told "no change" forever.
+		// 真实 Nacos 在 Listening-Configs 里的摘要与自己的不一致时立刻回答，一致时才挂起
+		// 请求。照此建模，测试才能判断 watcher 是否会重放应用失败的变更：提前推进游标的
+		// watcher 会拿新摘要来问，于是永远得到"无变更"。
+		if changed || !strings.Contains(listening, digest([]byte(content))) {
 			io.WriteString(w, "gofy-service\x02GO_GROUP\x01")
 			return
 		}
@@ -581,14 +591,18 @@ func TestListenEncodesRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	changed, err := client.Listen(context.Background(), "abc123")
+	// The fake now answers "changed" when the digest sent by the client does
+	// not match its content, as Nacos does. Use the real digest so the second
+	// call below really models "no remote change".
+	configured := digest([]byte("env: dev\n"))
+	changed, err := client.Listen(context.Background(), configured)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	if !changed {
 		t.Fatal("changed = false")
 	}
-	want := "gofy-service\x02GO_GROUP\x02abc123\x02dev\x01"
+	want := "gofy-service\x02GO_GROUP\x02" + configured + "\x02dev\x01"
 	if fake.lastListen != want {
 		t.Fatalf("Listening-Configs = %q, want %q", fake.lastListen, want)
 	}
@@ -600,7 +614,7 @@ func TestListenEncodesRequest(t *testing.T) {
 		t.Fatalf("Long-Pulling-Timeout = %q, want 30000", fake.lastHoldTime)
 	}
 
-	changed, err = client.Listen(context.Background(), "abc123")
+	changed, err = client.Listen(context.Background(), configured)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -817,5 +831,83 @@ func TestWatcherRunClosesItsClient(t *testing.T) {
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("explicit Close: %v", err)
+	}
+}
+
+// TestWatcherRetriesAFailedApply is the regression for the audit finding: the
+// change cursor was advanced before the handler ran, so a handler that failed
+// once never saw that change again — the server was asked about the new digest
+// from then on and always answered "no change", leaving the process on the old
+// configuration while the file on disk held the new one.
+//
+// The retry cannot rely on the file: Sync reports Changed only when it rewrote
+// it, and the failed apply left the new content already written, so the second
+// pass sees Changed=false and must still call the handler.
+// TestWatcherRetriesAFailedApply 是审计结论的回归测试：游标原先在 handler 执行之前
+// 就推进了，失败一次的 handler 再也见不到那次变更——此后向服务端询问的是新摘要，回答
+// 永远是"无变更"，进程跑旧配置而磁盘上已是新文件。
+//
+// 重试不能依赖文件：Sync 只在重写文件时置 Changed，而 apply 失败时新内容已经写好，
+// 第二遍看到的是 Changed=false，仍必须调用 handler。
+func TestWatcherRetriesAFailedApply(t *testing.T) {
+	first := "env: dev\nhttp:\n  port: 8080\n"
+	second := "env: dev\nhttp:\n  port: 9090\n"
+	fake := &fakeServer{content: first}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := testConfig(t, server.URL, file)
+	cfg.RetryDelay = 20 * time.Millisecond
+
+	var attempts atomic.Int32
+	applied := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Watch(ctx, cfg, WithOnChange(func(_ context.Context, result Result) error {
+			if attempts.Add(1) == 1 {
+				return errors.New("reload failed: database unreachable")
+			}
+			// The replay reports Changed=false — Sync did not rewrite a file that
+			// already held this content — which is exactly why the retry keys off
+			// the digest instead. The path must still be there.
+			// 重放报 Changed=false——Sync 并没有重写已经持有该内容的文件——这正是重试要
+			// 看摘要而不是 Changed 的原因。路径仍必须给出。
+			if result.Changed {
+				t.Errorf("replay result = %+v, want Changed=false (the file was already written)", result)
+			}
+			if result.File != file {
+				t.Errorf("replay File = %q, want %q", result.File, file)
+			}
+			select {
+			case applied <- struct{}{}:
+			default:
+			}
+			return nil
+		}))
+	}()
+
+	waitFor(t, 5*time.Second, func() bool {
+		data, err := os.ReadFile(file)
+		return err == nil && string(data) == first
+	}, "initial config written")
+
+	fake.set(second, true)
+	select {
+	case <-applied:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the failed apply was not retried (attempts = %d)", attempts.Load())
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("handler attempts = %d, want at least 2", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop after cancel")
 	}
 }

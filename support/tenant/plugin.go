@@ -84,10 +84,11 @@ func (p *Plugin) Initialize(db *gorm.DB) error {
 		fn     func(*gorm.DB)
 	}
 	filter := p.filter
+	update := p.filterUpdate
 	fill := p.fill
 	registrations := []registration{
 		{db.Callback().Query().Before("gorm:query"), "query", filter},
-		{db.Callback().Update().Before("gorm:update"), "update", filter},
+		{db.Callback().Update().Before("gorm:update"), "update", update},
 		{db.Callback().Delete().Before("gorm:delete"), "delete", filter},
 		{db.Callback().Create().Before("gorm:create"), "create", fill},
 	}
@@ -190,7 +191,29 @@ func (p *Plugin) tenantID(ctx context.Context, table string, db *gorm.DB) string
 // 条件总是与调用方的整个 WHERE 用 AND 组合。已有 WHERE 时先把它包成一个
 // AndConditions 分组：GORM 会把新表达式追加到列表末尾，`a OR b` 加上 `AND tenant`
 // 会渲染成 `a OR b AND tenant`——限制的是最后一个操作数，而不是整个查询。
-func (p *Plugin) filter(db *gorm.DB) {
+func (p *Plugin) filter(db *gorm.DB) { p.scope(db, false) }
+
+// filterUpdate is filter plus the write-side guard: the tenant column never
+// appears in a SET list.
+//
+// GORM's Save, and Select("*").Updates, write every field of the destination, so
+// the most common update shape — a struct carrying the primary key and the
+// fields being changed — sent a zero tenant_id along with it. The row survived
+// but left every tenant: it is invisible to each tenant-scoped query, and
+// nothing reported an error. Omitting the column keeps the value the row already
+// has. There is nothing to write anyway: the WHERE clause pins the row to the
+// context tenant, and a caller that really wants to move a row between tenants
+// uses tenant.Without, which skips this guard entirely.
+// filterUpdate 是 filter 加上写入侧保护：租户列永远不出现在 SET 列表里。
+//
+// GORM 的 Save 与 Select("*").Updates 会写目标的所有字段，于是最常见的更新写法——一个
+// 只带主键和要改字段的结构体——把零值 tenant_id 一起发了出去。行还在，却离开了所有租户：
+// 任何带租户过滤的查询都看不到它，而且没有任何报错。忽略该列即保留行原有的值。本来也没有
+// 什么要写：WHERE 已经把行限定在上下文租户内；确实要在租户之间搬行时用 tenant.Without，
+// 那条路径完全跳过这个守卫。
+func (p *Plugin) filterUpdate(db *gorm.DB) { p.scope(db, true) }
+
+func (p *Plugin) scope(db *gorm.DB, protectSet bool) {
 	if db == nil || db.Error != nil || db.Statement == nil {
 		return
 	}
@@ -199,6 +222,12 @@ func (p *Plugin) filter(db *gorm.DB) {
 		return
 	}
 	stmt := db.Statement
+	if protectSet {
+		// Omits is applied after Selects, so this also wins over the "*" that
+		// Save installs.
+		// Omits 在 Selects 之后生效，因此也能压过 Save 装上的 "*"。
+		stmt.Omits = append(stmt.Omits, p.column)
+	}
 	scope := clause.Eq{Column: clause.Column{Name: p.column}, Value: id}
 
 	where, exists := stmt.Clauses["WHERE"]
@@ -217,8 +246,18 @@ func (p *Plugin) filter(db *gorm.DB) {
 	stmt.Clauses["WHERE"] = where
 }
 
-// fill sets the tenant column on INSERT when the caller did not.
-// fill 在 INSERT 时填充调用方未赋值的租户列。
+// fill sets the tenant column on INSERT where the caller left it empty.
+//
+// The old "any explicit row means the batch is explicit" rule was wrong twice
+// over: it skipped the whole batch, and GORM builds INSERT values by reading
+// each row's field, so a batch-wide SetColumn would have overwritten the rows
+// that did carry a value. Fill is now per row — explicit values are kept, zero
+// ones get the context tenant — for struct slices and map slices alike.
+// fill 给 INSERT 中调用方留空的租户列赋值。
+//
+// 原先"任一行显式赋值就视为整批已提供"的规则两处都错：它直接跳过整批，而 GORM 是按行
+// 读取字段构造 INSERT 的，整批 SetColumn 反而会覆盖本来有值的行。现在按行填——显式值保留，
+// 零值取上下文租户——结构体切片与 map 切片都覆盖。
 func (p *Plugin) fill(db *gorm.DB) {
 	if db == nil || db.Error != nil || db.Statement == nil {
 		return
@@ -228,10 +267,68 @@ func (p *Plugin) fill(db *gorm.DB) {
 		return
 	}
 	stmt := db.Statement
-	if !p.overwriteExplicit && explicitColumnSet(stmt, p.column) {
+	if p.overwriteExplicit {
+		stmt.SetColumn(p.column, id, true)
 		return
 	}
-	stmt.SetColumn(p.column, id, true)
+
+	// maps are handled by key, including a pointer to a map or a slice of maps.
+	// map 按键赋值，同时兼容指向 map 或 map 切片的指针。
+	dest := stmt.Dest
+	for {
+		switch v := dest.(type) {
+		case *map[string]any:
+			dest = *v
+			continue
+		case *[]map[string]any:
+			dest = *v
+			continue
+		}
+		break
+	}
+	switch v := dest.(type) {
+	case map[string]any:
+		if value, exists := v[p.column]; !exists || isZeroValue(value) {
+			v[p.column] = id
+		}
+		return
+	case []map[string]any:
+		for _, row := range v {
+			if value, exists := row[p.column]; !exists || isZeroValue(value) {
+				row[p.column] = id
+			}
+		}
+		return
+	}
+
+	field := stmt.Schema.LookUpField(p.column)
+	if field == nil || field.ValueOf == nil {
+		return
+	}
+	rv := reflect.ValueOf(stmt.Dest)
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.Struct:
+		if _, zero := field.ValueOf(stmt.Context, rv); zero {
+			stmt.SetColumn(p.column, id, true)
+		}
+	case reflect.Slice, reflect.Array:
+		// GORM reads each row's field when it builds the INSERT values, so the
+		// zero rows must be set on the caller's slice itself.
+		// GORM 构造 INSERT 值时逐行读字段，因此必须直接改调用方切片里的零值行。
+		for i := 0; i < rv.Len(); i++ {
+			if _, zero := field.ValueOf(stmt.Context, rv.Index(i)); zero {
+				if err := field.Set(stmt.Context, rv.Index(i), id); err != nil {
+					stmt.AddError(err)
+				}
+			}
+		}
+	}
 }
 
 // constrainsColumn walks the expression tree along the paths that restrict the
@@ -339,57 +436,6 @@ func columnName(v any) string {
 		return c
 	}
 	return ""
-}
-
-// explicitColumnSet reports whether Dest already carries a non-zero tenant
-// column. It handles struct, pointer-to-struct, []struct, and map Dest shapes
-// that GORM's Create accepts.
-// explicitColumnSet 报告 Dest 上是否已有非零的租户列取值。覆盖 GORM Create 接受的
-// struct、指针、切片与 map 形态。
-func explicitColumnSet(stmt *gorm.Statement, column string) bool {
-	if stmt.Dest == nil {
-		return false
-	}
-	switch dest := stmt.Dest.(type) {
-	case map[string]any:
-		v, exists := dest[column]
-		return exists && !isZeroValue(v)
-	case []map[string]any:
-		for _, m := range dest {
-			if v, exists := m[column]; exists && !isZeroValue(v) {
-				return true
-			}
-		}
-		return false
-	}
-
-	field := stmt.Schema.LookUpField(column)
-	if field == nil || field.ValueOf == nil {
-		return false
-	}
-	rv := reflect.ValueOf(stmt.Dest)
-	for rv.Kind() == reflect.Ptr {
-		if rv.IsNil() {
-			return false
-		}
-		rv = rv.Elem()
-	}
-	switch rv.Kind() {
-	case reflect.Struct:
-		_, zero := field.ValueOf(stmt.Context, rv)
-		return !zero
-	case reflect.Slice, reflect.Array:
-		// Batch insert: honour an explicit value if any row has one. GORM's
-		// SetColumn(fromCallbacks=true) then fills the remaining rows.
-		// 批量插入：任一行显式赋值即视为已提供。
-		for i := 0; i < rv.Len(); i++ {
-			_, zero := field.ValueOf(stmt.Context, rv.Index(i))
-			if !zero {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func isZeroValue(v any) bool {

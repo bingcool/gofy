@@ -255,6 +255,12 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	var runErr error
 	remaining := len(runners)
 	ready := false
+	// A local alias so the shutdown case can be disarmed after it fires: a
+	// closed channel is ready forever, and the loop ends on the runner errors
+	// that follow.
+	// 用局部别名，停机分支触发后可以就地停用它：已关闭的通道会一直就绪，而结束循环的是
+	// 随后到达的 runner 错误。
+	stopCh := a.stopCh
 	// One group failing takes the process down: a process that keeps half of
 	// its groups alive would report ready while silently skipping work, and the
 	// wildcard exists for local runs where "all or nothing" is the useful
@@ -281,6 +287,20 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 			// line before it prints success.
 			// 脱离出本进程的父进程正等着这一行才打印成功。
 			a.notifier.ready()
+		case <-stopCh:
+			// Programmatic shutdown. App.Shutdown closes stopCh and then waits
+			// for a.done; the HTTP path listens to stopCh in run(), but a worker
+			// process never reached that code, so stopping it this way waited
+			// out the caller's deadline (or blocked forever on a background
+			// context) while the workers kept consuming. Cancelling here gives
+			// both entry points one stop path: run through the same drain, close
+			// a.done, return.
+			// 程序化停机。App.Shutdown 关闭 stopCh 后等 a.done；HTTP 路径在 run() 里
+			// 监听 stopCh，而 worker 进程永远走不到那段代码，于是这样停机只会等满调用方
+			// 的截止时间（用 Background 时永久阻塞），worker 还在继续消费。在这里取消，
+			// 两条入口就共用同一个停机路径：走同一段排空、关闭 a.done、返回。
+			cancelRunners(nil)
+			stopCh = nil
 		case err := <-errCh:
 			remaining--
 			if err != nil {

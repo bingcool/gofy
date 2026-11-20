@@ -622,3 +622,134 @@ func TestTenantFilterSurvivesConditionsThatMentionTheColumn(t *testing.T) {
 		})
 	}
 }
+
+// TestSaveDoesNotClearTenant is the regression for the audit's (b): Save and
+// Select("*").Updates write every field of the destination, so the ordinary
+// "primary key plus the fields being changed" struct also sent an empty
+// tenant_id. The row stayed in the table but left every tenant — invisible to
+// every scoped query, with no error.
+// TestSaveDoesNotClearTenant 是审计 (b) 的回归测试：Save 与 Select("*").Updates 会写
+// 目标的全部字段，于是"主键 + 要改的字段"这种常规写法也把空的 tenant_id 发了出去。行还在
+// 表里，却离开了所有租户——任何带租户过滤的查询都看不到它，而且没有报错。
+func TestSaveDoesNotClearTenant(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*gorm.DB, *order) *gorm.DB
+	}{
+		{"save", func(db *gorm.DB, row *order) *gorm.DB { return db.Save(row) }},
+		{"select all", func(db *gorm.DB, row *order) *gorm.DB { return db.Select("*").Updates(row) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openDB(t, tenant.Options{})
+			seed(t, db, order{TenantID: "a", Code: "keep"})
+
+			var row order
+			if err := db.WithContext(ctxFor("a")).Where("code = ?", "keep").First(&row).Error; err != nil {
+				t.Fatalf("First: %v", err)
+			}
+			partial := order{ID: row.ID, Code: "renamed"}
+			if err := tc.apply(db.WithContext(ctxFor("a")), &partial).Error; err != nil {
+				t.Fatalf("update: %v", err)
+			}
+
+			var raw []order
+			if err := db.WithContext(tenant.Without(context.Background())).Find(&raw).Error; err != nil {
+				t.Fatalf("Find: %v", err)
+			}
+			if len(raw) != 1 {
+				t.Fatalf("rows = %d, want 1", len(raw))
+			}
+			if raw[0].TenantID != "a" || raw[0].Code != "renamed" {
+				t.Fatalf("row = %+v, want tenant a / renamed", raw[0])
+			}
+		})
+	}
+}
+
+// TestWithoutCanStillMoveARowAcrossTenants: the write-side guard exists only
+// for tenant-scoped statements. An administrator using tenant.Without must
+// keep the ability to change tenant_id, including through Save.
+// TestWithoutCanStillMoveARowAcrossTenants：写入侧守卫只针对带租户的语句。用
+// tenant.Without 的管理端仍必须能改 tenant_id，包括通过 Save。
+func TestWithoutCanStillMoveARowAcrossTenants(t *testing.T) {
+	db := openDB(t, tenant.Options{})
+	seed(t, db, order{TenantID: "a", Code: "keep"})
+
+	var row order
+	if err := db.WithContext(ctxFor("a")).Where("code = ?", "keep").First(&row).Error; err != nil {
+		t.Fatalf("First: %v", err)
+	}
+	moving := order{ID: row.ID, TenantID: "b", Code: "keep"}
+	if err := db.WithContext(tenant.Without(context.Background())).Save(&moving).Error; err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var raw []order
+	if err := db.WithContext(tenant.Without(context.Background())).Find(&raw).Error; err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if len(raw) != 1 || raw[0].TenantID != "b" {
+		t.Fatalf("rows = %+v, want the row moved to tenant b", raw)
+	}
+}
+
+// TestBatchInsertFillsOnlyZeroTenantRows is the regression for (c): one row
+// with an explicit tenant used to make the plugin skip the entire batch, so
+// the other rows landed with an empty tenant id. The explicit row must keep
+// its value (even when it names another tenant) and only the empty ones get
+// the context tenant.
+// TestBatchInsertFillsOnlyZeroTenantRows 是审计 (c) 的回归测试：只要有一行显式赋了租户，
+// 插件就跳过整批，其它行因此以空租户落库。显式值必须保留（哪怕它写的是另一个租户），
+// 只有空值行才取上下文租户。
+func TestBatchInsertFillsOnlyZeroTenantRows(t *testing.T) {
+	t.Run("structs", func(t *testing.T) {
+		db := openDB(t, tenant.Options{})
+		rows := []order{
+			{TenantID: "b", Code: "explicit"},
+			{Code: "implicit"},
+		}
+		if err := db.WithContext(ctxFor("a")).Create(&rows).Error; err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		var raw []order
+		if err := db.WithContext(tenant.Without(context.Background())).Order("id").Find(&raw).Error; err != nil {
+			t.Fatalf("Find: %v", err)
+		}
+		want := []string{"b/explicit", "a/implicit"}
+		if len(raw) != len(want) {
+			t.Fatalf("rows = %+v, want %d rows", raw, len(want))
+		}
+		for i, row := range raw {
+			if got := row.TenantID + "/" + row.Code; got != want[i] {
+				t.Fatalf("row %d = %q, want %q (all: %+v)", i, got, want[i], raw)
+			}
+		}
+	})
+
+	t.Run("maps", func(t *testing.T) {
+		db := openDB(t, tenant.Options{})
+		rows := []map[string]any{
+			{"tenant_id": "b", "code": "explicit"},
+			{"code": "implicit"},
+		}
+		if err := db.WithContext(ctxFor("a")).Table("orders").Create(&rows).Error; err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		var raw []struct {
+			TenantID string `gorm:"column:tenant_id"`
+			Code     string
+		}
+		if err := db.WithContext(tenant.Without(context.Background())).Table("orders").Order("id").Find(&raw).Error; err != nil {
+			t.Fatalf("Find: %v", err)
+		}
+		want := []string{"b/explicit", "a/implicit"}
+		if len(raw) != len(want) {
+			t.Fatalf("rows = %+v, want %d rows", raw, len(want))
+		}
+		for i, row := range raw {
+			if got := row.TenantID + "/" + row.Code; got != want[i] {
+				t.Fatalf("row %d = %q, want %q (all: %+v)", i, got, want[i], raw)
+			}
+		}
+	})
+}

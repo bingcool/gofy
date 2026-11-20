@@ -297,3 +297,37 @@ func TestExecuteWorkerUsesFuncConcurrency(t *testing.T) {
 		t.Fatalf("ExecuteArgs error = %v", err)
 	}
 }
+
+// TestShutdownStopsAWorkerProcess is the regression for the audit finding:
+// App.Shutdown closes stopCh and waits for a.done, but the only listener was
+// the HTTP run() loop. A worker process never reached that code, so a
+// programmatic stop waited out the caller's deadline — or blocked forever on a
+// background context — while the workers kept consuming.
+// TestShutdownStopsAWorkerProcess 是审计结论的回归测试：App.Shutdown 关闭 stopCh 并
+// 等 a.done，但唯一的监听者是 HTTP 的 run()。worker 进程走不到那段代码，程序化停机因此
+// 只会等满调用方的截止时间（用 Background 时永久阻塞），而 worker 还在继续消费。
+func TestShutdownStopsAWorkerProcess(t *testing.T) {
+	var started int32
+	app := newWorkerApp(t, "order", &started)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- app.ExecuteArgs(context.Background(), []string{"worker", "--group=order"})
+	}()
+	waitFor(t, func() bool { return atomic.LoadInt32(&started) == 1 }, "the worker to start")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ExecuteArgs error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker command did not stop after Shutdown")
+	}
+}
