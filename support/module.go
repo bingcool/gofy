@@ -11,10 +11,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Middleware is a gin middleware function.
-// Middleware 是 gin 中间件函数；按注册顺序执行，调用 c.Next() 之前的代码先于
+// MiddlewareFunc is a gin middleware function.
+// MiddlewareFunc 是 gin 中间件函数；按注册顺序执行，调用 c.Next() 之前的代码先于
 // 处理器运行。
-type Middleware = gin.HandlerFunc
+//
+// The Func suffix keeps it distinct from Handler: a Handler produces the result
+// of one route, a MiddlewareFunc wraps around it and decides whether to call
+// c.Next().
+// 后缀 Func 用来和 Handler 区分：Handler 产生一条路由的结果，MiddlewareFunc 包裹
+// 它并决定是否调用 c.Next()。
+type MiddlewareFunc = gin.HandlerFunc
 
 // Module is how a business package attaches itself to the framework.
 // Module 是业务包接入框架的方式；实现应保持无状态，装配所需的依赖在

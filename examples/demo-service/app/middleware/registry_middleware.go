@@ -30,7 +30,7 @@ func Register(reg *gofymiddleware.Registry, deps Deps) error {
 	}
 	entries := []struct {
 		alias string
-		mw    support.Middleware
+		mw    support.MiddlewareFunc
 	}{
 		{NameAuth, auth},
 		{NameAudit, Audit(deps.Logger, "group")},

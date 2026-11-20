@@ -318,7 +318,7 @@ import (
 type Runtime = core.Runtime
 type VersionInfo = core.VersionInfo
 type ModuleFactory = support.ModuleFactory
-type Middleware = support.Middleware
+type MiddlewareFunc = support.MiddlewareFunc
 type Responder = support.Responder
 type CORSConfig = support.CORSConfig
 type DatabaseConfig = gofydb.Config
@@ -578,7 +578,7 @@ import (
     "github.com/gin-gonic/gin"
 )
 
-type Middleware = gin.HandlerFunc
+type MiddlewareFunc = gin.HandlerFunc
 
 // Module 是业务接入框架的唯一入口。
 type Module interface {
@@ -877,9 +877,9 @@ const (
 
 ```go
 func NewRegistry() *Registry
-func (r *Registry) Register(name string, mw support.Middleware) error
-func (r *Registry) MustRegister(name string, mw support.Middleware)
-func (r *Registry) Lookup(name string) (support.Middleware, bool)
+func (r *Registry) Register(name string, mw support.MiddlewareFunc) error
+func (r *Registry) MustRegister(name string, mw support.MiddlewareFunc)
+func (r *Registry) Lookup(name string) (support.MiddlewareFunc, bool)
 func (r *Registry) Names() []string
 
 type MiddlewareRegistration struct {
@@ -901,7 +901,7 @@ func WithMiddlewareRegistrar(fn MiddlewareRegistrar) Option
 - `MiddlewareRegistrar` 在模块绑定路由之前执行，失败会使启动（或热更新）失败；
   每次启动/`Reload` 都用新的 Runtime、Responder 和空注册表重新执行，Nacos
   更新 jwt 等配置后立即得到新实例；
-- adapter 只依赖 `Lookup(name string) (support.Middleware, bool)`
+- adapter 只依赖 `Lookup(name string) (support.MiddlewareFunc, bool)`
   （`gofyadapter.MiddlewareRegistry` 接口），解析优先级为
   `BindOptions.Middleware`（单次覆盖）→ `BindOptions.Registry`（可选显式注入）
   → Router 携带的 App 注册表，三处都缺失时启动期报错；
@@ -2822,7 +2822,7 @@ func (s *Snapshot) UUID() *uuidint.Generator // 生成器不是连接，没有 R
 
 func WithSnapshot(context.Context, *Snapshot) context.Context
 func WithContext(context.Context) *Snapshot  // ctx 固定优先，否则回退 Current()；两者都没有直接 panic
-func Middleware() support.Middleware         // 请求入口固定当前一代
+func Middleware() support.MiddlewareFunc         // 请求入口固定当前一代
 ```
 
 ```go
@@ -3620,7 +3620,7 @@ type JWTConfig struct {
     RequireExpiry bool     `yaml:"require_expiry"`
 }
 
-func Auth(cfg JWTConfig, responder support.Responder) (support.Middleware, error) {
+func Auth(cfg JWTConfig, responder support.Responder) (support.MiddlewareFunc, error) {
     if cfg.Secret == "" {
         return func(c *gin.Context) { c.Next() }, nil
     }
@@ -3661,7 +3661,7 @@ func Register(reg *gofymiddleware.Registry, deps Deps) error {
     }
     for _, e := range []struct {
         alias string
-        mw    support.Middleware
+        mw    support.MiddlewareFunc
     }{
         {NameAuth, auth},
         {NameAudit, Audit(deps.Logger, "group")},
@@ -4279,7 +4279,7 @@ type CORSConfig = support.CORSConfig
 type VersionInfo = core.VersionInfo
 type Runtime = core.Runtime
 type ModuleFactory = support.ModuleFactory
-type Middleware = support.Middleware
+type MiddlewareFunc = support.MiddlewareFunc
 type Responder = support.Responder
 type DatabaseConfig = gofydb.Config
 type LogConfig = logger.Config
@@ -4300,7 +4300,7 @@ func (*Runtime) Fail(error)
 ### A.3 `support`
 
 ```text
-type Middleware = gin.HandlerFunc
+type MiddlewareFunc = gin.HandlerFunc
 type Module
 type ModuleFactory
 type Prefixer
@@ -4355,9 +4355,9 @@ const NameRequestID / NameHeaderPropagation / NameAccessLog / NameRecovery /
       NameCORS / NameBodyLimit / NameSecurityHeaders / NameRateLimit / NameJWTAuth
 type Registry
 func NewRegistry() *Registry
-func (*Registry) Register(string, support.Middleware) error
-func (*Registry) MustRegister(string, support.Middleware)
-func (*Registry) Lookup(string) (support.Middleware, bool)
+func (*Registry) Register(string, support.MiddlewareFunc) error
+func (*Registry) MustRegister(string, support.MiddlewareFunc)
+func (*Registry) Lookup(string) (support.MiddlewareFunc, bool)
 func (*Registry) Names() []string
 ```
 

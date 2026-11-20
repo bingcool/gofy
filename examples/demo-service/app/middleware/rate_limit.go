@@ -59,7 +59,7 @@ type RateLimiter struct {
 //
 // adapter 把 Router 的 Responder 作为第二个参数传入，限流的 429/503 因此与
 // App 的其它错误共用同一信封；RateLimiter.Responder 非空时显式覆盖注入值。
-func (r RateLimiter) Callback() func(endpoint.Spec, support.Responder) support.Middleware {
+func (r RateLimiter) Callback() func(endpoint.Spec, support.Responder) support.MiddlewareFunc {
 	return r.middleware
 }
 
@@ -69,7 +69,7 @@ func (r RateLimiter) Callback() func(endpoint.Spec, support.Responder) support.M
 // Redis；store 与框架限流中间件由 redisLimiter 在第一次请求时构建并缓存。
 // 没有声明 RateLimit 时返回 nil；adapter 本不会调用到这里，这里判空是为了
 // 防御直接调用回调的场景（例如测试）。
-func (r RateLimiter) middleware(spec endpoint.Spec, responder support.Responder) support.Middleware {
+func (r RateLimiter) middleware(spec endpoint.Spec, responder support.Responder) support.MiddlewareFunc {
 	if spec.RateLimit == nil {
 		return nil
 	}
@@ -193,7 +193,7 @@ type redisLimiter struct {
 	// mu 保护 handler 的首次构建；handler 非 nil 后不再重复构建。
 	mu sync.Mutex
 	// handler 是框架限流中间件，构建成功后由这条路由的所有请求共用。
-	handler support.Middleware
+	handler support.MiddlewareFunc
 }
 
 // handle 是暴露给 gin 的入口：先确保框架中间件就绪，再交给它处理请求。
@@ -215,7 +215,7 @@ func (l *redisLimiter) handle(c *gin.Context) {
 // 由它负责计数、429 响应和 X-RateLimit-* / Retry-After 响应头。任一步失败
 // 都原样返回，handle 会把当前请求按 503 处理；失败不写回 handler，下一次
 // 请求会重新尝试。
-func (l *redisLimiter) resolve(ctx context.Context) (support.Middleware, error) {
+func (l *redisLimiter) resolve(ctx context.Context) (support.MiddlewareFunc, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.handler != nil {

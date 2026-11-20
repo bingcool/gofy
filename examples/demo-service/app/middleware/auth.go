@@ -36,7 +36,7 @@ type JWTConfig struct {
 // Auth 用框架的 JWTAuth（support/middleware/jwt.go）实现契约里的显式
 // "auth" 别名。secret 为空时返回放行中间件：示例默认不要求凭证，但别名
 // 始终指向一个非 nil 实例，注册表不会因为缺省而漏掉认证。
-func Auth(cfg JWTConfig, responder support.Responder) (support.Middleware, error) {
+func Auth(cfg JWTConfig, responder support.Responder) (support.MiddlewareFunc, error) {
 	if cfg.Secret == "" {
 		return func(c *gin.Context) { c.Next() }, nil
 	}

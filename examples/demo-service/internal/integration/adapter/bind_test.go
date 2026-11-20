@@ -75,7 +75,7 @@ func newEngine(t *testing.T) *gin.Engine {
 		}),
 	})
 	opts := gofyadapter.BindOptions{
-		Middleware: map[string]support.Middleware{
+		Middleware: map[string]support.MiddlewareFunc{
 			"order-audit": func(c *gin.Context) { c.Next() },
 		},
 	}
@@ -143,7 +143,7 @@ func TestBindAllConfigRoute(t *testing.T) {
 
 func TestBindAllGroupMiddlewareOrder(t *testing.T) {
 	var order []string
-	record := func(name string) support.Middleware {
+	record := func(name string) support.MiddlewareFunc {
 		return func(c *gin.Context) {
 			order = append(order, name)
 			c.Next()
@@ -160,14 +160,14 @@ func TestBindAllGroupMiddlewareOrder(t *testing.T) {
 	// 手动 Group 不解析契约里的分组名字，因此分组中间件（含认证）直接传实例。
 	orders := router.Group(orderroute.Orders.Prefix, record("group"), record("auth"))
 	err := gofyadapter.BindAll(orders, orderroute.Orders.Routes, orderImpl{}, gofyadapter.BindOptions{
-		Global: []support.Middleware{record("global")},
-		Middleware: map[string]support.Middleware{
+		Global: []support.MiddlewareFunc{record("global")},
+		Middleware: map[string]support.MiddlewareFunc{
 			"order-audit": record("route-name"),
 		},
-		Routes: map[string][]support.Middleware{
+		Routes: map[string][]support.MiddlewareFunc{
 			"ListOrders": {record("route")},
 		},
-		RateLimit: func(endpoint.Spec, support.Responder) support.Middleware {
+		RateLimit: func(endpoint.Spec, support.Responder) support.MiddlewareFunc {
 			return record("rate")
 		},
 	})
@@ -177,7 +177,7 @@ func TestBindAllGroupMiddlewareOrder(t *testing.T) {
 
 	config := router.Group(orderroute.Config.Prefix, record("config-group"), record("auth"))
 	err = gofyadapter.BindAll(config, orderroute.Config.Routes, orderImpl{}, gofyadapter.BindOptions{
-		Global: []support.Middleware{record("global")},
+		Global: []support.MiddlewareFunc{record("global")},
 	})
 	if err != nil {
 		t.Fatalf("BindAll config: %v", err)
@@ -204,7 +204,7 @@ func TestBindAllGroupMiddlewareOrder(t *testing.T) {
 
 func TestBindGroupMiddlewareNames(t *testing.T) {
 	var order []string
-	record := func(name string) support.Middleware {
+	record := func(name string) support.MiddlewareFunc {
 		return func(c *gin.Context) {
 			order = append(order, name)
 			c.Next()
@@ -220,17 +220,17 @@ func TestBindGroupMiddlewareNames(t *testing.T) {
 	// orderroute.Orders 在契约里声明了 group.Use("audit", "auth")，CreateOrder
 	// 声明了 spec.Middleware = []string{"order-audit"}，两者都由显式映射解析。
 	err := gofyadapter.BindGroup(router, orderroute.Orders, orderImpl{}, gofyadapter.BindOptions{
-		Middleware: map[string]support.Middleware{
+		Middleware: map[string]support.MiddlewareFunc{
 			"audit":       record("group"),
 			"auth":        record("auth"),
 			"order-audit": record("route-name"),
 		},
-		Global: []support.Middleware{record("global")},
-		Routes: map[string][]support.Middleware{
+		Global: []support.MiddlewareFunc{record("global")},
+		Routes: map[string][]support.MiddlewareFunc{
 			"ListOrders":  {record("route")},
 			"CreateOrder": {record("route")},
 		},
-		RateLimit: func(endpoint.Spec, support.Responder) support.Middleware {
+		RateLimit: func(endpoint.Spec, support.Responder) support.MiddlewareFunc {
 			return record("rate")
 		},
 	})
@@ -277,13 +277,13 @@ func TestBindAllRejectsUnknownRouteMiddleware(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
-		registry map[string]support.Middleware
+		registry map[string]support.MiddlewareFunc
 		want     string
 	}{
 		{name: "absent", want: `ListOrders: middleware "absent" is not registered`},
 		{
 			name:     "nil-entry",
-			registry: map[string]support.Middleware{"nil-entry": nil},
+			registry: map[string]support.MiddlewareFunc{"nil-entry": nil},
 			want:     `ListOrders: middleware "nil-entry" is not registered`,
 		},
 	} {

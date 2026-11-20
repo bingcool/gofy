@@ -33,7 +33,7 @@ type Router struct {
 // 安装一份注册表（support/middleware.Registry 实现该接口），模块只负责绑定
 // 路由，不再自己创建或注入注册表。
 type MiddlewareResolver interface {
-	Lookup(name string) (Middleware, bool)
+	Lookup(name string) (MiddlewareFunc, bool)
 }
 
 type engine struct {
@@ -76,7 +76,7 @@ func NewRouter(e *gin.Engine, cfg RouterConfig) *Router {
 // to have no trailing "/". An empty prefix keeps the parent path.
 // Group 创建子路由。前缀会被规范化为以 "/" 开头、无结尾 "/"，空前缀保持父路径；
 // 子路由共享同一 responder 与 validator，中间件按层级累积而非覆盖。
-func (r *Router) Group(prefix string, mw ...Middleware) *Router {
+func (r *Router) Group(prefix string, mw ...MiddlewareFunc) *Router {
 	return r.subRouter(prefix, true, mw...)
 }
 
@@ -87,7 +87,7 @@ func (r *Router) Group(prefix string, mw ...Middleware) *Router {
 // ModuleGroup 创建启动期交给模块的 Router。与 Group 不同，它不累计绑定前缀，
 // 适配器可直接绑定完整契约路径而不会被裁掉模块名。它由 gofy 根包使用，
 // 业务代码应调用 Group。
-func (r *Router) ModuleGroup(prefix string, mw ...Middleware) *Router {
+func (r *Router) ModuleGroup(prefix string, mw ...MiddlewareFunc) *Router {
 	return r.subRouter(prefix, false, mw...)
 }
 
@@ -96,7 +96,7 @@ func (r *Router) ModuleGroup(prefix string, mw ...Middleware) *Router {
 // prefix, so a module binding full contract paths directly is not trimmed.
 // subRouter 是 Group 的内部实现；bind 为 false 时（框架创建模块 Router）不累计
 // 绑定前缀，保证模块内直接绑定完整契约路径不会被误裁剪。
-func (r *Router) subRouter(prefix string, bind bool, mw ...Middleware) *Router {
+func (r *Router) subRouter(prefix string, bind bool, mw ...MiddlewareFunc) *Router {
 	prefix = NormalizePrefix(prefix)
 	group := r.group.Group(prefix)
 	if len(mw) > 0 {
@@ -128,55 +128,55 @@ func (r *Router) GroupPrefix() string {
 
 // Use appends middleware to this router.
 // Use 为本路由追加中间件；只影响之后注册的路由，已注册的路由不受影响。
-func (r *Router) Use(mw ...Middleware) {
+func (r *Router) Use(mw ...MiddlewareFunc) {
 	r.group.Use(mw...)
 }
 
 // GET registers a GET route.
 // GET 注册 GET 路由；路径相对当前分组前缀，mw 先于处理器执行。
-func (r *Router) GET(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) GET(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("GET", path, h, mw...)
 }
 
 // POST registers a POST route.
 // POST 注册 POST 路由；路径相对当前分组前缀，mw 先于处理器执行。
-func (r *Router) POST(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) POST(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("POST", path, h, mw...)
 }
 
 // PUT registers a PUT route.
 // PUT 注册 PUT 路由；路径相对当前分组前缀，mw 先于处理器执行。
-func (r *Router) PUT(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) PUT(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("PUT", path, h, mw...)
 }
 
 // PATCH registers a PATCH route.
 // PATCH 注册 PATCH 路由；路径相对当前分组前缀，mw 先于处理器执行。
-func (r *Router) PATCH(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) PATCH(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("PATCH", path, h, mw...)
 }
 
 // DELETE registers a DELETE route.
 // DELETE 注册 DELETE 路由；路径相对当前分组前缀，mw 先于处理器执行。
-func (r *Router) DELETE(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) DELETE(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("DELETE", path, h, mw...)
 }
 
 // HEAD registers a HEAD route.
 // HEAD 注册 HEAD 路由；路径相对当前分组前缀，mw 先于处理器执行。
-func (r *Router) HEAD(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) HEAD(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("HEAD", path, h, mw...)
 }
 
 // OPTIONS registers an OPTIONS route.
 // OPTIONS 注册 OPTIONS 路由；CORS 预检若已由中间件处理，无需再单独注册。
-func (r *Router) OPTIONS(path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) OPTIONS(path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	r.Handle("OPTIONS", path, h, mw...)
 }
 
 // Handle registers a route for an arbitrary HTTP method.
 // Handle 为任意 HTTP 方法注册路由；mw 按传入顺序先于处理器执行。
-func (r *Router) Handle(method, path string, h gin.HandlerFunc, mw ...Middleware) {
+func (r *Router) Handle(method, path string, h gin.HandlerFunc, mw ...MiddlewareFunc) {
 	handlers := make([]gin.HandlerFunc, 0, len(mw)+1)
 	handlers = append(handlers, mw...)
 	handlers = append(handlers, h)
@@ -212,7 +212,7 @@ func (r *Router) Responder() Responder { return r.engine.responder }
 // (nil, false).
 // Middleware 按契约里的逻辑名查找应用级中间件。注册表由 App 在启动时统一
 // 安装，分组 Router 共享同一份；未安装注册表或名字不存在时返回 (nil, false)。
-func (r *Router) Middleware(name string) (Middleware, bool) {
+func (r *Router) Middleware(name string) (MiddlewareFunc, bool) {
 	if r == nil || r.engine == nil || r.engine.middleware == nil {
 		return nil, false
 	}

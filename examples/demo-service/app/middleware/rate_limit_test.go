@@ -296,7 +296,7 @@ func spec(method string, limit int, key endpoint.RateKey) endpoint.Spec {
 }
 
 // buildLimiter 用契约声明构造一条路由的限流中间件，要求回调返回非 nil。
-func buildLimiter(t *testing.T, spec endpoint.Spec) support.Middleware {
+func buildLimiter(t *testing.T, spec endpoint.Spec) support.MiddlewareFunc {
 	t.Helper()
 	limiter := newRateLimiter(t).Callback()(spec, testResponder())
 	if limiter == nil {
@@ -331,7 +331,7 @@ func testClient(t *testing.T) *goredis.Client {
 }
 
 // newEngine 注册一条带限流的测试路由。
-func newEngine(limiter support.Middleware, method, path string) *gin.Engine {
+func newEngine(limiter support.MiddlewareFunc, method, path string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Handle(method, path, limiter, func(c *gin.Context) { c.Status(http.StatusOK) })

@@ -1367,7 +1367,7 @@ func Bind[Req, Res any](
 	r *support.Router,
 	rt *endpoint.Route[Req, Res],
 	h support.Handler[Req, Res],
-	mw ...support.Middleware,
+	mw ...support.MiddlewareFunc,
 )
 ```
 
@@ -1377,19 +1377,19 @@ func Bind[Req, Res any](
 // MiddlewareRegistry 是服务端注入的「别名 → 中间件实例」查询接口，
 // 由 support/middleware.Registry 实现；adapter 只依赖这一个方法。
 type MiddlewareRegistry interface {
-	Lookup(name string) (support.Middleware, bool)
+	Lookup(name string) (support.MiddlewareFunc, bool)
 }
 
 type BindOptions struct {
 	// Global 应用到所有契约路由的中间件（RequestID/AccessLog 等由 gofy 根包负责）。
-	Global []support.Middleware
+	Global []support.MiddlewareFunc
 
 	// Routes 按 OperationID 追加路由级中间件。
-	Routes map[string][]support.Middleware
+	Routes map[string][]support.MiddlewareFunc
 
 	// Middleware 是本次绑定的显式别名映射，优先级最高，用于测试桩
 	// 或单个模块的定制覆盖；未注册或值为 nil 的名字在启动期报错。
-	Middleware map[string]support.Middleware
+	Middleware map[string]support.MiddlewareFunc
 
 	// Registry 是可选的显式注册表。通常不需要：App 启动时把别名注册进
 	// Router 携带的共享注册表（support.RouterConfig.Middleware），adapter
@@ -1399,7 +1399,7 @@ type BindOptions struct {
 	// RateLimit 按契约声明构造限流中间件，只对声明了 Spec.RateLimit 的路由
 	// 调用，返回值装在路由中间件链最前面；返回 nil 表示该路由不挂限流。
 	// 第二个参数是 Router 的 Responder，限流拒绝与 App 其它错误共用信封。
-	RateLimit func(endpoint.Spec, support.Responder) support.Middleware
+	RateLimit func(endpoint.Spec, support.Responder) support.MiddlewareFunc
 
 	// Strict 为 true 时，实现类型缺少方法、签名不符会返回错误（默认 true）。
 	Strict bool
@@ -1525,13 +1525,13 @@ err := gofyadapter.BindGroup(router, orderroute.Orders, impl, gofyadapter.BindOp
 
 ```go
 type Registry struct {
-	// mu sync.RWMutex; entries map[string]support.Middleware
+	// mu sync.RWMutex; entries map[string]support.MiddlewareFunc
 }
 
 func NewRegistry() *Registry
-func (r *Registry) Register(name string, mw support.Middleware) error
-func (r *Registry) MustRegister(name string, mw support.Middleware)
-func (r *Registry) Lookup(name string) (support.Middleware, bool)
+func (r *Registry) Register(name string, mw support.MiddlewareFunc) error
+func (r *Registry) MustRegister(name string, mw support.MiddlewareFunc)
+func (r *Registry) Lookup(name string) (support.MiddlewareFunc, bool)
 func (r *Registry) Names() []string
 ```
 
@@ -1701,7 +1701,7 @@ func BindSSE[Req any](
 	r *support.Router,
 	rt *endpoint.Route[Req, endpoint.NoBody],
 	h func(ctx context.Context, req *Req, stream *sse.Stream) error,
-	mw ...support.Middleware,
+	mw ...support.MiddlewareFunc,
 )
 
 // 下载：返回文件流；Content-Disposition 由 gofy 生成。
@@ -1709,7 +1709,7 @@ func BindDownload[Req any](
 	r *support.Router,
 	rt *endpoint.Route[Req, endpoint.NoBody],
 	h func(ctx context.Context, req *Req) (*support.Download, error),
-	mw ...support.Middleware,
+	mw ...support.MiddlewareFunc,
 )
 
 // 分块：handler 直接写 chunk。
@@ -1717,7 +1717,7 @@ func BindChunked[Req any](
 	r *support.Router,
 	rt *endpoint.Route[Req, endpoint.NoBody],
 	h func(ctx context.Context, req *Req, w *chunked.Writer) error,
-	mw ...support.Middleware,
+	mw ...support.MiddlewareFunc,
 )
 ```
 
@@ -2867,8 +2867,8 @@ type Options struct {
 	ContextKey  string // 默认 "gofy.principal"
 }
 
-func Bearer(a Authenticator, opts Options) support.Middleware
-func OptionalBearer(a Authenticator, opts Options) support.Middleware
+func Bearer(a Authenticator, opts Options) support.MiddlewareFunc
+func OptionalBearer(a Authenticator, opts Options) support.MiddlewareFunc
 func PrincipalFrom(c *gin.Context) (Principal, bool)
 ```
 
@@ -3074,7 +3074,7 @@ type Config struct {
 	Propagator  propagation.TextMapPropagator
 }
 
-func Middleware(cfg Config) support.Middleware
+func Middleware(cfg Config) support.MiddlewareFunc
 ```
 
 **规则：**

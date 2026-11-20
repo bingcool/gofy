@@ -373,7 +373,7 @@ func TestMiddlewareOrderContract(t *testing.T) {
 		observed = append(observed, name)
 		mu.Unlock()
 	}
-	marker := func(name string, checks ...func(*gin.Context)) support.Middleware {
+	marker := func(name string, checks ...func(*gin.Context)) support.MiddlewareFunc {
 		return func(c *gin.Context) {
 			for _, check := range checks {
 				check(c)

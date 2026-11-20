@@ -22,9 +22,11 @@ type VersionInfo = core.VersionInfo
 // ModuleFactory 在启动期构建 Module，能拿到当代 Runtime。
 type ModuleFactory = support.ModuleFactory
 
-// Middleware is a gin middleware function.
-// Middleware 是一个 gin 中间件函数。
-type Middleware = support.Middleware
+// MiddlewareFunc is a gin middleware function; the semantics live with the
+// definition in support.MiddlewareFunc.
+// MiddlewareFunc 是 gin 中间件函数；语义写在 support.MiddlewareFunc 的定义处，
+// 这里不重复描述，避免两份注释各说一半而漂移。
+type MiddlewareFunc = support.MiddlewareFunc
 
 // Responder renders HTTP successes and errors.
 // Responder 渲染 HTTP 成功与错误响应。

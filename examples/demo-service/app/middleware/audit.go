@@ -17,7 +17,7 @@ const (
 // Audit 记录业务操作流水，用于实现契约里声明的中间件逻辑名：订单分组的
 // "audit" 与 CreateOrder 路由的 "order-audit"。scope 区分名字来自分组还是路由。
 // 与框架的 AccessLog 不同，这里只关心业务维度，因此在 handler 之后记录结果。
-func Audit(logger *zap.Logger, scope string) support.Middleware {
+func Audit(logger *zap.Logger, scope string) support.MiddlewareFunc {
 	if logger == nil {
 		logger = zap.NewNop()
 	}

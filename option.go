@@ -85,8 +85,8 @@ type options struct {
 	http      HTTPConfig // HTTP 监听地址、超时与 TLS 等配置
 	apiPrefix string     // shared prefix prepended to module routes; leave empty when the contract already owns the full prefix；追加在模块路由前的共享前缀；契约自带完整前缀时应留空
 
-	middleware           []support.Middleware  // business middleware installed after framework middleware；框架中间件之后安装的业务中间件
-	middlewareRegistrars []MiddlewareRegistrar // functions registering app-level middleware aliases at assembly time；装配期注册应用层中间件别名的函数
+	middleware           []support.MiddlewareFunc // business middleware installed after framework middleware；框架中间件之后安装的业务中间件
+	middlewareRegistrars []MiddlewareRegistrar    // functions registering app-level middleware aliases at assembly time；装配期注册应用层中间件别名的函数
 
 	pidFile    string        // pid 文件路径；空表示不写 pid 文件
 	pidPerm    os.FileMode   // pid 文件权限
@@ -280,7 +280,7 @@ func WithAPIPrefix(prefix string) Option {
 // WithMiddleware 追加业务中间件，安装在内建中间件之后、模块路由之前，因此
 // 对模块路由统一生效。可多次调用，按传入顺序累积；任一中间件为 nil 都在
 // New 阶段报错。
-func WithMiddleware(mw ...support.Middleware) Option {
+func WithMiddleware(mw ...support.MiddlewareFunc) Option {
 	return func(o *options) error {
 		for _, m := range mw {
 			if m == nil {

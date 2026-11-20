@@ -19,13 +19,13 @@ import (
 // newOrderRouter 建一个只挂订单契约的 router，中间件把执行顺序写进 trace。
 func newOrderRouter(t *testing.T, trace *[]string, opts gofyadapter.BindOptions) *gin.Engine {
 	t.Helper()
-	record := func(name string) support.Middleware {
+	record := func(name string) support.MiddlewareFunc {
 		return func(c *gin.Context) {
 			*trace = append(*trace, name)
 			c.Next()
 		}
 	}
-	opts.Global = append([]support.Middleware{record("global")}, opts.Global...)
+	opts.Global = append([]support.MiddlewareFunc{record("global")}, opts.Global...)
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
@@ -83,7 +83,7 @@ func TestBindOptionsMiddlewareOverridesRegistry(t *testing.T) {
 	reg := registryWith(t, &trace, map[string]string{"audit": "registry-group", "auth": "auth", "order-audit": "route-name"})
 	engine := newOrderRouter(t, &trace, gofyadapter.BindOptions{
 		Registry: reg,
-		Middleware: map[string]support.Middleware{
+		Middleware: map[string]support.MiddlewareFunc{
 			"audit": func(c *gin.Context) {
 				trace = append(trace, "override-group")
 				c.Next()
@@ -111,9 +111,9 @@ func TestBindOptionsMiddlewareOverridesRegistry(t *testing.T) {
 }
 
 // stubRegistry 证明 adapter 只依赖 Lookup 方法，不绑定 support/middleware.Registry。
-type stubRegistry map[string]support.Middleware
+type stubRegistry map[string]support.MiddlewareFunc
 
-func (s stubRegistry) Lookup(name string) (support.Middleware, bool) {
+func (s stubRegistry) Lookup(name string) (support.MiddlewareFunc, bool) {
 	mw, ok := s[name]
 	return mw, ok
 }
@@ -271,7 +271,7 @@ func TestBindAllRejectsRouteNameMissingFromRegistry(t *testing.T) {
 		{name: "nil registry", opts: gofyadapter.BindOptions{}},
 		{
 			name: "nil entry in explicit map",
-			opts: gofyadapter.BindOptions{Middleware: map[string]support.Middleware{"absent": nil}},
+			opts: gofyadapter.BindOptions{Middleware: map[string]support.MiddlewareFunc{"absent": nil}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

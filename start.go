@@ -286,7 +286,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system, access *zap.Logger, fa
 	gin.SetMode(ginMode(a.opts.http.Mode))
 	engine := gin.New()
 	registry := middleware.NewRegistry()
-	register := func(name string, mw support.Middleware) error {
+	register := func(name string, mw support.MiddlewareFunc) error {
 		if err := registry.Register(name, mw); err != nil {
 			return fmt.Errorf("gofy: register middleware %q: %w", name, err)
 		}

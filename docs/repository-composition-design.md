@@ -223,7 +223,7 @@ func Get[T any](r *Registry, name string) (T, error)
 - 注册表是显式实例而非包级全局：每个装配周期新建一份，`Reload` 后重建；
 - 不在注册表里放 logger、db 句柄等基础设施对象，除非确实需要跨模块共享；
 - 与 `support/middleware.Registry` 的区别：中间件注册表是强类型、专用于
-  `support.Middleware`，并在 Router 内解析；通用注册表存放任意跨模块实例，
+  `support.MiddlewareFunc`，并在 Router 内解析；通用注册表存放任意跨模块实例，
   供业务层按名字取用。两者不合并，避免框架核心被业务扩展拖宽。
 
 ### 5.3 装配注册表与时序

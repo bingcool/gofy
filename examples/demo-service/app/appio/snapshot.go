@@ -214,6 +214,6 @@ func WithContext(ctx context.Context) *Snapshot {
 // Middleware 把进入请求时的当前一代固定到上下文；ctx 已经固定过则不覆盖。HTTP
 // 请求通常由框架的代际 binder（见 Module.RequestBinder）固定，它固定的是 handler
 // 所属的那一代；这里的中间件只服务框架之外自建的 engine，且绝不覆盖那个固定值。
-func Middleware() support.Middleware {
+func Middleware() support.MiddlewareFunc {
 	return currentSnapshot.Middleware()
 }

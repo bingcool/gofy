@@ -39,13 +39,13 @@ import (
 // 所有方法都可并发调用。
 type Registry struct {
 	mu      sync.RWMutex
-	entries map[string]support.Middleware
+	entries map[string]support.MiddlewareFunc
 }
 
 // NewRegistry creates an empty middleware registry.
 // NewRegistry 创建一份空的中间件注册表。
 func NewRegistry() *Registry {
-	return &Registry{entries: make(map[string]support.Middleware)}
+	return &Registry{entries: make(map[string]support.MiddlewareFunc)}
 }
 
 // Register binds an instance to an alias. The alias must not be blank once
@@ -53,7 +53,7 @@ func NewRegistry() *Registry {
 // returns an error instead of overwriting it.
 // Register 把实例绑定到别名上。别名去掉首尾空白后不能为空，实例不能为 nil，
 // 同一个别名重复注册会返回错误而不是覆盖。
-func (r *Registry) Register(name string, mw support.Middleware) error {
+func (r *Registry) Register(name string, mw support.MiddlewareFunc) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("middleware alias must not be empty")
@@ -75,7 +75,7 @@ func (r *Registry) Register(name string, mw support.Middleware) error {
 // arrives and the middleware is missing from the chain.
 // MustRegister 是 Register 的 panic 版本，用于启动期装配：别名写错时立刻失败，
 // 而不是等到请求进来才发现某个中间件没有生效。
-func (r *Registry) MustRegister(name string, mw support.Middleware) {
+func (r *Registry) MustRegister(name string, mw support.MiddlewareFunc) {
 	if err := r.Register(name, mw); err != nil {
 		panic(err)
 	}
@@ -86,7 +86,7 @@ func (r *Registry) MustRegister(name string, mw support.Middleware) {
 // or a skip.
 // Lookup 按别名查中间件。名字不存在、实例为 nil，或注册表本身为 nil 时返回
 // (nil, false)，由调用方决定是报错还是跳过。
-func (r *Registry) Lookup(name string) (support.Middleware, bool) {
+func (r *Registry) Lookup(name string) (support.MiddlewareFunc, bool) {
 	if r == nil {
 		return nil, false
 	}

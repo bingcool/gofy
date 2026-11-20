@@ -19,14 +19,14 @@ import (
 // that was registered.
 // marker 返回一个可识别的中间件：命中时把 name 写进响应头，
 // 测试据此确认 Lookup 拿到的就是注册进去的那个实例。
-func marker(name string) support.Middleware {
+func marker(name string) support.MiddlewareFunc {
 	return func(c *gin.Context) {
 		c.Header("X-Middleware", name)
 		c.Next()
 	}
 }
 
-func serveWith(t *testing.T, mw support.Middleware) string {
+func serveWith(t *testing.T, mw support.MiddlewareFunc) string {
 	t.Helper()
 	engine := newGin()
 	engine.GET("/", mw, func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -57,7 +57,7 @@ func TestRegistryRejectsInvalidRegistration(t *testing.T) {
 	tests := []struct {
 		name    string
 		alias   string
-		mw      support.Middleware
+		mw      support.MiddlewareFunc
 		wantErr string
 	}{
 		{name: "empty alias", alias: "", mw: marker("x"), wantErr: "must not be empty"},
