@@ -10,7 +10,7 @@
 
 1. **引入 `entgo.io/ent/dialect/sql`，只用它的 SQL 构造能力。** 不用 ent 的 ORM、schema DSL、codegen、migration、`*ent.Client`。这是与 2026-11-15「数据访问只用 gorm」决策不冲突的一步：引进的是构造器，不是第二套运行时。
 2. **定位：`query` 只读层的可选构造器。** 产出 `(sql string, args []any)`，交给 **gorm 的 `Raw`/`Where`** 执行。事务仍由 ctx 携带，连接仍从 `appio` 快照取，SQL 日志、脱敏、trace-id、慢 SQL 全部继续生效。
-3. **不封装成新 DSL。** 新增 `support/sqlbuild`，只做 re-export 加一个 `Build` 辅助，API 就是 ent 的 API，文档指向上游。
+3. **不封装成新 DSL。** 新增 `support/sqlbuilder`，只做 re-export 加一个 `Build` 辅助，API 就是 ent 的 API，文档指向上游。
 
 一句话：**只借它的拼装能力，不借它的执行栈。**
 
@@ -65,15 +65,15 @@ GROUP BY user_id HAVING COUNT(*) > ?
 用 builder 之后，同一段是：
 
 ```go
-paid := sqlbuild.Select(orders.C("id"), orders.C("user_id")).
+paid := sqlbuilder.Select(orders.C("id"), orders.C("user_id")).
 	From(orders).
-	Where(sqlbuild.EQ(orders.C("status"), "paid")).
-	Where(sqlbuild.GTE(orders.C("created_at"), from))
+	Where(sqlbuilder.EQ(orders.C("status"), "paid")).
+	Where(sqlbuilder.GTE(orders.C("created_at"), from))
 
-with := sqlbuild.With("paid_orders").As(paid)
-sel := sqlbuild.Select(with.C("user_id"), sqlbuild.Count("*")).
+with := sqlbuilder.With("paid_orders").As(paid)
+sel := sqlbuilder.Select(with.C("user_id"), sqlbuilder.Count("*")).
 	From(with).GroupBy(with.C("user_id")).
-	Having(sqlbuild.GT(sqlbuild.Count("*"), minCount)).
+	Having(sqlbuilder.GT(sqlbuilder.Count("*"), minCount)).
 	Prefix(with)
 ```
 
@@ -184,12 +184,12 @@ entgo.io/ent/dialect/sql
 
 ## 七、放在哪
 
-新增 `support/sqlbuild`，与 `support/db` 平级。
+新增 `support/sqlbuilder`，与 `support/db` 平级。
 
 ```
 support/
-├── db/            # 连接、事务、registry
-├── sqlbuild/      # SQL 构造器（本方案）
+├── db/           # 连接、事务、registry
+├── sqlbuilder/   # SQL 构造器（本方案）
 └── ...
 ```
 
@@ -205,12 +205,12 @@ support/
 
 ## 八、API 形态
 
-不造新 DSL。`support/sqlbuild` 的内容是 re-export 加一个 `Build`：
+不造新 DSL。`support/sqlbuilder` 的内容是 re-export 加一个 `Build`：
 
 ```go
-// Package sqlbuild 只做两件事：把 ent 的 SQL 构造器引到一处，
+// Package sqlbuilder 只做两件事：把 ent 的 SQL 构造器引到一处，
 // 以及提供带 error 的 Build。它不是一套新的 DSL。
-package sqlbuild
+package sqlbuilder
 
 import (
 	"fmt"
@@ -276,7 +276,7 @@ func Build(q Querier) (string, []any, error) {
 	stmt, args := q.Query()
 	if e, ok := q.(interface{ Err() error }); ok {
 		if err := e.Err(); err != nil {
-			return "", nil, fmt.Errorf("sqlbuild: %w", err)
+			return "", nil, fmt.Errorf("sqlbuilder: %w", err)
 		}
 	}
 	return stmt, args, nil
@@ -285,7 +285,7 @@ func Build(q Querier) (string, []any, error) {
 
 这样做的取舍：
 
-- **好处**：调用方只 import `support/sqlbuild`，未来若换构造器（goqu 或自研），只需要改一个文件；`entgo.io/ent` 的名字不会散落到业务代码里。
+- **好处**：调用方只 import `support/sqlbuilder`，未来若换构造器（goqu 或自研），只需要改一个文件；`entgo.io/ent` 的名字不会散落到业务代码里。
 - **代价**：需要维护这份 var 清单；上游新增 API 不会自动出现。清单只覆盖实际用到的部分，缺了就在用的时候加——不追求完整镜像。
 
 ---
@@ -300,23 +300,23 @@ func (q *Queries) listFiltered(ctx context.Context, f Filter) ([]Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	orders := sqlbuild.Table("orders")
+	orders := sqlbuilder.Table("orders")
 
-	preds := []*sqlbuild.Predicate{sqlbuild.EQ(orders.C("user_id"), f.UserID)}
+	preds := []*sqlbuilder.Predicate{sqlbuilder.EQ(orders.C("user_id"), f.UserID)}
 	if f.Status != "" {
-		preds = append(preds, sqlbuild.EQ(orders.C("status"), f.Status))
+		preds = append(preds, sqlbuilder.EQ(orders.C("status"), f.Status))
 	}
 	if f.MinAmount > 0 {
-		preds = append(preds, sqlbuild.GT(orders.C("amount"), f.MinAmount))
+		preds = append(preds, sqlbuilder.GT(orders.C("amount"), f.MinAmount))
 	}
 	if f.IncludePublic {
-		preds = append(preds, sqlbuild.Or(
-			sqlbuild.NotNull(orders.C("owner_id")),
-			sqlbuild.EQ(orders.C("is_public"), 1),
+		preds = append(preds, sqlbuilder.Or(
+			sqlbuilder.NotNull(orders.C("owner_id")),
+			sqlbuilder.EQ(orders.C("is_public"), 1),
 		))
 	}
 
-	where, args, err := sqlbuild.Build(sqlbuild.And(preds...))
+	where, args, err := sqlbuilder.Build(sqlbuilder.And(preds...))
 	if err != nil {
 		return nil, err
 	}
@@ -334,19 +334,19 @@ func (q *Queries) listFiltered(ctx context.Context, f Filter) ([]Row, error) {
 ### 9.2 CTE
 
 ```go
-orders := sqlbuild.Table("orders")
+orders := sqlbuilder.Table("orders")
 
-paid := sqlbuild.Select(orders.C("id"), orders.C("user_id")).
+paid := sqlbuilder.Select(orders.C("id"), orders.C("user_id")).
 	From(orders).
-	Where(sqlbuild.EQ(orders.C("status"), "paid"))
+	Where(sqlbuilder.EQ(orders.C("status"), "paid"))
 
-with := sqlbuild.With("paid_orders").As(paid)
+with := sqlbuilder.With("paid_orders").As(paid)
 
-stmt, args, err := sqlbuild.Build(
-	sqlbuild.Select(with.C("user_id"), sqlbuild.Count("*")).
+stmt, args, err := sqlbuilder.Build(
+	sqlbuilder.Select(with.C("user_id"), sqlbuilder.Count("*")).
 		From(with).
 		GroupBy(with.C("user_id")).
-		Having(sqlbuild.GT(sqlbuild.Count("*"), 2)).
+		Having(sqlbuilder.GT(sqlbuilder.Count("*"), 2)).
 		Prefix(with),
 )
 ```
@@ -366,10 +366,10 @@ args：`[]any{"paid", 2}` —— 顺序由 builder 维护，调用方不用数�
 ### 9.3 UNION
 
 ```go
-stmt, args, _ := sqlbuild.Build(
-	sqlbuild.Select(orders.C("id")).From(orders).
-		Where(sqlbuild.EQ(orders.C("status"), "paid")).
-		Union(sqlbuild.Select(items.C("order_id")).From(items)),
+stmt, args, _ := sqlbuilder.Build(
+	sqlbuilder.Select(orders.C("id")).From(orders).
+		Where(sqlbuilder.EQ(orders.C("status"), "paid")).
+		Union(sqlbuilder.Select(items.C("order_id")).From(items)),
 )
 ```
 
@@ -383,10 +383,10 @@ UNION SELECT `order_items`.`order_id` FROM `order_items`
 窗口函数没有专用 API，走 `AppendSelectExprAs`：
 
 ```go
-rank := sqlbuild.Expr("ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC)")
+rank := sqlbuilder.Expr("ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC)")
 
-stmt, _, _ := sqlbuild.Build(
-	sqlbuild.Select(orders.C("id")).
+stmt, _, _ := sqlbuilder.Build(
+	sqlbuilder.Select(orders.C("id")).
 		AppendSelectExprAs(rank, "rn").
 		From(orders),
 )
@@ -401,7 +401,7 @@ SELECT `orders`.`id`, (ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_
 ### 9.5 整条语句交给 `Raw`
 
 ```go
-stmt, args, err := sqlbuild.Build(sel)
+stmt, args, err := sqlbuilder.Build(sel)
 if err != nil {
 	return nil, err
 }
@@ -413,10 +413,10 @@ if err := db.WithContext(ctx).Raw(stmt, args...).Scan(&rows).Error; err != nil {
 ### 9.6 行锁
 
 ```go
-stmt, args, _ := sqlbuild.Build(
-	sqlbuild.Select(orders.C("id")).From(orders).
-		Where(sqlbuild.EQ(orders.C("status"), "queued")).
-		ForUpdate(sqlbuild.WithLockAction(sqlbuild.SkipLocked)),
+stmt, args, _ := sqlbuilder.Build(
+	sqlbuilder.Select(orders.C("id")).From(orders).
+		Where(sqlbuilder.EQ(orders.C("status"), "queued")).
+		ForUpdate(sqlbuilder.WithLockAction(sqlbuilder.SkipLocked)),
 )
 // SELECT `orders`.`id` FROM `orders` WHERE `orders`.`status` = ? FOR UPDATE SKIP LOCKED
 ```
@@ -431,9 +431,9 @@ stmt, args, _ := sqlbuild.Build(
 
 **1. `Predicate` 有状态，不能并发复用。** `Query()` 会 `Reset()` 自己再重跑回调。同一个 `*Predicate` 被两个 goroutine 同时 `Query()` 是 data race；跨请求缓存谓词同样危险。规则：**谓词在函数内构造、函数内消费，不存字段、不跨 goroutine**。
 
-**2. 不要把 slice 塞进 `EQ`。** builder 会把它当一个参数，gorm 的 `Raw` 会把它当 `IN` 展开——两次解释不一致。`In` 要用 `sqlbuild.In(col, vals...)` 显式构造。
+**2. 不要把 slice 塞进 `EQ`。** builder 会把它当一个参数，gorm 的 `Raw` 会把它当 `IN` 展开——两次解释不一致。`In` 要用 `sqlbuilder.In(col, vals...)` 显式构造。
 
-**3. 表名不经过 gorm 的 `NamingStrategy`。** `sqlbuild.Table("orders")` 就是字面量 `orders`。如果项目配了表前缀或复数化，必须从 `model.TableName()` 取，不要手写。建议在 `query` 包里统一用 `xxxmodel.TableName()` 或列常量。
+**3. 表名不经过 gorm 的 `NamingStrategy`。** `sqlbuilder.Table("orders")` 就是字面量 `orders`。如果项目配了表前缀或复数化，必须从 `model.TableName()` 取，不要手写。建议在 `query` 包里统一用 `xxxmodel.TableName()` 或列常量。
 
 **4. 方言要显式决定，且 SQLite 不能显式传。**
 
@@ -471,13 +471,19 @@ SQLite 只出现在测试里，用默认方言即可（SQLite 也接受反引号
 
 `app/module/*/query` 现在的手写 SQL 已经是这个状态，所以不是新问题；但引入 builder 会让这种写法变多。三条对策，方案建议同时做前两条：
 
-1. **包文档强制约定**：`support/sqlbuild` 的包注释写死——「若目标表含租户列，谓词里必须显式包含 `tenant_id`，Raw 不经过 tenant 插件」。
+1. **包文档强制约定**：`support/sqlbuilder` 的包注释写死——「若目标表含租户列，谓词里必须显式包含 `tenant_id`，Raw 不经过 tenant 插件」。
 2. **提供 helper**：
 
 ```go
-// TenantScope 返回当前请求的租户等值谓词。没有租户上下文时返回 false，
-// 由调用方决定是报错还是跳过。
-func TenantScope(table *entsql.SelectTable) (*sqlbuild.Predicate, bool)
+// TenantScope 返回当前请求的租户等值谓词；ctx 里没有租户时返回 (nil, false)，
+// 由调用方决定是报错还是跳过。列名固定为 tenant_id，与 support/tenant 的默认列一致。
+func TenantScope(ctx context.Context, table *entsql.SelectTable) (*Predicate, bool) {
+	tid := frameworkcontext.TenantID(ctx)
+	if tid == "" {
+		return nil, false
+	}
+	return EQ(table.C("tenant_id"), tid), true
+}
 ```
 
 3. （可选）在 `query` 层的测试里加一条断言：对含租户列的表，生成的 SQL 必须包含 `tenant_id`。这需要一张表名到租户列的映射，成本较高，先不做。
@@ -493,7 +499,7 @@ func TenantScope(table *entsql.SelectTable) (*sqlbuild.Predicate, bool)
 | ent 的 schema DSL / `ent generate` | 会引入 codegen 和 atlas，与 gorm 的 AutoMigrate 形成两套模型定义 |
 | `*ent.Client` / `entsql.Open` | 第二套连接与事务，绕过 appio 代际 |
 | 用 builder 做 INSERT / UPDATE 的默认路径 | 写路径继续走 gorm，`clause.OnConflict` 已经够用；只在批量 upsert 场景评估 |
-| 封装完整 DSL（`sqlbuild.Q().Where(...).OrderBy(...)`） | 增加一层要维护的 API，收益只是换个名字 |
+| 封装完整 DSL（`sqlbuilder.Q().Where(...).OrderBy(...)`） | 增加一层要维护的 API，收益只是换个名字 |
 | 替换 `support/claim` 的裸 SQL | claim 的 SQL 依赖方言细节（`FOR UPDATE SKIP LOCKED` / `NOW(3)`），已经稳定，改动无收益 |
 
 ---
@@ -502,12 +508,12 @@ func TenantScope(table *entsql.SelectTable) (*sqlbuild.Predicate, bool)
 
 | 步骤 | 内容 | 验证 |
 |---|---|---|
-| 1 | 新增 `support/sqlbuild/sqlbuild.go`（re-export + `Build`）与包注释 | `go build ./support/sqlbuild` |
+| 1 | 新增 `support/sqlbuilder/sqlbuilder.go`（re-export + `Build`）与包注释 | `go build ./support/sqlbuilder` |
 | 2 | `go get entgo.io/ent@v0.14.6` + `go mod tidy`，确认 go.mod/go.sum 变化与第五节一致 | `git diff go.mod go.sum` 与本文档数字比对 |
-| 3 | 新增 `support/sqlbuild/README.md`：三条使用规则、方言表、租户约定 | — |
+| 3 | 新增 `support/sqlbuilder/README.md`：三条使用规则、方言表、租户约定 | — |
 | 4 | 在 `app/module/order/query` 增加一个 builder 版本的示例（建议 `ListUnsoldProducts`，与现有 Raw 版本并列，测试同时跑两条，断言结果一致） | `go test ./app/module/order/query/` |
 | 5 | 更新 `docs/module-layering-design.md`：query 层可选构造器 | — |
-| 6 | 检查 `shell/check-imports.sh`：controller 不引入 `sqlbuild`（构造 SQL 不属于入口层） | `make check` |
+| 6 | 检查 `shell/check-imports.sh`：controller 不引入 `sqlbuilder`（构造 SQL 不属于入口层） | `make check` |
 
 第 4 步的"两条实现跑同一组断言"是这个方案的关键验证：如果 builder 版本与 Raw 版本在 SQLite 上返回不同结果，就说明方言或参数展开有问题，宁可放弃方案也不能带着不确定性上线。
 
@@ -532,6 +538,6 @@ func TenantScope(table *entsql.SelectTable) (*sqlbuild.Predicate, bool)
 
 ## 附：与 2026-11-15「不引入 ent」决策的关系
 
-那次决策拒绝的是 `*ent.Client`：它带来的是一套新的模型定义、连接管理、事务桥接和 codegen，会与 gorm 争夺同一块地盘。本次引入的 `dialect/sql` 是一个无状态的 SQL 字符串构造器，不持有连接、不定义模型、不参与迁移，退出成本是删掉 `support/sqlbuild` 一个目录。
+那次决策拒绝的是 `*ent.Client`：它带来的是一套新的模型定义、连接管理、事务桥接和 codegen，会与 gorm 争夺同一块地盘。本次引入的 `dialect/sql` 是一个无状态的 SQL 字符串构造器，不持有连接、不定义模型、不参与迁移，退出成本是删掉 `support/sqlbuilder` 一个目录。
 
-两者不矛盾，但要把这条边界写进 `support/sqlbuild` 的包注释，否则下一个人会以为"既然引了 ent，不如把 repository 也换掉"。
+两者不矛盾，但要把这条边界写进 `support/sqlbuilder` 的包注释，否则下一个人会以为"既然引了 ent，不如把 repository 也换掉"。
