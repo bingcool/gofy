@@ -237,3 +237,41 @@ func TestUserIDUint64(t *testing.T) {
 		})
 	}
 }
+
+// TestUserIDUint32 pins the 32-bit boundary: the largest uint32 converts, one
+// past it reports false instead of wrapping to 0.
+// TestUserIDUint32 钉住 32 位边界：uint32 最大值能转换，再大一点返回 false 而不是
+// 回绕成 0。
+func TestUserIDUint32(t *testing.T) {
+	withID := func(id string) context.Context {
+		return frameworkcontext.WithUser(context.Background(), frameworkcontext.User{ID: id})
+	}
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want uint32
+		ok   bool
+	}{
+		{name: "in range", ctx: withID("42"), want: 42, ok: true},
+		{name: "max uint32", ctx: withID("4294967295"), want: 4294967295, ok: true},
+		{name: "one past max", ctx: withID("4294967296")},
+		{name: "non-numeric id", ctx: withID("auth0|abc")},
+		{name: "empty identity", ctx: context.Background()},
+		{
+			name: "propagated numeric id",
+			ctx: headerpropagation.ContextWithHeaders(context.Background(), http.Header{
+				headerpropagation.HeaderUserID: {"7"},
+			}),
+			want: 7,
+			ok:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := frameworkcontext.UserIDUint32(tc.ctx)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("UserIDUint32 = %d, %v; want %d, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}

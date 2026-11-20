@@ -246,11 +246,31 @@ func UserID(ctx context.Context) string {
 // UUID 或 "auth0|..." 这样的不透明字符串。用文本保存身份，这些部署才能继续工作，X-User-Id
 // 头本身也是文本。把解析放在这里，灵活性留在边界上，而不是把整个身份类型收窄成数字。
 func UserIDUint64(ctx context.Context) (uint64, bool) {
+	return userIDUint(ctx, 64)
+}
+
+// UserIDUint32 is UserIDUint64 for services whose user table uses a 32-bit
+// primary key (INT UNSIGNED): values above math.MaxUint32 report false instead
+// of wrapping, so an out-of-range identity is never mistaken for a real user.
+// UserIDUint32 是给"用户表用 32 位主键（INT UNSIGNED）"的 service 用的
+// UserIDUint64：超过 math.MaxUint32 的值返回 false 而不是回绕，超出范围的身份不会被
+// 当成真实用户。
+func UserIDUint32(ctx context.Context) (uint32, bool) {
+	id, ok := userIDUint(ctx, 32)
+	return uint32(id), ok
+}
+
+// userIDUint parses the identity as an unsigned decimal of the given bit width.
+// bitSize is what makes overflow a "no usable id" answer instead of a wrapped
+// value: 4294967296 must not become user 0.
+// userIDUint 按给定位宽解析无符号十进制身份。bitSize 让溢出变成"没有可用 id"而不是
+// 回绕后的值：4294967296 不能变成 0 号用户。
+func userIDUint(ctx context.Context, bitSize int) (uint64, bool) {
 	raw := UserID(ctx)
 	if raw == "" {
 		return 0, false
 	}
-	id, err := strconv.ParseUint(raw, 10, 64)
+	id, err := strconv.ParseUint(raw, 10, bitSize)
 	if err != nil {
 		return 0, false
 	}
