@@ -37,6 +37,34 @@ type orgOrder struct {
 
 func (orgOrder) TableName() string { return "org_orders" }
 
+// TestNewRejectsEmptyColumn covers the same misconfiguration on the builder
+// path. Returning an error from New is what makes it visible at assembly time;
+// a disabled resolver has no tenant column to name and is allowed.
+// TestNewRejectsEmptyColumn 覆盖构造器路径上的同一种误配置。New 返回错误才能在装配期发现；
+// 整条路径关闭时没有租户列可言，因此允许空列名。
+func TestNewRejectsEmptyColumn(t *testing.T) {
+	if _, err := sqlmodel.New(sqlmodel.Options{Handler: emptyColumnHandler{}}); !errors.Is(err, tenant.ErrTenantColumnRequired) {
+		t.Fatalf("New err = %v, want ErrTenantColumnRequired", err)
+	}
+	if _, err := sqlmodel.New(sqlmodel.Options{
+		Handler: emptyColumnHandler{}, Disabled: true,
+	}); err != nil {
+		t.Fatalf("New with Disabled: %v", err)
+	}
+}
+
+// newResolver turns the constructor's error into a test failure at the call
+// site, so a config that used to be silently accepted cannot pass a test.
+// newResolver 把构造错误就地变成测试失败，过去被静默接受的错误配置因此过不了测试。
+func newResolver(t *testing.T, opts sqlmodel.Options) *sqlmodel.Resolver {
+	t.Helper()
+	r, err := sqlmodel.New(opts)
+	if err != nil {
+		t.Fatalf("sqlmodel.New: %v", err)
+	}
+	return r
+}
+
 func build(t *testing.T, sel *sqlbuilder.Selector) (string, []any) {
 	t.Helper()
 	stmt, args, err := sqlbuilder.Build(sel)
@@ -137,7 +165,7 @@ func TestSelectRespectsBypass(t *testing.T) {
 // TestSelectUsesConfiguredColumn：改过租户列名的项目把给插件的同一个 Handler 传进来，
 // 两条路径因此盯的是同一列。
 func TestSelectUsesConfiguredColumn(t *testing.T) {
-	r := sqlmodel.New(sqlmodel.Options{
+	r := newResolver(t, sqlmodel.Options{
 		Handler: tenant.FuncHandler{ColumnName: "org_id"},
 	})
 	ctx := tenant.WithTenant(context.Background(), "org-1")
@@ -173,7 +201,7 @@ func (n prefixedNamer) ColumnName(table, column string) string {
 // TestSelectFollowsNamer 固定 Namer 契约：schema 解析使用构建连接时的 namer，因此能在
 // 真实列名下找到租户列。
 func TestSelectFollowsNamer(t *testing.T) {
-	r := sqlmodel.New(sqlmodel.Options{
+	r := newResolver(t, sqlmodel.Options{
 		Handler: tenant.FuncHandler{ColumnName: "x_tenant_id"},
 		Namer:   prefixedNamer{},
 	})
@@ -196,7 +224,7 @@ func TestSelectFollowsNamer(t *testing.T) {
 // the tenant predicate, including the placeholder numbering.
 // TestSelectPostgresDialect：方言同时作用于限定列名与租户谓词，占位符编号也在内。
 func TestSelectPostgresDialect(t *testing.T) {
-	r := sqlmodel.New(sqlmodel.Options{Dialect: sqlbuilder.DialectPostgres})
+	r := newResolver(t, sqlmodel.Options{Dialect: sqlbuilder.DialectPostgres})
 	ctx := tenant.WithTenant(context.Background(), "t-9")
 	sel, err := r.Select(ctx, order{}, "id")
 	if err != nil {
@@ -258,7 +286,7 @@ func TestTableReturnsPredicate(t *testing.T) {
 // TestSelectDisabled 覆盖部署开关：以 Disabled 构造的 Resolver 与未装插件的连接行为一致
 // ——不加条件，ctx 无租户也不报错。两条隔离路径共用同一个开关靠的就是它。
 func TestSelectDisabled(t *testing.T) {
-	r := sqlmodel.New(sqlmodel.Options{Disabled: true})
+	r := newResolver(t, sqlmodel.Options{Disabled: true})
 
 	sel, err := r.Select(context.Background(), order{}, "id")
 	if err != nil {
@@ -311,3 +339,12 @@ func TestModelRequired(t *testing.T) {
 type emptyName struct{}
 
 func (emptyName) TableName() string { return "  " }
+
+// emptyColumnHandler is a custom Handler with a blank column name — the shape
+// that used to turn every model into "not tenant-aware".
+// emptyColumnHandler 是列名留空的自定义 Handler——过去它会让每张表都被当成"不带租户"。
+type emptyColumnHandler struct{}
+
+func (emptyColumnHandler) TenantID(context.Context) string { return "a" }
+func (emptyColumnHandler) Column() string                  { return "   " }
+func (emptyColumnHandler) IgnoreTable(string) bool         { return false }

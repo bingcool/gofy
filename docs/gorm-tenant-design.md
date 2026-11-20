@@ -125,10 +125,12 @@ stmt.SetColumn(column, tenantID, true) // 第三个参数表示来自 callback�
 ```
 
 - `SetColumn` 支持 struct、`map[string]any`、`[]map` 三种 Dest，单行与批量插入都能覆盖。
-- 若模型声明了该字段但调用方**已经显式赋值**，应尊重显式值还是强制覆盖？建议策略：
-  **显式值优先**——先检查 `stmt.Dest` 里该字段是否零值，非零则不覆盖。这样管理后台可以
-  合法地跨租户造数据。若项目要求「一律强制当前租户」，把该行为做成插件选项
-  `OverwriteExplicit bool`（默认 false）。
+- 若模型声明了该字段但调用方**已经显式赋值**，应尊重显式值还是强制覆盖？原方案建议
+  **显式值优先**，并做成 `OverwriteExplicit bool`（默认 false）。**2026-11-21 已推翻**：
+  插件分不清管理员与请求 DTO 里带进来的租户字段，"显式值优先"默认就是一条跨租户写入通路。
+  现为 `OverwriteExplicit *bool`，nil 即覆盖；跨租户写入改用 `tenant.Without(ctx)`。
+  赋值也由整批 `SetColumn` 改为逐行处理——批量 map Dest 上整批 SetColumn 会报
+  `invalid field`，且无法表达"这行保留、那行填充"。
 - 这与 swoolefy 的 `rewriteInsert` 一致：它检测字段列表/SET 列表中是否已有租户列，有则不动。
 
 ### 3.4 失败关闭（fail-closed）
@@ -263,7 +265,7 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
 - `support/tenant/tenant.go`：`ErrTenantRequired`、`ErrPluginNil`、`Without`、`WithTenant`。
 - `support/tenant/handler.go`：`Handler` 接口、`ContextHandler`（默认）、`FuncHandler`。
 - `support/tenant/plugin.go`：`Plugin`（gorm.Plugin）、`Options`、`Instrument`、四个 before
-  回调、结构化去重与显式值检测。
+  回调、结构化去重（含绑定值比较，见 §11.3）与显式值检测。
 - `support/tenant/README.md`：使用说明。
 - 测试：`support/tenant/plugin_test.go`（20 个用例，含 race 与 100 goroutine 并发隔离）、
   `examples/demo-service/app/appio/db/tenant_test.go`（装配层接线与幂等）、
@@ -336,3 +338,35 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
   `withOrderTenant` 覆盖三条路径——事件租户生效、关闭时不改写语句、缺租户时
   `ErrTenantRequired`（失败关闭）。探针模型带 `tenant_id`，与 `orders` 表分开。
 - `make check` 全绿（含导入守卫、race、cgo-free、Windows cross）。
+
+### 11.3 去重必须比较绑定值（2026-11-21）
+
+原实现只要在合取路径上看到 `tenant_id` 的等值条件就认为"调用方已隔离"，不看绑定的值。
+`Where("tenant_id = ?", req.TenantID)` 这种写法形状完全正确、值可能属于别的租户，于是
+租户 a 的请求读出 b 的数据，既不报错也不追加条件——审计 P1-01。
+
+现在 `pinsTenant` / `exprsPinTenant` 除了形状，还要求绑定值等于本次生效租户：
+`clause.Eq.Value`（map / struct）或 `clause.Expr.Vars[0]`（手写 SQL），按字符串形态比较
+（`string` / `[]byte` / `driver.Valuer` / `fmt.Sprint`），所以 `"42"`、`42`、`int64(42)`
+与命名 string 类型是同一个租户。证明不了相等就追加，得到
+`tenant_id = 'b' AND tenant_id = 'a'`——零行，而不是跨租户读取。
+
+`tenant.WithTenant(ctx, id)` 设定生效租户，因此管理端路径不受影响：显式条件与之相等时仍然
+只绑定一次。回归测试：`TestExistingConditionMustMatchTheContext`（raw SQL / map / struct
+三种写法）与 `TestSameTenant`（值归一化）。
+
+### 11.4 本轮审计的其他修复（2026-11-21）
+
+- **空列名不能静默失效。** `Instrument` / `Initialize` 与 `sqlmodel.New` 遇到
+  `Handler.Column()` 为空（或全空白）时返回 `ErrTenantColumnRequired`；`sqlmodel.New`
+  因此改为返回 `(*Resolver, error)`，`Disabled` 时跳过校验。
+- **三条路径共用身份判定。** 租户覆盖与绕过标记移入 `support/frameworkcontext`，
+  `support/tenant` 转出为 `WithTenant` / `Without`。`sqlbuilder.TenantScope` 直接读同一份
+  标记（`WithTenant` 压过 JWT 身份、`Without` 压过两者），不需要依赖 gorm，守卫照旧通过；
+  `table == nil` 返回 false 而不是 panic。
+- **日志默认更安全。** AccessLog 的 `LogQuery` 默认关闭——敏感参数黑名单盖不住业务自定义
+  字段；SQL 脱敏的默认规则改为私有变量，导出函数返回副本；`maskSQL` 现在记录 INSERT 列名
+  并按位置映射到所有 VALUES 元组，自定义敏感列在批量插入里也能脱敏。
+- 其余两项在别的仓库：`gofy-adapter` 的 `BindAll` 改为两阶段注册、K8s Lease 的 `Close`
+  等待在途 API 操作；`gofy-interface-api` 的 SSE 重连复用 `retryFor` 的幂等判定。
+  逐条状态与回归测试见 `docs/gofy-architecture-audit-2026-11-21.md` §2.2。

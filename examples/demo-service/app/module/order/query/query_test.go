@@ -105,7 +105,11 @@ func newQueries(t *testing.T) (*query.Queries, *gorm.DB) {
 
 	// 与 config.yaml 的 tenant.enabled=false 一致：测试里的连接没有装租户插件，
 	// 解析器也必须关着，否则构造器路径会比它查询的连接多一层过滤。
-	return query.New(sqlmodel.New(sqlmodel.Options{Disabled: true})), conn
+	r, err := sqlmodel.New(sqlmodel.Options{Disabled: true})
+	if err != nil {
+		t.Fatalf("sqlmodel.New: %v", err)
+	}
+	return query.New(r), conn
 }
 
 func TestListOrderLines(t *testing.T) {

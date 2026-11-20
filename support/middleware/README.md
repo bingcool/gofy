@@ -69,8 +69,9 @@ gofy.WithAccessLogOptions(middleware.AccessLogOptions{
     SlowThreshold: 300 * time.Millisecond,
     LogRequestID:  true,
     LogClientIP:   true,
-    LogQuery:      true,
     MaxPathLength: 512,
+    // LogQuery 默认关闭。SensitiveQuery 是已知键名的黑名单，盖不住业务自定义参数；
+    // 只有参数明确安全或有白名单约束时才显式打开。
 })
 ```
 

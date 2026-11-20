@@ -21,17 +21,20 @@ stmt, args, err := sqlbuilder.Build(sel)
 `schema.LookUpField` 判断表上有没有租户列。后一个判断和 `support/tenant` 改写语句前用的是
 **同一个调用**，两条路径因此不会对「这张表是否带租户」给出不同答案。
 
-## 三条规则
+## 四条规则
 
 1. **失败关闭。** 模型带租户列、ctx 里没有租户时返回 `tenant.ErrTenantRequired`，不会退化成
    不带过滤的查询。要跨租户读（运维脚本、迁移）就显式 `tenant.Without(ctx)`，与插件一致；
    整个部署关闭隔离用 `Options.Disabled`，它是 `tenant.enabled` 的对应项——两条路径必须一起
    开关，否则仓储读到所有租户、构造器还在过滤，配置里看不出这件事。
-2. **配置必须与连接一致。** `Options.Handler` 决定租户列名与取值来源，`Options.Namer` 决定
+2. **构造期校验列名。** `sqlmodel.New` 返回 `(*Resolver, error)`；`Handler.Column()` 为空
+   （或全空白）时返回 `tenant.ErrTenantColumnRequired`，除非 `Options.Disabled` 为真。空列名
+   会让 `LookUpField("")` 匹配不到任何表，等于静默关掉隔离，所以必须在装配期就失败。
+3. **配置必须与连接一致。** `Options.Handler` 决定租户列名与取值来源，`Options.Namer` 决定
    `TenantID` 映射到哪一列；两者都要传构建 `*gorm.DB` 时用的那一份。传错不会报错，只会让
    两条路径盯不同的列——那正是跨租户读的样子。改过列名或命名策略的项目用 `New` 构造自己的
    `Resolver`，不要用包级 `Select` 的默认值。
-3. **`Select` 覆盖不了的语句用 `Table`，谓词自己挂。** JOIN、CTE、手写 UPDATE 都要按表挂：
+4. **`Select` 覆盖不了的语句用 `Table`，谓词自己挂。** JOIN、CTE、手写 UPDATE 都要按表挂：
    一条 join 里每张带租户列的表都需要自己的条件。`Table` 返回的谓词为 `nil` 表示这张表不带
    租户列（或 ctx 被绕过），不需要挂。
 

@@ -721,14 +721,16 @@ func WithAccessLog(enabled bool) Option {
 // WithAccessLog(false).
 // The config is taken literally and is not merged with DefaultAccessLogOptions: to
 // change only SkipPaths you must also set the switches you need, such as
-// LogRequestID / LogUserAgent / LogClientIP / LogQuery, to true explicitly; nil
+// LogRequestID / LogUserAgent / LogClientIP / LogQuery, to true explicitly
+// (LogQuery is off in DefaultAccessLogOptions and stays off here); nil
 // slices are still defaulted inside AccessLog (SkipPaths, SensitiveQuery), as are
 // the numeric defaults (SlowThreshold, MaxPathLength).
 // WithAccessLogOptions 启用访问日志并应用给定配置，会覆盖 WithAccessLog(false)。
 //
 // 传入的配置按字面生效，不会与 DefaultAccessLogOptions 合并：只想改 SkipPaths
 // 时，需要同时把 LogRequestID / LogUserAgent / LogClientIP / LogQuery 等你需要
-// 的开关显式设为 true；切片为 nil 时仍由 AccessLog 内部补默认值（SkipPaths、
+// 的开关显式设为 true（LogQuery 在 DefaultAccessLogOptions 里默认关闭，这里也不会打开）；
+// 切片为 nil 时仍由 AccessLog 内部补默认值（SkipPaths、
 // SensitiveQuery）或默认数值（SlowThreshold、MaxPathLength）。
 func WithAccessLogOptions(opts middleware.AccessLogOptions) Option {
 	return func(o *options) error {

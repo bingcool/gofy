@@ -31,8 +31,41 @@ func TestMaskSetMergeAppendsToBuiltins(t *testing.T) {
 	}
 	// Built-in patterns plus the custom one; a duplicate name must not add a
 	// second scanner for the same shape.
-	if len(set.patterns) < len(DefaultMaskPatterns)+1 {
-		t.Fatalf("patterns = %d, want at least %d", len(set.patterns), len(DefaultMaskPatterns)+1)
+	if len(set.patterns) < len(DefaultMaskPatterns())+1 {
+		t.Fatalf("patterns = %d, want at least %d", len(set.patterns), len(DefaultMaskPatterns())+1)
+	}
+}
+
+// TestDefaultRulesAreCopies pins P2-05: the framework baseline cannot be
+// replaced or edited through the exported accessors. Mutating a returned slice
+// must leave both later reads and the actual mask set untouched, including
+// under concurrent readers.
+// TestDefaultRulesAreCopies 固定 P2-05：框架基线不能通过导出访问器被替换或改写。改返回值
+// 不能影响后续读取，也不能影响实际规则集；并发读取时同样如此。
+func TestDefaultRulesAreCopies(t *testing.T) {
+	cols := DefaultMaskColumns()
+	pats := DefaultMaskPatterns()
+	if len(cols) == 0 || len(pats) == 0 {
+		t.Fatal("default rules are empty")
+	}
+	cols[0] = "not-a-rule"
+	cols = append(cols, "extra")
+	pats[0] = "not-a-pattern"
+
+	if got := DefaultMaskColumns(); got[0] == "not-a-rule" || len(got) == len(cols) {
+		t.Fatalf("DefaultMaskColumns leaked mutable state: %v", got)
+	}
+	if got := DefaultMaskPatterns(); got[0] == "not-a-pattern" {
+		t.Fatalf("DefaultMaskPatterns leaked mutable state: %v", got)
+	}
+
+	// The baseline still masks a built-in column after the attempted edit.
+	// 改副本之后，内置列的脱敏仍然生效。
+	set := mustSet(t, MaskConfig{})
+	sql := "UPDATE users SET password = 'hunter2'"
+	got := maskSQL(sql, set)
+	if strings.Contains(got, "hunter2") {
+		t.Fatalf("built-in rule was removed: %s", got)
 	}
 }
 
@@ -83,6 +116,69 @@ func TestMaskSQLMasksColumnValue(t *testing.T) {
 			}
 			if !strings.Contains(got, tc.want) {
 				t.Fatalf("masked text = %s, want to contain %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaskSQLInsertColumnsByPosition covers the shape the scanner used to skip:
+// a custom sensitive column in an INSERT. The column list is declared once and
+// the values repeat across tuples, so only positional mapping catches every
+// row. Non-sensitive columns in the same tuple must stay readable.
+// TestMaskSQLInsertColumnsByPosition 覆盖扫描器过去跳过的形态：自定义敏感列出现在 INSERT
+// 中。列名只声明一次、值按元组重复，只有按位置映射才能覆盖每一行；同一元组里非敏感列仍须可读。
+func TestMaskSQLInsertColumnsByPosition(t *testing.T) {
+	set := mustSet(t, MaskConfig{Columns: []string{"employee_no", "account_no"}})
+	cases := []struct {
+		name    string
+		in      string
+		secrets []string
+		keep    []string
+	}{
+		{
+			name:    "single row",
+			in:      "INSERT INTO users (employee_no, remark) VALUES ('SF-778899', 'hello')",
+			secrets: []string{"SF-778899"},
+			keep:    []string{"hello"},
+		},
+		{
+			name: "batch rows",
+			in: "INSERT INTO users (employee_no, remark) VALUES " +
+				"('SF-778899', 'hello'), ('SF-112233', 'world')",
+			secrets: []string{"SF-778899", "SF-112233"},
+			keep:    []string{"hello", "world"},
+		},
+		{
+			name:    "numeric value",
+			in:      "INSERT INTO accounts (account_no, note) VALUES (1234567890, 'open')",
+			secrets: []string{"1234567890"},
+			keep:    []string{"open"},
+		},
+		{
+			name: "upsert keeps its own clause",
+			in: "INSERT INTO users (employee_no, remark) VALUES ('SF-778899', 'hello') " +
+				"ON DUPLICATE KEY UPDATE remark = 'updated'",
+			secrets: []string{"SF-778899"},
+			keep:    []string{"updated"},
+		},
+		{
+			name: "other columns stay untouched",
+			in:   "INSERT INTO users (id, remark) VALUES (7, 'SF-778899')",
+			keep: []string{"7", "SF-778899"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := maskSQL(tc.in, set)
+			for _, secret := range tc.secrets {
+				if strings.Contains(got, secret) {
+					t.Fatalf("value leaked: %s", got)
+				}
+			}
+			for _, keep := range tc.keep {
+				if !strings.Contains(got, keep) {
+					t.Fatalf("value lost: %s", got)
+				}
 			}
 		})
 	}

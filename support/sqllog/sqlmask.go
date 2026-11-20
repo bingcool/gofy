@@ -26,30 +26,45 @@ const (
 	MaskStrategyRemove MaskStrategy = "remove"
 )
 
-// DefaultMaskColumns is the framework's column blacklist. It lives here rather
+// defaultMaskColumns is the framework's column blacklist. It lives here rather
 // than in each project's config so a version upgrade can extend it: a sensitive
 // column added upstream reaches every project, which is the only way a security
 // baseline stays a baseline.
 //
 // Entries are stored in normalized form (lower case, no "_" or "-"), so
 // api_key, apiKey and API-KEY all match the same entry.
-// DefaultMaskColumns 是框架内置的列名黑名单。它放在框架里而不是每个项目的配置里，
+// defaultMaskColumns 是框架内置的列名黑名单。它放在框架里而不是每个项目的配置里，
 // 这样升级才能把新增的敏感列带到已有项目——安全基线只有这样才能一直是基线。
 //
 // 表中存的是归一化形式（小写、去掉 "_" 与 "-"），因此 api_key、apiKey、API-KEY
 // 命中同一条。
-var DefaultMaskColumns = []string{
+var defaultMaskColumns = []string{
 	"password", "passwd", "pwd", "token", "accesstoken", "refreshtoken",
 	"secret", "apikey", "privatekey", "idcard", "idno", "phone", "mobile",
 	"email", "bankcard", "cvv",
 }
 
-// DefaultMaskPatterns is the built-in set of value detectors. Patterns run on
+// defaultMaskPatterns is the built-in set of value detectors. Patterns run on
 // every string literal and numeric literal, so a value is masked even when its
 // column name says nothing (a phone number inside a free-text WHERE clause).
-// DefaultMaskPatterns 是内置的值检测器集合。它在每个字符串字面量与数字字面量上运行，
+// defaultMaskPatterns 是内置的值检测器集合。它在每个字符串字面量与数字字面量上运行，
 // 因此列名看不出敏感的值（比如 WHERE 里自由文本中的手机号）也会被替换。
-var DefaultMaskPatterns = []string{"phone", "email", "id_card", "bank_card", "long_token"}
+var defaultMaskPatterns = []string{"phone", "email", "id_card", "bank_card", "long_token"}
+
+// DefaultMaskColumns returns a copy of the built-in column blacklist. The
+// framework baseline is not project configuration: callers can read it, but
+// mutating the result cannot remove a rule from the logger or race with it.
+// DefaultMaskColumns 返回内置列名黑名单的副本。框架基线不是项目配置：调用方可以查看，
+// 但改副本删不掉 logger 的规则，也不会与它发生数据竞争。
+func DefaultMaskColumns() []string {
+	return append([]string(nil), defaultMaskColumns...)
+}
+
+// DefaultMaskPatterns returns a copy of the built-in detector names.
+// DefaultMaskPatterns 返回内置检测器名字的副本。
+func DefaultMaskPatterns() []string {
+	return append([]string(nil), defaultMaskPatterns...)
+}
 
 // builtinPatterns maps a pattern name to its detector. Names are stable API:
 // config refers to them, so renaming one breaks a deployed config.
@@ -88,12 +103,12 @@ type maskSet struct {
 // defaultMaskSet returns the built-in tables as a usable set.
 // defaultMaskSet 返回只含内置表的可用集合。
 func defaultMaskSet() maskSet {
-	columns := make(map[string]struct{}, len(DefaultMaskColumns))
-	for _, name := range DefaultMaskColumns {
+	columns := make(map[string]struct{}, len(defaultMaskColumns))
+	for _, name := range defaultMaskColumns {
 		columns[normalizeColumn(name)] = struct{}{}
 	}
-	patterns := make([]*regexp.Regexp, 0, len(DefaultMaskPatterns))
-	for _, name := range DefaultMaskPatterns {
+	patterns := make([]*regexp.Regexp, 0, len(defaultMaskPatterns))
+	for _, name := range defaultMaskPatterns {
 		patterns = append(patterns, builtinPatterns[name])
 	}
 	return maskSet{strategy: MaskStrategyMask, columns: columns, patterns: patterns}
@@ -198,14 +213,15 @@ func maskValue(value string, strategy MaskStrategy) string {
 // SQL, so a literal may contain ")", ",", "=" and quotes, and the column name
 // must be paired with the value that follows it.
 //
-// It never fails: unsupported shapes (batch INSERT column positions, for
-// example) are left as they are, which is why that case is listed as a
-// follow-up in the design doc instead of being claimed here.
+// INSERT statements list their columns once and their values in one or more
+// tuples, so the scanner captures that column list and maps values by position
+// across every tuple. A statement shape it cannot classify is left unchanged:
+// masking is best-effort logging hygiene, not a SQL parser.
 // maskSQL 替换一条已展开语句中的敏感值。它用扫描器而不是若干正则：输入是插值后的
-// SQL，字面量里可能含 ")"、","、"="" 与引号，而且必须把列名与随后的值配对。
+// SQL，字面量里可能含 ")"、","、"=" 与引号，而且必须把列名与随后的值配对。
 //
-// 它不会失败：不支持的形态（例如批量 INSERT 的按列位置映射）原样保留——这也是设计
-// 文档把它列为后续项而不是声称已支持的原因。
+// INSERT 只列一次列名、值分布在若干组元组里，因此扫描器先记下列名，再按位置映射到每一组值。
+// 认不出的语句形态原样保留：脱敏是日志卫生的尽力而为，不是 SQL 解析器。
 func maskSQL(sql string, set maskSet) string {
 	if sql == "" || (len(set.columns) == 0 && len(set.patterns) == 0) {
 		return sql
@@ -214,16 +230,29 @@ func maskSQL(sql string, set maskSet) string {
 	var b strings.Builder
 	b.Grow(len(sql))
 
-	lastIdent := ""    // last identifier seen, normalized
-	lastKeyword := ""  // last keyword seen, upper case
-	inListColumn := "" // column of an IN (...) list currently open
-	inListDepth := 0   // parenthesis depth of that list
-	quotedIdent := ""  // last backquoted/double-quoted identifier, normalized
+	lastIdent := ""                // last identifier seen, normalized
+	lastKeyword := ""              // last keyword seen, upper case
+	inListColumn := ""             // column of an IN (...) list currently open
+	inListDepth := 0               // parenthesis depth of that list
+	quotedIdent := ""              // last backquoted/double-quoted identifier, normalized
+	insertColumns := []string(nil) // columns of INSERT INTO t (...) — by value position
+	collectingColumns := false     // inside that column list
+	mappingValues := false         // in the VALUES clause of an INSERT
+	inValuesTuple := false         // inside one VALUES (...) tuple
+	valueIndex := 0                // position in the current tuple
 
 	isSensitive := func(value string) bool {
 		column := lastIdent
 		if inListColumn != "" {
 			column = inListColumn
+		}
+		// INSERT lists the columns once and the values many times. Positional
+		// mapping is the only way to tell which configured column a value belongs
+		// to; without it every custom INSERT column would leak into the log.
+		// INSERT 只列一次列名、值却可以有多组，按位置对应是唯一能知道某个值属于哪个配置列的
+		// 办法；不做映射，所有自定义 INSERT 列都会漏进日志。
+		if inValuesTuple && valueIndex < len(insertColumns) {
+			column = insertColumns[valueIndex]
 		}
 		if column != "" {
 			if _, ok := set.columns[column]; ok {
@@ -250,6 +279,9 @@ func maskSQL(sql string, set maskSet) string {
 			} else {
 				b.WriteString(sql[i:next])
 			}
+			if inValuesTuple {
+				valueIndex++
+			}
 			i = next
 			// A literal ends the identifier slot: the next literal in
 			// VALUES ('a','b') must not inherit "a"'s column.
@@ -267,10 +299,26 @@ func maskSQL(sql string, set maskSet) string {
 			} else if lastKeyword == "IN" && lastIdent != "" {
 				inListColumn = lastIdent
 				inListDepth = 1
+			} else if mappingValues && insertColumns != nil {
+				// A literal clears lastKeyword, so the tuples after the first
+				// one cannot be recognised by "lastKeyword == VALUES".
+				// 字面量会清空 lastKeyword，第二组之后的元组不能靠 "lastKeyword == VALUES" 识别。
+				inValuesTuple = true
+				valueIndex = 0
+			} else if lastIdent != "" && !inValuesTuple {
+				collectingColumns = true
+				insertColumns = insertColumns[:0]
 			}
 			b.WriteByte(c)
 			i++
 		case c == ')':
+			if collectingColumns {
+				collectingColumns = false
+			}
+			if inValuesTuple {
+				inValuesTuple = false
+				valueIndex = 0
+			}
 			if inListDepth > 0 {
 				inListDepth--
 				if inListDepth == 0 {
@@ -287,11 +335,27 @@ func maskSQL(sql string, set maskSet) string {
 			token := sql[start:i]
 			if keyword := strings.ToUpper(token); keywordSet[keyword] {
 				lastKeyword = keyword
+				if keyword == "INSERT" {
+					insertColumns = nil
+					collectingColumns, inValuesTuple = false, false
+				}
+				// ON DUPLICATE KEY UPDATE / ON CONFLICT starts a new clause;
+				// its literals are not INSERT values any more.
+				// ON DUPLICATE KEY UPDATE / ON CONFLICT 开启新子句，其后的字面量不再是 INSERT 值。
+				if keyword == "ON" {
+					insertColumns, mappingValues, inValuesTuple = nil, false, false
+				}
+				if keyword == "VALUES" {
+					mappingValues = true
+				}
 				if keyword != "IN" {
 					inListColumn = ""
 					inListDepth = 0
 				}
 				lastIdent = ""
+			} else if collectingColumns {
+				insertColumns = append(insertColumns, normalizeColumn(token))
+				lastIdent, lastKeyword = "", ""
 			} else {
 				lastIdent, lastKeyword = normalizeColumn(token), ""
 			}
@@ -307,6 +371,9 @@ func maskSQL(sql string, set maskSet) string {
 				b.WriteString(maskValue(value, set.strategy))
 			} else {
 				b.WriteString(value)
+			}
+			if inValuesTuple {
+				valueIndex++
 			}
 			lastIdent, lastKeyword = "", ""
 		default:

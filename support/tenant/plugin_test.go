@@ -256,27 +256,106 @@ func TestInsertSliceOfMapsFillsEveryRow(t *testing.T) {
 	}
 }
 
-func TestInsertRespectsExplicitTenantByDefault(t *testing.T) {
+// emptyColumnHandler is the misconfiguration P2-01 describes: a custom Handler
+// whose column name is blank. FuncHandler cannot express it because it falls
+// back to the default column, so the test needs a real custom implementation.
+// emptyColumnHandler 是 P2-01 描述的误配置：自定义 Handler 返回空列名。FuncHandler 会回退到
+// 默认列名，表达不了这种情形，因此测试需要一个真正的自定义实现。
+type emptyColumnHandler struct{}
+
+func (emptyColumnHandler) TenantID(context.Context) string { return "a" }
+func (emptyColumnHandler) Column() string                  { return "   " }
+func (emptyColumnHandler) IgnoreTable(string) bool         { return false }
+
+// TestEmptyColumnFailsAtInstrument pins the fail-closed boundary: a blank column
+// would make LookUpField("") miss every model, so no statement would be scoped
+// and nothing would report why. Both Instrument and a direct db.Use must reject
+// it before the first query runs.
+// TestEmptyColumnFailsAtInstrument 固定失败关闭的边界：空列名会让 LookUpField("") 匹配不到
+// 任何模型，所有语句都不被隔离且不报错。Instrument 与直接 db.Use 都必须在第一条查询之前拒绝。
+func TestEmptyColumnFailsAtInstrument(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:empty_column?mode=memory&cache=shared"),
+		&gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	err = tenant.Instrument(db, tenant.Options{Handler: emptyColumnHandler{}})
+	if !errors.Is(err, tenant.ErrTenantColumnRequired) {
+		t.Fatalf("Instrument err = %v, want ErrTenantColumnRequired", err)
+	}
+	// The rejected plugin must not have left callbacks installed.
+	// 被拒绝的插件不能留下已注册的回调。
+	if err := db.AutoMigrate(&order{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	var got []order
+	if err := db.WithContext(context.Background()).Find(&got).Error; err != nil {
+		t.Fatalf("Find after rejected install: %v", err)
+	}
+}
+
+// boolPtr makes the tri-state explicit: nil means overwrite (the safe default),
+// &false means preserve a caller's value on a privileged connection.
+// boolPtr 表达三态：nil 表示覆盖（安全默认值），&false 表示在特权连接上保留调用方的值。
+func boolPtr(v bool) *bool { return &v }
+
+// TestInsertOverwritesExplicitTenantByDefault pins the secure default: a DTO
+// carrying tenant_id from the request must not write into that tenant. The
+// plugin cannot tell an administrator from an untrusted field, so the context
+// tenant wins unless the deployment opts out explicitly.
+// TestInsertOverwritesExplicitTenantByDefault 固定安全默认值：请求结构体里带进来的
+// tenant_id 不能据此写入别的租户。插件无法分辨管理员与不可信字段，因此除非显式关闭，
+// 一律用上下文租户。
+func TestInsertOverwritesExplicitTenantByDefault(t *testing.T) {
 	db := openDB(t, tenant.Options{})
 	if err := db.WithContext(ctxFor("a")).Create(&order{TenantID: "b", Code: "x"}).Error; err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var got order
 	_ = db.WithContext(tenant.Without(context.Background())).First(&got).Error
-	if got.TenantID != "b" {
-		t.Fatalf("explicit tenant overwritten: %+v", got)
+	if got.TenantID != "a" {
+		t.Fatalf("explicit tenant b survived: %+v", got)
 	}
 }
 
-func TestInsertOverwriteExplicitOption(t *testing.T) {
-	db := openDB(t, tenant.Options{OverwriteExplicit: true})
+// TestInsertPreservesExplicitTenantWhenOptedOut covers the same insert on a
+// deliberately privileged connection: an explicit false keeps the caller's
+// value. The zero value must not accidentally take this path.
+// TestInsertPreservesExplicitTenantWhenOptedOut 覆盖刻意提权的连接：显式 false 才保留
+// 调用方的值。零值绝不能不小心走到这条路上。
+func TestInsertPreservesExplicitTenantWhenOptedOut(t *testing.T) {
+	db := openDB(t, tenant.Options{OverwriteExplicit: boolPtr(false)})
 	if err := db.WithContext(ctxFor("a")).Create(&order{TenantID: "b", Code: "x"}).Error; err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var got order
 	_ = db.WithContext(tenant.Without(context.Background())).First(&got).Error
-	if got.TenantID != "a" {
-		t.Fatalf("OverwriteExplicit did not force context tenant: %+v", got)
+	if got.TenantID != "b" {
+		t.Fatalf("explicit tenant b was overwritten: %+v", got)
+	}
+}
+
+// TestWithoutStillWritesAnotherTenant proves the privileged path survives the
+// secure default: Without skips the plugin entirely, so an explicit tenant on
+// INSERT is kept without weakening ordinary request connections.
+// TestWithoutStillWritesAnotherTenant 证明安全默认值下提权路径仍然可用：Without 整条跳过
+// 插件，INSERT 上的显式租户因此被保留，不必削弱普通请求连接。
+func TestWithoutStillWritesAnotherTenant(t *testing.T) {
+	db := openDB(t, tenant.Options{})
+	if err := db.WithContext(tenant.Without(context.Background())).
+		Create(&order{TenantID: "b", Code: "x"}).Error; err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var got order
+	_ = db.WithContext(tenant.Without(context.Background())).First(&got).Error
+	if got.TenantID != "b" {
+		t.Fatalf("privileged insert did not keep tenant b: %+v", got)
 	}
 }
 
@@ -356,6 +435,126 @@ func TestNoDuplicateCondition(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("tenant binds = %d, want 1; vars = %v; sql = %s", count, stmt.Vars, stmt.SQL.String())
+	}
+}
+
+// TestExistingConditionMustMatchTheContext is the regression test for the one
+// shape the plugin used to trust blindly: a tenant equality already in the
+// caller's WHERE. Recognising `tenant_id = ?` says nothing about the value bound
+// to it, and a repository that still takes tenantID as a parameter — the usual
+// residue when a codebase moves onto the plugin — binds somebody else's ID. The
+// statement must then return nothing, not that tenant's rows.
+//
+// The bind count proves the mechanism: a mismatched condition keeps the caller's
+// bind and gains the plugin's, so nothing can match either tenant.
+// TestExistingConditionMustMatchTheContext 固定插件原先唯一盲信的形状：调用方 WHERE
+// 里已有的租户等值条件。认出 `tenant_id = ?` 并不说明绑定的是哪个值，而把 tenantID 当参数
+// 的仓储——迁到插件上时最常见的残留——绑的是别的租户。语句必须返回空，而不是那个租户的数据。
+//
+// 绑定个数证明机制：值不匹配时调用方的绑定保留、插件再追加一个，两个租户都不可能命中。
+func TestExistingConditionMustMatchTheContext(t *testing.T) {
+	db := openDB(t, tenant.Options{})
+	seed(t, db,
+		order{TenantID: "a", Code: "a1", Amount: 1},
+		order{TenantID: "b", Code: "b1", Amount: 2},
+	)
+
+	cases := []struct {
+		name  string
+		apply func(*gorm.DB) *gorm.DB
+		rows  int // rows a tenant-a request may see
+		binds int // tenant ids bound as query args, plugin included
+	}{
+		{
+			name:  "raw sql, same tenant",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where("tenant_id = ?", "a") },
+			rows:  1,
+			binds: 1,
+		},
+		{
+			name:  "raw sql, other tenant",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where("tenant_id = ?", "b") },
+			rows:  0,
+			binds: 2,
+		},
+		{
+			name:  "map condition, other tenant",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where(map[string]any{"tenant_id": "b"}) },
+			rows:  0,
+			binds: 2,
+		},
+		{
+			name:  "struct condition, other tenant",
+			apply: func(db *gorm.DB) *gorm.DB { return db.Where(order{TenantID: "b"}) },
+			rows:  0,
+			binds: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []order
+			if err := tc.apply(db.WithContext(ctxFor("a"))).Find(&got).Error; err != nil {
+				t.Fatalf("find: %v", err)
+			}
+			if len(got) != tc.rows {
+				t.Fatalf("rows = %d, want %d: %+v", len(got), tc.rows, got)
+			}
+			for _, row := range got {
+				if row.TenantID != "a" {
+					t.Fatalf("tenant-a context read tenant %q", row.TenantID)
+				}
+			}
+
+			stmt := tc.apply(db.WithContext(ctxFor("a")).Session(&gorm.Session{DryRun: true})).
+				Find(&[]order{}).Statement
+			binds := 0
+			for _, v := range stmt.Vars {
+				if s, ok := v.(string); ok && (s == "a" || s == "b") {
+					binds++
+				}
+			}
+			if binds != tc.binds {
+				t.Fatalf("tenant binds = %d, want %d; sql = %s; vars = %v",
+					binds, tc.binds, stmt.SQL.String(), stmt.Vars)
+			}
+		})
+	}
+}
+
+// TestWithTenantKeepsAnotherTenantReachable guards the escape hatch: WithTenant
+// sets the effective tenant, so a matching explicit condition is still deduped
+// and the query returns that tenant's rows. Without this, the comparison above
+// would make a legitimate cross-tenant read impossible.
+// TestWithTenantKeepsAnotherTenantReachable 守住逃生口：WithTenant 设定了生效租户，
+// 因此与之相等的显式条件仍然被去重，查询照常返回那个租户的数据。没有它，上面的比较会让
+// 合法的跨租户读取变得不可能。
+func TestWithTenantKeepsAnotherTenantReachable(t *testing.T) {
+	db := openDB(t, tenant.Options{})
+	seed(t, db,
+		order{TenantID: "a", Code: "a1"},
+		order{TenantID: "b", Code: "b1"},
+	)
+
+	ctx := tenant.WithTenant(ctxFor("a"), "b")
+	var got []order
+	if err := db.WithContext(ctx).Where("tenant_id = ?", "b").Find(&got).Error; err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(got) != 1 || got[0].TenantID != "b" {
+		t.Fatalf("WithTenant override returned %+v, want tenant b only", got)
+	}
+
+	stmt := db.WithContext(ctx).Session(&gorm.Session{DryRun: true}).
+		Where("tenant_id = ?", "b").Find(&[]order{}).Statement
+	binds := 0
+	for _, v := range stmt.Vars {
+		if s, ok := v.(string); ok && s == "b" {
+			binds++
+		}
+	}
+	if binds != 1 {
+		t.Fatalf("tenant binds = %d, want 1; sql = %s; vars = %v",
+			binds, stmt.SQL.String(), stmt.Vars)
 	}
 }
 
@@ -720,55 +919,65 @@ func TestWithoutCanStillMoveARowAcrossTenants(t *testing.T) {
 // TestBatchInsertFillsOnlyZeroTenantRows 是审计 (c) 的回归测试：只要有一行显式赋了租户，
 // 插件就跳过整批，其它行因此以空租户落库。显式值必须保留（哪怕它写的是另一个租户），
 // 只有空值行才取上下文租户。
-func TestBatchInsertFillsOnlyZeroTenantRows(t *testing.T) {
-	t.Run("structs", func(t *testing.T) {
-		db := openDB(t, tenant.Options{})
-		rows := []order{
-			{TenantID: "b", Code: "explicit"},
-			{Code: "implicit"},
-		}
-		if err := db.WithContext(ctxFor("a")).Create(&rows).Error; err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		var raw []order
-		if err := db.WithContext(tenant.Without(context.Background())).Order("id").Find(&raw).Error; err != nil {
-			t.Fatalf("Find: %v", err)
-		}
-		want := []string{"b/explicit", "a/implicit"}
-		if len(raw) != len(want) {
-			t.Fatalf("rows = %+v, want %d rows", raw, len(want))
-		}
-		for i, row := range raw {
-			if got := row.TenantID + "/" + row.Code; got != want[i] {
-				t.Fatalf("row %d = %q, want %q (all: %+v)", i, got, want[i], raw)
+// TestBatchInsertFillsPerRow covers the two policy values across both batch
+// shapes. Assignment is per row either way: the default overwrites every row
+// (a request DTO cannot smuggle in another tenant), while an explicit opt-out
+// keeps rows that already carry a value and fills only the empty ones.
+// TestBatchInsertFillsPerRow 覆盖两种策略 × 两种批量形态。两种策略都按行赋值：默认覆盖每行
+// （请求 DTO 塞不进别的租户），显式关闭时保留已有值的行、只填空值行。
+func TestBatchInsertFillsPerRow(t *testing.T) {
+	cases := []struct {
+		name     string
+		opts     tenant.Options
+		mapShape bool
+		want     []string
+	}{
+		{name: "structs overwrite by default", opts: tenant.Options{},
+			want: []string{"a/explicit", "a/implicit"}},
+		{name: "maps overwrite by default", opts: tenant.Options{}, mapShape: true,
+			want: []string{"a/explicit", "a/implicit"}},
+		{name: "structs preserve when opted out", opts: tenant.Options{OverwriteExplicit: boolPtr(false)},
+			want: []string{"b/explicit", "a/implicit"}},
+		{name: "maps preserve when opted out", opts: tenant.Options{OverwriteExplicit: boolPtr(false)}, mapShape: true,
+			want: []string{"b/explicit", "a/implicit"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openDB(t, tc.opts)
+			if tc.mapShape {
+				rows := []map[string]any{
+					{"tenant_id": "b", "code": "explicit"},
+					{"code": "implicit"},
+				}
+				if err := db.WithContext(ctxFor("a")).Table("orders").Create(&rows).Error; err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+			} else {
+				rows := []order{
+					{TenantID: "b", Code: "explicit"},
+					{Code: "implicit"},
+				}
+				if err := db.WithContext(ctxFor("a")).Create(&rows).Error; err != nil {
+					t.Fatalf("Create: %v", err)
+				}
 			}
-		}
-	})
 
-	t.Run("maps", func(t *testing.T) {
-		db := openDB(t, tenant.Options{})
-		rows := []map[string]any{
-			{"tenant_id": "b", "code": "explicit"},
-			{"code": "implicit"},
-		}
-		if err := db.WithContext(ctxFor("a")).Table("orders").Create(&rows).Error; err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		var raw []struct {
-			TenantID string `gorm:"column:tenant_id"`
-			Code     string
-		}
-		if err := db.WithContext(tenant.Without(context.Background())).Table("orders").Order("id").Find(&raw).Error; err != nil {
-			t.Fatalf("Find: %v", err)
-		}
-		want := []string{"b/explicit", "a/implicit"}
-		if len(raw) != len(want) {
-			t.Fatalf("rows = %+v, want %d rows", raw, len(want))
-		}
-		for i, row := range raw {
-			if got := row.TenantID + "/" + row.Code; got != want[i] {
-				t.Fatalf("row %d = %q, want %q (all: %+v)", i, got, want[i], raw)
+			var raw []struct {
+				TenantID string `gorm:"column:tenant_id"`
+				Code     string
 			}
-		}
-	})
+			if err := db.WithContext(tenant.Without(context.Background())).
+				Table("orders").Order("id").Find(&raw).Error; err != nil {
+				t.Fatalf("Find: %v", err)
+			}
+			if len(raw) != len(tc.want) {
+				t.Fatalf("rows = %+v, want %d rows", raw, len(tc.want))
+			}
+			for i, row := range raw {
+				if got := row.TenantID + "/" + row.Code; got != tc.want[i] {
+					t.Fatalf("row %d = %q, want %q (all: %+v)", i, got, tc.want[i], raw)
+				}
+			}
+		})
+	}
 }

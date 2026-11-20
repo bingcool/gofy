@@ -135,7 +135,14 @@ type Resolver struct {
 // configuration.
 // New 构造 Resolver。Handler 与 Namer 为 nil 时回退到插件默认值；列名取自 Handler，
 // 因此两条路径读的是同一份配置。
-func New(opts Options) *Resolver {
+// New builds a resolver. An empty tenant column is rejected unless the whole
+// path is disabled: a model cannot be tenant-scoped by a column that does not
+// exist, and accepting "" would make every LookUpField miss and quietly turn
+// isolation off. Failing here is the only way an assembly-time typo is visible.
+// New 构造解析器。空租户列名会被拒绝，除非整条路径已关闭：列名都不存在就谈不上按租户隔离，
+// 接受 "" 会让每次 LookUpField 都匹配不到，等于静默关掉隔离。在这里失败，装配期的笔误
+// 才看得见。
+func New(opts Options) (*Resolver, error) {
 	r := &Resolver{
 		handler:  opts.Handler,
 		namer:    opts.Namer,
@@ -148,8 +155,11 @@ func New(opts Options) *Resolver {
 	if r.namer == nil {
 		r.namer = schema.NamingStrategy{}
 	}
-	r.column = r.handler.Column()
-	return r
+	r.column = strings.TrimSpace(r.handler.Column())
+	if !r.disabled && r.column == "" {
+		return nil, tenant.ErrTenantColumnRequired
+	}
+	return r, nil
 }
 
 // Default is the Resolver behind the package-level Select: ContextHandler,
@@ -157,7 +167,16 @@ func New(opts Options) *Resolver {
 // that configured either of them builds its own Resolver with New.
 // Default 是包级 Select 使用的 Resolver：ContextHandler、tenant_id、GORM 默认命名与
 // 构造器默认方言。配置过其中任一项的项目应当用 New 构造自己的 Resolver。
-var Default = New(Options{})
+var Default = func() *Resolver {
+	r, err := New(Options{})
+	if err != nil {
+		// Options{} always carries the default handler and a non-empty column;
+		// reaching this branch means the defaults themselves were broken.
+		// Options{} 一定带默认 Handler 和非空列名；走到这里说明默认值本身被改坏了。
+		panic(err)
+	}
+	return r
+}()
 
 // Select builds `SELECT columns FROM <model table>`, with the tenant condition
 // already attached when the model declares the tenant column. Columns are plain

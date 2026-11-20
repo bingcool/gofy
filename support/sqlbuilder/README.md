@@ -248,6 +248,11 @@ sel := sqlbuilder.Select(orders.C("id")).From(orders).Where(pred)
 （`sqlbuilder_test.go` 里的 `TestDefaultTenantColumnMatchesTenant` 钉住这一点——这里不能
 直接 import `support/tenant`，那会把 gorm 带进一个从不执行 SQL 的包）。
 
+身份优先级与另两条路径一致：`WithTenant` 覆盖 JWT 身份，`Without` 覆盖两者（返回 `false`）。
+覆盖与绕过标记定义在 `support/frameworkcontext`，`support/tenant` 只是转出——这样本包读取
+同一份判定时仍不必依赖 gorm。`table == nil` 返回 `false`，不会 panic。
+`support/sqlmodel` 的 `TestAllTenantPathsResolveTheSameIdentity` 同时钉住三条路径的取值。
+
 ## 什么时候不该用
 
 - query 层一年新增不到 5 条复杂查询：手写 SQL 加 `if` 更直接；

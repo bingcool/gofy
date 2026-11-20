@@ -967,7 +967,7 @@ type AccessLogOptions struct {
     LogUserAgent   bool          // 默认 true
     LogClientIP    bool          // 默认 true
     MaxPathLength  int           // 默认 1024，防止超长 URL 污染日志
-    LogQuery       bool          // 默认 true，记录脱敏后的 query
+    LogQuery       bool          // 默认 false：query 黑名单盖不住业务自定义参数，按需显式打开
     SensitiveQuery []string      // 默认 DefaultSensitiveQueryKeys()
 }
 ```

@@ -45,9 +45,14 @@ type TenantConfig struct {
 	// at all) is off — see IsEnabled.
 	// Enabled 决定是否在每个池上安装插件。段存在时 nil 表示开启，false 才是显式关闭；
 	// 接收者为 nil（整段缺失）时为关闭——见 IsEnabled。
-	Enabled           *bool  `yaml:"enabled"`
-	Column            string `yaml:"column"`
-	OverwriteExplicit bool   `yaml:"overwrite_explicit"`
+	Enabled *bool  `yaml:"enabled"`
+	Column  string `yaml:"column"`
+	// OverwriteExplicit mirrors the plugin's tri-state switch. Nil means the
+	// context tenant wins on INSERT, which is the safe default: the plugin
+	// cannot tell an administrator from a request DTO that carries tenant_id.
+	// OverwriteExplicit 对应插件的三态开关。nil 表示 INSERT 一律用上下文租户，是安全默认值：
+	// 插件无从分辨管理员与带 tenant_id 的请求 DTO。
+	OverwriteExplicit *bool `yaml:"overwrite_explicit"`
 }
 
 // IsEnabled reports whether isolation should be installed. A nil receiver means
@@ -62,6 +67,15 @@ func (c *TenantConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
 }
 
+// OverwritesExplicit reports the INSERT policy. Absent means overwrite, so an
+// untrusted caller cannot choose another tenant by filling tenant_id; false is
+// an explicit opt-out for a privileged connection only.
+// OverwritesExplicit 报告 INSERT 策略。不写表示覆盖，不可信调用方因此无法靠填 tenant_id
+// 选择别的租户；false 是特权连接的显式选择。
+func (c *TenantConfig) OverwritesExplicit() bool {
+	return c == nil || c.OverwriteExplicit == nil || *c.OverwriteExplicit
+}
+
 // Options turns the YAML section into plugin options. The bool is false when
 // isolation is off — an absent section or an explicit false — so the caller
 // simply does not pass WithTenant.
@@ -71,7 +85,8 @@ func (c *TenantConfig) Options() (tenant.Options, bool) {
 	if !c.IsEnabled() {
 		return tenant.Options{}, false
 	}
-	opts := tenant.Options{OverwriteExplicit: c.OverwriteExplicit}
+	overwrite := c.OverwritesExplicit()
+	opts := tenant.Options{OverwriteExplicit: &overwrite}
 	if col := strings.TrimSpace(c.Column); col != "" && col != tenant.DefaultColumn {
 		opts.Handler = tenant.FuncHandler{
 			ColumnName:   col,

@@ -51,10 +51,14 @@ type AccessLogOptions struct {
 	// MaxPathLength 是 path / query 字段的最大长度，超出部分截断，
 	// 防止超长 URL 撑大日志。
 	MaxPathLength int
-	// LogQuery records the sanitized query string when true: values of sensitive
-	// keys are replaced with ***, so tokens and passwords never reach the log.
-	// LogQuery 为 true 时记录脱敏后的 query string：敏感 key 的值统一替换成
-	// ***，token、密码不会进入日志。
+	// LogQuery records the sanitized query string when true. It is off by
+	// default: SensitiveQuery is a blacklist of known key names and cannot cover
+	// a project's own sensitive parameters, so every extra logged query is a
+	// chance to leak one. Turn it on only when the request parameters are known
+	// and safe, or when an explicit allowlist governs them.
+	// LogQuery 为 true 时记录脱敏后的 query string。默认关闭：SensitiveQuery 只是已知敏感参数名
+	// 的黑名单，盖不住业务自定义的敏感参数，多记一条 query 就多一次泄漏机会。只有在请求参数
+	// 明确安全、或有显式白名单约束时才打开。
 	LogQuery bool
 	// SensitiveQuery lists the query keys to sanitize, case-insensitively; nil
 	// means DefaultSensitiveQueryKeys, while an explicit empty slice turns
@@ -65,9 +69,10 @@ type AccessLogOptions struct {
 }
 
 // DefaultAccessLogOptions returns the access-log configuration gofy apps use by
-// default: health checks are skipped and every optional field is recorded.
-// DefaultAccessLogOptions 返回 gofy 应用默认使用的访问日志配置：跳过健康
-// 检查，其余可选字段全部记录。
+// default: health checks are skipped, safe request metadata is recorded, and
+// the raw query string is not (LogQuery is off).
+// DefaultAccessLogOptions 返回 gofy 应用默认使用的访问日志配置：跳过健康检查、
+// 记录安全的请求元数据，但不记录原始 query string（LogQuery 关闭）。
 func DefaultAccessLogOptions() AccessLogOptions {
 	return AccessLogOptions{
 		SkipPaths:      []string{"/healthz", "/readyz"},
@@ -76,7 +81,7 @@ func DefaultAccessLogOptions() AccessLogOptions {
 		LogUserAgent:   true,
 		LogClientIP:    true,
 		MaxPathLength:  1024,
-		LogQuery:       true,
+		LogQuery:       false,
 		SensitiveQuery: DefaultSensitiveQueryKeys(),
 	}
 }

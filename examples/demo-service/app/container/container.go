@@ -6,6 +6,7 @@
 package container
 
 import (
+	"fmt"
 	"sync"
 
 	gofyadapter "github.com/bingcool/gofy-adapter/adapter/gofy"
@@ -81,7 +82,16 @@ func (c *Container) tenantConfig() *config.TenantConfig {
 // 构造器还开着」这种半开状态不会出现。
 func (c *Container) SQLModel() *sqlmodel.Resolver {
 	return c.models.Get(func() *sqlmodel.Resolver {
-		return sqlmodel.New(c.tenantConfig().SQLModelOptions())
+		r, err := sqlmodel.New(c.tenantConfig().SQLModelOptions())
+		if err != nil {
+			// A bad tenant column is an assembly-time configuration error, not a
+			// request error: failing here keeps the deployment from running with
+			// a resolver that would never scope a statement.
+			// 空的租户列名是装配期配置错误，不是请求错误：在这里失败，部署就不会带着一个
+			// 永远不加租户条件的 resolver 运行。
+			panic(fmt.Sprintf("container: sqlmodel resolver: %v", err))
+		}
+		return r
 	})
 }
 

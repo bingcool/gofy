@@ -379,10 +379,40 @@ func TestSecurityHeadersValidation(t *testing.T) {
 	}
 }
 
-func TestAccessLogRedactsSensitiveQuery(t *testing.T) {
+// TestAccessLogDoesNotRecordQueryByDefault pins P2-07: a blacklist of known
+// parameter names can never cover a project's own sensitive fields, so the
+// default is to log no query at all. Applications that need it opt in and take
+// responsibility for what their parameters contain.
+// TestAccessLogDoesNotRecordQueryByDefault 固定 P2-07：已知参数名的黑名单永远盖不住业务自定义
+// 的敏感字段，因此默认完全不记 query。需要的应用显式打开，并自行负责参数内容。
+func TestAccessLogDoesNotRecordQueryByDefault(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	engine := newGin()
 	engine.Use(middleware.AccessLog(zap.New(core), middleware.DefaultAccessLogOptions()))
+	engine.GET("/search", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/search?customer_identity=abc&bank_account=123456", nil)
+	engine.ServeHTTP(httptest.NewRecorder(), req)
+
+	entries := logs.FilterMessage("http access").All()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if query, ok := entries[0].ContextMap()["query"]; ok {
+		t.Fatalf("query recorded by default: %v", query)
+	}
+}
+
+func TestAccessLogRedactsSensitiveQuery(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	engine := newGin()
+	// Query logging is off by default; opt in here because this test is about
+	// how the query is redacted once it is recorded.
+	// query 默认不记录；本测试验证的是记录之后如何脱敏，所以这里显式打开。
+	opts := middleware.DefaultAccessLogOptions()
+	opts.LogQuery = true
+	engine.Use(middleware.AccessLog(zap.New(core), opts))
 	engine.GET("/login", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/login?user=alice&password=hunter2&access_token=abc", nil)
@@ -407,7 +437,11 @@ func TestAccessLogRedactsSensitiveQuery(t *testing.T) {
 func TestAccessLogMalformedQueryIsOpaque(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	engine := newGin()
-	engine.Use(middleware.AccessLog(zap.New(core), middleware.DefaultAccessLogOptions()))
+	// Opt in: the assertion is about redaction, not about the default switch.
+	// 显式打开：本用例断言的是脱敏行为，不是默认开关。
+	opts := middleware.DefaultAccessLogOptions()
+	opts.LogQuery = true
+	engine.Use(middleware.AccessLog(zap.New(core), opts))
 	engine.GET("/search", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/search?q=%zz&password=x", nil)

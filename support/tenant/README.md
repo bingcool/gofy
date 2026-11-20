@@ -71,12 +71,21 @@ db.WithContext(ctx).Create(&Order{...})
 | `tenant.Options` 字段 | 默认 | 说明 |
 |---|---|---|
 | `Handler` | `ContextHandler{}` | 提供租户 ID 与列名；自定义来源时实现 `Handler` 或用 `FuncHandler` |
-| `OverwriteExplicit` | `false` | `true` 时 INSERT 强制用当前租户，忽略调用方已填的值 |
+| `OverwriteExplicit` | 覆盖（`nil`） | `*bool`；`nil` / `true` 时 INSERT 强制用当前租户，忽略调用方已填的值；只有特权连接才写 `false` |
 | `OnBypass` | `nil` | `Without(ctx)` 生效时回调，用于给特权绕过留痕 |
 | `OnUnresolved` | `nil` | GORM 解析不出 schema 时回调，对应 swoolefy 的 `warnNotRewritten` |
 
 `Handler` 三方法：`TenantID(ctx) string`、`Column() string`、`IgnoreTable(table) bool`。
 实现**必须无状态**——插件单例被所有请求共享，租户值只能来自 `ctx`。
+
+`Column()` 返回空串（或全空白）会在 `Instrument` / `Initialize` 阶段返回
+`ErrTenantColumnRequired`，不会退化成"每张表都不带租户"。`FuncHandler` 对空列名会回退默认列，
+要实测这条拒绝路径需自己实现 `Handler`。
+
+`OverwriteExplicit` 的零值是"覆盖"：插件分不清管理员与请求 DTO 里带进来的 `tenant_id`，
+默认信任调用方就是一条跨租户写入通路。INSERT 会**按行**设置租户列——批量里即使某一行显式
+写了别的租户，默认也会被改成上下文租户；整批 `SetColumn` 在 map 切片上还会报 `invalid field`。
+确实要跨租户写入用 `tenant.Without(ctx)`（整条跳过插件），而不是把这个开关关掉。
 
 ## 表是否参与隔离
 
@@ -129,15 +138,35 @@ tenant.OverrideTenant(ctx)    // WithTenant 设置的显式租户，以及是否
 |---|---|
 | SELECT / UPDATE / DELETE | 追加 `clause.Eq`，并把调用方已有的 WHERE 包成一个分组后 AND 组合 |
 | INSERT（struct / map / 切片 / 批量） | `SetColumn` 填充租户列；已有显式值时按 `OverwriteExplicit` 处理 |
-| 已含租户条件的 WHERE | **只在合取路径上成立时才不追加**：顶层 AND 链里的 `clause.Eq`，或单条 `tenant_id = ?` 手写条件。`<>`、`NOT`、`OR`、`LIKE`、`IN` 以及任何只在字面上提到列名的条件都不算，照常追加 |
+| 已含租户条件的 WHERE | **只在「合取路径上的等值 + 绑定值等于生效租户」同时成立时才不追加**：顶层 AND 链里的 `clause.Eq`（`Value` 相等），或单条 `tenant_id = ?`（`Expr.Vars[0]` 相等）。`<>`、`NOT`、`OR`、`LIKE`、`IN`、右侧字面量，以及绑定了别的租户 ID 的条件，一律照常追加 |
 | 不含租户列的模型 | 不改写 |
 | 原生 `Exec` / `Raw` / `Row` | **不改写**——没有 schema 可判定；需手写租户条件 |
 
-"已含租户条件"的判定必须是**合取**的：`Where("tenant_id <> ?")`、
-`Where("tenant_id = ? OR is_public = 1")`、`Where("NOT (tenant_id = ?)")` 都提到了
-租户列，却都不限制结果集。把它们当作"已过滤"会让跨租户数据直接可见，且不报错、不留
-日志。要按别的租户查询（管理端），用 `tenant.Without` 显式表达意图，而不是写一个
-租户条件指望插件让路。
+"已含租户条件"要同时看**形状**和**值**，缺一条都照常追加。
+
+**形状**必须是合取的：`Where("tenant_id <> ?")`、`Where("tenant_id = ? OR is_public = 1")`、
+`Where("NOT (tenant_id = ?)")` 都提到了租户列，却都不限制结果集。把它们当作"已过滤"
+会让跨租户数据直接可见，且不报错、不留日志。
+
+**值**必须是本次生效的租户。`Where("tenant_id = ?", otherTenant)` 的形状完全正确——
+单独一条等值、在合取路径上——但绑定的是别人的 ID：
+
+```go
+// ctx 属于租户 a，参数来自请求
+db.WithContext(ctxForA).Where("tenant_id = ?", req.TenantID).Find(&orders)
+// 旧版：WHERE tenant_id = 'b'          ← 读到租户 b 的数据，零报错
+// 现在：WHERE tenant_id = 'b' AND tenant_id = 'a'  ← 零行
+```
+
+只有能从 `clause.Eq.Value`（map / struct 写法）或 `Expr.Vars[0]`（手写 SQL）证明与生效
+租户相等时才不追加。认不出的值——无法归一的类型、无效的 `sql.NullString`、列引用——一律
+追加；追加只会多一个谓词，而放行是跨租户读取，两者代价不对称。比较在字符串形态上做，
+所以 `"42"`、`42`、`int64(42)` 与命名 string 类型都被当作同一个租户。
+
+要按别的租户查询（管理端），用 `tenant.WithTenant(ctx, id)`：它设定生效租户，因此
+`WithTenant(ctx, "b")` 配 `Where("tenant_id = ?", "b")` 仍然只绑定一次、照常返回 b 的
+数据。整条绕过则是 `tenant.Without`——两者都是显式表达意图，而不是写一个租户条件指望
+插件让路。
 
 ## 边界
 
@@ -151,7 +180,8 @@ tenant.OverrideTenant(ctx)    // WithTenant 设置的显式租户，以及是否
 ## 测试
 
 `go test ./support/tenant -race` 覆盖 SELECT/UPDATE/DELETE/INSERT 四种语句、struct/map/
-切片/批量插入、失败关闭、不含租户列的模型、`Without`/`WithTenant`、去重、`IgnoreTable`
+切片/批量插入、失败关闭、不含租户列的模型、`Without`/`WithTenant`、
+「已有租户条件但绑定了别的租户」、去重的绑定计数、值归一化、`IgnoreTable`
 兜底、自定义列名、与「替换 context 的前置插件」共存、重复安装被拒绝，以及 100
 goroutine 并发不同租户不串扰。
 

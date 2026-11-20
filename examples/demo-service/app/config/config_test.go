@@ -569,18 +569,28 @@ func TestTenantConfigOptions(t *testing.T) {
 	if opts.Handler != nil {
 		t.Fatal("default column must not need a custom Handler")
 	}
-	if opts.OverwriteExplicit {
-		t.Fatal("OverwriteExplicit must default to false")
+	if !opts.OverwritesExplicit() {
+		t.Fatal("an absent overwrite_explicit must keep the secure default (overwrite)")
 	}
 
-	custom, ok := (&TenantConfig{Enabled: &on, Column: "org_id", OverwriteExplicit: true}).Options()
+	// 显式 false 是特权连接的选择，必须原样传到插件；不能因为漏配而走这条路。
+	keep := false
+	custom, ok := (&TenantConfig{
+		Enabled: &on, Column: "org_id", OverwriteExplicit: &keep,
+	}).Options()
 	if !ok {
 		t.Fatal("custom config disabled")
 	}
 	if custom.Handler == nil || custom.Handler.Column() != "org_id" {
 		t.Fatalf("custom column not propagated: %+v", custom.Handler)
 	}
-	if !custom.OverwriteExplicit {
-		t.Fatal("OverwriteExplicit not propagated")
+	if custom.OverwritesExplicit() {
+		t.Fatal("explicit overwrite_explicit: false was not propagated")
+	}
+
+	force := true
+	forced, _ := (&TenantConfig{Enabled: &on, OverwriteExplicit: &force}).Options()
+	if !forced.OverwritesExplicit() {
+		t.Fatal("explicit overwrite_explicit: true did not overwrite")
 	}
 }

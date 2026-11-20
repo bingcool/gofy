@@ -24,6 +24,8 @@ package tenant
 import (
 	"context"
 	"errors"
+
+	"github.com/bingcool/gofy/support/frameworkcontext"
 )
 
 // ErrTenantRequired is returned when a tenant-aware statement runs without a
@@ -37,10 +39,12 @@ var ErrTenantRequired = errors.New("tenant: tenant id is required")
 // ErrPluginNil 在 Instrument 收到 nil db 时返回。
 var ErrPluginNil = errors.New("tenant: gorm db is required")
 
-type (
-	bypassKey struct{}
-	tenantKey struct{}
-)
+// ErrTenantColumnRequired is returned when a Handler supplies an empty tenant
+// column name. LookUpField("") finds nothing, so accepting it would make every
+// model look "not tenant-aware" and silently disable isolation.
+// ErrTenantColumnRequired 在 Handler 给出空租户列名时返回。LookUpField("") 找不到字段，
+// 接受它会让每张表都显得"不带租户"，从而静默关掉隔离。
+var ErrTenantColumnRequired = errors.New("tenant: handler column name is required")
 
 // Without marks ctx so the next statement skips tenant rewriting. The scope is
 // one statement chain, not the connection — connections are pooled and shared,
@@ -57,7 +61,7 @@ func Without(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, bypassKey{}, true)
+	return frameworkcontext.WithTenantBypass(ctx)
 }
 
 // WithTenant puts an explicit tenant ID into ctx, overriding the identity
@@ -69,7 +73,7 @@ func WithTenant(ctx context.Context, id string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, tenantKey{}, id)
+	return frameworkcontext.WithTenantOverride(ctx, id)
 }
 
 // Bypassed reports whether ctx was marked by Without. It is exported so a second
@@ -78,11 +82,7 @@ func WithTenant(ctx context.Context, id string) context.Context {
 // Bypassed 报告 ctx 是否被 Without 标记过。它导出是因为另一条施加租户隔离的路径
 // （SQL 构造器的 support/sqlmodel）必须与插件得出同一个结论，而不是自己猜。
 func Bypassed(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	v, _ := ctx.Value(bypassKey{}).(bool)
-	return v
+	return frameworkcontext.TenantBypassed(ctx)
 }
 
 // OverrideTenant returns the explicit tenant set by WithTenant, if any. The
@@ -92,9 +92,5 @@ func Bypassed(ctx context.Context) bool {
 // OverrideTenant 返回 WithTenant 设置的显式租户（若有）。插件在 Handler 之前检查它，
 // 其它路径也必须如此：脚本调 WithTenant 就是要它压过 ctx 里碰巧带的身份。
 func OverrideTenant(ctx context.Context) (string, bool) {
-	if ctx == nil {
-		return "", false
-	}
-	v, ok := ctx.Value(tenantKey{}).(string)
-	return v, ok
+	return frameworkcontext.TenantOverride(ctx)
 }
