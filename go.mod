@@ -3,6 +3,7 @@ module github.com/bingcool/gofy
 go 1.26.0
 
 require (
+	entgo.io/ent v0.14.6
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.2
 	github.com/creasty/defaults v1.8.0
@@ -110,7 +111,7 @@ require (
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.1 // indirect
-	go.opencensus.io v0.22.5 // indirect
+	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect

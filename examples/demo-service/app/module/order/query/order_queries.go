@@ -3,6 +3,8 @@ package query
 import (
 	"context"
 	"fmt"
+
+	"github.com/bingcool/gofy/support/sqlbuilder"
 )
 
 // OrderLine 是一行订单明细读模型，由 orders ⋈ order_items ⋈ products 三表
@@ -88,6 +90,60 @@ LIMIT ?`
 	var rows []UnsoldProduct
 	if err := db.Raw(stmt, clampLimit(limit)).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("query unsold products: %w", err)
+	}
+	return rows, nil
+}
+
+// ListUnsoldProductsWithBuilder is the builder version of ListUnsoldProducts,
+// kept beside it as the reference shape for reports gorm's chain API cannot
+// express — CTE, UNION, window functions. The two return the same rows and a test
+// runs both against one fixture, so the builder path cannot drift from the SQL
+// that production uses.
+//
+// The predicate is built in this function and consumed here: a *Predicate is
+// stateful (Query resets it and replays its callbacks), so it must not be cached
+// or shared between goroutines. The table names are literals on purpose — this
+// package reads other modules' tables directly, so there is no model to ask.
+//
+// ListUnsoldProductsWithBuilder 是 ListUnsoldProducts 的 builder 版本，与 Raw 版本
+// 并列，作为 gorm 链式 API 表达不了的报表（CTE、UNION、窗口函数）的参考写法。两者
+// 返回相同的行，测试在同一份 fixture 上同时跑，builder 路径因此不会与生产使用的
+// SQL 漂移。
+//
+// 谓词在本函数内构造、本函数内消费：*Predicate 有状态（Query 会 Reset 并重放回调），
+// 不能缓存或跨 goroutine 共享。表名是字面量：本包直接读其他模块的表，没有 model 可问。
+func (q *Queries) ListUnsoldProductsWithBuilder(ctx context.Context, limit int) ([]UnsoldProduct, error) {
+	db, err := q.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	products := sqlbuilder.Table("products")
+	items := sqlbuilder.Table("order_items")
+
+	// NOT EXISTS (SELECT 1 FROM order_items WHERE order_items.product_id = products.id)
+	unused := sqlbuilder.SelectExpr(sqlbuilder.Expr("1")).
+		From(items).
+		Where(sqlbuilder.ColumnsEQ(items.C("product_id"), products.C("id")))
+
+	stmt, args, err := sqlbuilder.Build(
+		sqlbuilder.Select(
+			products.C("id"),
+			products.C("name"),
+			products.C("price"),
+			products.C("stock"),
+		).
+			From(products).
+			Where(sqlbuilder.NotExists(unused)).
+			OrderBy(products.C("id")).
+			Limit(clampLimit(limit)),
+	)
+	if err != nil {
+		return nil, err
+	}
+	var rows []UnsoldProduct
+	if err := db.Raw(stmt, args...).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("query unsold products (builder): %w", err)
 	}
 	return rows, nil
 }

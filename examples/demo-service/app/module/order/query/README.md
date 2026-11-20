@@ -36,6 +36,7 @@ SQL 里写表名**：表结构是数据库契约，跨模块的 Go 依赖才需�
 | --- | --- |
 | `ListOrderLines` | `orders ⋈ order_items ⋈ products` 三表内连接、行金额计算 |
 | `ListUnsoldProducts` | `NOT EXISTS` 反半连接（从未被下单的产品） |
+| `ListUnsoldProductsWithBuilder` | 同一查询的 `support/sqlbuilder` 版本，与 Raw 版本并列、测试比对 |
 | `UserHasOrder` | `EXISTS`，命中一条即返回，状态由调用方传入 |
 | `ListUserOrderStats` | 原生 SQL：`GROUP BY` + 聚合 + `HAVING` + 多列排序 |
 | `GetUserOrderStat` | 单行聚合，未命中翻译成 `ErrNotFound` |
@@ -79,6 +80,21 @@ return db, nil
    （`db.<name>`），用 `NewDBIO(ctx, "report")` 解析，不影响写库。这里必须用 `NewDBIO`：
    报表要落在只读库上，不能被 ctx 里 `db.default` 的事务接管——`DBConnect` 只按 ctx
    判断有没有事务，不区分实例。
+
+## 可选：SQL 构造器
+
+`ListUnsoldProductsWithBuilder` 是 `ListUnsoldProducts` 的 builder 版本，两个都保留：
+
+- 生产路径仍是 Raw 版本，SQL 与列别名同屏可读，改表时最容易对照；
+- builder 版本证明同一条查询能用构造器写出等价语句，`TestListUnsoldProductsBuilderMatchesRaw`
+  在同一份 fixture 上跑两者并比对结果，再单独断言已知答案——只比「两者相等」发现不了
+  「两边错得一样」；
+- 值得用构造器的场景很窄：gorm 1.31 没有 `clause.With` 的实现，也没有 `Union` 类型，
+  CTE 与 UNION 否则只能整条手写并把 `?` 与 args 人肉对齐。
+
+执行路径不变：`sqlbuilder.Build` 产出 `(stmt, args)` 后交给 `db.Raw`，连接仍来自
+`conn(ctx)`，所以事务、SQL 日志、脱敏、代际都不受影响。注意 `Raw` 不经过租户插件，
+含租户列的表要显式带上 `tenant_id`（`sqlbuilder.TenantScope`）。
 
 ## 调用方式
 

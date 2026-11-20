@@ -19,6 +19,7 @@ require (
 
 require (
 	contrib.go.opencensus.io/exporter/ocagent v0.6.0 // indirect
+	entgo.io/ent v0.14.6 // indirect
 	filippo.io/edwards25519 v1.1.1 // indirect
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -90,7 +91,7 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/zendev-sh/goai v0.11.0 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.2-0.20260911210157-d46ac2e02a79 // indirect
-	go.opencensus.io v0.22.5 // indirect
+	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.72.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0 // indirect

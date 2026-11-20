@@ -134,14 +134,19 @@ SQLite 测试（沿用既有决策）。innerapi 不同：它是**模块间的�
 
 - 只读：不提供 `Create` / `Update` / `Delete`，写路径仍归本模块 repository；
 - 返回本包定义的 row 结构，不复用持久化 model 做投影，也不参与迁移；
-- 连接解析与 repository 完全一致：`appio.WithContext(ctx).NewDBIO(...)` +
-  `gofydb.WithContext(ctx, db)`，因此与写操作共享同一个 ctx 事务，并在
+- 连接解析与 repository 完全一致：`appio.WithContext(ctx).DBConnect(ctx, ...)`，
+  因此与写操作共享同一个 ctx 事务（已有事务就加入，没有就直接执行），并在
   Reload 边界固定在请求进入时的那一代；
 - 调用方向是 `service → query`，反向禁止：query 不依赖 service、controller、
   innerapi 或 repository；
 - 只允许 import 本模块 model、`app/appio`、`support` 与第三方库。**其他模块的
   表可以在 SQL 里直接写表名，但不 import 对方的 model/repository**：表结构是
-  数据库契约，跨模块的 Go 依赖才需要 innerapi。
+  数据库契约，跨模块的 Go 依赖才需要 innerapi；
+- 复杂报表可选 `support/sqlbuilder`（ent 的 SQL 构造器）。它只产出 `(sql, args)`，
+  交给 `db.Raw` / `db.Where` 执行：事务、SQL 日志、脱敏、代际全部照旧，因为语句
+  最终仍由 gorm 发出。用它的理由只有一个——gorm 没有 CTE 与 UNION 的 clause，
+  这两类语句否则只能整条手写并把 `?` 与 args 人肉对齐。注意 `Raw` 不经过租户插件，
+  含租户列的表要显式带上 `tenant_id`（`sqlbuilder.TenantScope` 可取值）。
 
 判据：单表、按主键/索引的读 → repository；跨表、聚合、为页面裁剪列 → 本模块
 query。跨模块取数仍优先走对方 innerapi；只有报表类需求确实需要 JOIN 时才在

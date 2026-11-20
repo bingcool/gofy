@@ -67,6 +67,12 @@ if go list -deps ./support/image | grep -q "$root_pkg/logger"; then
   fail "support/image must not depend on logger"
 fi
 
+# support/sqlbuilder 只构造 SQL 字符串，不执行、不持有连接。引入 gorm 就意味着有人把
+# 执行栈塞了进来——那时连接、事务、日志都要重新接一遍，它也就不是构造器了。
+if go list -deps ./support/sqlbuilder | grep -q "gorm.io/gorm"; then
+  fail "support/sqlbuilder must not depend on gorm"
+fi
+
 # gofy 框架库不得反向依赖契约基础设施库。
 if go list -deps ./... | grep -q 'github.com/bingcool/gofy-interface-api'; then
   fail "gofy must not depend on gofy-interface-api"

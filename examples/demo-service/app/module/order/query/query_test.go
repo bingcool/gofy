@@ -3,6 +3,7 @@ package query_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -155,6 +156,44 @@ func TestListUnsoldProducts(t *testing.T) {
 	}
 	if len(limited) != 1 {
 		t.Fatalf("limited rows = %d, want 1", len(limited))
+	}
+}
+
+// TestListUnsoldProductsBuilderMatchesRaw runs the two implementations against one
+// fixture. Comparing them only proves they agree, so it also asserts the known
+// answer: if both were wrong the same way, equality alone would not notice.
+//
+// TestListUnsoldProductsBuilderMatchesRaw 在同一份 fixture 上跑两个实现。互相比对只能
+// 证明两者一致，所以同时断言已知答案：万一两边错得一样，只比相等是看不出来的。
+func TestListUnsoldProductsBuilderMatchesRaw(t *testing.T) {
+	q, _ := newQueries(t)
+	ctx := context.Background()
+
+	// 0 走 clampLimit 的默认页大小，1 与 500 分别是下界和上界，两条路径必须同时收敛。
+	for _, limit := range []int{0, 1, 10, 500} {
+		raw, err := q.ListUnsoldProducts(ctx, limit)
+		if err != nil {
+			t.Fatalf("ListUnsoldProducts(limit=%d): %v", limit, err)
+		}
+		built, err := q.ListUnsoldProductsWithBuilder(ctx, limit)
+		if err != nil {
+			t.Fatalf("ListUnsoldProductsWithBuilder(limit=%d): %v", limit, err)
+		}
+		if !reflect.DeepEqual(raw, built) {
+			t.Fatalf("limit=%d: raw = %+v, builder = %+v", limit, raw, built)
+		}
+	}
+
+	rows, err := q.ListUnsoldProductsWithBuilder(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListUnsoldProductsWithBuilder: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want only product 4", rows)
+	}
+	want := query.UnsoldProduct{ID: 4, Name: "Retired Mug", Price: 3900, Stock: 0}
+	if rows[0] != want {
+		t.Fatalf("row = %+v, want %+v", rows[0], want)
 	}
 }
 
