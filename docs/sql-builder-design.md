@@ -460,6 +460,40 @@ stmt, args, _ := sqlbuilder.Build(
 
 注意：这条语句必须在显式事务里执行，且 `db.Raw` 要走 tx 句柄，否则锁立刻释放。`support/claim` 已有更完整的认领语义，业务不应自己写这条。
 
+### 9.8 连接从哪来：`appio` 取连接要两步
+
+`appio.WithContext(ctx).DBIO(ctx, name)` 只做一件事：从当前代快照取连接，**不解析事务**。事务在 ctx 里，要用 `gofydb.WithContext(ctx, db)` 提出来，两步都不能省：
+
+```go
+raw, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance) // ① 当代连接
+if err != nil {
+	return nil, err
+}
+db := gofydb.WithContext(ctx, raw) // ② ctx 里有 tx 就用 tx，否则用 raw
+
+query, args, err := sqlbuilder.Build(sel)
+if err != nil {
+	return nil, err
+}
+if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
+	return nil, err
+}
+```
+
+三个容易漏的点：
+
+1. **`DBIO` 需要实例名**（`appdb.DefaultInstance` 或 `"order"`），不是无参调用。
+2. **`gofydb.WithContext` 只选连接，不绑定 ctx**。事务分支拿到的 tx 自带 ctx（`Transaction` 用 `conn.WithContext(ctx)` 创建），但 fallback 分支（registry 里的当代连接）没有，所以执行前统一补 `.WithContext(ctx)`；漏掉就没有超时、不能取消。
+3. **直接 `DBIO(...).Raw(...)` 会绕过事务**。它取到的是当代连接池上的句柄，在事务内调用时不会自动切到 tx——这与 9.6 的 `db.DB()` 是同一类错误，只是更隐蔽，因为代码看起来完全正常。
+
+`repository` 与 `query` 的 `conn(ctx)` 已经把这两步封在一起（见 `order_repository.go` 的 `conn`），所以业务代码只需要：
+
+```go
+db, err := q.conn(ctx)
+```
+
+**推荐走 `conn(ctx)`**，不要在每个查询里重复取连接。理由不是省代码，而是"漏一步就在事务外执行"这种错误没法靠读代码发现。
+
 ---
 
 ## 十、五个必须写进包注释的约束
