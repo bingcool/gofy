@@ -494,6 +494,42 @@ db, err := q.conn(ctx)
 
 **推荐走 `conn(ctx)`**，不要在每个查询里重复取连接。理由不是省代码，而是"漏一步就在事务外执行"这种错误没法靠读代码发现。
 
+### 9.9 需要开启事务时用 `gofydb.Transaction`
+
+9.8 的两步解决的是「有事务就加入」，开启事务另有专门函数：
+
+| 场景 | 写法 |
+|---|---|
+| 已有事务就加入，没有就直接执行（大多数读写） | `db := gofydb.WithContext(ctx, raw)` |
+| 由当前调用开启事务，未提交前不让别人看见 | `gofydb.Transaction(ctx, raw, fn)` |
+
+标准形态（`order_service.go:72-96`）：
+
+```go
+db, err := appio.WithContext(ctx).DBIO(ctx, appdb.DefaultInstance)
+if err != nil {
+	return nil, fmt.Errorf("resolve default database: %w", err)
+}
+err = gofydb.Transaction(ctx, db, func(ctx context.Context) error {
+	// 这里的 ctx 已经是携带事务的 ctx
+	for _, it := range items {
+		if err := s.productAPI.DecreaseStock(ctx, it.SkuID, int(it.Num)); err != nil {
+			return err
+		}
+	}
+	_, err := s.orderRepository.Create(ctx, &ordermodel.Order{...})
+	return err
+})
+```
+
+三个设计点，决定了它能不能用好：
+
+1. **事务通过 ctx 向下传**。product 模块的 repository 与 order 的 repository 都用 `gofydb.WithContext(ctx, ...)` 取连接，于是跨模块的两次写落在同一个事务里，同提交同回滚——调用方不需要把 `*gorm.DB` 当参数一路传下去。
+2. **嵌套调用复用外层，不建 savepoint**。内层 `Transaction` 看到 ctx 里已有事务就直接执行 `fn`，内层返回的错误冒泡到最外层，由最外层统一回滚。
+3. **`conn` 参数直接传 `DBIO` 的返回值**，不要先经过 `gofydb.WithContext`。`Transaction` 内部第一件事就是检查 ctx：有事务则复用（`conn` 完全不参与），没有才在 `conn` 上开启。提前解析反而会掩盖"我以为在开事务，其实在复用别人的"这种情况。
+
+sqlbuilder 与这三条没有冲突：事务内用 builder，只要 `db` 来自 `conn(ctx)` 或 `gofydb.WithContext`，`Raw` 就在事务里执行，`ForUpdate` 的锁也才真正持有到提交。
+
 ---
 
 ## 十、五个必须写进包注释的约束
