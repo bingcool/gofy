@@ -188,3 +188,52 @@ func TestUserFromClaimsAcceptsNumericIDs(t *testing.T) {
 		t.Fatalf("user = %+v", user)
 	}
 }
+
+// TestUserIDUint64 covers the numeric accessor services use when their user
+// table has a bigint primary key: a decimal identity converts, everything else
+// reports "no usable id" instead of turning into 0 silently.
+// TestUserIDUint64 覆盖 service 在用户表用 bigint 主键时使用的数值取值器：十进制身份能
+// 转换，其余情况报告"没有可用 id"，而不是静默变成 0。
+func TestUserIDUint64(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want uint64
+		ok   bool
+	}{
+		{
+			name: "local numeric id",
+			ctx:  frameworkcontext.WithUser(context.Background(), frameworkcontext.User{ID: "42"}),
+			want: 42,
+			ok:   true,
+		},
+		{
+			name: "local non-numeric id",
+			ctx:  frameworkcontext.WithUser(context.Background(), frameworkcontext.User{ID: "auth0|abc"}),
+		},
+		{
+			name: "empty identity",
+			ctx:  context.Background(),
+		},
+		{
+			name: "propagated numeric id",
+			ctx: headerpropagation.ContextWithHeaders(context.Background(), http.Header{
+				headerpropagation.HeaderUserID: {"7"},
+			}),
+			want: 7,
+			ok:   true,
+		},
+		{
+			name: "overflow",
+			ctx:  frameworkcontext.WithUser(context.Background(), frameworkcontext.User{ID: "18446744073709551616"}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := frameworkcontext.UserIDUint64(tc.ctx)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("UserIDUint64 = %d, %v; want %d, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}

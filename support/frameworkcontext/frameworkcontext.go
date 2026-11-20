@@ -230,6 +230,33 @@ func UserID(ctx context.Context) string {
 	return headerpropagation.HeaderFromContext(ctx, headerpropagation.HeaderUserID)
 }
 
+// UserIDUint64 is UserID for services whose user table uses a numeric primary
+// key: it returns the id and true, or 0 and false when there is no identity or
+// the identity is not a decimal integer.
+//
+// The string form stays the wire type on purpose. JWT defines "sub" as
+// StringOrURI, and OIDC subjects are commonly UUIDs or opaque strings such as
+// "auth0|..."; storing the id as text is what lets those deployments keep
+// working, and it is also what the X-User-Id header carries. Parsing here keeps
+// that flexibility at the boundary instead of narrowing the whole identity type.
+// UserIDUint64 是给"用户表用数值主键"的 service 用的 UserID 变体：有身份且是十进制整数时
+// 返回 id 与 true，否则返回 0 与 false。
+//
+// 字符串形态刻意保留为传输类型：JWT 把 "sub" 定义为 StringOrURI，OIDC 的 subject 常是
+// UUID 或 "auth0|..." 这样的不透明字符串。用文本保存身份，这些部署才能继续工作，X-User-Id
+// 头本身也是文本。把解析放在这里，灵活性留在边界上，而不是把整个身份类型收窄成数字。
+func UserIDUint64(ctx context.Context) (uint64, bool) {
+	raw := UserID(ctx)
+	if raw == "" {
+		return 0, false
+	}
+	id, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
 // TenantID returns the tenant ID of the local identity first, then the
 // propagated value.
 // TenantID 优先返回本地身份的租户 ID，其次返回透传值。
