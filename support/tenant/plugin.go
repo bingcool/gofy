@@ -137,7 +137,7 @@ func (p *Plugin) resolve(db *gorm.DB) (string, bool) {
 	// every statement shape, including Table("x") with no parseable model.
 	// 绕过最先检查，先于任何 schema 判定：Without 必须在所有语句形态上生效，
 	// 包括 Table("x") 这种解析不出 model 的情况。
-	if isBypassed(ctx) {
+	if Bypassed(ctx) {
 		if p.onBypass != nil {
 			p.onBypass(ctx, stmt.Table)
 		}
@@ -166,7 +166,7 @@ func (p *Plugin) resolve(db *gorm.DB) (string, bool) {
 }
 
 func (p *Plugin) tenantID(ctx context.Context, table string, db *gorm.DB) string {
-	id, ok := overrideTenant(ctx)
+	id, ok := OverrideTenant(ctx)
 	if !ok {
 		id = p.handler.TenantID(ctx)
 	}

@@ -72,16 +72,29 @@ func WithTenant(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, tenantKey{}, id)
 }
 
-// isBypassed reports whether ctx was marked by Without.
-// isBypassed 报告 ctx 是否被 Without 标记过。
-func isBypassed(ctx context.Context) bool {
+// Bypassed reports whether ctx was marked by Without. It is exported so a second
+// path that applies tenant isolation — support/sqlmodel for the SQL builder —
+// reaches the same verdict as the plugin instead of guessing.
+// Bypassed 报告 ctx 是否被 Without 标记过。它导出是因为另一条施加租户隔离的路径
+// （SQL 构造器的 support/sqlmodel）必须与插件得出同一个结论，而不是自己猜。
+func Bypassed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
 	v, _ := ctx.Value(bypassKey{}).(bool)
 	return v
 }
 
-// overrideTenant returns the explicit tenant from WithTenant, if any.
-// overrideTenant 返回 WithTenant 设置的显式租户（若有）。
-func overrideTenant(ctx context.Context) (string, bool) {
+// OverrideTenant returns the explicit tenant set by WithTenant, if any. The
+// plugin checks it before the Handler, and so must every other path: a script
+// that calls WithTenant intends it to win over whatever identity the context
+// happens to carry.
+// OverrideTenant 返回 WithTenant 设置的显式租户（若有）。插件在 Handler 之前检查它，
+// 其它路径也必须如此：脚本调 WithTenant 就是要它压过 ctx 里碰巧带的身份。
+func OverrideTenant(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
 	v, ok := ctx.Value(tenantKey{}).(string)
 	return v, ok
 }

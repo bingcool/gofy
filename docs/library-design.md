@@ -187,7 +187,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`support/sqlbuilder`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`support/sqlbuilder`、`support/sqlmodel`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -244,6 +244,7 @@ internal/* ──> core
 | `support/image` 不依赖 `logger` | 错误通过哨兵错误返回，日志由业务决定 |
 | `support/redis` 只依赖 go-redis | 不 import 任何 gofy 包，可独立使用 |
 | `support/sqlbuilder` 不依赖 gorm、不依赖 `logger` | 它只构造 SQL 字符串；引入 gorm 就说明有人在里面搭第二套执行栈。租户列名用 `DefaultTenantColumn` 复制而非 import `support/tenant`（那会带进 gorm），由测试钉住两边一致 |
+| `support/sqlmodel` 依赖 gorm，`support/sqlbuilder` 不依赖 | 表名与租户列只能从模型来：`TableName()` 与 `schema.LookUpField` 都需要 gorm。把这一半单独成包，构造器才能保持零 gorm 依赖；租户判定因此与 `support/tenant` 共用同一个 `LookUpField` 调用，不存在第二套定义 |
 
 CI 中用一个脚本强制检查（见 §12.3）。
 

@@ -1036,6 +1036,7 @@ support/middleware/ 请求 ID、访问日志、恢复、CORS、限流、JWT、�
 support/registry/ 通用 name -> instance 注册表（可选；单实现由 app/container 注入）
 support/generation/ 当前一代句柄的原子发布与请求级固定（跨 Reload 不换资源）
 support/sqlbuilder/ SQL 构造器（CTE/UNION/谓词树；只产出 SQL 与参数，执行仍走 gorm）
+support/sqlmodel/   模型 → 构造器表：表名取 TableName()，带租户列时自动施加租户条件
 support/db/    GORM MySQL 协议连接管理（MySQL/MariaDB/TiDB/OceanBase/SelectDB）
 support/pg/    GORM PostgreSQL 连接管理（gorm.io/driver/postgres + jackc/pgx/v5）
 support/sqlite/ GORM SQLite 连接管理（glebarez/sqlite，纯 Go 无 cgo）
