@@ -14,7 +14,7 @@ http:
 # 默认关闭。pprof 会输出堆内容、协程栈与命令行（含启动参数），生产环境应把该端口
 # 限制在管理网络，或设置 disable_pprof: true。
 diagnostics:
-  enabled: false          # 打开后 /metrics 与 /debug/pprof/ 同时可用
+  enabled: true          # 打开后 /metrics 与 /debug/pprof/ 同时可用
   addr: 127.0.0.1:6060    # Prometheus 从其他 Pod 抓取时改为 0.0.0.0:6060
   # disable_pprof: true   # 不允许堆转储离开进程时关掉
   # disable_metrics: true # 只要 pprof
