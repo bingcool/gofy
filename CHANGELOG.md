@@ -107,6 +107,41 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/sqllog`: masking now maps values for quoted column lists and for
+  `IN` lists. `INSERT INTO \`users\` (\`password\`, ...) VALUES (...)` — the shape
+  GORM actually emits on MySQL — collected no columns at all, because the
+  quoted-identifier branch never fed the INSERT column list; every value fell
+  back to pattern matching, so a custom column (or the built-in `password`)
+  reached the log in clear text. `col IN (...)` / `col NOT IN (...)` had the
+  same outcome for a different reason: the `IN` keyword cleared the identifier
+  the list branch keys on, leaving that branch unreachable. Both now map each
+  literal to its column; `TestMaskSQLInsertColumnsByPosition` (quoted cases)
+  and `TestMaskSQLInListColumns` cover them.
+- `support/sqllog`: INSERT position mapping now counts VALUES elements instead
+  of literal tokens. `valueIndex` advanced only in the string and numeric
+  literal branches, so an element like `NULL`, `DEFAULT`, `NOW()`, `UUID()`,
+  `TRUE` or `1 + 2` either consumed no position or consumed several: the secret
+  after it mapped to another column, or fell off the end and reached the log in
+  clear text — an arithmetic element even had its `2` masked as if it were the
+  password. Positions now advance at the comma between elements, nested
+  parentheses (function calls, subqueries) no longer reset or close the tuple,
+  and `)` only ends the tuple at depth zero.
+  `TestMaskSQLInsertValueElements` covers the matrix; the positional test gains
+  a `NULL` case.
+- `support/tenant`, `support/sqlmodel`, `support/sqlbuilder`: all three tenant
+  paths now resolve the tenant with one rule. An empty or blank
+  `tenant.WithTenant(ctx, "")` used to mean three different things — the plugin
+  and sqlmodel failed closed, masking the JWT tenant the context already
+  carried, while `sqlbuilder.TenantScope` dropped the predicate or, for a
+  whitespace value, emitted one bound to `"   "`. `WithTenant` now does what its
+  comment promises: an empty or blank id removes the override and falls back to
+  the identity. Resolution lives in `tenant.ResolveTenant` for the Handler paths
+  and `frameworkcontext.EffectiveTenant` for paths that read the framework
+  identity directly; both trim once, so a padded override binds the same tenant
+  everywhere instead of `" tenant_a "` on one path and `"tenant_a"` on another.
+  `TestTenantPathAgreement` asserts the plugin, sqlmodel and TenantScope agree
+  on one context for the identity-only, empty, blank, padded-override and
+  padded-propagated-header cases.
 - `support/tenant`: the two write-side ways of losing a tenant are closed.
   `Save` and `Select("*").Updates` build their SET list from every field of the
   destination, so the ordinary "primary key plus the fields being changed"
