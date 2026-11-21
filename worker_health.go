@@ -61,7 +61,15 @@ func (h *workerHealth) start() error {
 	return nil
 }
 
-func (h *workerHealth) setReady()    { h.state.Store(workerHealthReady) }
+// setReady moves the endpoint to ready only from starting. Once a stop has
+// begun the state is final: a Ready signal that was already buffered must not
+// turn the probe green again while the process is draining.
+// setReady 只在 starting 时把端点置为 ready。停机一旦开始状态就是终态：已经进入
+// 缓冲的 Ready 信号不能让 drain 中的探针重新变绿。
+func (h *workerHealth) setReady() {
+	h.state.CompareAndSwap(workerHealthStarting, workerHealthReady)
+}
+
 func (h *workerHealth) setStopping() { h.state.Store(workerHealthStopping) }
 
 // stop shuts the endpoint down inside its own budget. It is safe to call twice.

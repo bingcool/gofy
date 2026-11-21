@@ -163,14 +163,18 @@ func newNewCmd() *cobra.Command {
 //
 // A directory that already holds a Go module is a normal target, not a
 // conflict: the flow this command is built for is `go mod init` first. In that
-// case go.mod is merged (the framework requirement and replace are added, the
-// module line and the caller's other requirements stay), and every other file
-// that already exists is left alone unless force is set — the scaffold must not
-// overwrite work it did not create.
+// case go.mod is always merged (the framework requirement and replace are added,
+// the module line, the go directive and the caller's other requirements stay),
+// even under force: dropping them is silent data loss, and the flag is about
+// overwriting files the scaffold generated, not the caller's module identity.
+// Every other file that already exists is left alone unless force is set — the
+// scaffold must not overwrite work it did not create.
 // Generate 把内嵌模板渲染到 dir。
 //
 // 已有 Go module 的目录是正常目标而不是冲突：本命令面向的流程就是先 `go mod init`。
-// 这种情况下 go.mod 走合并（补框架依赖与 replace，module 行和调用方其它依赖原样保留），
+// 这种情况下 go.mod 始终走合并（补框架依赖与 replace，module 行、go 指令和调用方
+// 其它依赖原样保留），force 也不例外：丢掉它们是静默的数据丢失，而这个开关说的是
+// 覆盖脚手架生成的文件，不是调用方的模块身份。
 // 其余已存在的文件在未指定 force 时保持不动——脚手架不该覆盖不是它创建的内容。
 func (s scaffold) Generate(dir string, force bool) error {
 	dir = filepath.Clean(dir)
@@ -182,7 +186,16 @@ func (s scaffold) Generate(dir string, force bool) error {
 	for _, f := range files {
 		outs = append(outs, f.out)
 	}
-	if err := checkAppTarget(dir, force, outs); err != nil {
+	// The check accepts every path the templates can produce, not just the ones
+	// this run writes: turning --with-scripts / --with-worker off and re-running
+	// must not make the directories the previous run created look foreign.
+	// 检查接受模板可能产出的全部路径，而不只是本次要写的：关掉
+	// --with-scripts / --with-worker 后重跑，不能让上一次生成的目录变成外来内容。
+	known, err := templateOutputs()
+	if err != nil {
+		return err
+	}
+	if err := checkAppTarget(dir, force, append(outs, known...)); err != nil {
 		return err
 	}
 	var kept, merged []string
@@ -191,21 +204,28 @@ func (s scaffold) Generate(dir string, force bool) error {
 		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", filepath.Dir(out), err)
 		}
-		if existing, err := os.ReadFile(out); err == nil && !force {
-			if f.out != "go.mod" {
+		if existing, err := os.ReadFile(out); err == nil {
+			// go.mod keeps its merged form under --force too: the module path,
+			// go directive and the caller's own requirements are not the
+			// scaffold's to drop, and losing them prints no warning.
+			// 即使指定 --force，go.mod 仍保持合并语义：module 路径、go 指令与调用方
+			// 自己的依赖不归脚手架处置，而丢掉它们不会有任何提示。
+			if f.out == "go.mod" {
+				content, changed := mergeGoMod(existing, s)
+				if !changed {
+					kept = append(kept, f.out)
+					continue
+				}
+				if err := os.WriteFile(out, content, 0o644); err != nil {
+					return fmt.Errorf("write %s: %w", out, err)
+				}
+				merged = append(merged, f.out)
+				continue
+			}
+			if !force {
 				kept = append(kept, f.out)
 				continue
 			}
-			content, changed := mergeGoMod(existing, s)
-			if !changed {
-				kept = append(kept, f.out)
-				continue
-			}
-			if err := os.WriteFile(out, content, 0o644); err != nil {
-				return fmt.Errorf("write %s: %w", out, err)
-			}
-			merged = append(merged, f.out)
-			continue
 		}
 		if err := os.WriteFile(out, f.content, filePerm(f.out)); err != nil {
 			return fmt.Errorf("write %s: %w", out, err)
@@ -298,6 +318,34 @@ func (s scaffold) enabled(out string) bool {
 	default:
 		return true
 	}
+}
+
+// templateOutputs lists every path the embedded templates can produce,
+// regardless of the current flags. Generate writes only the enabled subset, but
+// the target check has to accept everything this command itself may have
+// generated before: otherwise turning an optional module off turns its
+// directory into an intruder.
+// templateOutputs 列出全部模板可能产出的路径，与当前开关无关。Generate 只写启用的
+// 子集，但目标检查必须接受本命令自己此前可能生成的全部内容：否则关掉一个可选模块，
+// 它的目录就变成了入侵者。
+func templateOutputs() ([]string, error) {
+	var outs []string
+	err := fs.WalkDir(templatesFS, "templates", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if out, ok := outputPath(strings.TrimPrefix(p, "templates/")); ok {
+			outs = append(outs, out)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return outs, nil
 }
 
 func outputPath(name string) (string, bool) {

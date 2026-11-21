@@ -211,6 +211,145 @@ func TestAppFailsWhenDiagnosticsPortIsTaken(t *testing.T) {
 	}
 }
 
+// slowRequestModule keeps one business request in flight while shutdown
+// starts, so the drain path is observable.
+// slowRequestModule 让一个业务请求在停机开始时仍在途，从而能观察排空路径。
+type slowRequestModule struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (slowRequestModule) Name() string { return "slow-request" }
+
+func (m slowRequestModule) Register(router *support.Router) error {
+	router.GET("/slow", func(c *gin.Context) {
+		select {
+		case m.started <- struct{}{}:
+		default:
+		}
+		<-m.release
+		c.String(http.StatusOK, "drained")
+	})
+	return nil
+}
+
+// TestDiagnosticsShutdownKeepsTheBusinessBudget pins the budget split: an
+// operational request that outlives its own short budget must not consume the
+// time the main server uses to drain in-flight business requests. Before the
+// split, one 30s pprof profile ate the whole shutdown timeout, srv.Shutdown
+// returned with an expired context and srv.Close cut the drain short.
+// TestDiagnosticsShutdownKeepsTheBusinessBudget 固定预算划分：活得比自身短预算更久的
+// 运维请求，不能吃掉主服务用于排空在途业务请求的时间。拆分之前，一个 30s 的 pprof
+// profile 会耗尽整个停机超时，srv.Shutdown 拿到过期 ctx 后 srv.Close 把排空截断。
+func TestDiagnosticsShutdownKeepsTheBusinessBudget(t *testing.T) {
+	httpPort := freePort(t)
+	diagPort := freePort(t)
+	mod := slowRequestModule{started: make(chan struct{}, 1), release: make(chan struct{})}
+
+	app, err := New(
+		WithName("diagnostics-budget-test"),
+		WithEnv("test"),
+		WithHTTP(HTTPConfig{Host: "127.0.0.1", Port: httpPort, Mode: "test"}),
+		WithLogger(zap.NewNop()),
+		WithShutdownTimeout(5*time.Second),
+		WithDiagnostics(diagnostics.Config{
+			Enabled: true,
+			Addr:    fmt.Sprintf("127.0.0.1:%d", diagPort),
+		}),
+		WithModules(mod),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(context.Background()) }()
+	waitReady(t, app)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// One business request that stays in flight across the whole shutdown.
+	// 一个横跨整个停机过程的在途业务请求。
+	slowDone := make(chan error, 1)
+	go func() {
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/slow-request/slow", httpPort))
+		if err != nil {
+			slowDone <- err
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			slowDone <- fmt.Errorf("slow request = %d, body=%s", resp.StatusCode, body)
+			return
+		}
+		slowDone <- nil
+	}()
+	select {
+	case <-mod.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("slow handler never started")
+	}
+
+	// A pprof profile that outlives the diagnostics budget by far.
+	// 一个远超诊断预算的 pprof profile。
+	profileDone := make(chan struct{})
+	go func() {
+		defer close(profileDone)
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/debug/pprof/profile?seconds=10", diagPort))
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+	// Give the profile time to reach the handler; a request that has not
+	// arrived yet would be refused instantly when the listener closes, and the
+	// test would prove nothing.
+	// 给 profile 一点时间进入 handler：还没到达的请求会在监听关闭时立刻被拒，
+	// 那样测试什么也证明不了。
+	time.Sleep(300 * time.Millisecond)
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- app.Shutdown(context.Background()) }()
+
+	// The diagnostics listener closes once its own budget runs out and cuts
+	// the profile request; only then is the business request released, which
+	// is what tells the two implementations apart.
+	// 诊断监听在自己的预算耗尽后关闭并切断 profile 请求；这时才放行业务请求，
+	// 两种实现由此区分。
+	select {
+	case <-profileDone:
+	case <-time.After(20 * time.Second):
+		t.Fatal("diagnostics listener never closed its stalled request")
+	}
+	close(mod.release)
+
+	select {
+	case err := <-slowDone:
+		if err != nil {
+			t.Fatalf("in-flight request was not drained: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight request never finished")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("shutdown did not finish")
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after Shutdown")
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

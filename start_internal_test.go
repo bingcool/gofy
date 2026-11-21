@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/support"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestDuplicatePID(t *testing.T) {
@@ -432,5 +434,65 @@ func TestRunReportsStartupFailureToTheDaemonParent(t *testing.T) {
 	report := strings.TrimSpace(line)
 	if !strings.HasPrefix(report, "error: ") || !strings.Contains(report, "listen") {
 		t.Fatalf("startup report = %q, want an error naming the listen failure", report)
+	}
+}
+
+// syncRecorder counts Sync calls so the test can tell whether cleanup flushed
+// the SQL channel.
+// syncRecorder 记录 Sync 调用次数，测试据此判断 cleanup 是否 flush 了 SQL 通道。
+type syncRecorder struct {
+	mu    sync.Mutex
+	syncs int
+}
+
+func (r *syncRecorder) Write(p []byte) (int, error) { return len(p), nil }
+
+func (r *syncRecorder) Sync() error {
+	r.mu.Lock()
+	r.syncs++
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *syncRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.syncs
+}
+
+// TestCleanupSyncsSQLLogger pins the last flush: sql_outputs gives the SQL
+// channel its own file logger, and every retired generation flushes it. The
+// final cleanup has to do the same, or the last statements before exit stay in
+// the buffer.
+// TestCleanupSyncsSQLLogger 固定最后一次 flush：sql_outputs 让 SQL 通道成为独立文件
+// logger，每个退役代都会 flush 它。最终 cleanup 也必须如此，否则退出前的最后几条 SQL
+// 会留在缓冲区里。
+func TestCleanupSyncsSQLLogger(t *testing.T) {
+	rec := &syncRecorder{}
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+		zapcore.AddSync(rec),
+		zapcore.InfoLevel,
+	)
+	app, err := New(
+		WithName("cleanup-sql-log-test"),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// New with an injected logger does not own it; the SQL channel here stands
+	// in for the app-owned one built from sql_outputs, which is the path that
+	// flushes.
+	// 注入 logger 时 New 不拥有它；这里的 SQL 通道代表由 sql_outputs 构建、属于 App
+	// 的那一个，也正是会 flush 的路径。
+	app.ownLogger = true
+	app.sqlLogger = zap.New(core)
+
+	if err := app.cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if rec.count() == 0 {
+		t.Fatal("cleanup did not sync the SQL logger")
 	}
 }

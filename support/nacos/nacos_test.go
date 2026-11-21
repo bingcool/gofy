@@ -849,6 +849,73 @@ func TestWatcherRunClosesItsClient(t *testing.T) {
 //
 // 重试不能依赖文件：Sync 只在重写文件时置 Changed，而 apply 失败时新内容已经写好，
 // 第二遍看到的是 Changed=false，仍必须调用 handler。
+// TestWatcherRestoresTheAppliedContentAfterRollback pins the case where a
+// change is written to disk, rejected by the handler, and then rolled back
+// remotely. Listen compares against the applied digest, so it keeps answering
+// "no change"; without an explicit resync the rejected version would stay on
+// disk while the process runs the old one.
+// TestWatcherRestoresTheAppliedContentAfterRollback 固定这条路径：变更已写入磁盘、
+// 被 handler 拒绝，随后服务端回滚。Listen 比对的是已应用摘要，会一直回答"没有变更"；
+// 没有显式重同步，被拒绝的版本会留在磁盘上，而进程跑的是旧配置。
+func TestWatcherRestoresTheAppliedContentAfterRollback(t *testing.T) {
+	first := "env: dev\nhttp:\n  port: 8080\n"
+	second := "env: dev\nhttp:\n  port: 9090\n"
+	fake := &fakeServer{content: first}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := testConfig(t, server.URL, file)
+	cfg.RetryDelay = 10 * time.Millisecond
+
+	var attempts atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Watch(ctx, cfg, WithOnChange(func(_ context.Context, _ Result) error {
+			attempts.Add(1)
+			return errors.New("reload failed: bad value")
+		}))
+	}()
+
+	waitFor(t, 5*time.Second, func() bool {
+		data, err := os.ReadFile(file)
+		return err == nil && string(data) == first
+	}, "initial config written")
+
+	fake.set(second, true)
+	waitFor(t, 5*time.Second, func() bool {
+		data, err := os.ReadFile(file)
+		return err == nil && string(data) == second
+	}, "rejected config written to disk")
+
+	// The server rolls back to the content the process applied. Its digest
+	// matches the listen cursor, so the watcher is told "no change".
+	// 服务端回滚到进程应用过的内容。其摘要与监听游标一致，watcher 因此得到"没有变更"。
+	fake.set(first, false)
+	waitFor(t, 5*time.Second, func() bool {
+		data, err := os.ReadFile(file)
+		return err == nil && string(data) == first
+	}, "applied config restored to disk")
+
+	// The rollback is not a new change: content the process already applied
+	// must not be handed to the handler again.
+	// 回滚不是新变更：本进程已经应用过的内容不应再交给 handler。
+	settled := attempts.Load()
+	time.Sleep(100 * time.Millisecond)
+	if got := attempts.Load(); got != settled {
+		t.Fatalf("handler replayed an already-applied config: %d -> %d", settled, got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not stop after cancel")
+	}
+}
+
 func TestWatcherRetriesAFailedApply(t *testing.T) {
 	first := "env: dev\nhttp:\n  port: 8080\n"
 	second := "env: dev\nhttp:\n  port: 9090\n"

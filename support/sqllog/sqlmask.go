@@ -236,6 +236,8 @@ func maskSQL(sql string, set maskSet) string {
 
 	lastIdent := ""                // last identifier seen, normalized
 	lastKeyword := ""              // last keyword seen, upper case
+	betweenColumn := ""            // column of a BETWEEN whose upper bound is pending
+	inInsertStatement := false     // the statement being scanned is an INSERT
 	inListColumn := ""             // column of an IN (...) list currently open
 	inListDepth := 0               // parenthesis depth of that list
 	insertColumns := []string(nil) // columns of INSERT INTO t (...) — by value position
@@ -321,7 +323,15 @@ func maskSQL(sql string, set maskSet) string {
 				// 字面量会清空 lastKeyword，第二组之后的元组不能靠 "lastKeyword == VALUES" 识别。
 				inValuesTuple = true
 				valuesDepth, valueIndex = 0, 0
-			} else if lastIdent != "" {
+			} else if inInsertStatement && lastIdent != "" {
+				// Only an INSERT column list has the "table (col, col)" shape:
+				// the identifier before the parenthesis is the table. Treating
+				// every "name (" as a column list made LOWER(employee_no) lose
+				// the column, so its literal was never matched against the
+				// configured names.
+				// 只有 INSERT 列清单是 "表 (列, 列)" 的形态：括号前的标识符是表名。
+				// 把每个 "名字 (" 都当成列清单，会让 LOWER(employee_no) 丢掉列上下文，
+				// 其字面量因此不再与配置的列名比对。
 				collectingColumns = true
 				insertColumns = insertColumns[:0]
 			}
@@ -365,14 +375,26 @@ func maskSQL(sql string, set maskSet) string {
 			if keyword := strings.ToUpper(token); keywordSet[keyword] {
 				lastKeyword = keyword
 				if keyword == "INSERT" {
+					inInsertStatement = true
 					insertColumns = nil
 					collectingColumns, inValuesTuple = false, false
 					valuesDepth, valueIndex = 0, 0
+				}
+				// SELECT / UPDATE / DELETE open a statement shape where a
+				// parenthesis after a name is a call or a subquery, never a
+				// column list. Without this, "SELECT LOWER(name)" would collect
+				// "name" as an INSERT column.
+				// SELECT / UPDATE / DELETE 开启的语句形态里，名字后的括号是函数调用或
+				// 子查询，不是列清单。不区分的话 "SELECT LOWER(name)" 会把 name
+				// 当成 INSERT 的列。
+				if keyword == "SELECT" || keyword == "UPDATE" || keyword == "DELETE" {
+					inInsertStatement = false
 				}
 				// ON DUPLICATE KEY UPDATE / ON CONFLICT starts a new clause;
 				// its literals are not INSERT values any more.
 				// ON DUPLICATE KEY UPDATE / ON CONFLICT 开启新子句，其后的字面量不再是 INSERT 值。
 				if keyword == "ON" {
+					inInsertStatement = false
 					insertColumns, mappingValues, inValuesTuple = nil, false, false
 					valuesDepth, valueIndex = 0, 0
 				}
@@ -395,8 +417,17 @@ func maskSQL(sql string, set maskSet) string {
 				// its column.
 				// IN 前的标识符命名随后括号打开的列表（col IN (...)、col NOT IN (...））。
 				// 在这里清掉它，会让列表分支永远不可达，IN 里的字面量也就映射不到列。
-				if keyword != "IN" && keyword != "NOT" {
+				if keyword != "IN" && keyword != "NOT" && !comparisonKeywords[keyword] {
 					lastIdent = ""
+				}
+				// BETWEEN has two bounds: remember the column so the second one,
+				// which follows AND, is still attributed to it.
+				// BETWEEN 有两个边界：记住列名，让跟在 AND 之后的后一个边界仍归属该列。
+				if keyword == "BETWEEN" {
+					betweenColumn = lastIdent
+				}
+				if keyword == "AND" && betweenColumn != "" {
+					lastIdent, betweenColumn = betweenColumn, ""
 				}
 			} else if collectingColumns {
 				insertColumns = append(insertColumns, normalizeColumn(token))
@@ -481,6 +512,17 @@ func isIdentPart(c byte) bool {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
+// comparisonKeywords keep the column they compare in the identifier slot.
+// "col LIKE 'x'", "col BETWEEN 1 AND 2" and "col REGEXP 'x'" all still describe
+// col, so the literal that follows has to be matched against it instead of
+// falling back to value patterns alone.
+// comparisonKeywords 让被比较的列留在标识符位置："col LIKE 'x'"、
+// "col BETWEEN 1 AND 2"、"col REGEXP 'x'" 说的都是 col，其后的字面量必须与它比对，
+// 而不是只靠值模式兜底。
+var comparisonKeywords = map[string]bool{
+	"LIKE": true, "BETWEEN": true, "REGEXP": true, "RLIKE": true, "IS": true,
+}
+
 // keywordSet keeps SQL keywords out of the identifier slot: without it "AND"
 // would look like a column name and every value after it would be tested
 // against the blacklist.
@@ -496,4 +538,5 @@ var keywordSet = map[string]bool{
 	"EXISTS": true, "CASE": true, "WHEN": true, "THEN": true, "ELSE": true,
 	"END": true, "ASC": true, "DESC": true, "DISTINCT": true, "DUPLICATE": true,
 	"KEY": true, "REPLACE": true, "FOR": true, "USING": true, "TABLE": true,
+	"REGEXP": true, "RLIKE": true,
 }

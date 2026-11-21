@@ -947,6 +947,14 @@ func (a *App) abort(err error) error {
 	return err
 }
 
+// diagnosticsShutdownBudget caps how long the operational endpoints may hold
+// up a shutdown. A pprof profile runs for 30s by default; letting it consume
+// the shared budget left the main server and modules with an expired context,
+// which forced in-flight business requests to be closed.
+// diagnosticsShutdownBudget 限制运维端点最多能拖住停机多久。pprof 的 profile 默认
+// 跑 30s；让它消耗共享预算，主服务与模块就会拿到过期的 ctx，在途业务请求被强制断开。
+const diagnosticsShutdownBudget = 2 * time.Second
+
 // cleanup runs once and releases every resource the App owns.
 // cleanup 只执行一次，释放 App 持有的全部资源；重复调用返回首次的结果。
 func (a *App) cleanup() error {
@@ -996,12 +1004,26 @@ func (a *App) cleanup() error {
 		// a pprof profile captured while modules are shutting down reports a state
 		// that never existed. A failure here is logged, not escalated — the
 		// operational endpoint must not decide whether the process stops.
+		//
+		// It gets its own budget on purpose. Sharing the shutdown timeout meant a
+		// single 30s profile could consume all of it, after which srv.Shutdown
+		// and every module Stop received an expired context and in-flight
+		// requests were closed instead of drained.
 		// 在应用服务之前关闭诊断监听：在模块停机期间抓取或采到的 pprof 描述的是一个
 		// 从未存在过的状态。这里的失败只记录，不升级——运维端点不该决定进程能否停下。
+		//
+		// 它刻意使用独立预算。共享停机超时意味着一个 30s 的 profile 就能把它耗尽，
+		// 随后 srv.Shutdown 与所有模块 Stop 都拿到过期 ctx，在途请求被强断而不是排空。
 		if a.diagnostics != nil {
-			if err := a.diagnostics.Shutdown(ctx); err != nil {
+			diagTimeout := timeout
+			if diagTimeout > diagnosticsShutdownBudget {
+				diagTimeout = diagnosticsShutdownBudget
+			}
+			diagCtx, diagCancel := context.WithTimeout(context.Background(), diagTimeout)
+			if err := a.diagnostics.Shutdown(diagCtx); err != nil {
 				lg.Warn("diagnostics shutdown failed", zap.Error(err))
 			}
+			diagCancel()
 		}
 
 		if a.srv != nil && a.serving {
@@ -1061,7 +1083,11 @@ func (a *App) cleanup() error {
 			}
 		}
 		if a.ownLogger {
-			syncLoggers(a.logger, a.systemLogger, a.accessLogger)
+			// sqlLogger is a separate channel when sql_outputs is configured;
+			// the retired generations flush it, so the final one has to as well.
+			// 配置 sql_outputs 后 sqlLogger 是独立通道；退役代都会 flush 它，最后一代
+			// 也必须如此。
+			syncLoggers(a.logger, a.systemLogger, a.accessLogger, a.sqlLogger)
 		}
 
 		a.cleanupErr = errors.Join(errs...)

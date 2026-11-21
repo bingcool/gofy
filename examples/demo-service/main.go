@@ -71,6 +71,12 @@ func main() {
 	// 只有 HTTP 进程挂监听：worker 运行期保持不变，配置变更由部署层滚动重启生效。
 	watchEnabled := plan.Watch && nacosCfg.Enabled && nacosCfg.Watch
 
+	// Capture this before the fallback writes GOFY_ENV: re-reading it afterwards
+	// is always true, and the reloader would stop letting a config change drive
+	// the environment.
+	// 必须在回落到 config.yaml 写入 GOFY_ENV 之前取这个答案：之后再读恒为真，reloader 就不再
+	// 让配置变更驱动环境变量。
+	envFromProcess := strings.TrimSpace(os.Getenv("GOFY_ENV")) != ""
 	cfg := &config.Config{}
 	if plan.LoadConfig {
 		loaded, err := config.Load(ctx, configPath())
@@ -80,7 +86,6 @@ func main() {
 		cfg = loaded
 		// 进程显式设置了 GOFY_ENV 时以它为准；否则回落到 config.yaml 的 env，
 		// 让 systemenv 与 Runtime.Env 读到的环境保持一致。
-		envFromProcess := strings.TrimSpace(os.Getenv("GOFY_ENV")) != ""
 		if !envFromProcess {
 			if err := os.Setenv("GOFY_ENV", cfg.Env); err != nil {
 				fatalf("set GOFY_ENV: %v", err)
@@ -131,7 +136,7 @@ func main() {
 		nacosCfg:       nacosCfg,
 		watch:          watchEnabled,
 		httpCfg:        cfg.HTTP,
-		envFromProcess: strings.TrimSpace(os.Getenv("GOFY_ENV")) != "",
+		envFromProcess: envFromProcess,
 		policy:         policy,
 	}
 

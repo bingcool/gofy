@@ -58,6 +58,11 @@ func TestConfigValidate(t *testing.T) {
 		{"cert without key", Config{TLS: TLSConfig{CertFile: "client.pem"}}},
 		{"insecure with tls", Config{Insecure: true, TLS: TLSConfig{CAFile: "ca.pem"}}},
 		{"batch order", Config{Batch: BatchConfig{MaxQueueSize: 10, MaxExportBatchSize: 20}}},
+		// Only one side is set: validation has to judge the pair that will
+		// actually be used, not the zero values as written.
+		// 只设置了一侧：校验必须看真正生效的那一对值，而不是写下来的零值。
+		{"batch size against default queue", Config{Batch: BatchConfig{MaxExportBatchSize: 3000}}},
+		{"default batch size against small queue", Config{Batch: BatchConfig{MaxQueueSize: 10}}},
 		{"batch negative", Config{Batch: BatchConfig{Timeout: -time.Second}}},
 	}
 	for _, tc := range tests {
@@ -85,5 +90,22 @@ func TestConfigValidateAcceptsDefaults(t *testing.T) {
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+// TestBatchConfigAcceptsEqualEffectiveBounds keeps the default-filled check
+// honest: batch == queue is allowed, and the defaults themselves are valid.
+// TestBatchConfigAcceptsEqualEffectiveBounds 保证按生效值校验没有收紧过头：
+// batch 等于 queue 是允许的，默认值本身也合法。
+func TestBatchConfigAcceptsEqualEffectiveBounds(t *testing.T) {
+	for _, b := range []BatchConfig{
+		{},                         // 2048 / 512
+		{MaxExportBatchSize: 2048}, // 2048 / 2048
+		{MaxQueueSize: 512},        // 512 / 512
+		{MaxQueueSize: 4096, MaxExportBatchSize: 1024},
+	} {
+		if err := b.Validate(); err != nil {
+			t.Errorf("Validate(%+v) = %v, want nil", b, err)
+		}
 	}
 }

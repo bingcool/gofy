@@ -1,6 +1,7 @@
 package gofy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
@@ -207,6 +208,71 @@ func TestStopWorkerWildcardStopsEveryWorkerPIDFile(t *testing.T) {
 	// A pid that is gone leaves no pid file behind.
 	if _, statErr := os.Stat(orderPID); !os.IsNotExist(statErr) {
 		t.Fatalf("stale worker pid file survived the stop: %v", statErr)
+	}
+}
+
+// TestStopWorkerWildcardReportsPartialFailure pins the case that used to be
+// swallowed: one worker pid file is stale while another worker ignores SIGTERM.
+// The joined error must not read as "nothing was running", or `worker restart`
+// starts a second process on top of the one that is still alive.
+// TestStopWorkerWildcardReportsPartialFailure 固定过去被吞掉的情形：一个 worker 的
+// pid 文件已过期，另一个 worker 忽略 SIGTERM。合并后的错误不能读成"本来就没在运行"，
+// 否则 `worker restart` 会在仍活着的进程之上再起一个。
+func TestStopWorkerWildcardReportsPartialFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pid based stop is not supported on windows")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestStopHelperProcess")
+	cmd.Env = append(os.Environ(), "GOFY_STOP_HELPER=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("spawn helper: %v", err)
+	}
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(ready) != "ready" {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		t.Fatalf("helper readiness: line=%q err=%v", ready, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	defer func() {
+		_ = cmd.Process.Kill()
+		<-done
+	}()
+
+	pidPath := filepath.Join(t.TempDir(), "demo.pid")
+	orderPID := workerPIDPath(pidPath, "order")
+	if err := pidfile.WriteRecord(orderPID, pidfile.NewRecord(cmd.Process.Pid), 0o644); err != nil {
+		t.Fatalf("write worker pid file: %v", err)
+	}
+	// This one cannot be alive, so stop reports ErrNotRunning for it.
+	stalePID := workerPIDPath(pidPath, commandline.WorkerAllPIDToken)
+	if err := os.WriteFile(stalePID, []byte(strconv.Itoa(999999)), 0o644); err != nil {
+		t.Fatalf("write stale pid file: %v", err)
+	}
+
+	app, err := New(
+		WithName("stop-worker-partial-test"),
+		WithPIDFile(pidPath),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = app.stop(context.Background(), commandline.StopOptions{
+		Worker:  commandline.WorkerGroupAll,
+		Timeout: 150 * time.Millisecond,
+	})
+	if !errors.Is(err, ErrStopTimeout) {
+		t.Fatalf("stop worker wildcard: got %v, want ErrStopTimeout", err)
+	}
+	if isRestartIgnorableError(err) {
+		t.Fatalf("a partial stop failure was treated as nothing to stop: %v", err)
 	}
 }
 

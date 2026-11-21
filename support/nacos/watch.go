@@ -194,6 +194,15 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// 让下面的重试成立：Sync 只在重写本地文件时置 Changed，而 apply 失败时新内容已经写
 	// 好，重试时 Changed 恒为 false。
 	applied := current
+	// written is the digest of the content currently on disk. It runs ahead of
+	// applied exactly once: Sync wrote a change that the handler then rejected.
+	// If the server later rolls back to the applied digest, Listen compares
+	// against that digest, answers "no change", and nothing would ever rewrite
+	// the rejected version — so the no-change branch has to notice the gap.
+	// written 是当前磁盘内容的摘要。它恰好在一种情况下领先 applied：Sync 写入了变更、
+	// 随后 handler 拒绝。若服务端之后回滚到已应用摘要，Listen 比对的是该摘要、会回答
+	// "没有变更"，被拒绝的版本就再也不会被重写——因此无变更分支必须发现这个差值。
+	written := current
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -212,6 +221,35 @@ func (w *Watcher) Run(ctx context.Context) error {
 			continue
 		}
 		if !changed {
+			// The server says its content is what this process applied, but the
+			// file may still hold the version whose handler failed and which
+			// the server then rolled back. Listen compares against the applied
+			// digest rather than the file, so this is the only place that can
+			// put the applied content back on disk.
+			// 服务端说它的内容就是本进程应用过的版本，但文件可能仍停留在"handler 失败、
+			// 服务端随后回滚"的那份内容上。Listen 比对的是已应用摘要而不是文件，这里是
+			// 唯一能把已应用内容写回磁盘的地方。
+			if written != current {
+				w.logger.Warn("nacos local file holds a rejected config, resyncing",
+					zap.String("file", w.client.cfg.File),
+					zap.String("applied", current),
+					zap.String("written", written),
+				)
+				result, syncErr := w.client.Sync(ctx)
+				if syncErr != nil {
+					w.logger.Error("nacos config resync failed", zap.Error(syncErr))
+					if !sleep(ctx, cfg.RetryDelay) {
+						return ctx.Err()
+					}
+					continue
+				}
+				written = result.Digest
+				if result.Changed {
+					w.logger.Info("nacos config file restored to the applied content",
+						zap.String("file", result.File))
+				}
+				continue
+			}
 			// A correct server answers "no change" only after holding the
 			// request for the full listen timeout. An answer at less than half
 			// of it means the hold was cut short — proxy, error page, server
@@ -236,6 +274,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		// Sync leaves the file holding the remote content, whether or not the
+		// handler below accepts it.
+		// 无论下面的 handler 是否接受，Sync 之后文件里都是远端内容。
+		written = result.Digest
 		if result.Digest == applied {
 			// Nothing to act on: either the content is what this process already
 			// applied, or the server reported a change that Sync found identical

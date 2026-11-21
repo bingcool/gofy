@@ -46,6 +46,16 @@ const (
 	ProtocolHTTP = "http"
 )
 
+// Batch defaults, shared by BatchConfig.withDefaults and BatchConfig.Validate:
+// validation has to judge the pair that will actually be used, so both paths
+// need the same numbers.
+// 批处理默认值，由 BatchConfig.withDefaults 与 BatchConfig.Validate 共用：校验必须
+// 判断真正会生效的那一对值，两条路径因此要用同一组数字。
+const (
+	defaultMaxQueueSize       = 2048
+	defaultMaxExportBatchSize = 512
+)
+
 // Compression modes.
 // 导出压缩方式：gzip 或 none。
 const (
@@ -265,7 +275,21 @@ func (b BatchConfig) Validate() error {
 	if b.MaxQueueSize < 0 || b.MaxExportBatchSize < 0 {
 		return errors.New("otel: batch sizes must not be negative")
 	}
-	if b.MaxQueueSize > 0 && b.MaxExportBatchSize > b.MaxQueueSize {
+	// Validate the effective pair, not the raw one: a caller who sets only
+	// MaxExportBatchSize gets the default queue filled in later, and
+	// 2048/3000 is exactly the combination this rule rejects. Guarding on
+	// MaxQueueSize > 0 skipped the check for that caller.
+	// 校验生效值而不是原始值：只设置 MaxExportBatchSize 的调用方稍后会拿到默认队列，
+	// 而 2048/3000 正是这条规则要拒绝的组合。用 MaxQueueSize > 0 作守卫会跳过这类调用方。
+	queue := b.MaxQueueSize
+	if queue == 0 {
+		queue = defaultMaxQueueSize
+	}
+	batch := b.MaxExportBatchSize
+	if batch == 0 {
+		batch = defaultMaxExportBatchSize
+	}
+	if batch > queue {
 		return errors.New("otel: batch max_export_batch_size must not exceed max_queue_size")
 	}
 	return nil
@@ -319,10 +343,10 @@ func (b BatchConfig) withDefaults() BatchConfig {
 		out.Timeout = 5 * time.Second
 	}
 	if out.MaxQueueSize == 0 {
-		out.MaxQueueSize = 2048
+		out.MaxQueueSize = defaultMaxQueueSize
 	}
 	if out.MaxExportBatchSize == 0 {
-		out.MaxExportBatchSize = 512
+		out.MaxExportBatchSize = defaultMaxExportBatchSize
 	}
 	if out.ExportTimeout == 0 {
 		out.ExportTimeout = 30 * time.Second

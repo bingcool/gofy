@@ -327,13 +327,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// registerPprof mounts the standard handlers on a private mux. The package is
-// not blank-imported on purpose: net/http/pprof's init registers on
-// http.DefaultServeMux, which would expose the same endpoints from any listener
-// this process ever serves with the default mux.
-// registerPprof 把标准 handler 挂到私有 mux。这里刻意不用空导入：net/http/pprof
-// 的 init 会注册到 http.DefaultServeMux，本进程任何使用默认 mux 的监听都会因此
-// 暴露同样的端点。
+// registerPprof mounts the standard handlers on a private mux.
+//
+// net/http/pprof also registers the same handlers on http.DefaultServeMux from
+// its init, and an ordinary import runs that init exactly like a blank import
+// does — no import form suppresses it. What keeps them off the wire is that
+// nothing in this process serves DefaultServeMux: the diagnostics listener, the
+// application server and the worker health endpoint each build their own mux.
+// A future listener that serves DefaultServeMux would expose /debug/pprof on
+// its own address, so it must not; the alternative is to drop this package and
+// re-implement the handlers, which buys isolation at the cost of tracking the
+// standard library's pprof wiring by hand.
+// registerPprof 把标准 handler 挂到私有 mux。
+//
+// net/http/pprof 的 init 同样会把一组 handler 注册到 http.DefaultServeMux，而普通
+// import 与空导入一样会执行该 init——没有任何 import 形式能跳过它。真正让这些端点
+// 不出网的是：本进程没有任何监听使用 DefaultServeMux——诊断监听、应用 server 与
+// worker 健康端各自新建 mux。将来若有人用 DefaultServeMux 提供服务，/debug/pprof
+// 就会出现在那个地址上，因此不能这么做；另一条路是弃用本包、自行实现这些 handler，
+// 那能换来隔离，代价是要手工跟进标准库的 pprof 接线。
 func registerPprof(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)

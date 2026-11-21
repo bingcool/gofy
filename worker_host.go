@@ -277,6 +277,14 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 			if !allReady || ready {
 				continue
 			}
+			// The Ready signal can already sit in the buffer when shutdown
+			// starts. A process that is draining must not report ready: the
+			// scheduler would keep sending work into the drain window.
+			// 停机开始时 Ready 信号可能已经躺在缓冲里。正在 drain 的进程不能报就绪：
+			// 否则调度器会继续把任务打进 drain 窗口。
+			if runCtx.Err() != nil {
+				continue
+			}
 			ready = true
 			a.markReady()
 			if health != nil {

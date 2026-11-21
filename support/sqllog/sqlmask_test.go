@@ -382,6 +382,94 @@ func TestMaskSQLInListColumns(t *testing.T) {
 	}
 }
 
+// TestMaskSQLComparisonKeepsColumnContext pins the comparison shapes that used
+// to lose the column: LIKE / BETWEEN / REGEXP cleared the identifier slot, and a
+// function call around the column was read as an INSERT column list. The value
+// then only had the pattern fallback, so a configured column whose values do not
+// look like a phone or an id card leaked verbatim.
+// TestMaskSQLComparisonKeepsColumnContext 固定过去会丢失列上下文的比较形态：
+// LIKE / BETWEEN / REGEXP 清空了标识符位置，列外层的函数调用又被当成 INSERT 列清单。
+// 值于是只剩模式兜底，配置列里那些不像手机号或身份证的值就原样泄漏。
+func TestMaskSQLComparisonKeepsColumnContext(t *testing.T) {
+	set := mustSet(t, MaskConfig{Columns: []string{"employee_no"}})
+	cases := []struct {
+		name    string
+		in      string
+		secrets []string
+	}{
+		{
+			name:    "like",
+			in:      "SELECT * FROM users WHERE employee_no LIKE 'SF-778899'",
+			secrets: []string{"778899"},
+		},
+		{
+			name:    "not like",
+			in:      "SELECT * FROM users WHERE employee_no NOT LIKE 'SF-778899'",
+			secrets: []string{"778899"},
+		},
+		{
+			name:    "between both bounds",
+			in:      "SELECT * FROM users WHERE employee_no BETWEEN 'SF-100000' AND 'SF-778899'",
+			secrets: []string{"100000", "778899"},
+		},
+		{
+			name:    "not between both bounds",
+			in:      "SELECT * FROM users WHERE employee_no NOT BETWEEN 100000 AND 778899",
+			secrets: []string{"100000", "778899"},
+		},
+		{
+			name:    "regexp",
+			in:      "SELECT * FROM users WHERE employee_no REGEXP '^SF-778899'",
+			secrets: []string{"778899"},
+		},
+		{
+			name:    "rlike",
+			in:      "SELECT * FROM users WHERE employee_no RLIKE '^SF-778899'",
+			secrets: []string{"778899"},
+		},
+		{
+			name:    "function wrapped equality",
+			in:      "SELECT * FROM users WHERE LOWER(employee_no) = 'SF-778899'",
+			secrets: []string{"778899"},
+		},
+		{
+			name:    "function wrapped like",
+			in:      "SELECT * FROM users WHERE UPPER(employee_no) LIKE 'SF-778899'",
+			secrets: []string{"778899"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := maskSQL(tc.in, set)
+			for _, secret := range tc.secrets {
+				if strings.Contains(got, secret) {
+					t.Fatalf("sensitive value leaked: %s", got)
+				}
+			}
+		})
+	}
+}
+
+// TestMaskSQLComparisonLeavesOtherColumnsAlone is the counterpart: keeping the
+// column in the identifier slot must not make a comparison on an unrelated
+// column look sensitive.
+// TestMaskSQLComparisonLeavesOtherColumnsAlone 是反向用例：把列留在标识符位置，
+// 不能让无关列上的比较被当成敏感列。
+func TestMaskSQLComparisonLeavesOtherColumnsAlone(t *testing.T) {
+	set := mustSet(t, MaskConfig{Columns: []string{"employee_no"}})
+	for _, in := range []string{
+		"SELECT * FROM users WHERE note LIKE 'SF-778899'",
+		"SELECT * FROM users WHERE note BETWEEN 'SF-100000' AND 'SF-778899'",
+		"SELECT * FROM users WHERE LOWER(note) = 'SF-778899'",
+		// A function call in the SELECT list is not an INSERT column list.
+		"SELECT LOWER(note) FROM users WHERE note = 'SF-778899'",
+	} {
+		if got := maskSQL(in, set); got != in {
+			t.Fatalf("non-sensitive column rewritten: %s", got)
+		}
+	}
+}
+
 func TestMaskSQLKeepsNonSensitiveValues(t *testing.T) {
 	set := mustSet(t, MaskConfig{})
 	in := "SELECT * FROM users WHERE name = 'bob' AND status = 'paid'"
