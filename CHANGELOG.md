@@ -120,6 +120,15 @@ All notable changes to this project are documented here. The format follows
   read. `TestSameTenant` gains the display-string rows in both directions, and
   `TestDisplayStringCannotSpoofTenantScope` proves a spoofed SELECT returns
   nothing and a spoofed DELETE removes nothing.
+- `support/sqllog`: a keyword inside an `IN` list no longer ends the list's
+  column context. `NULL` (and `CASE`, `END`, ...) was treated like any other
+  keyword and cleared `inListColumn`, so in
+  `employee_no IN ('SF-778899', NULL, 'SF-112233')` the literals after `NULL`
+  fell back to pattern matching and a configured sensitive column reached the
+  log in clear text. The context now persists until the closing parenthesis —
+  list members that are keywords are part of the list, not its end.
+  `TestMaskSQLInListColumns` covers `NULL` in the middle, at the start, and in
+  a lower-case `NOT IN` list.
 - `support/sqllog`: masking now maps values for quoted column lists and for
   `IN` lists. `INSERT INTO \`users\` (\`password\`, ...) VALUES (...)` — the shape
   GORM actually emits on MySQL — collected no columns at all, because the

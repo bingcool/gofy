@@ -379,9 +379,15 @@ func maskSQL(sql string, set maskSet) string {
 				if keyword == "VALUES" {
 					mappingValues = true
 				}
-				if keyword != "IN" {
+				// A keyword inside an open IN list (NULL, CASE, ...) is part of
+				// the list, not its end; only the closing parenthesis clears the
+				// column context. Resetting on NULL made every later literal fall
+				// back to pattern matching, leaking a configured sensitive column.
+				// 列表内的关键字（NULL、CASE 等）是列表的一部分而不是结束信号；只有右括号
+				// 才清空列上下文。遇到 NULL 就重置，会让后续每个字面量只靠模式兜底，
+				// 配置的敏感列因此泄漏。
+				if keyword != "IN" && inListDepth == 0 {
 					inListColumn = ""
-					inListDepth = 0
 				}
 				// The identifier before IN names the list the next parenthesis
 				// opens (col IN (...), col NOT IN (...)). Clearing it here made

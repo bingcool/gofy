@@ -340,6 +340,26 @@ func TestMaskSQLInListColumns(t *testing.T) {
 			secrets: []string{"SF-778899"},
 		},
 		{
+			// NULL is a keyword, and the scanner used to treat every keyword
+			// as the end of the list context: the literals after it fell back
+			// to pattern matching and a configured column leaked in clear.
+			// NULL 是关键字，扫描器过去把每个关键字都当成列表上下文的结束：其后的
+			// 字面量只靠模式兜底，配置的敏感列于是明文泄漏。
+			name:    "null inside list",
+			in:      "SELECT * FROM users WHERE employee_no IN ('SF-778899', NULL, 'SF-112233')",
+			secrets: []string{"SF-778899", "SF-112233"},
+		},
+		{
+			name:    "null first in list",
+			in:      "SELECT * FROM users WHERE employee_no IN (NULL, 'SF-112233')",
+			secrets: []string{"SF-112233"},
+		},
+		{
+			name:    "lowercase null in not in list",
+			in:      "SELECT * FROM users WHERE employee_no NOT IN ('SF-778899', null, 'SF-112233')",
+			secrets: []string{"SF-778899", "SF-112233"},
+		},
+		{
 			name: "other column stays untouched",
 			in:   "SELECT * FROM users WHERE note IN ('SF-778899')",
 			keep: []string{"SF-778899"},
