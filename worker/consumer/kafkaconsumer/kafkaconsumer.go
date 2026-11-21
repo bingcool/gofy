@@ -10,7 +10,7 @@ import (
 	"fmt"
 
 	"github.com/bingcool/gofy/support/kafka"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 

@@ -11,8 +11,8 @@ import (
 	"go.uber.org/zap"
 
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
-	gofyworker "github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/rocketmqconsumer"
+	gofyworker "github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/rocketmqconsumer"
 )
 
 // RocketMQConfig describes one RocketMQ subscription.

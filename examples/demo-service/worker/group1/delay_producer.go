@@ -16,7 +16,7 @@ import (
 	gofyqueues "github.com/bingcool/gofy/support/queues"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // DelayEventProducerConfig controls the delayed half of the demo. The numbers

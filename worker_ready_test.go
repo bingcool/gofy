@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 )
 
 // slowStartingWorker is a worker that connects for a while before it can accept

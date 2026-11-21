@@ -11,8 +11,8 @@ import (
 
 	"github.com/bingcool/gofy/support/queues"
 	gofyredis "github.com/bingcool/gofy/support/redis"
-	gofyworker "github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/queuesconsumer"
+	gofyworker "github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/queuesconsumer"
 )
 
 // QueuesConfig describes one Redis queue subscription.

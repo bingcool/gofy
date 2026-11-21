@@ -34,7 +34,7 @@
 
 | # | 位置 | 问题 | 修正 |
 |---|---|---|---|
-| 1 | 附录 A / Phase 1 | `Runner.Ready() bool` 与现有 `Ready() <-chan struct{}`（`support/worker/runner.go:143`）**同名冲突**，照抄编译不过 | 只读视图改名 `IsReady() bool`，`Ready()` 通道保持原样 |
+| 1 | 附录 A / Phase 1 | `Runner.Ready() bool` 与现有 `Ready() <-chan struct{}`（`worker/runner.go:143`）**同名冲突**，照抄编译不过 | 只读视图改名 `IsReady() bool`，`Ready()` 通道保持原样 |
 | 2 | §3.9 / Phase 1 | diagnostics 的 `Validate` 在「enabled 且 metrics、pprof 都关」时返回 `ErrNothingEnabled`（`support/diagnostics/diagnostics.go:93-95`）；只加 `/health` 而不改这条判断，health-only 的诊断端口会被拒绝 | 规则改为「三个端点全关才报错」，并把 `Endpoints.Health` 纳入 |
 | 3 | §4.1 / Phase 2 | worker 进程**根本没有诊断监听**（`worker_host.go` 全文无 diagnostics 引用），只构建 `MeterProvider` 不会产生 `/metrics` | Phase 2 补「worker_host 在指标开启时启动诊断监听（或独立 metrics 监听）」 |
 | 4 | §3.4 / §3.6 | readyGate 用 `sync.Once` 关通道后**永不回退**（`runner.go:147-149`），只看 gate 的 `/readyz` 在 draining 期间仍返回 200 | `/readyz` 必须同时要求 `state == ready`；`groupReady` 检查不能单独表达 draining |
@@ -45,7 +45,7 @@
 
 其余定位复核无误：`start.go:813-830`（两个端点的实现）、`generation.go:219-246`（闸门与 503）、
 `worker_health.go:88-97`（只看 ready 状态）、`gofy.go:484-505`（`buildMetrics` 的 gating）、
-`support/otel/metrics.go:235-310`（现有 instrument）、`support/worker/ready.go`（readyGate）。
+`support/otel/metrics.go:235-310`（现有 instrument）、`worker/ready.go`（readyGate）。
 只有 `gofy.go:487-495` 与 `runner.go:157-300,316-370` 的区间略窄，引用时以函数边界为准。
 
 另有三处小修，已直接改进正文：
@@ -78,8 +78,8 @@
 | Runtime | `TracerProvider`/`Propagator`/`Tracing`；**无 Meter**（`core/runtime.go`） | 子包拿不到指标入口 |
 
 现有 worker 生命周期已经具备可观测的语义，只是没有暴露出来：`Runner` 内部有 readyGate、
-重启计数、drain 预算与 `abandoned` 标记（`support/worker/runner.go:157-300,316-370`），
-`ReadyReporter` 已经让消费者在建连后才上报就绪（`support/worker/ready.go`）。
+重启计数、drain 预算与 `abandoned` 标记（`worker/runner.go:157-300,316-370`），
+`ReadyReporter` 已经让消费者在建连后才上报就绪（`worker/ready.go`）。
 
 消费链路同样已经有完整分支：claim / in-flight / duplicate / 解码失败 / 永久失败 / 可重试 / 成功，
 以及 `OnLedgerError` 钩子（`support/consumer/consume.go:333-345,475-640`）。认领链路有
@@ -496,10 +496,10 @@ app, err := gofy.New(
 
 | 事件 | 位置 | 指标 |
 |---|---|---|
-| Runner 启动/就绪/停机 | `support/worker/runner.go:157-300` + `readyGate` | `worker.ready`、`instances.*` |
-| 重启 | `support/worker/runner.go:316-370`（`supervise`） | `worker.restarts`、`worker.run.duration` |
+| Runner 启动/就绪/停机 | `worker/runner.go:157-300` + `readyGate` | `worker.ready`、`instances.*` |
+| 重启 | `worker/runner.go:316-370`（`supervise`） | `worker.restarts`、`worker.run.duration` |
 | drain 超时 | `runner.go:262-284`（`abandoned`） | `worker.abandoned` |
-| 轮询 tick | `support/worker/ticker.go:62-89`（`runTick`） | `worker.tick.duration/errors` |
+| 轮询 tick | `worker/ticker.go:62-89`（`runTick`） | `worker.tick.duration/errors` |
 | 消息进入 | `support/consumer/consume.go:470`（`Handle` 开始） | `consumer.received` |
 | ACK 决策 | `consume.go:520-640` 的 nil 返回路径 | `consumer.acked{reason=success/duplicate/permanent/decode}` |
 | NACK 决策 | 同上的 error 返回路径 | `consumer.nacked{reason=retry/inflight/decode/ledger}` |
@@ -517,7 +517,7 @@ app, err := gofy.New(
 - `result` 只在一个地方决定：`Handle` 的出口；broker 适配器不重复计消息数，只计 ack 错误。
 - `worker.ready` 的状态来源是 readyGate，不轮询 `w.Run`；由 `setReady`/`setStopping` 触发更新。
 - `instances.ready/total` 需要一个新数据源：readyGate 目前只有 `pending map` 与 `done` 通道
-  （`support/worker/ready.go:54-80`），没有计数访问器。要么加 `reported()`/`registered()` 两个
+  （`worker/ready.go:54-80`），没有计数访问器。要么加 `reported()`/`registered()` 两个
   只读方法，要么在 Runner 里按 `instances` 长度与 gate 差值维护计数——不改 gate 就取不到值。
 - 所有 `Meter` 在指标禁用时是 no-op；调用点无需判空。
 
@@ -573,7 +573,7 @@ app, err := gofy.New(
 | `generation.go:221-241` | liveness 精确路径豁免 |
 | `worker_health.go` | 新增 `/readyz`；`/healthz` 改为纯 liveness |
 | `worker_host.go:202-208,300-301` | 注册 `groupReady` 检查；构造 worker registry |
-| `support/worker/runner.go` | 暴露 `IsReady()`/`State()`（只读视图，不改调度逻辑；`Ready()` 通道保持原样） |
+| `worker/runner.go` | 暴露 `IsReady()`/`State()`（只读视图，不改调度逻辑；`Ready()` 通道保持原样） |
 | `support/diagnostics/diagnostics.go` | `Config.HealthPath`/`DisableHealth`、`Endpoints.Health`，并把 `ErrNothingEnabled` 改成「三个端点全关才报错」（`:93-95`） |
 
 验收：不注册检查时 `/readyz` 行为与响应体不变；摘流时 `/healthz` 200、`/readyz` 503；
@@ -616,7 +616,7 @@ worker 宿主探针测试改探 `/readyz`（并断言 `/healthz` 在启动与 dr
 | `gofy.go:487-495` | `WithMetrics` 独立构建；worker host 也构建 |
 | `worker_host.go` | 指标开启时启动 diagnostics 监听（`diagnostics.New` + `Endpoints{Metrics: metrics.Handler()}`），否则 worker 的 `/metrics` 不存在 |
 | `core/runtime.go` | `MeterProvider metric.MeterProvider` |
-| `support/worker/runner.go`、`ticker.go` | `RunConfig.MeterProvider`（或从 Runtime 取）；状态/重启/run/tick 指标 |
+| `worker/runner.go`、`ticker.go` | `RunConfig.MeterProvider`（或从 Runtime 取）；状态/重启/run/tick 指标 |
 | `worker_host.go` | 构建指标并注入 runner |
 
 验收：指标关闭时所有调用为 no-op、无额外分配；worker 进程 `/metrics` 能看到 `gofy_worker_*`。
@@ -711,7 +711,7 @@ type Runtime struct {
     MeterProvider metric.MeterProvider
 }
 
-// support/worker
+// worker
 // Ready() 已被现有只读通道占用（runner.go:143），只读视图用另一个名字。
 func (r *Runner) IsReady() bool
 func (r *Runner) State() State // Starting/Ready/Draining/Stopped/Failed

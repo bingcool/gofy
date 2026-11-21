@@ -10,7 +10,7 @@ import (
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofysqlite "github.com/bingcool/gofy/support/sqlite"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 
 	"github.com/bingcool/gofy/core"
 	"github.com/yourorg/demo-service/app/appio"

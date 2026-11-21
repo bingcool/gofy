@@ -102,7 +102,7 @@ if err := dq.Add(ctx, order{ID: 1}, 30*time.Second); err != nil {
 }
 
 // 常驻消费：Consume 与 Queue.Consume 同签名，可直接交给
-// support/worker/consumer/queuesconsumer 适配器。
+// worker/consumer/queuesconsumer 适配器。
 // 到期消息按 PopLimit 成批取出，空轮询等 IdleDelay，失败按 RetryDelay 写回。
 err = dq.Consume(ctx, func(ctx context.Context, msg *queues.Message) error {
     var job order

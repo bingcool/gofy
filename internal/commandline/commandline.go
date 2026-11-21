@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/internal/console"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )

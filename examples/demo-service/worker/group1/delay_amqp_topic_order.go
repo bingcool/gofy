@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // orderAMQPDelayTopic is the topic flavour of the same TTL + dead-letter

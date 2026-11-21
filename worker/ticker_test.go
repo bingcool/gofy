@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 )
 
 // TestTickerRunsUntilCancelled covers the contract a resident loop needs: it

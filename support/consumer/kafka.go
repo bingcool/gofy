@@ -11,8 +11,8 @@ import (
 	"go.uber.org/zap"
 
 	gofykafka "github.com/bingcool/gofy/support/kafka"
-	gofyworker "github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/kafkaconsumer"
+	gofyworker "github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/kafkaconsumer"
 )
 
 // KafkaConfig describes one Kafka subscription.

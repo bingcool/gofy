@@ -21,7 +21,7 @@ import (
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"github.com/bingcool/gofy/support/sqllog"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )

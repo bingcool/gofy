@@ -13,7 +13,7 @@ root_pkg="github.com/bingcool/gofy"
 # Public packages must not depend on the root package: that would be an import
 # cycle the moment the root package exposes them. gofytest is the deliberate
 # exception: it wraps the root package for tests.
-for pkg in apperr core logger support/... script command config; do
+for pkg in apperr core logger support/... worker/... script command config; do
   if go list -deps "./$pkg" | grep -qx "$root_pkg"; then
     fail "$pkg must not depend on the root package"
   fi

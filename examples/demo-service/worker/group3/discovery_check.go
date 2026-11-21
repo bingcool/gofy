@@ -6,7 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 	"github.com/yourorg/demo-service/serviceclients"
 	"github.com/yourorg/interface-service/appinterface/demoservice/orderrequest"
 )

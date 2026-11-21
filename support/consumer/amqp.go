@@ -12,8 +12,8 @@ import (
 	"go.uber.org/zap"
 
 	gofyamqp "github.com/bingcool/gofy/support/amqp"
-	gofyworker "github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/amqpconsumer"
+	gofyworker "github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/amqpconsumer"
 )
 
 // AMQPConfig describes one RabbitMQ queue subscription.

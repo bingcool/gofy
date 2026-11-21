@@ -5,7 +5,7 @@ import (
 
 	"go.uber.org/zap"
 
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // newHeartbeatWorker proves a group can host tasks that need no database; it

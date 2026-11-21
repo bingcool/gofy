@@ -38,7 +38,7 @@ package worker
 import (
 	supportai "github.com/bingcool/gofy/support/ai"
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 	"github.com/yourorg/demo-service/serviceclients"
 	"github.com/yourorg/demo-service/worker/group1"
 	"github.com/yourorg/demo-service/worker/group2"

@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // orderRocketMQDelay subscribes to the DELAY-type topic. RocketMQ v5 rejects a

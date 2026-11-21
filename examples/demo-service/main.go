@@ -11,7 +11,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support/nacos"
 	gofysqllog "github.com/bingcool/gofy/support/sqllog"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	"github.com/yourorg/demo-service/app/config"
 	"github.com/yourorg/demo-service/serviceclients"
 	appworker "github.com/yourorg/demo-service/worker"

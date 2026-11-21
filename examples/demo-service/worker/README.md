@@ -591,7 +591,7 @@ AMQP 的空兜底是刻意的：拿 `DeliveryTag` 当 ID 会把每次重投当�
 4. 预算耗尽只写一条 warn，进程仍以 0 退出。
 
 `drain` 预算从**停机时刻**起算，不是从进程启动起算——这一点由
-`support/worker` 的 `newDrainContext` 保证，否则跑得比预算久的 worker 会拿到过期
+`worker` 的 `newDrainContext` 保证，否则跑得比预算久的 worker 会拿到过期
 context，每个 handler 都失败。
 
 ### 新增一种消费者
@@ -601,7 +601,7 @@ context，每个 handler 都失败。
 
 1. 照 `support/consumer/kafka.go` 写一个文件：`XxxConfig`（配置 + 默认值 + `validate`）、
    `XxxMessage`（信封 + 原生实体）、`NewXxx(conns, cfg)` 返回实现 `Name`/`Concurrency`/`Run`
-   的值，`Run` 里建连 → 装配 `Processor` → 调用 `support/worker/consumer` 的适配器；
+   的值，`Run` 里建连 → 装配 `Processor` → 调用 `worker/consumer` 的适配器；
 2. 在 `support/consumer/consume.go` 的编译期断言里补两行，保证它仍然满足 `worker.Worker`；
 3. 在 `group1` 里加一个文件：`var xxxConfig = gofyconsumer.XxxConfig{...}` 加业务 handler；
 4. 在 `abc_register.go` 的 `NewGroup` 里 `gofyconsumer.NewXxx(conns, xxxConfig)` 追加。
@@ -922,6 +922,6 @@ panic 被隔离，ctx 取消返回 nil（回调比间隔慢时，积压的 tick 
 
 - `docs/worker-guide.md`：四种循环（claim / MQ / Redis 队列 / lease）的写法与部署建议
 - `docs/worker-daemon-design.md`：设计与验收记录
-- `support/worker/README.md`：包 API、`Policy` 重启策略、drain 语义
+- `worker/README.md`：包 API、`Policy` 重启策略、drain 语义
 - `support/consumer/README.md`：四种消费者的配置、原生实体、幂等与错误分类
 - `examples/demo-service/storage/log/README.md`：日志目录与文件命名规则

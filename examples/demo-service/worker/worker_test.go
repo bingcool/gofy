@@ -10,7 +10,7 @@ import (
 	gofykafka "github.com/bingcool/gofy/support/kafka"
 	gofyredis "github.com/bingcool/gofy/support/redis"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 
 	appworker "github.com/yourorg/demo-service/worker"
 )

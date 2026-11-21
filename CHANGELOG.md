@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Breaking import path: `support/worker` moved to `worker`.** The package name is
+  unchanged, so only the import string moves:
+  `github.com/bingcool/gofy/support/worker` → `github.com/bingcool/gofy/worker`,
+  and the adapters follow (`.../worker/consumer/kafkaconsumer` and so on). The
+  worker runtime is a top-level entry point next to `script` and `command`, not a
+  support helper, and the move keeps it out of `support/...` in the import guards.
+  `go test -race ./worker/...` replaces `./support/worker/...`.
+  **破坏性 import 路径：`support/worker` 移到 `worker`。** 包名不变，只改 import 字符串：
+  `github.com/bingcool/gofy/support/worker` → `github.com/bingcool/gofy/worker`，适配器
+  同步变为 `.../worker/consumer/kafkaconsumer` 等。worker 运行时是与 `script`、`command`
+  并列的顶层入口，而不是 support 辅助包；移动后它也不再属于 `support/...` 的守卫范围。
+  `go test -race ./worker/...` 取代 `./support/worker/...`。
+
 - **worker `/healthz` is now liveness only.** It answers 200 while the process is
   alive, including during the drain window; readiness moved to the new
   `/readyz`, which requires `state == ready` and every registered readiness check

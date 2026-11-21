@@ -8,7 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	supportai "github.com/bingcool/gofy/support/ai"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // AICheckConfig paces the live LLM check. No yaml tags: the values belong to

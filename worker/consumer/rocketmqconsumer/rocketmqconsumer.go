@@ -19,7 +19,7 @@ import (
 	"fmt"
 
 	"github.com/bingcool/gofy/support/rocketmq"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 )
 
 var (

@@ -8,7 +8,7 @@ import (
 
 // Consume handles due delayed messages until ctx is cancelled. It has the same
 // signature as Queue.Consume, so the same worker adapter
-// (support/worker/consumer/queuesconsumer) drives both.
+// (worker/consumer/queuesconsumer) drives both.
 //
 // Pop already deletes the messages from the ZSET, so in-flight work is
 // at-most-once: a crash between Pop and a successful handler loses that batch.
@@ -21,7 +21,7 @@ import (
 // is one Lua range query.
 //
 // Consume 持续处理到期消息直到 ctx 被取消。它与 Queue.Consume 签名相同，因此两者
-// 可以共用同一个 worker 适配器（support/worker/consumer/queuesconsumer）。
+// 可以共用同一个 worker 适配器（worker/consumer/queuesconsumer）。
 //
 // Pop 已经把消息从 ZSET 删除，在途消息因此是"至多一次"：Pop 到 handler 成功之间
 // 进程崩溃会丢这一批。ctx 被取消不是崩溃：整批会在 Consume 返回前写回，一次滚动

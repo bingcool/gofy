@@ -47,7 +47,7 @@ import (
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/support/headerpropagation"
 	gofyotel "github.com/bingcool/gofy/support/otel"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // start builds what every consumer needs inside Run: the runtime's logger
@@ -118,10 +118,10 @@ func validateConcurrency(n int) error {
 func validName(name string) bool { return gofyworker.ValidName(name) }
 
 // The four consumers must stay registrable as workers without importing
-// support/worker into their own files. These assertions are the compiler's
+// worker package into their own files. These assertions are the compiler's
 // copy of that promise: dropping Name or changing Run's signature breaks the
 // build here instead of at a caller's group constructor.
-// 四个消费者必须能在自己的文件不导入 support/worker 的前提下注册为 worker。下面这些
+// 四个消费者必须能在自己的文件不导入 worker 包的前提下注册为 worker。下面这些
 // 断言是编译器手里的那份承诺：少写 Name 或改了 Run 的签名，会在这里编译失败，而不是
 // 在调用方的分组构造函数里。
 var (

@@ -6,7 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // orderKafkaManual is the manual-commit counterpart of orderKafka. It has its

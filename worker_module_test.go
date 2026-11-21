@@ -11,7 +11,7 @@ import (
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/support"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 )
 
 // moduleFactory returns a factory for m, matching the shape an application uses

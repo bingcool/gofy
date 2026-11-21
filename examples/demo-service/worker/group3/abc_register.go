@@ -19,7 +19,7 @@ package group3
 
 import (
 	supportai "github.com/bingcool/gofy/support/ai"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 	"github.com/yourorg/demo-service/serviceclients"
 )
 

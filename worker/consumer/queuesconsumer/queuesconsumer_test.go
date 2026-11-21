@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy/support/queues"
-	"github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/queuesconsumer"
+	"github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/queuesconsumer"
 )
 
 type fakeQueue struct {

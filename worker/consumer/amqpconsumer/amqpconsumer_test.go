@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy/support/amqp"
-	"github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/amqpconsumer"
+	"github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/amqpconsumer"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 

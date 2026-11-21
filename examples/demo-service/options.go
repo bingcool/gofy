@@ -8,7 +8,7 @@ import (
 	"github.com/bingcool/gofy/core/systemenv"
 	gofyi18n "github.com/bingcool/gofy/support/i18n"
 	"github.com/bingcool/gofy/support/nacos"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/config"

@@ -26,7 +26,7 @@ demo-service stop --worker=order        → 只停 order 组，不碰 HTTP（旧
 
 | 工作的形态 | 用什么 | 多副本安全的原因 |
 | --- | --- | --- |
-| 消息（Kafka / AMQP / RocketMQ） | `support/worker/consumer/*` | 消费组把分区/队列分给成员，同一分区只有一个消费者 |
+| 消息（Kafka / AMQP / RocketMQ） | `worker/consumer/*` | 消费组把分区/队列分给成员，同一分区只有一个消费者 |
 | Redis 队列 | `support/queues` + `queuesconsumer` | 出队即删除，Lua 原子完成 |
 | 表里 `status=0` 的待办行 | `support/claim` | `FOR UPDATE SKIP LOCKED` 行级抢占，配合 owner + attempts CAS |
 | 绝不能执行两次（对账、日切、清理） | `support/lease` | 选主 + fencing token，只有持有者能写 |

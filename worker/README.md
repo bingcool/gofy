@@ -1,4 +1,4 @@
-# support/worker
+# worker
 
 把常驻任务（MQ 消费、扫表、对账）从 HTTP 进程里拆出来的最小运行时：一个分组内的
 worker 在同一进程里同生共死，进程由 `app worker --group=<g>` 启动，HTTP 服务不会
@@ -8,9 +8,9 @@ worker 在同一进程里同生共死，进程由 `app worker --group=<g>` 启�
 **怎么停**（两级 context + drain 预算）。业务循环本身、以及"多副本如何不重复处理"，
 分别属于业务代码与 `support/claim`、`support/lease`、消费者适配器。
 
-> 部署方式、k8s 清单、排障表见 [`docs/worker-guide.md`](../../docs/worker-guide.md)；
-> 设计取舍见 [`docs/worker-daemon-design.md`](../../docs/worker-daemon-design.md)；
-> 可直接跑的分组示例见 [`examples/demo-service/worker/README.md`](../../examples/demo-service/worker/README.md)。
+> 部署方式、k8s 清单、排障表见 [`docs/worker-guide.md`](../docs/worker-guide.md)；
+> 设计取舍见 [`docs/worker-daemon-design.md`](../docs/worker-daemon-design.md)；
+> 可直接跑的分组示例见 [`examples/demo-service/worker/README.md`](../examples/demo-service/worker/README.md)。
 
 ## 与其它生命周期的边界
 
@@ -141,7 +141,7 @@ Runner 把身份注入 context，业务用 `worker.IdentityFrom(ctx)` 取。认�
 
 `Owner()` 只回答"哪个实例"，不回答"该实例的哪一次认领"：同一实例在租约过期、
 行被 Reap 之后重新认领同一行时，owner 字符串完全不变。所以 `claim` 的收尾语句还会
-比较 `task.Attempts`——每次认领必然自增的那个值，见 [`support/claim`](../claim/claim.go)。
+比较 `task.Attempts`——每次认领必然自增的那个值，见 [`support/claim`](../support/claim/claim.go)。
 
 ### Policy
 
@@ -367,7 +367,7 @@ return worker.Ticker(ctx, 5000, func(ctx context.Context) error { // 5000 毫秒
 
 ## 消费者适配器
 
-`support/worker/consumer/` 下四个子包把现成的消费者接到 worker 生命周期上：
+`worker/consumer/` 下四个子包把现成的消费者接到 worker 生命周期上：
 
 | 子包 | 包装 | 构造 |
 | --- | --- | --- |
@@ -410,7 +410,7 @@ if err != nil {
 各客户端的选项按原样透传，不做统一抽象：AMQP 的 `AutoAck`（关闭手动确认）与 Kafka 的
 `DiscardOnError`（提交失败位点并继续）是不同契约，硬套一张结构体只会把差异藏起来。
 
-适配器只管协议。往上一层是 [`support/consumer`](../consumer/README.md)：一个订阅一个文件，
+适配器只管协议。往上一层是 [`support/consumer`](../support/consumer/README.md)：一个订阅一个文件，
 信封、数据库幂等台账、永久/可重试分类都在里面，`consumer.NewKafka(conns, cfg)` 返回的值直接
 满足 `Worker`，所以业务分组通常跳过本节的适配器、直接用那四个构造器。两者可以分开用——
 只要 worker 生命周期就只用本包的适配器；要完整的消费语义，就用 `support/consumer`。
@@ -494,7 +494,7 @@ CLI：
 ## 测试
 
 ```bash
-go test -race ./support/worker/...
+go test -race ./worker/...
 ```
 
 本包测试不依赖外部服务：MQ 适配器用假消费者，`Runner` 用可计数的 `Worker`，覆盖
@@ -503,7 +503,7 @@ go test -race ./support/worker/...
 
 ## 相关文档
 
-- [`docs/worker-guide.md`](../../docs/worker-guide.md)：命令、四种循环写法、k8s 清单、排障
-- [`docs/worker-daemon-design.md`](../../docs/worker-daemon-design.md)：决策与取舍
+- [`docs/worker-guide.md`](../docs/worker-guide.md)：命令、四种循环写法、k8s 清单、排障
+- [`docs/worker-daemon-design.md`](../docs/worker-daemon-design.md)：决策与取舍
 - `support/claim`：扫表抢占（`go doc github.com/bingcool/gofy/support/claim`）
 - `support/lease`：全局单例与 fencing token（`go doc github.com/bingcool/gofy/support/lease`）

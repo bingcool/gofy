@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // orderAMQPDelay is the RabbitMQ delayed subscription. Unlike the RocketMQ one,

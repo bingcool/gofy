@@ -51,7 +51,7 @@ import (
 	"fmt"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // NewGroup builds group1: the scan loop, the immediate and delayed

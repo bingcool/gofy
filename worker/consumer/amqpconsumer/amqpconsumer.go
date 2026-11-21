@@ -8,7 +8,7 @@ import (
 	"fmt"
 
 	"github.com/bingcool/gofy/support/amqp"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 

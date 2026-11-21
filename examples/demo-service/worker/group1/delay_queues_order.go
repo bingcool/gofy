@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // orderDelayQueues is one delayed Redis subscription, one file like the four

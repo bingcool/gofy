@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/support/rocketmq"
-	"github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/rocketmqconsumer"
+	"github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/rocketmqconsumer"
 )
 
 type fakeConsumer struct {

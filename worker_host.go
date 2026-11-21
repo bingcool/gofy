@@ -18,7 +18,7 @@ import (
 	"github.com/bingcool/gofy/internal/proclock"
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/health"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 	"go.uber.org/zap"
 )
 

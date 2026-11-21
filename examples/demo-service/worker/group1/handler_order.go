@@ -12,7 +12,7 @@ import (
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	"github.com/bingcool/gofy/support/tenant"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"

@@ -19,7 +19,7 @@
 package group2
 
 import (
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // NewGroup builds group2. The summary worker passes its own defaults, declared

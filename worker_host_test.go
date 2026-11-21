@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy"
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 )
 
 func TestExecuteWorkerRequiresGroup(t *testing.T) {

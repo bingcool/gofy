@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/bingcool/gofy/support/kafka"
-	"github.com/bingcool/gofy/support/worker"
-	"github.com/bingcool/gofy/support/worker/consumer/kafkaconsumer"
+	"github.com/bingcool/gofy/worker"
+	"github.com/bingcool/gofy/worker/consumer/kafkaconsumer"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 

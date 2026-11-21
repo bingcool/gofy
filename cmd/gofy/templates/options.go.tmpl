@@ -9,7 +9,7 @@ import (
 	"github.com/bingcool/gofy/support/nacos"
 	gofysqllog "github.com/bingcool/gofy/support/sqllog"
 {{- if .WithWorker }}
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 {{- end }}
 	"{{.Module}}/app/appio"
 	appdb "{{.Module}}/app/appio/db"

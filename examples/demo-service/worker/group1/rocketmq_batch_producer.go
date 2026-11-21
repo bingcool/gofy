@@ -13,7 +13,7 @@ import (
 
 	gofyconsumer "github.com/bingcool/gofy/support/consumer"
 	gofyrocketmq "github.com/bingcool/gofy/support/rocketmq"
-	gofyworker "github.com/bingcool/gofy/support/worker"
+	gofyworker "github.com/bingcool/gofy/worker"
 )
 
 // OrderBatchProducerConfig controls the burst that feeds the batch

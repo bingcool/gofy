@@ -9,7 +9,7 @@
 - [1. 背景与问题](#1-背景与问题)
 - [2. 核心决策](#2-核心决策)
 - [3. 进程模型](#3-进程模型)
-- [4. support/worker：生命周期抽象](#4-supportworker生命周期抽象)
+- [4. worker：生命周期抽象](#4-worker生命周期抽象)
 - [5. 消费者托管层 Run(ctx)](#5-消费者托管层-runctx)
 - [6. support/lease：全局单例](#6-supportlease全局单例)
 - [7. support/claim：扫表任务抢占](#7-supportclaim扫表任务抢占)
@@ -283,7 +283,7 @@ func WorkerGroup() string
 
 ---
 
-## 4. support/worker：生命周期抽象
+## 4. worker：生命周期抽象
 
 ### 4.1 接口
 
@@ -469,7 +469,7 @@ app, err := gofy.New(
 | RocketMQ | `Consumer.Consume` | `rocketmqconsumer.New(name, consumer, cfg)` / `NewFactory(name, factory, cfg)` | `Consumer` 一次性：`New` 只能当一次性 Worker；Runner 后面用 `NewFactory`，每次 `Run` 建新消费者 |
 | Redis 队列 | `queues.Consume` | `queuesconsumer.New(name, queue, cfg)` | 客户端归应用所有，适配器不负责关闭 |
 
-包路径：`support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`（子包，避免 `support/worker` 反向依赖三种 MQ 客户端，保持核心包零 MQ 依赖）。
+包路径：`worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`（子包，避免 `worker` 反向依赖三种 MQ 客户端，保持核心包零 MQ 依赖）。
 
 每个适配器只做三件事：把投递 context 换成 drain context、退出时按需 `Close`、把错误原样返回给重启策略。`Concurrency` 由宿主解析后决定实例数，适配器不自己起协程——否则并发语义会散落在四个包里。
 
@@ -970,7 +970,7 @@ HPA 建议只对 claim/AMQP 类开，指标用 `gofy_claim_backlog` 而不是 CP
 | ID | 任务 | 来源 | 前置 | 完成判据 |
 | --- | --- | --- | --- | --- |
 | T3-1 | `worker` 子命令：`commandline` 新增 `newWorkerCmd`，`App.RunWorker` 复用 logger/DB/telemetry/Runtime，跳过 `Register` | §3.1/§3.5 | — | `go run . worker --list` 打印分组并退出 0；`worker --group=不存在` 返回非零且错误含组名 |
-| T3-2 | `support/worker`：`Worker`/`Group`/`Func`/`IdentityFrom` + 组名与重名校验 | §4.1–§4.3 | T3-1 | `go test -race ./support/worker/...` 通过；非法组名、组内重名各有用例 |
+| T3-2 | `worker`：`Worker`/`Group`/`Func`/`IdentityFrom` + 组名与重名校验 | §4.1–§4.3 | T3-1 | `go test -race ./worker/...` 通过；非法组名、组内重名各有用例 |
 | T3-3 | 并发实例与错误策略：`concurrency` 起 N 个实例，`Policy` 实现指数退避与 `max_restarts` | §4.3/§4.4 | T3-2 | 单测：注入必失败的 worker，重启次数与退避序列符合预期 |
 | T3-4 | 优雅退出：`consumeCtx` / `drainCtx` 两级 context + drain 预算 + 关闭顺序 | §3.6/§5.5 | T3-3 | 集成测试：SIGTERM 后日志顺序为 `stop consume → drained → closed`，总耗时 ≤ `shutdown_timeout` |
 | T3-5 | 进程标识与日志：`systemenv.IsWorkerService/WorkerGroup`、pid 文件、`applyLogPaths` 增 worker 分支 | §3.7/§3.8 | T3-1 | `worker --group=order` 生成 `storage/log/worker/{date}/info/worker.log`（带 `--name` 时用 worker 名）与 `app/demo-service-worker-order.pid`（demo 的 `pid_file` 为 `app/demo-service.pid`）；同名启动第二个进程返回 `ErrAlreadyRunning` |
@@ -984,7 +984,7 @@ HPA 建议只对 claim/AMQP 类开，指标用 `gofy_claim_backlog` 而不是 CP
 | --- | --- | --- | --- | --- |
 | T3-7 | `support/claim`：`Claim/Succeed/Fail/Reap` + MySQL 8 `SKIP LOCKED` + DDL 模板 | §7 | M3 | 双进程并发消费 1000 行，`grep owner` 每行唯一；`Succeed` 的 CAS 在 owner 变更后返回 `ErrLeaseLost` |
 | T3-8 | claim 的可观测钩子：批次、积压、回收、死亡计数 | §7.7/§9.2 | T3-7 | 单测断言钩子被调用；指标名与 §9.2 一致 |
-| T3-9 | 消费者适配器：`support/worker/consumer/{kafka,amqp,rocketmq}`，统一 drain 与错误策略 | §5.2/§5.3/§5.6 | T3-4 | 三个适配器各有集成测试（可用 testcontainers 或本地 broker）；取消后不丢 ack |
+| T3-9 | 消费者适配器：`worker/consumer/{kafka,amqp,rocketmq}`，统一 drain 与错误策略 | §5.2/§5.3/§5.6 | T3-4 | 三个适配器各有集成测试（可用 testcontainers 或本地 broker）；取消后不丢 ack |
 | T3-10 | `queues.Consume`：Redis 队列补循环 + 空轮询退避 + `Retry` 集成 | §5.4 | T3-4 | 单测：空队列时 `idle_delay` 生效；失败消息按 `max_retries` 落入失败集合 |
 | T3-11 | 配置与校验：`worker` 段解析、默认值、键路径错误信息 | §8 | T3-1 | 缺 `--group`、`lease < 3×p99`（配置校验项）、`drain > shutdown` 各有一条错误用例 |
 
@@ -1035,14 +1035,14 @@ go test -race -count=1 -run TestClaimConcurrent ./support/claim/...
 | ID | 状态 | 产物 / 复核方式 |
 | --- | --- | --- |
 | T3-1 | 已完成（2026-11-14） | `internal/commandline/worker.go`、`worker_host.go`；`worker --list` 输出 GROUP/WORKER/CONCURRENCY，`--group` 缺失返回 `ErrUsage`、未知分组返回 `ErrWorkerGroupNotFound` |
-| T3-2 | 已完成（2026-11-14） | `support/worker/{worker,identity,policy,runtime,runner}.go`；`go test -race ./support/worker/` 覆盖组名校验、重名、Subset、空并发 |
+| T3-2 | 已完成（2026-11-14） | `worker/{worker,identity,policy,runtime,runner}.go`；`go test -race ./worker/` 覆盖组名校验、重名、Subset、空并发 |
 | T3-3 | 已完成（2026-11-14） | `runner.supervise` + `Policy`：指数退避、±20% 抖动、`MaxRestarts`；用例覆盖「重启到成功」「触顶退出」「ExitOnError 立即退出」「提前返回 nil 视为违约」 |
 | T3-4 | 已完成（2026-11-14） | `Runner.Run` 两级 context：`runCtx` 停止拉取、`drainCtx = WithoutCancel + deadline`；用例断言 drain 期间 `DrainContext` 仍有效且 Runner 等在途任务结束 |
 | T3-5 | 已完成（2026-11-14） | `systemenv.IsWorkerService/WorkerGroup` + `workerPIDPath` + `applyLogPaths` worker 分支；实测生成 `storage/log/worker/20261114/info/order-scan-h11.log`（`--name=order-scan`）与 `worker-h11.log`（整组），pid 文件用 `-worker-order` 后缀并在退出时清理 |
 | T3-6 | 已完成（2026-11-14） | `examples/demo-service/worker/`：`config.go`（公共设置 + 按分组分层的 `Config`）、`worker.go`（`Register` 返回全部组）、`group1/`（`abc_register.go` 装组成员与配置 + `scan.go`、`heartbeat.go`）、`group2/`（`abc_register.go` + `summary.go`）；`config.yaml` 已无 `worker:` 段：并发与节奏写在各分组包内，探针未启用（`options.go` 未传 `WithWorkerHealth`）。实测 `worker --list` 列出 group1（order-scan×2、order-heartbeat×1）与 group2（report-summary×1）两组；`--group=group1` 与 `--group=group2` 各自生成 `-worker-<group>.pid` 与独立日志，SIGTERM 后均 `stopped`、退出码 0 |
 | T3-7 | 已完成（2026-11-14） | `support/claim/{claim.go,claim_test.go,claim_integration_test.go}`；真实 MySQL 8.4 上 1000 行 × 2 个并发 owner 零重复、`job` 隔离、`Succeed/Fail` 的 CAS 拒绝过期 owner、回收过期租约后 `attempts` 递增 |
 | T3-8 | 已完成（2026-11-14） | `claim.Hooks{OnClaim,OnReap,OnLeaseLost}`；用例断言租约丢失回调触发；不引入监控库依赖 |
-| T3-9 | 已完成（2026-11-14） | `support/worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`；用例断言 handler 收到的是 drain context（投递 ctx 已取消也仍有效）、停机才 `Close`、可重试错误不 `Close` |
+| T3-9 | 已完成（2026-11-14） | `worker/consumer/{kafkaconsumer,amqpconsumer,rocketmqconsumer,queuesconsumer}`；用例断言 handler 收到的是 drain context（投递 ctx 已取消也仍有效）、停机才 `Close`、可重试错误不 `Close` |
 | T3-10 | 已完成（2026-11-14） | `support/queues/consume.go`、`consume_test.go`；`go test -race -count=1 ./support/queues/` 通过；覆盖空轮询、失败重投、重试耗尽、丢弃、panic、空闲停机六条路径 |
 | T3-11 | 已完成（2026-11-14） | `WithWorkerConcurrency` 校验 `group/worker` 形状与 `>=1`、`WithWorkerDrainTimeout` 校验正数、`worker` 缺 `--group` 报 `ErrUsage`；对应用例各一条 |
 

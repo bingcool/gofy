@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bingcool/gofy/support/worker"
+	"github.com/bingcool/gofy/worker"
 )
 
 func TestNewGroupValidates(t *testing.T) {
