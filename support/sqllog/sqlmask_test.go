@@ -166,6 +166,184 @@ func TestMaskSQLInsertColumnsByPosition(t *testing.T) {
 			in:   "INSERT INTO users (id, remark) VALUES (7, 'SF-778899')",
 			keep: []string{"7", "SF-778899"},
 		},
+		{
+			name:    "backquoted identifiers",
+			in:      "INSERT INTO `users` (`employee_no`, `remark`) VALUES ('SF-778899', 'hello')",
+			secrets: []string{"SF-778899"},
+			keep:    []string{"hello"},
+		},
+		{
+			name:    "double-quoted identifiers",
+			in:      `INSERT INTO "users" ("employee_no", "remark") VALUES ('SF-778899', 'hello')`,
+			secrets: []string{"SF-778899"},
+			keep:    []string{"hello"},
+		},
+		{
+			name: "backquoted batch rows",
+			in: "INSERT INTO `users` (`employee_no`, `remark`) VALUES " +
+				"('SF-778899', 'hello'), ('SF-112233', 'world')",
+			secrets: []string{"SF-778899", "SF-112233"},
+			keep:    []string{"hello", "world"},
+		},
+		{
+			name:    "null before the column",
+			in:      "INSERT INTO users (deleted_at, employee_no) VALUES (NULL, 'SF-778899')",
+			secrets: []string{"SF-778899"},
+			keep:    []string{"NULL"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := maskSQL(tc.in, set)
+			for _, secret := range tc.secrets {
+				if strings.Contains(got, secret) {
+					t.Fatalf("value leaked: %s", got)
+				}
+			}
+			for _, keep := range tc.keep {
+				if !strings.Contains(got, keep) {
+					t.Fatalf("value lost: %s", got)
+				}
+			}
+		})
+	}
+}
+
+// TestMaskSQLInsertValueElements covers VALUES elements that are not plain
+// literals: NULL, DEFAULT, function calls, arithmetic and subqueries. The
+// position counter advances at the comma between elements and nested
+// parentheses stay inside the tuple, so the element after such a value still
+// maps to its own column. A miss here writes a plaintext password to the log.
+// TestMaskSQLInsertValueElements 覆盖非普通字面量的 VALUES 元素：NULL、DEFAULT、函数调用、
+// 算术与子查询。位置计数在元素之间的逗号处推进，嵌套括号仍属于当前元组，因此这类元素之后的
+// 值仍对应到自己的列。这里漏一处就是日志里的明文密码。
+func TestMaskSQLInsertValueElements(t *testing.T) {
+	set := mustSet(t, MaskConfig{})
+	cases := []struct {
+		name    string
+		in      string
+		secrets []string
+		keep    []string
+	}{
+		{
+			name:    "null before the secret",
+			in:      "INSERT INTO users (deleted_at, password) VALUES (NULL, 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"NULL"},
+		},
+		{
+			name:    "default before the secret",
+			in:      "INSERT INTO users (deleted_at, password) VALUES (DEFAULT, 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"DEFAULT"},
+		},
+		{
+			name:    "function call before the secret",
+			in:      "INSERT INTO users (created_at, password) VALUES (NOW(), 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"NOW()"},
+		},
+		{
+			name:    "uuid function",
+			in:      "INSERT INTO users (uid, password) VALUES (UUID(), 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"UUID()"},
+		},
+		{
+			name:    "arithmetic expression",
+			in:      "INSERT INTO users (n, password) VALUES (1 + 2, 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"1 + 2"},
+		},
+		{
+			name:    "subquery expression",
+			in:      "INSERT INTO users (n, password) VALUES ((SELECT 1), 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"(SELECT 1)"},
+		},
+		{
+			name:    "boolean keyword",
+			in:      "INSERT INTO users (flag, password) VALUES (TRUE, 'abc123')",
+			secrets: []string{"abc123"},
+			keep:    []string{"TRUE"},
+		},
+		{
+			name:    "secret before the expression",
+			in:      "INSERT INTO users (password, created_at) VALUES ('abc123', NOW())",
+			secrets: []string{"abc123"},
+			keep:    []string{"NOW()"},
+		},
+		{
+			name: "mixed rows",
+			in: "INSERT INTO users (deleted_at, password) VALUES " +
+				"(NULL, 'abc123'), (NOW(), 'abc456')",
+			secrets: []string{"abc123", "abc456"},
+			keep:    []string{"NULL", "NOW()"},
+		},
+		{
+			name: "upsert after expression values",
+			in: "INSERT INTO users (deleted_at, password) VALUES (NULL, 'abc123') " +
+				"ON DUPLICATE KEY UPDATE remark = 'updated'",
+			secrets: []string{"abc123"},
+			keep:    []string{"'updated'"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := maskSQL(tc.in, set)
+			for _, secret := range tc.secrets {
+				if strings.Contains(got, secret) {
+					t.Fatalf("value leaked: %s", got)
+				}
+			}
+			for _, keep := range tc.keep {
+				if !strings.Contains(got, keep) {
+					t.Fatalf("value lost: %s", got)
+				}
+			}
+		})
+	}
+}
+
+// TestMaskSQLInListColumns covers the IN / NOT IN list: the identifier before
+// IN names the column every literal in the parentheses belongs to. It uses a
+// custom column whose values match no built-in pattern, because phone-like
+// values would be masked by the pattern fallback even without the mapping.
+// TestMaskSQLInListColumns 覆盖 IN / NOT IN 列表：IN 前的标识符就是括号内每个字面量的列。
+// 这里用不命中内置模式的自定义列，否则类手机号的值靠模式兜底也会被替换，看不出映射是否生效。
+func TestMaskSQLInListColumns(t *testing.T) {
+	set := mustSet(t, MaskConfig{Columns: []string{"employee_no"}})
+	cases := []struct {
+		name    string
+		in      string
+		secrets []string
+		keep    []string
+	}{
+		{
+			name:    "in list",
+			in:      "SELECT * FROM users WHERE employee_no IN ('SF-778899', 'SF-112233')",
+			secrets: []string{"SF-778899", "SF-112233"},
+		},
+		{
+			name:    "not in list",
+			in:      "SELECT * FROM users WHERE employee_no NOT IN ('SF-778899')",
+			secrets: []string{"SF-778899"},
+		},
+		{
+			name:    "backquoted column",
+			in:      "SELECT * FROM users WHERE `employee_no` IN ('SF-778899')",
+			secrets: []string{"SF-778899"},
+		},
+		{
+			name:    "double-quoted column",
+			in:      `SELECT * FROM users WHERE "employee_no" NOT IN ('SF-778899')`,
+			secrets: []string{"SF-778899"},
+		},
+		{
+			name: "other column stays untouched",
+			in:   "SELECT * FROM users WHERE note IN ('SF-778899')",
+			keep: []string{"SF-778899"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

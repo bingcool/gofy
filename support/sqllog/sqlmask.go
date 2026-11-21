@@ -215,13 +215,17 @@ func maskValue(value string, strategy MaskStrategy) string {
 //
 // INSERT statements list their columns once and their values in one or more
 // tuples, so the scanner captures that column list and maps values by position
-// across every tuple. A statement shape it cannot classify is left unchanged:
+// across every tuple. A value may be an expression (NULL, DEFAULT, NOW(),
+// arithmetic), so the position advances at the comma between elements, not at
+// every literal token. A statement shape it cannot classify is left unchanged:
 // masking is best-effort logging hygiene, not a SQL parser.
 // maskSQL 替换一条已展开语句中的敏感值。它用扫描器而不是若干正则：输入是插值后的
 // SQL，字面量里可能含 ")"、","、"=" 与引号，而且必须把列名与随后的值配对。
 //
 // INSERT 只列一次列名、值分布在若干组元组里，因此扫描器先记下列名，再按位置映射到每一组值。
-// 认不出的语句形态原样保留：脱敏是日志卫生的尽力而为，不是 SQL 解析器。
+// 值可以是表达式（NULL、DEFAULT、NOW()、算术），所以位置在元素之间的逗号处推进，
+// 而不是按字面量 token 计数。认不出的语句形态原样保留：脱敏是日志卫生的尽力而为，
+// 不是 SQL 解析器。
 func maskSQL(sql string, set maskSet) string {
 	if sql == "" || (len(set.columns) == 0 && len(set.patterns) == 0) {
 		return sql
@@ -234,12 +238,12 @@ func maskSQL(sql string, set maskSet) string {
 	lastKeyword := ""              // last keyword seen, upper case
 	inListColumn := ""             // column of an IN (...) list currently open
 	inListDepth := 0               // parenthesis depth of that list
-	quotedIdent := ""              // last backquoted/double-quoted identifier, normalized
 	insertColumns := []string(nil) // columns of INSERT INTO t (...) — by value position
 	collectingColumns := false     // inside that column list
 	mappingValues := false         // in the VALUES clause of an INSERT
 	inValuesTuple := false         // inside one VALUES (...) tuple
 	valueIndex := 0                // position in the current tuple
+	valuesDepth := 0               // nested parenthesis depth inside that tuple
 
 	isSensitive := func(value string) bool {
 		column := lastIdent
@@ -279,18 +283,24 @@ func maskSQL(sql string, set maskSet) string {
 			} else {
 				b.WriteString(sql[i:next])
 			}
-			if inValuesTuple {
-				valueIndex++
-			}
 			i = next
 			// A literal ends the identifier slot: the next literal in
 			// VALUES ('a','b') must not inherit "a"'s column.
 			// 字面量结束标识符位置：VALUES ('a','b') 里的第二个字面量不能继承第一个的列名。
-			lastIdent, lastKeyword, quotedIdent = "", "", ""
+			lastIdent, lastKeyword = "", ""
 		case c == '`' || c == '"':
 			value, next := scanQuotedIdentifier(sql, i)
-			quotedIdent = normalizeColumn(value)
-			lastIdent, lastKeyword = quotedIdent, ""
+			// A quoted identifier is a column name like any other, and GORM
+			// emits backquoted columns on MySQL. Skipping the column list here
+			// left every value of such an INSERT without a column to map to.
+			// 带引号的标识符就是普通列名，GORM 在 MySQL 上输出的正是反引号列名。
+			// 这里不收集列名，会让这类 INSERT 的每个值都失去列映射。
+			if collectingColumns {
+				insertColumns = append(insertColumns, normalizeColumn(value))
+				lastIdent, lastKeyword = "", ""
+			} else {
+				lastIdent, lastKeyword = normalizeColumn(value), ""
+			}
 			b.WriteString(sql[i:next])
 			i = next
 		case c == '(':
@@ -299,31 +309,50 @@ func maskSQL(sql string, set maskSet) string {
 			} else if lastKeyword == "IN" && lastIdent != "" {
 				inListColumn = lastIdent
 				inListDepth = 1
+			} else if inValuesTuple {
+				// A function call or subquery inside an element opens a
+				// parenthesis of its own; only the tuple's own commas separate
+				// elements.
+				// 元素里的函数调用或子查询会打开自己的括号；只有元组自身的逗号分隔元素。
+				valuesDepth++
 			} else if mappingValues && insertColumns != nil {
 				// A literal clears lastKeyword, so the tuples after the first
 				// one cannot be recognised by "lastKeyword == VALUES".
 				// 字面量会清空 lastKeyword，第二组之后的元组不能靠 "lastKeyword == VALUES" 识别。
 				inValuesTuple = true
-				valueIndex = 0
-			} else if lastIdent != "" && !inValuesTuple {
+				valuesDepth, valueIndex = 0, 0
+			} else if lastIdent != "" {
 				collectingColumns = true
 				insertColumns = insertColumns[:0]
 			}
 			b.WriteByte(c)
 			i++
+		case c == ',':
+			// The comma between elements is the boundary: NULL, DEFAULT, NOW()
+			// and arithmetic elements produce no literal for a per-token counter
+			// to see.
+			// 元素之间的逗号才是边界：NULL、DEFAULT、NOW() 与算术元素都不产生字面量，
+			// 按 token 计数看不到它们。
+			if inValuesTuple && valuesDepth == 0 && inListDepth == 0 {
+				valueIndex++
+			}
+			b.WriteByte(c)
+			i++
 		case c == ')':
-			if collectingColumns {
-				collectingColumns = false
-			}
-			if inValuesTuple {
-				inValuesTuple = false
-				valueIndex = 0
-			}
 			if inListDepth > 0 {
 				inListDepth--
 				if inListDepth == 0 {
 					inListColumn = ""
 				}
+			} else if inValuesTuple {
+				if valuesDepth > 0 {
+					valuesDepth--
+				} else {
+					inValuesTuple = false
+					valueIndex = 0
+				}
+			} else if collectingColumns {
+				collectingColumns = false
 			}
 			b.WriteByte(c)
 			i++
@@ -338,12 +367,14 @@ func maskSQL(sql string, set maskSet) string {
 				if keyword == "INSERT" {
 					insertColumns = nil
 					collectingColumns, inValuesTuple = false, false
+					valuesDepth, valueIndex = 0, 0
 				}
 				// ON DUPLICATE KEY UPDATE / ON CONFLICT starts a new clause;
 				// its literals are not INSERT values any more.
 				// ON DUPLICATE KEY UPDATE / ON CONFLICT 开启新子句，其后的字面量不再是 INSERT 值。
 				if keyword == "ON" {
 					insertColumns, mappingValues, inValuesTuple = nil, false, false
+					valuesDepth, valueIndex = 0, 0
 				}
 				if keyword == "VALUES" {
 					mappingValues = true
@@ -352,7 +383,15 @@ func maskSQL(sql string, set maskSet) string {
 					inListColumn = ""
 					inListDepth = 0
 				}
-				lastIdent = ""
+				// The identifier before IN names the list the next parenthesis
+				// opens (col IN (...), col NOT IN (...)). Clearing it here made
+				// the list branch unreachable, so no IN literal ever mapped to
+				// its column.
+				// IN 前的标识符命名随后括号打开的列表（col IN (...)、col NOT IN (...））。
+				// 在这里清掉它，会让列表分支永远不可达，IN 里的字面量也就映射不到列。
+				if keyword != "IN" && keyword != "NOT" {
+					lastIdent = ""
+				}
 			} else if collectingColumns {
 				insertColumns = append(insertColumns, normalizeColumn(token))
 				lastIdent, lastKeyword = "", ""
@@ -371,9 +410,6 @@ func maskSQL(sql string, set maskSet) string {
 				b.WriteString(maskValue(value, set.strategy))
 			} else {
 				b.WriteString(value)
-			}
-			if inValuesTuple {
-				valueIndex++
 			}
 			lastIdent, lastKeyword = "", ""
 		default:
