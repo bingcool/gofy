@@ -123,14 +123,21 @@ ctx = tenant.WithTenant(ctx, "t-42")   // 脚本/worker/测试直接指定租户
 `Without` 优先于一切判定，包括无 Schema 的语句。
 只应给运维脚本、数据迁移、跨租户报表使用；请求 handler 禁止调用。
 
+`WithTenant` 的 id 为空或纯空白表示取消覆盖：读取时回退到身份来源，而不是把身份盖成空值。
+生效值统一去空白一次，插件与 `support/sqlmodel` 都通过 `tenant.ResolveTenant` 解析，
+两条 Handler 路径因此绑定同一个租户。
+
 这两个标记也以只读形式导出，供别的隔离路径（`support/sqlmodel`）判断同一件事：
 
 ```go
-tenant.Bypassed(ctx)          // ctx 是否被 Without 标记
-tenant.OverrideTenant(ctx)    // WithTenant 设置的显式租户，以及是否存在
+tenant.Bypassed(ctx)                    // ctx 是否被 Without 标记
+tenant.OverrideTenant(ctx)              // WithTenant 设置的显式租户，以及是否存在
+tenant.ResolveTenant(ctx, handler)      // 生效租户：override 优先，回落 Handler，统一去空白
 ```
 
-插件内部也走这两个函数，因此"构造器认为该绕过、插件认为不该"这种分歧不会出现。
+插件内部也走这些函数，因此"构造器认为该绕过、插件认为不该"这种分歧不会出现。
+不经过 Handler 的路径（`support/sqlbuilder`）用 `frameworkcontext.EffectiveTenant`，
+它把同一套规则直接施加到框架身份上。
 
 ## 语句覆盖
 
@@ -180,8 +187,8 @@ db.WithContext(ctxForA).Where("tenant_id = ?", req.TenantID).Find(&orders)
 ## 测试
 
 `go test ./support/tenant -race` 覆盖 SELECT/UPDATE/DELETE/INSERT 四种语句、struct/map/
-切片/批量插入、失败关闭、不含租户列的模型、`Without`/`WithTenant`、
-「已有租户条件但绑定了别的租户」、去重的绑定计数、值归一化、`IgnoreTable`
+切片/批量插入、失败关闭、不含租户列的模型、`Without`/`WithTenant`（含空/空白 override
+回退身份）、「已有租户条件但绑定了别的租户」、去重的绑定计数、值归一化、`IgnoreTable`
 兜底、自定义列名、与「替换 context 的前置插件」共存、重复安装被拒绝，以及 100
 goroutine 并发不同租户不串扰。
 

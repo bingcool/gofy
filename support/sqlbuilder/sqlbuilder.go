@@ -649,25 +649,25 @@ func Build(q Querier) (string, []any, error) {
 //
 // The column is DefaultTenantColumn. Identity resolution matches the GORM plugin
 // and support/sqlmodel: frameworkcontext.WithTenantOverride wins over the JWT
-// identity, and a bypass wins over both. The markers are read from
-// support/frameworkcontext rather than support/tenant so this package keeps its
-// no-gorm dependency; a nil table returns false instead of panicking.
+// identity, a bypass wins over both, and one normalization applies to all three
+// paths — an empty or blank override falls back to the identity, and the value
+// is trimmed before it becomes a predicate. The markers and the rule are read
+// from support/frameworkcontext rather than support/tenant so this package keeps
+// its no-gorm dependency; a nil table returns false instead of panicking.
 // TenantScope 返回当前请求的租户等值谓词；ctx 没有租户或被标记为绕过时返回 false。缺租户
 // 是报错还是跳过过滤由调用方决定，本函数不替它猜。
 //
 // 列名固定为 DefaultTenantColumn。身份判定与 GORM 插件及 support/sqlmodel 一致：
-// frameworkcontext.WithTenantOverride 压过 JWT 身份，绕过又压过两者。标记从
-// support/frameworkcontext 读取而非 support/tenant，这样本包仍然不依赖 gorm；table 为 nil
+// frameworkcontext.WithTenantOverride 压过 JWT 身份，绕过又压过两者，三条路径共用同一套
+// 归一化——空或纯空白 override 回退到身份来源，值在变成谓词之前统一 TrimSpace。标记与规则
+// 从 support/frameworkcontext 读取而非 support/tenant，这样本包仍然不依赖 gorm；table 为 nil
 // 时返回 false，而不是直接 panic。
 func TenantScope(ctx context.Context, table *SelectTable) (*Predicate, bool) {
 	if table == nil || frameworkcontext.TenantBypassed(ctx) {
 		return nil, false
 	}
-	tid, ok := frameworkcontext.TenantOverride(ctx)
+	tid, ok := frameworkcontext.EffectiveTenant(ctx)
 	if !ok {
-		tid = frameworkcontext.TenantID(ctx)
-	}
-	if tid == "" {
 		return nil, false
 	}
 	return EQ(table.C(DefaultTenantColumn), tid), true

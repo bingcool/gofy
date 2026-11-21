@@ -189,11 +189,8 @@ func (p *Plugin) resolve(db *gorm.DB) (string, bool) {
 }
 
 func (p *Plugin) tenantID(ctx context.Context, table string, db *gorm.DB) string {
-	id, ok := OverrideTenant(ctx)
+	id, ok := ResolveTenant(ctx, p.handler)
 	if !ok {
-		id = p.handler.TenantID(ctx)
-	}
-	if strings.TrimSpace(id) == "" {
 		// Fail closed: adding an error short-circuits GORM's SQL builder, so no
 		// unfiltered statement ever reaches the database.
 		// 失败关闭：AddError 会短路 GORM 的 SQL 构造，不带过滤的语句不会到达数据库。

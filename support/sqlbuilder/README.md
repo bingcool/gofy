@@ -249,9 +249,13 @@ sel := sqlbuilder.Select(orders.C("id")).From(orders).Where(pred)
 直接 import `support/tenant`，那会把 gorm 带进一个从不执行 SQL 的包）。
 
 身份优先级与另两条路径一致：`WithTenant` 覆盖 JWT 身份，`Without` 覆盖两者（返回 `false`）。
-覆盖与绕过标记定义在 `support/frameworkcontext`，`support/tenant` 只是转出——这样本包读取
-同一份判定时仍不必依赖 gorm。`table == nil` 返回 `false`，不会 panic。
-`support/sqlmodel` 的 `TestAllTenantPathsResolveTheSameIdentity` 同时钉住三条路径的取值。
+空或纯空白的 `WithTenant` 值不算覆盖，回退到身份来源；生效值在变成谓词前统一去空白，实现
+就是 `frameworkcontext.EffectiveTenant`。覆盖与绕过标记定义在 `support/frameworkcontext`，
+`support/tenant` 只是转出——这样本包读取同一份判定时仍不必依赖 gorm。`table == nil` 返回
+`false`，不会 panic。
+
+跨路径取值由 `support/sqlmodel` 的两个测试钉住：`TestAllTenantPathsResolveTheSameIdentity`
+与 `TestTenantPathAgreement`（含空/空白/padded override 与带空白的透传头）。
 
 ## 什么时候不该用
 

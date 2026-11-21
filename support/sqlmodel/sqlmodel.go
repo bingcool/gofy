@@ -288,18 +288,17 @@ func (r *Resolver) parse(m Model) (*schema.Schema, error) {
 	return schema.Parse(m, &r.schemas, r.namer)
 }
 
-// tenantID mirrors the plugin: an explicit WithTenant overrides the Handler, and
-// an empty result means "no tenant", which the caller turns into an error.
-// tenantID 与插件一致：WithTenant 的显式值压过 Handler，空结果表示「无租户」，由调用方
-// 转成错误。
+// tenantID resolves through tenant.ResolveTenant, the same rule the plugin
+// applies: an explicit WithTenant wins, an empty or blank override falls back
+// to the Handler, and the value is trimmed once. Both paths therefore bind the
+// same tenant; an empty result means "no tenant", which the caller turns into
+// an error.
+// tenantID 通过 tenant.ResolveTenant 解析，与插件同一套规则：显式 WithTenant 优先，
+// 空或纯空白 override 回退到 Handler，值统一 TrimSpace 一次。两条路径因此绑定同一个租户；
+// 空结果表示「无租户」，由调用方转成错误。
 func (r *Resolver) tenantID(ctx context.Context) string {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if id, ok := tenant.OverrideTenant(ctx); ok {
-		return strings.TrimSpace(id)
-	}
-	return strings.TrimSpace(r.handler.TenantID(ctx))
+	id, _ := tenant.ResolveTenant(ctx, r.handler)
+	return id
 }
 
 // modelName validates the interface value. A typed nil pointer satisfies the

@@ -2,11 +2,13 @@ package sqlmodel_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
 
 	"github.com/bingcool/gofy/support/frameworkcontext"
+	"github.com/bingcool/gofy/support/headerpropagation"
 	"github.com/bingcool/gofy/support/sqlbuilder"
 	"github.com/bingcool/gofy/support/sqlmodel"
 	"github.com/bingcool/gofy/support/tenant"
@@ -73,24 +75,7 @@ func TestAllTenantPathsResolveTheSameIdentity(t *testing.T) {
 	}
 
 	// 4. The GORM plugin, through a DryRun statement.
-	dsn := fmt.Sprintf("file:identity_%d?mode=memory&cache=shared", counter.Add(1))
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
-	})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatalf("handle: %v", err)
-	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&order{}); err != nil {
-		t.Fatalf("AutoMigrate: %v", err)
-	}
-	if err := tenant.Instrument(db, tenant.Options{}); err != nil {
-		t.Fatalf("Instrument: %v", err)
-	}
+	db := openInstrumentedDB(t)
 	stmt := db.WithContext(ctx).Session(&gorm.Session{DryRun: true}).Find(&[]order{}).Statement
 	found := false
 	for _, v := range stmt.Vars {
@@ -120,5 +105,162 @@ func TestTenantScopeBypassAndNil(t *testing.T) {
 	}
 	if _, ok := sqlbuilder.TenantScope(base, nil); ok {
 		t.Fatal("TenantScope returned a predicate for a nil table")
+	}
+}
+
+// openInstrumentedDB opens a unique in-memory SQLite database with the tenant
+// plugin installed, so the plugin path can run without a server.
+// openInstrumentedDB 打开一个唯一的进程内 SQLite 库并装好租户插件，插件路径因此无需真实
+// 数据库。
+func openInstrumentedDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:identity_%d?mode=memory&cache=shared", counter.Add(1))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	// Migrate before Instrument, so the plugin never rewrites DDL.
+	// 先迁移后装插件，插件因此不会改写 DDL。
+	if err := db.AutoMigrate(&order{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := tenant.Instrument(db, tenant.Options{}); err != nil {
+		t.Fatalf("Instrument: %v", err)
+	}
+	return db
+}
+
+// tenantVerdict is what one isolation path decided for a context: the tenant it
+// would bind, or none.
+// tenantVerdict 是一条隔离路径对某个 ctx 的判定：将要绑定的租户，或没有租户。
+type tenantVerdict struct {
+	ID string
+	OK bool
+}
+
+func (v tenantVerdict) String() string {
+	if !v.OK {
+		return "none"
+	}
+	return fmt.Sprintf("%q", v.ID)
+}
+
+// pluginVerdict runs the plugin path as a DryRun query and reads the bound
+// tenant back from the statement vars. A fail-closed error is the "no tenant"
+// verdict, not a test failure.
+// pluginVerdict 以 DryRun 查询走插件路径，从语句参数读回绑定的租户。失败关闭的错误算
+// 「无租户」判定，不算测试失败。
+func pluginVerdict(t *testing.T, db *gorm.DB, ctx context.Context) tenantVerdict {
+	t.Helper()
+	tx := db.WithContext(ctx).Session(&gorm.Session{DryRun: true}).Find(&[]order{})
+	if tx.Error != nil {
+		if errors.Is(tx.Error, tenant.ErrTenantRequired) {
+			return tenantVerdict{}
+		}
+		t.Fatalf("plugin: %v", tx.Error)
+	}
+	vars := tx.Statement.Vars
+	if len(vars) != 1 {
+		t.Fatalf("plugin vars = %v, want exactly the tenant", vars)
+	}
+	return tenantVerdict{ID: fmt.Sprint(vars[0]), OK: true}
+}
+
+// modelVerdict reads the predicate sqlmodel attaches for the same model.
+// modelVerdict 读取 sqlmodel 为同一模型挂上的谓词。
+func modelVerdict(t *testing.T, r *sqlmodel.Resolver, ctx context.Context) tenantVerdict {
+	t.Helper()
+	_, pred, err := r.Table(ctx, order{})
+	if err != nil {
+		if errors.Is(err, tenant.ErrTenantRequired) {
+			return tenantVerdict{}
+		}
+		t.Fatalf("sqlmodel: %v", err)
+	}
+	if pred == nil {
+		return tenantVerdict{}
+	}
+	_, args, err := sqlbuilder.Build(pred)
+	if err != nil {
+		t.Fatalf("build model predicate: %v", err)
+	}
+	if len(args) != 1 {
+		t.Fatalf("model args = %v, want exactly the tenant", args)
+	}
+	return tenantVerdict{ID: fmt.Sprint(args[0]), OK: true}
+}
+
+// scopeVerdict reads the predicate the gorm-free builder path emits.
+// scopeVerdict 读取不依赖 gorm 的构造器路径给出的谓词。
+func scopeVerdict(t *testing.T, ctx context.Context) tenantVerdict {
+	t.Helper()
+	pred, ok := sqlbuilder.TenantScope(ctx, sqlbuilder.Table("orders"))
+	if !ok {
+		return tenantVerdict{}
+	}
+	_, args, err := sqlbuilder.Build(pred)
+	if err != nil {
+		t.Fatalf("build scope predicate: %v", err)
+	}
+	if len(args) != 1 {
+		t.Fatalf("scope args = %v, want exactly the tenant", args)
+	}
+	return tenantVerdict{ID: fmt.Sprint(args[0]), OK: true}
+}
+
+// TestTenantPathAgreement pins the P2-01/P2-02 fix end to end: for one ctx all
+// three isolation paths — GORM plugin, sqlmodel and sqlbuilder.TenantScope —
+// must bind the same tenant, and a blank override must fall back to the JWT
+// identity instead of masking it or emitting a whitespace predicate.
+// TestTenantPathAgreement 端到端固定 P2-01/P2-02 的修复：同一个 ctx 在三条隔离路径——
+// GORM 插件、sqlmodel 与 sqlbuilder.TenantScope——上必须绑定同一个租户；纯空白 override
+// 必须回退到 JWT 身份，而不是盖住身份或拼出空白谓词。
+func TestTenantPathAgreement(t *testing.T) {
+	identity := frameworkcontext.WithUser(context.Background(), frameworkcontext.User{
+		ID: "u-1", TenantID: "a",
+	})
+	// Programmatic propagation skips the trimming CaptureIncoming does, so this
+	// ctx carries the padding into every read path.
+	// 程序化透传跳过了 CaptureIncoming 的去空白，因此这个 ctx 会把空白带进每条读取路径。
+	propagated := headerpropagation.ContextWithHeader(
+		context.Background(), headerpropagation.HeaderTenantID, " a ")
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want tenantVerdict
+	}{
+		{name: "identity only", ctx: identity, want: tenantVerdict{ID: "a", OK: true}},
+		{name: "empty override falls back", ctx: tenant.WithTenant(identity, ""), want: tenantVerdict{ID: "a", OK: true}},
+		{name: "blank override falls back", ctx: tenant.WithTenant(identity, "   "), want: tenantVerdict{ID: "a", OK: true}},
+		{name: "padded override is trimmed", ctx: tenant.WithTenant(identity, " b "), want: tenantVerdict{ID: "b", OK: true}},
+		{name: "padded propagated header is trimmed", ctx: propagated, want: tenantVerdict{ID: "a", OK: true}},
+		{name: "no identity", ctx: context.Background(), want: tenantVerdict{}},
+		{name: "no identity and blank override", ctx: tenant.WithTenant(context.Background(), "  "), want: tenantVerdict{}},
+	}
+	r := newResolver(t, sqlmodel.Options{})
+	db := openInstrumentedDB(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			paths := []struct {
+				name string
+				got  tenantVerdict
+			}{
+				{"plugin", pluginVerdict(t, db, tc.ctx)},
+				{"sqlmodel", modelVerdict(t, r, tc.ctx)},
+				{"TenantScope", scopeVerdict(t, tc.ctx)},
+			}
+			for _, path := range paths {
+				if path.got != tc.want {
+					t.Fatalf("%s = %s, want %s", path.name, path.got, tc.want)
+				}
+			}
+		})
 	}
 }

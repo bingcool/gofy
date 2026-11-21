@@ -26,7 +26,9 @@ stmt, args, err := sqlbuilder.Build(sel)
 1. **失败关闭。** 模型带租户列、ctx 里没有租户时返回 `tenant.ErrTenantRequired`，不会退化成
    不带过滤的查询。要跨租户读（运维脚本、迁移）就显式 `tenant.Without(ctx)`，与插件一致；
    整个部署关闭隔离用 `Options.Disabled`，它是 `tenant.enabled` 的对应项——两条路径必须一起
-   开关，否则仓储读到所有租户、构造器还在过滤，配置里看不出这件事。
+   开关，否则仓储读到所有租户、构造器还在过滤，配置里看不出这件事。租户取值由
+   `tenant.ResolveTenant` 解析，与插件同一规则：`tenant.WithTenant` 优先，空或纯空白值回退
+   身份来源，结果统一去空白。
 2. **构造期校验列名。** `sqlmodel.New` 返回 `(*Resolver, error)`；`Handler.Column()` 为空
    （或全空白）时返回 `tenant.ErrTenantColumnRequired`，除非 `Options.Disabled` 为真。空列名
    会让 `LookUpField("")` 匹配不到任何表，等于静默关掉隔离，所以必须在装配期就失败。
@@ -67,4 +69,6 @@ go test -count=1 ./support/sqlmodel/
 ```
 
 不需要数据库：`schema.Parse` 只读结构体与 tag。测试覆盖无租户列、租户列、ctx 无租户、显式
-绕过、自定义列名、自定义命名策略、PostgreSQL 方言与 `*` 选择。
+绕过、自定义列名、自定义命名策略、PostgreSQL 方言与 `*` 选择；`TestTenantPathAgreement`
+用同一个 ctx 断言插件、本包与 `sqlbuilder.TenantScope` 取值一致，含空/空白/padded override
+与带空白的透传头。

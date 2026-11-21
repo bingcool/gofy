@@ -24,6 +24,7 @@ package tenant
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/bingcool/gofy/support/frameworkcontext"
 )
@@ -66,9 +67,9 @@ func Without(ctx context.Context) context.Context {
 
 // WithTenant puts an explicit tenant ID into ctx, overriding the identity
 // source. Scripts, workers and tests use it instead of faking a JWT identity.
-// An empty id removes the override.
+// An empty or blank id removes the override.
 // WithTenant 把显式租户 ID 放进 ctx，覆盖身份来源。脚本、worker 与测试用它，不必
-// 伪造 JWT 身份。空 id 表示取消覆盖。
+// 伪造 JWT 身份。空或纯空白的 id 表示取消覆盖。
 func WithTenant(ctx context.Context, id string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -93,4 +94,28 @@ func Bypassed(ctx context.Context) bool {
 // 其它路径也必须如此：脚本调 WithTenant 就是要它压过 ctx 里碰巧带的身份。
 func OverrideTenant(ctx context.Context) (string, bool) {
 	return frameworkcontext.TenantOverride(ctx)
+}
+
+// ResolveTenant is the Handler-based half of the shared identity rule: an
+// explicit WithTenant wins, an empty or blank override falls back to the
+// Handler, and the Handler's answer is trimmed once here. ok=false means the
+// statement has no tenant; the plugin and support/sqlmodel both turn that into
+// ErrTenantRequired. frameworkcontext.EffectiveTenant is the other half, for
+// paths that read the framework identity without a Handler.
+// ResolveTenant 是基于 Handler 的那一半统一身份规则：显式 WithTenant 优先，空或纯空白
+// override 回退到 Handler，Handler 的结果在这里统一 TrimSpace 一次。ok=false 表示语句没有
+// 租户；插件与 support/sqlmodel 都把它转成 ErrTenantRequired。
+// frameworkcontext.EffectiveTenant 是另一半，供不经过 Handler、直接读框架身份的路径使用。
+func ResolveTenant(ctx context.Context, h Handler) (string, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id, ok := frameworkcontext.TenantOverride(ctx); ok {
+		return id, true
+	}
+	if h == nil {
+		h = ContextHandler{}
+	}
+	id := strings.TrimSpace(h.TenantID(ctx))
+	return id, id != ""
 }
