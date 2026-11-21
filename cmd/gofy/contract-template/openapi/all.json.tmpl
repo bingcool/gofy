@@ -314,13 +314,6 @@
         ],
         "type": "object"
       }
-    },
-    "securitySchemes": {
-      "bearerAuth": {
-        "bearerFormat": "JWT",
-        "scheme": "bearer",
-        "type": "http"
-      }
     }
   },
   "info": {
@@ -371,22 +364,6 @@
             },
             "description": "invalid argument"
           },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
-          },
           "500": {
             "content": {
               "application/json": {
@@ -404,11 +381,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "查询订单模块配置",
         "tags": [
           "demoservice"
@@ -519,22 +491,6 @@
             },
             "description": "invalid argument"
           },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
-          },
           "429": {
             "content": {
               "application/json": {
@@ -568,11 +524,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "分页查询订单",
         "tags": [
           "demoservice"
@@ -629,22 +580,6 @@
             },
             "description": "invalid argument"
           },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
-          },
           "429": {
             "content": {
               "application/json": {
@@ -678,11 +613,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "创建订单",
         "tags": [
           "demoservice"
@@ -724,22 +654,6 @@
               }
             },
             "description": "invalid argument"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
           },
           "404": {
             "content": {
@@ -806,11 +720,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "取消订单",
         "tags": [
           "demoservice"
@@ -871,22 +780,6 @@
             },
             "description": "invalid argument"
           },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
-          },
           "404": {
             "content": {
               "application/json": {
@@ -936,11 +829,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "查询订单详情",
         "tags": [
           "demoservice"
@@ -1014,22 +902,6 @@
             },
             "description": "invalid argument"
           },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
-          },
           "500": {
             "content": {
               "application/json": {
@@ -1047,11 +919,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "分页查询产品",
         "tags": [
           "demoservice",
@@ -1115,22 +982,6 @@
             },
             "description": "invalid argument"
           },
-          "401": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "code": 40100,
-                  "data": null,
-                  "msg": "unauthorized",
-                  "req_id": "6f1c0b1e-7d2a-4b9c-8e1f-2a3b4c5d6e7f"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/CommonErrorEnvelope"
-                }
-              }
-            },
-            "description": "unauthorized"
-          },
           "404": {
             "content": {
               "application/json": {
@@ -1164,11 +1015,6 @@
             "description": "internal error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "summary": "查询产品详情",
         "tags": [
           "demoservice",

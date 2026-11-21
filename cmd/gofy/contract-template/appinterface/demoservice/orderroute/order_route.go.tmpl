@@ -36,13 +36,14 @@ var Orders = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group)
 	// Group middleware declares logical names only; at startup the server
 	// registers same-named instances into the middleware registry
 	// (support/middleware.Registry) and the adapter resolves and installs them in
-	// order. Auth goes through the same path: "auth" is the app-level auth alias,
-	// spec.Auth only marks OpenAPI security, and the adapter adds no middleware
-	// just because AuthRequired is set.
+	// order. Authentication is exactly this and nothing else: "auth" is the
+	// app-level auth alias, installing it here is what makes the group's routes
+	// require a credential, and a route in a group without it is public. The
+	// contract carries no auth field, so there is no second place to declare it.
 	// 分组中间件只声明逻辑名，服务端启动时把同名实例注册进中间件注册表
-	// （support/middleware.Registry），adapter 按顺序解析后安装。认证也走这里：
-	// "auth" 是应用层注册的认证别名，spec.Auth 仅用于 OpenAPI 的 security 标记，
-	// adapter 不会因为 AuthRequired 自动补任何中间件。
+	// （support/middleware.Registry），adapter 按顺序解析后安装。认证就是这件事本身：
+	// "auth" 是应用层注册的认证别名，在这里装上它，本组路由才需要凭证；不在这个分组里
+	// 的路由就是公开的。契约没有认证字段，因此不存在第二处声明。
 	group.Use("audit", "auth")
 
 	// GetOrder GET /api/v1/order/orders/{id}
@@ -53,7 +54,6 @@ var Orders = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group)
 			spec.Summary = "查询订单详情"
 			spec.Description = "按订单ID查询订单；订单不存在返回 40401。"
 			spec.Tags = []string{ServiceTag}
-			spec.Auth = endpoint.AuthRequired
 			// The contract declares the limit and the relay enforces exactly that:
 			// Limit and WindowSeconds are the effective thresholds, Key decides the
 			// counted subject, and the server builds the rate limit middleware from
@@ -78,7 +78,6 @@ var Orders = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group)
 			spec.OperationID = "ListOrders"
 			spec.Summary = "分页查询订单"
 			spec.Tags = []string{ServiceTag}
-			spec.Auth = endpoint.AuthRequired
 			spec.RateLimit = &endpoint.RateLimit{Limit: 100, WindowSeconds: 60, Key: endpoint.RateKeyUser, RedisAlias: "ratelimit"}
 		})
 
@@ -91,7 +90,6 @@ var Orders = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group)
 			spec.OperationID = "CreateOrder"
 			spec.Summary = "创建订单"
 			spec.Tags = []string{ServiceTag}
-			spec.Auth = endpoint.AuthRequired
 			spec.RateLimit = &endpoint.RateLimit{Limit: 60, WindowSeconds: 60, Key: endpoint.RateKeyUser, RedisAlias: "ratelimit"}
 			spec.Errors = []endpoint.ErrorSpec{
 				{Code: 40001, Status: 400, Message: "invalid argument"},
@@ -105,7 +103,6 @@ var Orders = endpoint.NewRouteGroup("/api/v1/order", func(group *endpoint.Group)
 			spec.OperationID = "CancelOrder"
 			spec.Summary = "取消订单"
 			spec.Tags = []string{ServiceTag}
-			spec.Auth = endpoint.AuthRequired
 			spec.NoContent = true
 			spec.RateLimit = &endpoint.RateLimit{Limit: 60, WindowSeconds: 60, Key: endpoint.RateKeyUser, RedisAlias: "ratelimit"}
 			spec.Errors = []endpoint.ErrorSpec{

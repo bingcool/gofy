@@ -37,12 +37,21 @@ func TestProjectRoutesGenerateCompleteSpec(t *testing.T) {
 	}
 	for _, want := range []string{
 		"/api/v1/order/orders/{id}",
+		"/api/v1/order/config",
 		"/api/v1/product/products",
-		"bearerAuth",
 		"DemoserviceOrderDTO",
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("generated spec missing %q", want)
 		}
+	}
+	// No operation carries a security requirement: the contract has no auth
+	// field, and the group's "auth" middleware is invisible to docgen. A
+	// generated requirement here would document a guarantee the document cannot
+	// check.
+	// 没有任何 operation 携带 security 要求：契约没有认证字段，分组上的 "auth"
+	// 中间件对 docgen 不可见。这里若生成要求，等于文档承诺了一件它无法核实的事。
+	if strings.Contains(string(data), "security:") {
+		t.Fatal("generated spec carries a security requirement")
 	}
 }
