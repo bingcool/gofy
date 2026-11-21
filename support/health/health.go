@@ -209,9 +209,13 @@ type Result struct {
 	// timeout, panic, budget or canceled.
 	// Reason 是降级结果的固定原因串（timeout、panic、budget、canceled）。
 	Reason string
-	// Latency is how long the check ran, including the wait for a concurrency
-	// slot.
-	// Latency 是检查耗时，包含等待并发槽位的时间。
+	// Latency is how long the check function itself ran, measured from the
+	// moment it got a concurrency slot. Queueing for that slot is the registry's
+	// own cost, so it is deliberately excluded: latency_ms answers "is the
+	// dependency slow", not "is the probe listener busy".
+	// Latency 是检查函数自身的耗时，从拿到并发槽位开始计时。排队等槽位是注册表自身的
+	// 开销，因此刻意不计入：latency_ms 回答的是"依赖是否慢"，而不是"探针 listener 是否
+	// 繁忙"。
 	Latency time.Duration
 	// CheckedAt is when the check started.
 	// CheckedAt 是检查开始的时间。
