@@ -187,7 +187,7 @@ github.com/bingcool/gofy/
 
 规则：
 
-- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`support/sqlbuilder`、`support/sqlmodel`、`script`、`command`、`config`、`gofytest`。
+- **只有上表中的公共包是契约**：`gofy`、`apperr`、`core`、`support`、`logger`、`support/db`、`support/pg`、`support/sqlite`、`support/uuidint`、`support/lock`、`support/phpoffice`、`support/image`、`support/redis`、`support/cache`、`support/queues`、`support/amqp`、`support/kafka`、`support/rocketmq`、`support/otel`、`support/sqllog`、`support/encryption`、`support/i18n`、`support/jwtauth`、`support/headerpropagation`、`support/frameworkcontext`、`support/registry`、`support/generation`、`support/sqlbuilder`、`support/sqlmodel`、`script`、`command`、`config`、`gofytest`。
 - `internal/` 可自由重构，不承诺兼容。
 - `cmd/gofy` 只是脚手架工具，不被业务 import；它的存在不影响库的依赖。
 - `examples/demo-service` 是**独立 module**，不进入 gofy 的依赖图；它通过 `replace` 指向 `../..`，并通过 `replace` 消费同级的 `gofy-interface-service` 契约模块。
@@ -220,6 +220,7 @@ gofy (root)
  ├── support/jwtauth
  ├── support/headerpropagation
  ├── support/frameworkcontext ──> support/headerpropagation, support/jwtauth
+ ├── support/i18n ──> gin, go-i18n/v2, golang.org/x/text
  ├── support/sqlbuilder ──> entgo.io/ent/dialect/sql（只用构造器）, support/frameworkcontext
  └── config
 

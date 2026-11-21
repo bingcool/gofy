@@ -420,6 +420,36 @@ Moonshot、自建 vLLM/LiteLLM 都属于最后一种，靠 `base_url` 区分—�
 
 配置项、调用方式、可观测性与测试约定见 [support/ai/README.md](support/ai/README.md)。
 
+## 多语言文案（support/i18n）
+
+`support/i18n` 用 [go-i18n v2](https://github.com/nicksnyder/go-i18n) 加载
+`active.<语言>.json` 消息文件，并提供一个协商中间件：
+
+```go
+bundle, err := gofyi18n.New(cfg.I18n, locale.FS) // locale.FS 是 //go:embed *.json
+app.Use(gofyi18n.Middleware(bundle))
+text := gofyi18n.Translate(c.Request.Context(), "order.notFound",
+    map[string]string{"OrderNo": "A-1"})
+```
+
+协商顺序对齐 swoolefy 的 `LocaleMiddleware`：`?lang=`/`?locale=` →
+`X-Locale`/`X-Language` → `Accept-Language` → 配置的 `default_language`。
+**只有已加载的语言会被选中**：不支持的候选被忽略并继续看下一个来源，全部落空
+才用默认语言——go-i18n 的 matcher 本身会把 `fr` 归到 `en`、`ja` 归到 `zh`，
+不拦截的话"不支持"就变成了"另一个语言"。
+
+`Translate` 始终返回非空文本：没有中间件、或所有语言都缺少该消息时返回消息 ID，
+缺失保持可见。复数用 `TranslatePlural(ctx, id, count, data)`；worker、脚本用
+`bundle.WithLanguage(ctx, "en")` 安装同一套 Localizer。
+
+`i18n.enabled` 为 false 或整段不配置即不启用：`New` 返回禁用态 bundle，中间件
+原样放行、`Translate` 返回消息 ID，不报错——不需要多语言的项目直接省略这一段。
+启用后 `default_language` 必须与某个消息文件名完全一致，否则**启动失败**——运行期
+每次翻译只得到消息 ID 更难发现。消息文件内嵌在二进制里，改文案需要重新构建。
+
+demo 的用法见 `examples/demo-service/app/locale` 与 `examples/demo-service/options.go`；
+完整说明见 [support/i18n/README.md](support/i18n/README.md)。
+
 ## 热更新
 
 `App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
@@ -1054,6 +1084,7 @@ support/kafka/  Kafka 连接、同步生产与消费组消费（franz-go，手�
 support/rocketmq/  RocketMQ 连接、同步生产与拉取消费（官方 v5 gRPC 客户端）
 support/otel/   OpenTelemetry 追踪配置、OTLP 导出与 Gin/HTTP/GORM/Redis 埋点
 support/ai/     配置驱动的 LLM 客户端（goai）：alias、OpenAI 兼容端点、流式与结构化输出
+support/i18n/   多语言文案（go-i18n v2）：active.<lang>.json、语言协商中间件、Translate/TranslatePlural
 support/encryption/  AES-CBC/GCM 对称加解密，与 swoolefy PHP 密文互通
 support/uuidint/  基于 Redis 的分布式自增 int64 ID（与 PHP Uuid 布局互通）
 support/lock/    基于 Redis/redsync 的分布式互斥锁（TTL 自愈 + token 围栏解锁）

@@ -132,7 +132,7 @@
 | 23 | CORS | `src/Http/Middleware/CorsMiddleware.php` | 精确 origin、credentials、expose、max-age 已有 | 补 `AllowOriginPatterns`（`https://*.example.com`）、`AllowPaths`、预检 204 统一 | `support/middleware` | P2 |
 | 24 | 安全响应头 | `SecurityHeadersMiddleware.php` | 无 | 新增：`nosniff`、`DENY/SAMEORIGIN`、`Referrer-Policy`、`Permissions-Policy`、CSP、HSTS（仅 TLS） | `support/middleware` | P1 |
 | 25 | Bearer 鉴权 / 可选鉴权 | `AuthenticateMiddleware`、`OptionalAuthenticateMiddleware` | 示例服务手写 | 新增 `Authenticator` 接口 + `Bearer` / `OptionalBearer`；Principal 放 context | `support/auth` | P1 |
-| 26 | Locale / i18n 协商 | `LocaleMiddleware.php` | 无 | 新增 `Locale`：`Accept-Language`、`?lang=`、cookie、`X-Locale`，只做协商与 context，不内置翻译 | `support/middleware` | P2 |
+| 26 | Locale / i18n 协商 | `LocaleMiddleware.php` | 无 | 已实现 `support/i18n`：go-i18n v2 加载 `active.<lang>.json`；`?lang=`/`?locale=`、`X-Locale`/`X-Language`、`Accept-Language` 协商，只接受已加载语言，落空用 `default_language`；`Translate`/`TranslatePlural` 取文案 | `support/i18n` | 已有 |
 | 27 | 限流与限流响应头 | `RateLimit/*`、`AbstractRateLimiterMiddleware` | 无 | `Limiter` 接口 + 内存滑窗实现；Redis 适配器独立模块；`X-RateLimit-*`、429 信封 | `support/ratelimit` | P2 |
 | 28 | 健康检查（DB/Redis/文件存储） | `src/Http/Health/*` | `/healthz`、`/readyz` 仅 DB ping | `health.Registry` + `Check` 接口；并发检查、超时、详情开关、路径别名；内置 DB Check | `support/health` | P2 |
 | 29 | 进程健康检查 | `Health/Check/ProcessHealthCheck.php` | 无 | 不移植：进程管理不在范围 | — | 不移植 |

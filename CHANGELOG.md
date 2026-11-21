@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `support/i18n` wraps go-i18n v2. `New` loads every `*.json` message file from
+  an `fs.FS` (`active.<language>.json`, the layout go-i18n derives the tag
+  from) and fails when the default language has no file: go-i18n resolves its
+  fallback by exact tag, so `zh-CN` would not fall back to a `zh` file and
+  every lookup would quietly return the message ID. `Middleware` negotiates in
+  the swoolefy order — `?lang=`/`?locale=`, `X-Locale`/`X-Language`, then
+  `Accept-Language` — but accepts only loaded languages: go-i18n's matcher maps
+  an unknown tag to its closest loaded language (`fr` to `en`, `ja` to `zh`),
+  which would turn "unsupported" into "another language". `Translate` always
+  returns text (the message ID when no localizer is installed or every language
+  lacks the message), `TranslatePlural` selects the plural form, and
+  `WithLanguage` installs the same localizer for workers and scripts.
+  `enabled: false` or a missing section returns a disabled bundle instead of an
+  error — the middleware passes requests through and `Translate` returns
+  message IDs — so a deployment without translations needs neither placeholder
+  configuration nor a wiring branch. An enabled-but-broken section still fails
+  startup. The bundle is immutable and shared across requests; message files
+  are embedded at build time, so edits need a rebuild, not a reload.
 - `support/ai`: a configuration-driven LLM client over `github.com/zendev-sh/goai`.
   An application declares aliases under the `llm_ai` section and business code
   calls them by name; provider, base URL and credentials stay in configuration.

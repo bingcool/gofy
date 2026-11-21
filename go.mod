@@ -12,6 +12,7 @@ require (
 	github.com/go-playground/validator/v10 v10.30.5
 	github.com/go-redsync/redsync/v4 v4.18.1
 	github.com/google/uuid v1.6.0
+	github.com/nicksnyder/go-i18n/v2 v2.7.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rabbitmq/amqp091-go v1.16.0
 	github.com/redis/go-redis/extra/redisotel/v9 v9.23.0
@@ -35,6 +36,7 @@ require (
 	go.uber.org/zap v1.27.0
 	golang.org/x/image v0.47.0
 	golang.org/x/sys v0.49.0
+	golang.org/x/text v0.43.0
 	google.golang.org/grpc v1.85.0-dev.0.20260825072537-93e31b48545e
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -46,7 +48,6 @@ require (
 require (
 	contrib.go.opencensus.io/exporter/ocagent v0.6.0 // indirect
 	filippo.io/edwards25519 v1.1.1 // indirect
-	github.com/BurntSushi/toml v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.4 // indirect
@@ -123,7 +124,6 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/api v0.293.0 // indirect
 	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
