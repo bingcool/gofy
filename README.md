@@ -5,6 +5,38 @@
 MySQL 协议 / PostgreSQL / SQLite（GORM）接入、维护脚本和 CLI，同时没有全局状态、
 `init()` 副作用和固定配置文件。
 
+## 目录
+
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [HTTP 安全与限流](#http-安全与限流)
+  - [中间件顺序](#中间件顺序)
+  - [中间件别名](#中间件别名)
+- [服务间请求头透传](#服务间请求头透传)
+  - [统一身份 FrameworkContext](#统一身份-frameworkcontext)
+- [OpenTelemetry 追踪](#opentelemetry-追踪)
+- [指标与运行时诊断](#指标与运行时诊断)
+- [LLM 接入（support/ai）](#llm-接入supportai)
+- [多语言文案（support/i18n）](#多语言文案supporti18n)
+- [支撑组件（support）](#支撑组件support)
+  - [数据库](#数据库)
+  - [缓存与消息队列](#缓存与消息队列)
+  - [命名实例](#命名实例)
+  - [可观测与安全](#可观测与安全)
+  - [其他工具包](#其他工具包)
+  - [装配与代际](#装配与代际)
+- [配置](#配置)
+- [日志](#日志)
+  - [日志分流](#日志分流)
+- [热更新](#热更新)
+- [Nacos](#nacos)
+  - [配置中心](#配置中心)
+  - [服务注册与发现](#服务注册与发现)
+- [脚手架](#脚手架)
+- [CLI](#cli)
+- [测试](#测试)
+- [目录结构](#目录结构)
+
 ## 安装
 
 ```bash
@@ -450,140 +482,9 @@ text := gofyi18n.Translate(c.Request.Context(), "order.notFound",
 demo 的用法见 `examples/demo-service/app/locale` 与 `examples/demo-service/options.go`；
 完整说明见 [support/i18n/README.md](support/i18n/README.md)。
 
-## 热更新
+## 支撑组件（support）
 
-`App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
-
-```go
-err := app.Reload(ctx, gofy.ReloadSpec{
-    Env:                  cfg.Env,      // 空字符串表示保持当前值
-    Log:                  &cfg.Log,     // 重建主、system、access 三个 logger
-    Database:             &cfg.DB,      // 重新连接数据库
-    ModuleFactories:      factories,    // 重新注册路由与模块
-    MiddlewareRegistrars: registrars,   // 重建应用层中间件别名表
-})
-```
-
-执行顺序：校验新配置 → 构建新 logger / system logger / access logger 与 DB →
-构建并启动新模块 → 原子发布新 handler 与 `Runtime` → 旧代在途请求排空 →
-停止旧模块、关闭旧 DB 与旧 logger。新模块启动失败时丢弃已构建的资源，旧服务继续可用。
-
-发布后 handler 立刻指向新一代：新请求进入新代，已在旧代上处理的请求持有租约，
-旧模块和资源要等这些请求结束（或达到 `WithShutdownTimeout` 预算）后才真正释放，
-因此切换期间不会有请求落到已关闭的连接上。`Reload` 只能在服务已启动后调用，
-否则返回 `ErrNotRunning`；并发 `Reload` 之间以及与 `Shutdown` 之间都会串行化。
-
-HTTP 监听地址与超时、pid 文件不在 `ReloadSpec` 中，修改这些内容需要重启进程。
-OpenTelemetry 的 provider 和导出器也在启动时固定，`Reload` 复用同一个实例；
-修改 telemetry 配置需要重启。
-通过 `WithModules` 注入的实例不会被重建：它们继续运行，只在新路由上重新注册，
-因此仍持有创建时捕获的 `Runtime`；需要跟随配置变化的模块请改用 `WithModuleFactories`。
-通过 `With*` 选项安装的全局中间件（CORS、限流、JWT、安全头）与 responder 沿用启动
-配置，`Reload` 不能更换；应用层中间件别名可以随 `MiddlewareRegistrars` 重建。
-
-## 脚手架
-
-```bash
-go install github.com/bingcool/gofy/cmd/gofy@latest
-
-gofy new demo-service \
-  --module github.com/yourorg/demo-service \
-  --dir ./demo-service \
-  --with-db \
-  --with-docker
-```
-
-本地开发时加 `--replace /path/to/gofy` 指向本地仓库。生成的项目不包含密钥，
-也不预生成 `go.sum`；执行 `go mod tidy` 后再运行 `go run . start`。
-
-## 配置
-
-gofy 自身从不读取配置文件。配置由业务项目负责加载，再通过 option 传入。
-可选的配置加载器会应用默认值、展开 `${ENV_VAR}` 并做校验：
-
-```go
-type Config struct {
-	HTTP gofy.HTTPConfig     `yaml:"http"`
-	Log  gofy.LogConfig      `yaml:"log"`
-	DB   gofy.DatabaseConfig `yaml:"db"`
-}
-
-cfg, err := gofyconfig.Load[Config](ctx, "config.yaml")
-```
-
-```yaml
-http:
-  port: 8080
-db:
-  dsn: ${ORDER_DB_DSN}
-```
-
-密钥应通过环境变量注入，不要提交到 YAML。
-
-如果只需要读取零散配置，可以按路径直读，不必定义完整结构体：
-
-```go
-doc, err := gofyconfig.LoadDocument(ctx, "config.yaml")
-if err != nil {
-    return err
-}
-dsn, ok := doc.GetString("db.default.dsn")
-if !ok {
-    return errors.New("db.default.dsn is required")
-}
-port, _ := doc.GetInt("http.port")          // 数字、字符串形式的数字都可读取
-timeout, _ := doc.GetDuration("http.read_timeout") // 1h、30s、200ms
-```
-
-`Document` 支持 `Get`、`Has`、`GetString`、`GetInt`、`GetInt64`、`GetFloat64`、
-`GetBool`、`GetDuration`、`GetStringSlice`；路径用点号分隔，序列用数字下标
-（如 `servers.0.host`），同样会展开 `${ENV_VAR}`。它不做结构体默认值和校验，
-需要这些能力时继续使用 `Load[T]`。
-
-日志用 `logger`（zap）：`log.color` 控制终端着色，`auto`（默认）只在 TTY 上
-生效，`always` 供 IDE 这类非 TTY 控制台强制开启，`never` 关闭，非法值启动即报错。
-着色生效时 `error` 及以上渲染成红色多行块：首行是时间、级别、caller、消息和
-其余字段，`error` 单独成行，`stacktrace` 逐帧展开；低于 `error` 的条目和所有
-文件日志仍按 `log.encoding` 输出，`NO_COLOR` 与 Windows 始终关闭着色。
-
-```yaml
-log:
-  encoding: json
-  color: always   # IDE 控制台不是 TTY，需要彩色分行错误时显式开启
-```
-
-### 日志分流
-
-`logger.Config` 把一次写入按用途拆到四个输出列表，同一进程可以同时写多个目标：
-
-| 字段 | 接收范围 | 为空时 |
-| --- | --- | --- |
-| `outputs` | 当前 `level` 及以上的全部日志（运行态日志） | 默认 `stdout` |
-| `error_outputs` | `error` 及以上，便于快速筛出失败请求 | 所有 error 仍写入 `outputs` |
-| `system_error_outputs` | 框架自动捕获的系统错误（目前是 HTTP recovery 记录的 panic） | App 回落到主 logger；直接调用 `NewSystem` 得到 nop |
-| `access_outputs` | 只接收 HTTP 访问条目 | App 回落到主 logger；直接调用 `NewAccess` 得到 nop |
-
-- 访问日志由 `middleware.AccessLog` 产生，`msg` 固定为 `http access`，字段包含
-  `method`、`path`、`status`、`bytes`、`latency_ms`，可按需附带 `req_id`、
-  `trace_id`/`span_id`、`client_ip`、`user_agent` 和脱敏后的 `query`；
-  默认跳过 `/healthz`、`/readyz`。
-- 访问条目按状态码和耗时分流：5xx → `error`，4xx 或超过慢请求阈值 → `warn`，
-  其余 → `info`。`logger.NewAccess` 因此忽略 `level`、始终接收 `info` 及以上，
-  也不附带 `stacktrace`（5xx 记录的是请求结果，不是出错位置）。
-- `access_outputs` 为空时行为与以前一致：访问条目混在主 logger 的
-  `outputs` / `error_outputs` 里；设置后运行态日志和访问日志各写各的文件。
-- 滚动方式对两类 info 流一致：`rotation.mode`（`size` / `hourly`）同时作用于
-  `outputs` 和 `access_outputs`，`rotation.date_dir` 与 `{date}` 占位符同样适用；
-  `error_outputs` / `system_error_outputs` 固定按大小滚动。
-- `WithAccessLogOptions` 不做字段级合并：布尔开关按字面生效，只想改一项时要把
-  其余需要的开关一并设为 `true`（nil 切片和 0 值数值仍由中间件补默认）；
-  `ReloadSpec.Log` 会同时重建主 logger、system logger 和 access logger。
-
-demo-service 的分流结果：HTTP 模式写 `storage/log/http/<date>/`（`info` /
-`error` / `system_error`）和 `storage/log/access/<date>/access.log`；脚本模式写
-`storage/log/script/<date>/{info,error}/`，没有访问日志。这些目录由进程在运行时
-自行创建，整个 `examples/demo-service/storage/` 都是运行产物，不纳入版本库
-（见根 `.gitignore`）。
+### 数据库
 
 数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
 MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase` 交给 App 托管连接池，
@@ -612,6 +513,13 @@ modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默�
 并把 `?` 与参数人肉对齐。见
 [support/sqlbuilder/README.md](support/sqlbuilder/README.md)。
 
+需要按模型自动取表名并施加租户条件时用 `support/sqlmodel`：表名取自
+`TableName()`，模型声明了租户列而请求上下文没有租户时直接失败，不会退化成
+不带过滤的查询。它依赖 gorm，与只拼 SQL 的 `support/sqlbuilder` 互补。见
+[support/sqlmodel/README.md](support/sqlmodel/README.md)。
+
+### 缓存与消息队列
+
 Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
 客户端之上的缓存与队列门面。AMQP（RabbitMQ）用 `support/amqp`：支持多 host
 回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、断线重连，以及基于
@@ -636,6 +544,8 @@ SimpleConsumer（v5 没有 push consumer），支持 Tag / SQL92 过滤、逐条
 失败重投（at-least-once）。配置与示例见
 [support/rocketmq/README.md](support/rocketmq/README.md)。
 
+### 命名实例
+
 `support/db`、`support/pg`、`support/sqlite`、`support/redis`、`support/amqp`、
 `support/kafka`、`support/rocketmq` 还支持命名
 实例：启动时用 `Configure(map[string]Config)` 注册配置别名，之后任意位置用
@@ -657,6 +567,8 @@ defer reg.Close()
 client, err := redis.NewIO(ctx, "default")
 ```
 
+### 可观测与安全
+
 追踪用 `support/otel`：`WithTelemetry` 是框架级接入，负责 Gin 中间件和 App
 托管连接池；Redis、出站 HTTP、额外 GORM 连接用包内的埋点助手接入。配置与
 隐私约定见 [support/otel/README.md](support/otel/README.md)。
@@ -666,6 +578,8 @@ AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼
 `EncryptString`/`DecryptString` 可跨语言互解。用于保护配置、Token、Cookie
 一类可逆数据，不用于密码哈希。见
 [support/encryption/README.md](support/encryption/README.md)。
+
+### 其他工具包
 
 分布式自增 ID 用 `support/uuidint`：Lua 把 Redis `TIME` 的毫秒前缀与段内序号
 拼成 `int64`（趋势递增、同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套
@@ -713,6 +627,8 @@ Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\E
 图片/文字水印、命名预设与 jpeg/png/gif 编码；`max_pixels` 与读取白名单防止
 超大图和路径穿越。见 [support/image/README.md](support/image/README.md)。
 
+### 装配与代际
+
 跨模块依赖只有一个实现时，在装配根（demo 的 `app/container`）构造实例、按对方
 `innerapi` 的接口注入消费方即可。需要按名字索引或多份同类型实例时，
 再用 `support/registry`：显式的「名字 → 实例」注册表，启动装配时登记
@@ -726,10 +642,135 @@ client/service，按名字取用（`Get[T]` 带类型检查）；空名字、nil
 `CompareAndSwap` 只撤回自己那一代。见
 [support/generation/README.md](support/generation/README.md)。
 
-## Nacos 配置中心
+## 配置
 
-`support/nacos` 直接调用 Nacos Open API（不引入 SDK）：启动时把远端配置写成
-`config.yaml`，运行期间通过长轮询保持同步。示例见
+gofy 自身从不读取配置文件。配置由业务项目负责加载，再通过 option 传入。
+可选的配置加载器会应用默认值、展开 `${ENV_VAR}` 并做校验：
+
+```go
+type Config struct {
+	HTTP gofy.HTTPConfig     `yaml:"http"`
+	Log  gofy.LogConfig      `yaml:"log"`
+	DB   gofy.DatabaseConfig `yaml:"db"`
+}
+
+cfg, err := gofyconfig.Load[Config](ctx, "config.yaml")
+```
+
+```yaml
+http:
+  port: 8080
+db:
+  dsn: ${ORDER_DB_DSN}
+```
+
+密钥应通过环境变量注入，不要提交到 YAML。
+
+如果只需要读取零散配置，可以按路径直读，不必定义完整结构体：
+
+```go
+doc, err := gofyconfig.LoadDocument(ctx, "config.yaml")
+if err != nil {
+    return err
+}
+dsn, ok := doc.GetString("db.default.dsn")
+if !ok {
+    return errors.New("db.default.dsn is required")
+}
+port, _ := doc.GetInt("http.port")          // 数字、字符串形式的数字都可读取
+timeout, _ := doc.GetDuration("http.read_timeout") // 1h、30s、200ms
+```
+
+`Document` 支持 `Get`、`Has`、`GetString`、`GetInt`、`GetInt64`、`GetFloat64`、
+`GetBool`、`GetDuration`、`GetStringSlice`；路径用点号分隔，序列用数字下标
+（如 `servers.0.host`），同样会展开 `${ENV_VAR}`。它不做结构体默认值和校验，
+需要这些能力时继续使用 `Load[T]`。
+
+## 日志
+
+日志用 `logger`（zap）：`log.color` 控制终端着色，`auto`（默认）只在 TTY 上
+生效，`always` 供 IDE 这类非 TTY 控制台强制开启，`never` 关闭，非法值启动即报错。
+着色生效时 `error` 及以上渲染成红色多行块：首行是时间、级别、caller、消息和
+其余字段，`error` 单独成行，`stacktrace` 逐帧展开；低于 `error` 的条目和所有
+文件日志仍按 `log.encoding` 输出，`NO_COLOR` 与 Windows 始终关闭着色。
+
+```yaml
+log:
+  encoding: json
+  color: always   # IDE 控制台不是 TTY，需要彩色分行错误时显式开启
+```
+
+### 日志分流
+
+`logger.Config` 把一次写入按用途拆到四个输出列表，同一进程可以同时写多个目标：
+
+| 字段 | 接收范围 | 为空时 |
+| --- | --- | --- |
+| `outputs` | 当前 `level` 及以上的全部日志（运行态日志） | 默认 `stdout` |
+| `error_outputs` | `error` 及以上，便于快速筛出失败请求 | 所有 error 仍写入 `outputs` |
+| `system_error_outputs` | 框架自动捕获的系统错误（目前是 HTTP recovery 记录的 panic） | App 回落到主 logger；直接调用 `NewSystem` 得到 nop |
+| `access_outputs` | 只接收 HTTP 访问条目 | App 回落到主 logger；直接调用 `NewAccess` 得到 nop |
+
+- 访问日志由 `middleware.AccessLog` 产生，`msg` 固定为 `http access`，字段包含
+  `method`、`path`、`status`、`bytes`、`latency_ms`，可按需附带 `req_id`、
+  `trace_id`/`span_id`、`client_ip`、`user_agent` 和脱敏后的 `query`；
+  默认跳过 `/healthz`、`/readyz`。
+- 访问条目按状态码和耗时分流：5xx → `error`，4xx 或超过慢请求阈值 → `warn`，
+  其余 → `info`。`logger.NewAccess` 因此忽略 `level`、始终接收 `info` 及以上，
+  也不附带 `stacktrace`（5xx 记录的是请求结果，不是出错位置）。
+- `access_outputs` 为空时行为与以前一致：访问条目混在主 logger 的
+  `outputs` / `error_outputs` 里；设置后运行态日志和访问日志各写各的文件。
+- 滚动方式对两类 info 流一致：`rotation.mode`（`size` / `hourly`）同时作用于
+  `outputs` 和 `access_outputs`，`rotation.date_dir` 与 `{date}` 占位符同样适用；
+  `error_outputs` / `system_error_outputs` 固定按大小滚动。
+- `WithAccessLogOptions` 不做字段级合并：布尔开关按字面生效，只想改一项时要把
+  其余需要的开关一并设为 `true`（nil 切片和 0 值数值仍由中间件补默认）；
+  `ReloadSpec.Log` 会同时重建主 logger、system logger 和 access logger。
+
+demo-service 的分流结果：HTTP 模式写 `storage/log/http/<date>/`（`info` /
+`error` / `system_error`）和 `storage/log/access/<date>/access.log`；脚本模式写
+`storage/log/script/<date>/{info,error}/`，没有访问日志。这些目录由进程在运行时
+自行创建，整个 `examples/demo-service/storage/` 都是运行产物，不纳入版本库
+（见根 `.gitignore`）。
+
+## 热更新
+
+`App.Reload` 在运行中的进程内重建运行时资源，不重启进程，也不重新监听端口：
+
+```go
+err := app.Reload(ctx, gofy.ReloadSpec{
+    Env:                  cfg.Env,      // 空字符串表示保持当前值
+    Log:                  &cfg.Log,     // 重建主、system、access 三个 logger
+    Database:             &cfg.DB,      // 重新连接数据库
+    ModuleFactories:      factories,    // 重新注册路由与模块
+    MiddlewareRegistrars: registrars,   // 重建应用层中间件别名表
+})
+```
+
+执行顺序：校验新配置 → 构建新 logger / system logger / access logger 与 DB →
+构建并启动新模块 → 原子发布新 handler 与 `Runtime` → 旧代在途请求排空 →
+停止旧模块、关闭旧 DB 与旧 logger。新模块启动失败时丢弃已构建的资源，旧服务继续可用。
+
+发布后 handler 立刻指向新一代：新请求进入新代，已在旧代上处理的请求持有租约，
+旧模块和资源要等这些请求结束（或达到 `WithShutdownTimeout` 预算）后才真正释放，
+因此切换期间不会有请求落到已关闭的连接上。`Reload` 只能在服务已启动后调用，
+否则返回 `ErrNotRunning`；并发 `Reload` 之间以及与 `Shutdown` 之间都会串行化。
+
+HTTP 监听地址与超时、pid 文件不在 `ReloadSpec` 中，修改这些内容需要重启进程。
+OpenTelemetry 的 provider 和导出器也在启动时固定，`Reload` 复用同一个实例；
+修改 telemetry 配置需要重启。
+通过 `WithModules` 注入的实例不会被重建：它们继续运行，只在新路由上重新注册，
+因此仍持有创建时捕获的 `Runtime`；需要跟随配置变化的模块请改用 `WithModuleFactories`。
+通过 `With*` 选项安装的全局中间件（CORS、限流、JWT、安全头）与 responder 沿用启动
+配置，`Reload` 不能更换；应用层中间件别名可以随 `MiddlewareRegistrars` 重建。
+
+## Nacos
+
+`support/nacos` 直接调用 Nacos Open API，不引入 SDK，覆盖配置中心与服务注册发现。
+
+### 配置中心
+
+启动时把远端配置写成 `config.yaml`，运行期间通过长轮询保持同步。示例见
 `examples/demo-service/main.go`；完整 API 见
 [support/nacos/README.md](support/nacos/README.md)。
 
@@ -764,7 +805,7 @@ if nx.Enabled && nx.Watch {
 }
 ```
 
-**两文件布局（与 swoolefy 一致）**
+#### 两文件布局（与 swoolefy 一致）
 
 `nacos.yaml` 只放服务器连接：
 
@@ -824,7 +865,7 @@ nacos:
 - `nacos.yaml` 不存在时 `Load` 返回的错误满足 `errors.Is(err, fs.ErrNotExist)`，
   可回退到 `nacos.FromEnv()`（示例见 `examples/demo-service/main.go`）。
 
-**单文件写法**
+#### 单文件写法
 
 所有键也可以写进同一个 `nacos.yaml`（需显式 `enabled: true` 或 `NACOS_ENABLED=1`）：
 
@@ -876,13 +917,13 @@ NACOS_DATA_ID=gofy-service NACOS_GROUP=GO_GROUP go run . start
 - 只在 `start` 路径调用 `Sync`，避免 `stop` / `version` 也依赖 Nacos
   （示例见 `examples/demo-service/main.go` 的 `isStartInvocation`）。
 
-## Nacos 服务注册与发现
+### 服务注册与发现
 
-`support/nacos` 同时实现了 Naming API：`App` 在监听端口可用后把自身注册到 Nacos，
-退出时注销。客户端侧（`gofy-adapter/client/nacos`）按服务名解析实例并
+Naming API 同样由 `support/nacos` 实现：`App` 在监听端口可用后把自身注册到
+Nacos，退出时注销。客户端侧（`gofy-adapter/client/nacos`）按服务名解析实例并
 做负载均衡。
 
-**服务注册**
+#### 服务注册
 
 `application.yaml` 沿用 swoolefy 的键：
 
@@ -945,7 +986,7 @@ app, err := gofy.New(
 | `NACOS_DISCOVERY_HEALTHY_ONLY` | 是否只返回健康实例 | `true` |
 | `NACOS_DISCOVERY_CLUSTERS` | 只发现指定集群，逗号分隔 | 空（全部） |
 
-**客户端服务发现（gofy-adapter）**
+#### 客户端服务发现（gofy-adapter）
 
 `client/nacos.Resolver` 实现了 `client.Resolver`：按服务名调用 `instance/list`，
 在本地缓存实例列表；Nacos 不可达时在 `stale_ttl` 内继续使用最后一次成功的结果；
@@ -979,6 +1020,21 @@ res, err := orders.GetOrder(ctx, &orderrequest.GetOrderRequest{ID: 1})
 ```go
 orders, err := demoserviceclient.NewWithBaseURL("https://orders.example.com")
 ```
+
+## 脚手架
+
+```bash
+go install github.com/bingcool/gofy/cmd/gofy@latest
+
+gofy new demo-service \
+  --module github.com/yourorg/demo-service \
+  --dir ./demo-service \
+  --with-db \
+  --with-docker
+```
+
+本地开发时加 `--replace /path/to/gofy` 指向本地仓库。生成的项目不包含密钥，
+也不预生成 `go.sum`；执行 `go mod tidy` 后再运行 `go run . start`。
 
 ## CLI
 
