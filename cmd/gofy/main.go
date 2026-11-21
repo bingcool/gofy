@@ -146,13 +146,13 @@ func newNewCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&module, "module", "", "Go module path (default: read from <dir>/go.mod)")
-	cmd.Flags().StringVar(&dir, "dir", "", "output directory (default ./<name>; use with `new .` for the current one)")
+	cmd.Flags().StringVar(&dir, "dir", "", "output directory (default ./<name>, or . when the name is .)")
 	cmd.Flags().BoolVar(&withDB, "with-db", false, "include MySQL/GORM wiring")
 	cmd.Flags().BoolVar(&withScripts, "with-scripts", true, "include the script/ directory")
 	cmd.Flags().BoolVar(&withWorker, "with-worker", true, "include the worker/ entry for long-running tasks")
 	cmd.Flags().BoolVar(&withDocker, "with-docker", false, "include Dockerfile and .dockerignore")
 	cmd.Flags().BoolVar(&withMakefile, "with-makefile", true, "include a Makefile")
-	cmd.Flags().BoolVar(&force, "force", false, "write into a non-empty directory")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite generated files and allow a non-empty target directory")
 	cmd.Flags().StringVar(&replace, "replace", "", "add a local replace directive for github.com/bingcool/gofy")
 	cmd.Flags().StringVar(&goVersion, "go", "1.26", "go directive in go.mod")
 	cmd.AddCommand(newInterfaceServiceCmd())
