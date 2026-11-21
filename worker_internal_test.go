@@ -430,10 +430,11 @@ func groupNames(groups []*worker.Group) []string {
 	return out
 }
 
-// TestWorkerHealthReportsState covers the probe contract: 503 before the group
-// starts, 200 while it runs, 503 again while it drains.
-// TestWorkerHealthReportsState 覆盖探针契约：分组启动前 503，运行中 200，drain 时
-// 再次 503。
+// TestWorkerHealthReportsState covers the split probe contract: liveness stays
+// 200 through starting, ready and draining, while readiness is 503 until the
+// group reports and turns 503 again once the drain begins.
+// TestWorkerHealthReportsState 覆盖拆开后的探针契约：liveness 在 starting、ready 与
+// draining 都是 200；readiness 在分组上报前 503，drain 开始后再次 503。
 func TestWorkerHealthReportsState(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -442,31 +443,42 @@ func TestWorkerHealthReportsState(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 
-	h := newWorkerHealth(addr)
+	h := newWorkerHealth(addr, nil)
 	if err := h.start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer h.stop()
 
-	code := func() int {
-		resp, err := http.Get("http://" + addr + "/healthz")
+	code := func(path string) int {
+		resp, err := http.Get("http://" + addr + path)
 		if err != nil {
-			t.Fatalf("GET /healthz: %v", err)
+			t.Fatalf("GET %s: %v", path, err)
 		}
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
 
-	if got := code(); got != http.StatusServiceUnavailable {
-		t.Fatalf("starting: %d, want 503", got)
+	if got := code("/healthz"); got != http.StatusOK {
+		t.Fatalf("starting liveness: %d, want 200", got)
 	}
+	if got := code("/readyz"); got != http.StatusServiceUnavailable {
+		t.Fatalf("starting readiness: %d, want 503", got)
+	}
+
 	h.setReady()
-	if got := code(); got != http.StatusOK {
-		t.Fatalf("ready: %d, want 200", got)
+	if got := code("/healthz"); got != http.StatusOK {
+		t.Fatalf("ready liveness: %d, want 200", got)
 	}
+	if got := code("/readyz"); got != http.StatusOK {
+		t.Fatalf("ready readiness: %d, want 200", got)
+	}
+
 	h.setStopping()
-	if got := code(); got != http.StatusServiceUnavailable {
-		t.Fatalf("stopping: %d, want 503", got)
+	if got := code("/healthz"); got != http.StatusOK {
+		t.Fatalf("draining liveness: %d, want 200", got)
+	}
+	if got := code("/readyz"); got != http.StatusServiceUnavailable {
+		t.Fatalf("draining readiness: %d, want 503", got)
 	}
 }
 

@@ -209,7 +209,28 @@ func WithWorkerHealthChecks(checkers ...health.Checker) Option  // worker 进程
 框架自动注册的 DB 检查名固定为 `database`，行为与现状一致（无 DB 不注册）。
 用户想完全接管 readiness 时用 `WithDatabaseHealthCheck(false)`。
 
+### 3.2.1 默认 readiness 的评审结论（2026-11-21）
+
+保留默认 readiness，不改「默认 diagnostic、显式声明才生效」。理由：注册检查本身就是表态「我在意
+这个依赖」，默认不生效会让检查静默失效——比误摘流更难发现。改成 diagnostic 后，漏写 `WithClass`
+的用户会得到一个永远绿的 `/readyz`，问题被藏起来而不是被暴露。
+
+代价用三条约束压低，而不是靠改默认值：
+
+- **槽位预算**：框架自动注册的 `database` 检查同样占 readiness 与并发槽位。默认并发 4 意味着
+  用户最多再注册 **3 个** critical 检查，加上 DB 才凑满 4 个；第 5 个（含 DB）跑不完，落到
+  `budget` 截断规则。这个数字要写进 godoc，否则用户按「4 个自定义检查」规划就会踩线。
+- **godoc 与 README 的硬性措辞**：放进 readiness 的检查必须满足「不满足就不能接活」且「失败快、
+  不重试、不重连」；业务健康（报表 Redis、搜索集群、第三方额度）一律走 `WithDiagnosticChecks`。
+- **注册日志**：`WithHealthChecks` 为每个检查记一条 debug 日志，写明 `name`、`class=readiness`、
+  `timeout`（默认 2s）。误注册时看启动日志即可定位，不必读代码。
+
+不做的事：不提供「默认 diagnostic」的反向开关，也不提供静默降级——类别只能显式选择。
+`WithDatabaseHealthCheck(false)` 保留，用于完全接管 readiness。
+
 ### 3.3 执行模型：缓存、并发与超时
+
+以下五个默认值**已确认**（2026-11-21），作为 Phase 1 的落地值；改动需同步本表与 §6 的验收门槛。
 
 | 参数 | 默认值 | 理由 |
 |---|---|---|
@@ -218,9 +239,15 @@ func WithWorkerHealthChecks(checkers ...health.Checker) Option  // worker 进程
 | 并发上限 | 4 | 避免 20 个依赖同时 Ping 打满连接池；依赖检查应快速失败而不是排队 |
 | Readiness 缓存 TTL | 1s | 探针频率通常 5–10s；1s 缓存足以合并同一副本的重复探测，又不会让状态滞后太久 |
 | Diagnostic 缓存 TTL | 2s | 明细允许稍旧；避免人工刷新与抓取同时打依赖 |
+| 并发与预算的关系 | 4 × 2s > 3s | 默认值只保证**不超过 4 个 critical 检查**能在预算内全部跑完；检查数超过 4 时第二轮只剩 1s，必须按下一行的规则截断，不排队等待 |
+| 预算耗尽 | 已完成的结果照用 | readiness：未完成或未开始的检查视为失败（503），与 `fail-closed` 一致；diagnostic：未完成记 `unknown` 并标注 `budget` |
 | 单检查结果 | 缓存到下一轮 | 同一轮内所有请求共享一次执行结果 |
 | 超时/panic | fail-closed | readiness 返回 503，diagnostic 标记 `unknown`；panic 恢复并记录，不中断整轮 |
 | singleflight | 按 `(registry, kind)` 合并 | 100 个并发探针只触发一轮检查 |
+
+表里最容易漏掉的是「并发 × 单检查 > 总预算」这条边界：调小并发、调大单检查，或者注册第 5 个
+critical 检查，都会让部分检查永远跑不完。因此改任一默认值时，必须在同一个 PR 里复核总预算
+与检查数量，否则 readiness 会长期失败而看不出原因。
 
 执行规则：
 
@@ -292,8 +319,16 @@ SecurityHeaders 响应头。若不能接受，改成「闸门层豁免 + 仍走�
 - `/readyz`：`state == ready` **且**所有 runner 的 readyGate 满足、worker readiness 检查通过 → 200；
   starting/draining → 503。只判 gate 不够：`markReady` 用 `sync.Once` 关通道（`runner.go:147-149`），
   drain 开始后通道仍然是关的，单看 gate 会把 `/readyz` 一直报成 200。
-- 这是行为变更：现有把 `/healthz` 当 readiness 用的部署需要切到 `/readyz`。发布说明中标注；
-  如需过渡，增加 `WithWorkerHealthLegacyLiveness(bool)`，默认 false（新语义）。
+- 这是行为变更，**不提供 legacy 开关**（评审结论 2026-11-21）。`WithWorkerHealthLegacyLiveness`
+  会把「路径叫 healthz、语义是就绪」的错配固化成两个可选项，并把两套语义一起拖到 v2；而迁移成本
+  只是一行 YAML：`readinessProbe` 指 `/readyz`、`livenessProbe` 指 `/healthz`。worker 不接业务
+  流量，探针误判不会把流量打到坏实例，风险窗口很小。
+- 替代开关的交付项：`CHANGELOG.md` 的 `Changed` 段写明「worker `/healthz` 由就绪语义改为存活性
+  语义」，`docs/worker-guide.md:96` 的「只报就绪」描述同步改写，README 的探针章节补迁移示例。
+- 连带影响：`status` 命令的 `health` 列探测的就是 `/healthz`（`README.md:1070`），语义变更后该列
+  只表示「进程活着」，不再表示「就绪」。表格列名与说明需同步修正，否则运维会把 `alive` 误读成
+  `ready`。
+- 若发布后确有用户在升级中受阻，再在 v1.x 追加兼容开关；届时语义已稳定，开关只承担兼容职责。
 
 ### 3.7 内置检查器
 
@@ -349,7 +384,7 @@ app, err := gofy.New(
   但必须同步放宽 `Config.Validate` 的 `ErrNothingEnabled`（`diagnostics.go:93-95`）：现在
   「enabled 且 metrics、pprof 都关」直接报错，加上 `/health` 后规则要改成「三个端点全关才报错」，
   否则 health-only 的诊断端口根本起不来。
-- worker `/healthz` 语义变更需要发布说明；`/readyz` 是纯新增。
+- worker `/healthz` 语义变更需要发布说明，不提供 legacy 开关（理由见 §3.6）；`/readyz` 是纯新增。
 
 ---
 
@@ -544,6 +579,35 @@ app, err := gofy.New(
 验收：不注册检查时 `/readyz` 行为与响应体不变；摘流时 `/healthz` 200、`/readyz` 503；
 100 并发探针只触发一轮检查；单检查 panic/超时不会拖垮整轮。
 
+#### Phase 1 落地记录（2026-11-21）
+
+代码已落地并通过验证：
+
+| 验证项 | 命令 | 结果 |
+|---|---|---|
+| 格式 | `gofmt -l .` | 无输出 |
+| 编译 / 静态检查 | `go build ./...`、`go vet ./...` | 通过 |
+| 单元 + 集成 | `go test ./support/health/... ./support/diagnostics/... .` | 通过 |
+| 并发 | `go test -race ./support/health/...` | 通过 |
+| 依赖方向 | `make guards` | 通过 |
+
+验证过程中发现并修掉的问题（均先复现再修）：
+
+1. **`WithCheckTimeout` 静默吞掉负值**：选项层 `if d > 0` 让 `Register` 的负超时校验永远不可达，
+   调用方以为检查运行在自己要求的预算下。改为记录非零值，由 `Register` 统一拒绝；
+   `TimeoutProvider` 返回负值同样拒绝。
+2. **Reload 复用注册表会 ping 已关闭的连接池**：`dbChecker` 捕获启动时的 `*gorm.DB`，
+   而带 `Database` 的 Reload 会关闭旧池（`generation.go:339-343`），`/readyz` 此后永久 503。
+   改为注册表随 runtime 重建（`atomic.Pointer` 保存，处理器按请求读取），`Handler()` 模式也构建注册表。
+3. **启动期 `/readyz` 会跑检查**：listener 在 `markReady` 之前已接受连接，与 §3.3
+   「尚未 ready 直接 503、不跑检查」不符。现在未 ready 时直接 503，不触发任何检查。
+4. **HTTP 检查错误带出 URL query**：`http.Client.Do` 的 `*url.Error` 文本重复完整 URL，
+   会把 `?token=...` 渲染进 `/health`。改为解包只保留操作与原因；构造期错误用去掉 query 与
+   userinfo 的 URL。
+
+测试口径也同步到新语义：`/healthz` 的摘流断言改为「liveness 200 + readiness 503」；
+worker 宿主探针测试改探 `/readyz`（并断言 `/healthz` 在启动与 drain 期间始终 200）。
+
 ### Phase 2：指标管道解耦（约 3–4 人日）
 
 | 文件 | 变更 |
@@ -597,7 +661,8 @@ app, err := gofy.New(
 
 1. 默认配置下行为与现状一致（端点开关、响应体、`/readyz` 的 DB 语义）。
 2. 任意单个检查超时/panic 不会让 `/healthz` 失败。
-3. 探针并发数不超过配置上限；同一 TTL 内检查函数调用次数为 1。
+3. 探针并发数不超过配置上限；同一 TTL 内检查函数调用次数为 1；总预算耗尽时，未完成或未开始的
+   readiness 检查必须判失败（503），不得静默通过；diagnostic 对应项记 `unknown`（`budget`）。
 4. 指标序列数与消息量解耦；禁用指标时无额外分配。
 5. 不新增公共包对根包的依赖（`make guards` 通过）。
 
@@ -612,7 +677,7 @@ app, err := gofy.New(
 | 详细健康信息泄露拓扑 | 安全风险 | 明细只在 diagnostics 端口（默认回环）；业务端口只返回状态码 |
 | liveness 被闸门拦截 | 滚动更新时误重启 | 精确路径豁免，只放行 `/healthz` |
 | 指标基数爆炸 | Prometheus 内存/查询成本 | 标签白名单 + 枚举 + topic 配置约束；禁止实例/消息 ID |
-| worker `/healthz` 语义变更 | 现有探针配置失效 | 发布说明 + 过渡开关；`/readyz` 为新增 |
+| worker `/healthz` 语义变更 | 现有探针配置失效 | 发布说明 + `CHANGELOG` 的 `Changed` 段 + worker-guide 改写；`/readyz` 为新增，不提供 legacy 开关 |
 | 指标与诊断耦合未解开 | worker 无指标 | `WithMetrics` 独立构建；diagnostics 仅挂载 handler |
 | 包依赖方向被破坏 | 循环依赖 | `support/health` 不 import 根包；`core` 保持叶子；`make guards` 守护 |
 

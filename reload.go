@@ -308,6 +308,16 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 	a.sqlLogger = sqlLogger
 	a.db, a.ownDB = db, ownDB
 	a.rt = rt
+	// The registry belongs to the runtime: its database check points at the pool
+	// built above. Rebuilding it before the swap keeps /readyz off the pool that
+	// retireGeneration is about to close, and registers a database check for a
+	// process that only got one on this reload.
+	// 注册表属于本次 runtime：它的数据库检查指向上面新建的连接池。在换代之前重建，
+	// /readyz 就不会去 ping 即将被 retireGeneration 关闭的那个池；本次 Reload 才拿到
+	// 连接池的进程也会在此注册数据库检查。
+	if a.healthRegistry.Load() != nil {
+		a.healthRegistry.Store(a.newHealthRegistry(rt, lg))
+	}
 	a.modules = modules
 	a.started = allStarted
 

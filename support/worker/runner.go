@@ -100,12 +100,78 @@ type Runner struct {
 	// The host must not tear down resources those instances are using.
 	// abandoned 记录 Run 返回时仍有实例在跑。宿主不能拆除这些实例正在使用的资源。
 	abandoned atomic.Bool
+
+	// state is the read-only lifecycle view exposed to the host: starting until the
+	// group reports ready, draining once the run context is cancelled, then
+	// stopped. It never changes how Run schedules work.
+	// state 是暴露给宿主的只读生命周期视图：分组上报就绪前为 starting，run context
+	// 取消后为 draining，最后为 stopped。它不改变 Run 的调度行为。
+	state atomic.Int32
 }
 
 // Abandoned reports whether Run returned with instances still running, which
 // only happens when the drain budget was exhausted.
 // Abandoned 报告 Run 返回时是否仍有实例在跑；只有 drain 预算耗尽才会如此。
 func (r *Runner) Abandoned() bool { return r.abandoned.Load() }
+
+// State is the lifecycle phase of a Runner.
+// State 是 Runner 的生命周期阶段。
+type State int32
+
+const (
+	// StateStarting means Run has not reported readiness yet.
+	// StateStarting 表示 Run 还没有上报就绪。
+	StateStarting State = iota
+	// StateReady means every reporting instance has reported.
+	// StateReady 表示所有需要上报的实例都已上报。
+	StateReady
+	// StateDraining means the run context was cancelled and in-flight work is
+	// finishing inside the drain budget.
+	// StateDraining 表示 run context 已取消，在途任务正在 drain 预算内收尾。
+	StateDraining
+	// StateStopped means Run returned.
+	// StateStopped 表示 Run 已返回。
+	StateStopped
+	// StateFailed means Run returned because a worker failed fatally.
+	// StateFailed 表示 Run 因 worker 致命失败而返回。
+	StateFailed
+)
+
+// String renders the state for logs and probe debugging.
+// String 渲染状态，供日志与探针排障使用。
+func (s State) String() string {
+	switch s {
+	case StateStarting:
+		return "starting"
+	case StateReady:
+		return "ready"
+	case StateDraining:
+		return "draining"
+	case StateStopped:
+		return "stopped"
+	case StateFailed:
+		return "failed"
+	}
+	return "unknown"
+}
+
+// State returns the lifecycle phase.
+// State 返回生命周期阶段。
+func (r *Runner) State() State { return State(r.state.Load()) }
+
+// IsReady reports whether the ready channel is closed. Ready() keeps returning
+// the channel, because existing callers select on it; this boolean view is what
+// the worker probe needs.
+// IsReady 报告就绪通道是否已关闭。Ready() 继续返回通道（既有调用方在它上面 select），
+// 这个布尔视图供 worker 探针使用。
+func (r *Runner) IsReady() bool {
+	select {
+	case <-r.ready:
+		return true
+	default:
+		return false
+	}
+}
 
 // NewRunner validates the group and its concurrency map.
 // NewRunner 校验分组与并发配置。
@@ -145,7 +211,10 @@ func (r *Runner) Ready() <-chan struct{} { return r.ready }
 // markReady closes the ready channel exactly once.
 // markReady 只关闭一次就绪通道。
 func (r *Runner) markReady() {
-	r.readyOne.Do(func() { close(r.ready) })
+	r.readyOne.Do(func() {
+		r.state.Store(int32(StateReady))
+		close(r.ready)
+	})
 }
 
 // Run blocks until the context is cancelled, a worker fails fatally, or every
@@ -159,6 +228,18 @@ func (r *Runner) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	cfg := r.cfg
+
+	// The state view is bookkeeping only: it never feeds back into scheduling. A
+	// failed run keeps its failed state so a supervisor can tell it apart from a
+	// clean stop.
+	// 状态视图只做记录，绝不反向影响调度。失败的运行保留 failed 状态，监管方因此能把
+	// 它与干净停机区分开。
+	r.state.Store(int32(StateStarting))
+	defer func() {
+		if r.State() != StateFailed {
+			r.state.Store(int32(StateStopped))
+		}
+	}()
 
 	runCtx, stopRuns := context.WithCancel(ctx)
 	defer stopRuns()
@@ -265,6 +346,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	case <-done:
 	}
 
+	if ctx.Err() != nil {
+		r.state.Store(int32(StateDraining))
+	}
+
 	// Stop pulling first, then wait: the order matters because cancelling the
 	// drain context before the run context would abort work that still had
 	// budget left.
@@ -292,6 +377,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	if fatal != nil {
+		r.state.Store(int32(StateFailed))
 		return fatal
 	}
 	if ctx.Err() != nil {

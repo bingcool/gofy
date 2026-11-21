@@ -1069,6 +1069,8 @@ gofy new .
 
 健康检查列只有在目标配置了 `/healthz` 时才有意义：HTTP 实例看 `WithHealthEndpoints`，worker 看 `WithWorkerHealth`；未配置时显示 `disabled`（worker 表格里整列省略，避免一排 `--` 被读成故障）。探测走本机回环且不走环境代理——经 `HTTP_PROXY` 发出的本机健康检查拿到的是代理的答复。
 
+worker 的 `health` 列探测的是 `/healthz`，而 `/healthz` 自 v1.x 起只表示**进程存活**：drain 窗口内它仍然 200。因此 worker 的该列回答"进程还在"，不再回答"可以接活"；就绪要看新增的 `/readyz`（分组已就绪且 readiness 检查通过）。HTTP 实例不受影响：`/healthz` 仍是存活、`/readyz` 仍是就绪。
+
 ## 测试
 
 `gofytest` 在进程内构建 handler，不监听端口、不写 pid 文件、不连接真实数据库：

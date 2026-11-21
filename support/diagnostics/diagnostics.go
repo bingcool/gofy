@@ -72,13 +72,28 @@ type Config struct {
 	// DisablePprof 关闭 /debug/pprof/*。在不允许堆转储离开进程的环境（例如受监管
 	// 场景）应关掉它。
 	DisablePprof bool `yaml:"disable_pprof"`
+
+	// DisableHealth omits /health, the per-check detail endpoint. Readiness and
+	// liveness stay on the application listener; this endpoint only carries the
+	// detail an operator reads, so it may be turned off where the diagnostics port
+	// is exposed to a wider network than the probes.
+	// DisableHealth 关闭 /health（逐检查明细端点）。readiness 与 liveness 在应用监听上；
+	// 这个端点只承载运维查看的明细，因此当代诊断端口暴露给比探针更宽的网络时可以关掉。
+	DisableHealth bool `yaml:"disable_health"`
+
+	// HealthPath is where the detail handler is mounted. Empty means /health. It
+	// exists for the same reason as MetricsPath: an existing route or proxy may
+	// already own the conventional path.
+	// HealthPath 是明细 handler 的挂载路径，空表示 /health。它与 MetricsPath 同理：
+	// 既有路由或代理可能已经占用了约定路径。
+	HealthPath string `yaml:"health_path"`
 }
 
-// ErrNothingEnabled is returned when the listener is enabled but both endpoints
-// are disabled: it would open a port that answers 404 to everything.
-// ErrNothingEnabled 在监听开启但两个端点都关闭时返回：否则会打开一个对一切请求都
+// ErrNothingEnabled is returned when the listener is enabled but every endpoint
+// is disabled: it would open a port that answers 404 to everything.
+// ErrNothingEnabled 在监听开启但所有端点都关闭时返回：否则会打开一个对一切请求都
 // 回 404 的端口。
-var ErrNothingEnabled = errors.New("diagnostics: listener is enabled but metrics and pprof are both disabled")
+var ErrNothingEnabled = errors.New("diagnostics: listener is enabled but metrics, pprof and health are all disabled")
 
 // Validate checks the configuration without opening a socket.
 // Validate 只校验配置，不创建 socket。
@@ -90,11 +105,19 @@ func (c Config) Validate() error {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		return fmt.Errorf("diagnostics: invalid addr %q: %w", c.Addr, err)
 	}
-	if c.Enabled && c.DisableMetrics && c.DisablePprof {
+	// The rule is "all three off", not "metrics and pprof off": a health-only
+	// listener is a legitimate deployment, and rejecting it would leave the
+	// operator with no diagnostics port at all.
+	// 规则是"三个端点全关"，而不是"metrics 与 pprof 关"：只开 health 是合法部署，
+	// 拒绝它会让运维彻底没有诊断端口。
+	if c.Enabled && c.DisableMetrics && c.DisablePprof && c.DisableHealth {
 		return ErrNothingEnabled
 	}
 	if path := strings.TrimSpace(c.MetricsPath); path != "" && !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("diagnostics: metrics_path %q must start with /", c.MetricsPath)
+	}
+	if path := strings.TrimSpace(c.HealthPath); path != "" && !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("diagnostics: health_path %q must start with /", c.HealthPath)
 	}
 	return nil
 }
@@ -138,6 +161,17 @@ type Endpoints struct {
 	// Metrics is the scrape handler, usually otel.Metrics.Handler().
 	// Metrics 是抓取 handler，通常是 otel.Metrics.Handler()。
 	Metrics http.Handler
+
+	// HealthPath is where the detail handler is mounted; empty means /health.
+	// HealthPath 是明细 handler 的挂载路径，空表示 /health。
+	HealthPath string
+
+	// Health is the per-check detail handler. A nil handler skips the route: the
+	// hosts build it only when they have a registry, and a health-only listener
+	// without one would otherwise fail to start.
+	// Health 是逐检查明细 handler。nil 时跳过该路由：宿主只在有注册表时才构建它，否则
+	// 只开 health 的监听会无法启动。
+	Health http.Handler
 }
 
 // Server is the diagnostics listener. It is created by New and started by Start;
@@ -209,6 +243,17 @@ func (s *Server) Handler(ep Endpoints) (http.Handler, error) {
 			path = "/metrics"
 		}
 		mux.Handle(path, ep.Metrics)
+	}
+
+	if !s.cfg.DisableHealth && ep.Health != nil {
+		path := strings.TrimSpace(ep.HealthPath)
+		if path == "" {
+			path = strings.TrimSpace(s.cfg.HealthPath)
+		}
+		if path == "" {
+			path = "/health"
+		}
+		mux.Handle(path, ep.Health)
 	}
 
 	if !s.cfg.DisablePprof {

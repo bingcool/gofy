@@ -6,7 +6,52 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **worker `/healthz` is now liveness only.** It answers 200 while the process is
+  alive, including during the drain window; readiness moved to the new
+  `/readyz`, which requires `state == ready` and every registered readiness check
+  to pass. Point `livenessProbe` at `/healthz` and `readinessProbe` at `/readyz`.
+  The `status` command's `health` column still probes `/healthz`, so it now
+  reports "alive" rather than "ready". No compatibility switch is provided: the
+  old behaviour made a clean shutdown look like a failed probe.
+  worker 的 `/healthz` 现在只表示存活：进程活着就返回 200，drain 窗口内也是；就绪语义
+  移到新增的 `/readyz`，它要求 `state == ready` 且所有 readiness 检查通过。请把
+  `livenessProbe` 指向 `/healthz`、`readinessProbe` 指向 `/readyz`。`status` 命令的
+  `health` 列仍然探测 `/healthz`，因此现在表示"活着"而不是"就绪"。不提供兼容开关：
+  旧行为让一次干净停机看起来像探针失败。
+
 ### Added
+
+- `support/health`: the probe registry behind `/healthz`, `/readyz` and the
+  diagnostics `/health`. Checks run with a per-check timeout (default 2s), a round
+  budget (3s), a concurrency cap (4), TTL caches (readiness 1s, diagnostic 2s),
+  singleflight and panic isolation; a budget-exhausted readiness check fails
+  closed while a diagnostic one reports `unknown` with `reason=budget`. Built-in
+  checkers cover the database pool, HTTP downstreams and Redis (through a
+  caller-supplied ping function, so no client is imported).
+  `support/health`：`/healthz`、`/readyz` 与诊断 `/health` 背后的探针注册表。检查带单
+  检查超时（默认 2s）、整轮预算（3s）、并发上限（4）、TTL 缓存（readiness 1s、
+  diagnostic 2s）、singleflight 与 panic 隔离；预算耗尽时 readiness 检查 fail-closed，
+  诊断检查记 `unknown` 且 `reason=budget`。内置检查器覆盖数据库连接池、HTTP 下游与
+  Redis（通过调用方提供的 ping 函数，不引入客户端依赖）。
+- `WithHealthChecks`, `WithDiagnosticChecks`, `WithHealthCheckOptions`,
+  `WithDatabaseHealthCheck` and `WithWorkerHealthChecks`. Registered checks default
+  to readiness; the automatic `database` check counts against the concurrency
+  budget, so at most three additional readiness checks fit in one round by
+  default.
+  新增这些选项。注册的检查默认属于 readiness；自动注册的 `database` 检查同样占用并发
+  预算，因此默认一轮最多再容纳三个 readiness 检查。
+- `diagnostics.Config.DisableHealth` / `HealthPath` and `Endpoints.Health` mount
+  the per-check detail on the diagnostics listener. A health-only listener is now
+  valid: `ErrNothingEnabled` is returned only when metrics, pprof **and** health
+  are all disabled.
+  诊断监听新增逐检查明细端点；只开 health 的监听现在合法——只有 metrics、pprof **与**
+  health 全关才返回 `ErrNothingEnabled`。
+- `/healthz` is exempted from the admission gate at the exact path, so the
+  liveness probe stays green while the process drains; `/readyz` keeps answering
+  503.
+  `/healthz` 按精确路径豁免准入闸门，摘流期间 liveness 保持 200；`/readyz` 仍返回 503。
 
 - `support/i18n` wraps go-i18n v2. `New` loads every `*.json` message file from
   an `fs.FS` (`active.<language>.json`, the layout go-i18n derives the tag

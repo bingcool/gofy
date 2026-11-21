@@ -86,6 +86,13 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	})
 	a.rt = rt
 
+	// The registry is built here for the same reason as in run(): /readyz and the
+	// diagnostic /health read it, and the database check has to exist before the
+	// handler answers its first probe.
+	// 这里构建注册表的原因与 run() 相同：/readyz 与诊断 /health 都要读它，数据库检查
+	// 必须在 handler 应答第一次探测之前就位。
+	a.healthRegistry.Store(a.newHealthRegistry(rt, lg))
+
 	engine, modules, err := a.buildHTTP(rt, lg, logs.system, logs.access)
 	if err != nil {
 		return nil, a.abort(err)
@@ -148,6 +155,14 @@ func (a *App) run(parent context.Context) error {
 		Tracing:        telemetry.Enabled(),
 	})
 	a.rt = rt
+
+	// The health registry is built before the engine: buildHTTP mounts /readyz
+	// against it, and the database check has to exist before the first probe.
+	// Building it unconditionally keeps the diagnostic /health endpoint working
+	// even when /healthz and /readyz are disabled.
+	// 健康注册表在 engine 之前构建：buildHTTP 把 /readyz 挂到它上面，数据库检查必须在
+	// 第一次探测之前就位。无条件构建还能让诊断 /health 在 /healthz、/readyz 关闭时仍然可用。
+	a.healthRegistry.Store(a.newHealthRegistry(rt, lg))
 
 	engine, modules, err := a.buildHTTP(rt, lg, logs.system, logs.access)
 	if err != nil {
@@ -426,7 +441,7 @@ func (a *App) buildHTTPWith(rt *core.Runtime, lg, system, access *zap.Logger, fa
 		engine.Use(a.opts.middleware...)
 	}
 	if a.opts.health {
-		registerHealth(engine, rt)
+		registerHealth(engine, a)
 	}
 	registerFallbacks(engine, a.opts.responder)
 
@@ -810,23 +825,42 @@ func registerFallbacks(engine *gin.Engine, responder support.Responder) {
 	})
 }
 
-func registerHealth(engine *gin.Engine, rt *core.Runtime) {
+func registerHealth(engine *gin.Engine, a *App) {
 	engine.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	engine.GET("/readyz", func(c *gin.Context) {
-		if rt.DB == nil {
-			c.JSON(http.StatusOK, gin.H{"status": "ok"})
-			return
-		}
-		ctx, cancel := context.WithTimeout(c.Request.Context(), time.Second)
-		defer cancel()
-		sqlDB, err := rt.DB.DB()
-		if err != nil || sqlDB.PingContext(ctx) != nil {
+		// The listener accepts connections before markReady, while Nacos
+		// registration finishes. Answering 503 there is both truthful and cheaper:
+		// the process is not announced yet, and a probe must not ping every
+		// dependency during start-up (design §3.3).
+		// listener 在 markReady 之前就已接受连接，此时 Nacos 注册还没完成。在这里回 503
+		// 既符合事实又更省：进程尚未对外宣告，探针也不该在启动期把每个依赖 ping 一遍
+		//（设计 §3.3）。
+		select {
+		case <-a.ready:
+		default:
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		// The registry is read per request because a reload replaces it together
+		// with the pool it checks; capturing it here would pin the checks to the
+		// runtime of the process's first generation.
+		// 注册表按请求读取：Reload 会连同它检查的连接池一起替换；在这里捕获它会把这些
+		// 检查固定在进程第一代的 runtime 上。
+		reg := a.healthRegistry.Load()
+		// No registry means no checks were configured: answer ready, which is what
+		// the inline handler did when there was no pool.
+		// 没有注册表意味着没有配置任何检查：回答就绪，这正是内联处理器在没有连接池时的行为。
+		if reg == nil {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			return
+		}
+		if reg.Ready(c.Request.Context()).Ready {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			return
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 	})
 }
 

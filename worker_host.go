@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/commandline"
@@ -16,6 +17,7 @@ import (
 	"github.com/bingcool/gofy/internal/process"
 	"github.com/bingcool/gofy/internal/proclock"
 	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/health"
 	"github.com/bingcool/gofy/support/worker"
 	"go.uber.org/zap"
 )
@@ -199,13 +201,31 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	// is the difference between "starting" and "wrong port".
 	// 探针先于分组启动，调度器因就绪检查失败而重启时看到的是 503 而不是连接被拒，
 	// 这正是"还在启动"与"端口配错了"的区别。
-	var health *workerHealth
+	// The worker registry carries group readiness plus the checks registered with
+	// WithWorkerHealthChecks. The group check reads an atomic flag that the ready
+	// path below flips, because only this function knows when every instance of
+	// every group has reported.
+	// worker 注册表承载分组就绪状态与 WithWorkerHealthChecks 注册的检查。分组检查读取下面
+	// 就绪路径翻起的原子标志，因为只有本函数知道每个分组的每个实例何时上报完毕。
+	var groupReady atomic.Bool
+	reg := a.newWorkerHealthRegistry(lg)
+	if err := reg.Register(health.Named("group", func(context.Context) error {
+		if !groupReady.Load() {
+			return errors.New("worker group is not ready")
+		}
+		return nil
+	})); err != nil {
+		lg.Warn("register worker group health check failed", zap.Error(err))
+	}
+	a.workerHealthRegistry = reg
+
+	var probe *workerHealth
 	if a.opts.workerHealth != "" {
-		health = newWorkerHealth(a.opts.workerHealth)
-		if err := health.start(); err != nil {
+		probe = newWorkerHealth(a.opts.workerHealth, reg)
+		if err := probe.start(); err != nil {
 			return a.abort(fmt.Errorf("gofy: worker health endpoint: %w", err))
 		}
-		defer health.stop()
+		defer probe.stop()
 	}
 
 	// Workers reach the logger, database and tracer through the runtime, the
@@ -220,10 +240,10 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	// graceful stop into a burst of failed requests.
 	// 停机一开始探针就转 503，而不是等最后一个 runner 返回：整个 drain 窗口都不接
 	// 新任务，否则调度器会一直往正在退出的进程打流量，把优雅停机变成一批失败请求。
-	if health != nil {
+	if probe != nil {
 		go func() {
 			<-runCtx.Done()
-			health.setStopping()
+			probe.setStopping()
 		}()
 	}
 
@@ -297,8 +317,14 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 			}
 			ready = true
 			a.markReady()
-			if health != nil {
-				health.setReady()
+			// The registry cached the 503 it produced before readiness; invalidate it
+			// so the first probe after this signal sees the group as ready.
+			// 注册表缓存了就绪之前产生的 503；这里让它失效，信号之后的第一次探测才能看到
+			// 分组已就绪。
+			groupReady.Store(true)
+			reg.Invalidate()
+			if probe != nil {
+				probe.setReady()
 			}
 			lg.Info("worker group ready", startedFields...)
 			// The parent that detached this process is waiting for exactly this

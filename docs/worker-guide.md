@@ -93,7 +93,7 @@ app, err := gofy.New(
 | --- | --- | --- |
 | pid 文件 | `<pid_file>` 加 `-worker-<group>` 后缀，如 `app/demo-service-worker-order.pid`；通配符启动写 `-worker-all.pid` | 未配置 `pid_file` 则不写；`worker stop` 按这个模式扫全部 |
 | 日志 | `storage/log/worker/<date>/info/<worker>.log`、`error/<worker>.log`、`error/<worker>-system_error.log` | 文件名取 `--name` 指定的 worker；整组启动为 `worker` |
-| 端口 | 默认不开；配了 `WithWorkerHealth` 才有 `/healthz` | 只报就绪，不做业务健康 |
+| 端口 | 默认不开；配了 `WithWorkerHealth` 才有 `/healthz` 与 `/readyz` | `/healthz` 只表示进程存活（drain 期间仍 200）；`/readyz` 要求分组就绪，且 `WithWorkerHealthChecks` 注册的检查全部通过；业务健康仍不进探针 |
 
 ### 3.4 多个分组
 

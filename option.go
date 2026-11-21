@@ -16,6 +16,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/diagnostics"
+	"github.com/bingcool/gofy/support/health"
 	"github.com/bingcool/gofy/support/middleware"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
@@ -133,6 +134,10 @@ type options struct {
 	headerPropagation bool                         // 是否安装 HeaderPropagation
 	cors              *support.CORSConfig          // CORS 策略；nil 表示不启用
 	health            bool                         // 是否注册 /healthz、/readyz
+	healthOptions     health.Options               // 探针执行参数；零值用 health 包的默认值
+	healthChecks      []healthCheckSpec            // 应用注册的检查；readiness 与 diagnostic 分列
+	databaseHealth    bool                         // 是否自动注册 database 检查
+	workerChecks      []health.Checker             // worker 进程的 readiness 检查
 	maxBody           int64                        // request body limit in bytes；请求体上限（字节）
 	trusted           []string                     // 可信代理列表（IP 或 CIDR）
 	alwaysOK          bool                         // 是否把所有响应统一成 HTTP 200
@@ -172,6 +177,7 @@ func defaultOptions() options {
 		responder:       support.NewResponder(support.ResponderConfig{}),
 		recovery:        true,
 		accessLog:       true,
+		databaseHealth:  true,
 		maxBody:         4 << 20,
 	}
 }
@@ -776,6 +782,94 @@ func WithCORS(cfg support.CORSConfig) Option {
 // App 上，不受 JWT 与限流影响，也不会进入模块路由。
 func WithHealthEndpoints(enabled bool) Option {
 	return func(o *options) error { o.health = enabled; return nil }
+}
+
+// healthCheckSpec is one registered check plus the class it was registered with.
+// It lives on options because the registry is built at startup, when the
+// database, logger and runtime exist.
+// healthCheckSpec 是一个已注册检查及其类别。它保存在 options 上，因为注册表要在启动期、
+// 数据库与 logger 就绪后才构建。
+type healthCheckSpec struct {
+	checker health.Checker
+	class   health.Class
+}
+
+// WithHealthChecks registers checks that decide whether this process may take
+// traffic. Every check lands in the readiness class: registering one is a
+// statement that the dependency matters, and a check that silently does nothing
+// is harder to notice than an unexpected drain. Non-critical dependencies belong
+// in WithDiagnosticChecks.
+//
+// The automatic database check takes one of the concurrency slots too: with the
+// default of four, at most three additional readiness checks fit in one round.
+// WithHealthChecks 注册决定本进程能否接活的检查。每个检查都落在 readiness 类别：注册
+// 本身就是"这个依赖重要"的表态，而静默不生效的检查比一次意外摘流更难发现。非关键依赖
+// 应放进 WithDiagnosticChecks。
+//
+// 自动注册的数据库检查也占用一个并发槽位：默认四个槽位下，一轮最多再容纳三个 readiness
+// 检查。
+func WithHealthChecks(checkers ...health.Checker) Option {
+	return func(o *options) error {
+		for _, c := range checkers {
+			if c == nil {
+				return fmt.Errorf("gofy: nil health checker")
+			}
+			o.healthChecks = append(o.healthChecks, healthCheckSpec{checker: c, class: health.ClassReadiness})
+		}
+		return nil
+	}
+}
+
+// WithDiagnosticChecks registers checks reported on the diagnostic endpoint only.
+// A failure here never answers 503 on /readyz, so a slow report database cannot
+// pull the whole service out of traffic.
+// WithDiagnosticChecks 注册只在诊断端点上报的检查。这里的失败绝不让 /readyz 返回 503，
+// 因此一个慢报表库不会把整个服务摘出流量。
+func WithDiagnosticChecks(checkers ...health.Checker) Option {
+	return func(o *options) error {
+		for _, c := range checkers {
+			if c == nil {
+				return fmt.Errorf("gofy: nil diagnostic checker")
+			}
+			o.healthChecks = append(o.healthChecks, healthCheckSpec{checker: c, class: health.ClassDiagnostic})
+		}
+		return nil
+	}
+}
+
+// WithHealthCheckOptions overrides probe execution parameters: per-check timeout,
+// round budget, concurrency cap, cache TTLs and startup grace. Zero fields keep
+// the confirmed defaults (2s, 3s, 4, 1s, 2s).
+// WithHealthCheckOptions 覆盖探针执行参数：单检查超时、整轮预算、并发上限、缓存 TTL
+// 与启动宽限。零值保留已确认的默认值（2s、3s、4、1s、2s）。
+func WithHealthCheckOptions(opts health.Options) Option {
+	return func(o *options) error { o.healthOptions = opts; return nil }
+}
+
+// WithDatabaseHealthCheck controls the automatic database check. It is on by
+// default and registers whenever a pool exists, keeping the previous /readyz
+// behaviour; turn it off to take over readiness completely.
+// WithDatabaseHealthCheck 控制自动注册的数据库检查。默认开启，存在连接池时即注册，
+// 保持既有 /readyz 行为；关闭它即可完全接管 readiness。
+func WithDatabaseHealthCheck(enabled bool) Option {
+	return func(o *options) error { o.databaseHealth = enabled; return nil }
+}
+
+// WithWorkerHealthChecks registers readiness checks for the worker process. They
+// are evaluated by the worker's /readyz next to the group readiness signal; the
+// HTTP process never sees them.
+// WithWorkerHealthChecks 为 worker 进程注册 readiness 检查。它们由 worker 的 /readyz
+// 与分组就绪信号一起评估，HTTP 进程不会看到它们。
+func WithWorkerHealthChecks(checkers ...health.Checker) Option {
+	return func(o *options) error {
+		for _, c := range checkers {
+			if c == nil {
+				return fmt.Errorf("gofy: nil worker health checker")
+			}
+			o.workerChecks = append(o.workerChecks, c)
+		}
+		return nil
+	}
 }
 
 // WithJWTAuth requires a valid bearer token on module routes. The config is

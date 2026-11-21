@@ -13,12 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/health"
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -217,17 +220,29 @@ func TestStopAcceptingOverRealListener(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- app.Run(ctx) }()
 
-	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	client := &http.Client{Timeout: time.Second}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		resp, err := client.Get(url)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				break
+	// fatal=false tolerates the refused connections of the startup window;
+	// fatal=true is the assertion form, used once the listener is known to be up.
+	// fatal=false 容忍启动窗口内的连接拒绝；fatal=true 是断言形式，只在监听已确认可用后使用。
+	status := func(path string, fatal bool) int {
+		t.Helper()
+		resp, err := client.Get(base + path)
+		if err != nil {
+			if fatal {
+				t.Fatalf("GET %s failed (listener should stay open): %v", path, err)
 			}
+			return 0
 		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Wait for readiness, not just liveness: /readyz is the endpoint the
+	// assertion below depends on, and it answers 503 until markReady.
+	// 等就绪而不是只等存活：下面的断言依赖 /readyz，而它在 markReady 之前回答 503。
+	deadline := time.Now().Add(5 * time.Second)
+	for status("/readyz", false) != http.StatusOK {
 		if time.Now().After(deadline) {
 			t.Fatal("server never became ready")
 		}
@@ -237,13 +252,16 @@ func TestStopAcceptingOverRealListener(t *testing.T) {
 	if err := app.StopAccepting(ctx); err != nil {
 		t.Fatalf("StopAccepting: %v", err)
 	}
-	resp, err := client.Get(url)
-	if err != nil {
-		t.Fatalf("request after StopAccepting failed (listener should stay open): %v", err)
+	// Liveness is exempt from the admission gate: a process that is shutting
+	// down cleanly must not be restarted as a crash. Readiness still flips to
+	// 503, because the gate answers before a generation is entered.
+	// liveness 豁免准入闸门：正在干净停机的进程不能被当成崩溃重启。readiness 仍然转
+	// 503，因为闸门在进入任何一代之前就作答了。
+	if got := status("/healthz", true); got != http.StatusOK {
+		t.Fatalf("liveness after StopAccepting = %d, want 200", got)
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("real HTTP status after StopAccepting = %d, want 503", resp.StatusCode)
+	if got := status("/readyz", true); got != http.StatusServiceUnavailable {
+		t.Fatalf("readiness after StopAccepting = %d, want 503", got)
 	}
 
 	cancel()
@@ -586,5 +604,142 @@ func TestCleanupWaitsForPIDRefreshBeforeRemovingTheFile(t *testing.T) {
 	time.Sleep(20 * time.Millisecond) // several further intervals
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("pid file reappeared after cleanup: %v", err)
+	}
+}
+
+// TestReloadRebuildsTheHealthRegistry pins the resource boundary: the registry's
+// database check holds the pool of the generation that built it, and a reload
+// that rebuilds the database replaces that pool. Reusing the registry would
+// leave /readyz pinging a closed handle and answering 503 for the rest of the
+// process's life.
+// TestReloadRebuildsTheHealthRegistry 固定资源边界：注册表的数据库检查持有构建它的那一代
+// 的连接池，而重建数据库的 Reload 会替换这个池。复用注册表会让 /readyz 一直 ping 已关闭的
+// 句柄，此后整个进程生命周期都回答 503。
+func TestReloadRebuildsTheHealthRegistry(t *testing.T) {
+	port := freePort(t)
+	app, err := New(
+		WithName("health-reload-test"),
+		WithHTTP(HTTPConfig{Host: "127.0.0.1", Port: port, Mode: "test"}),
+		WithHealthEndpoints(true),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(ctx) }()
+	waitReady(t, app)
+
+	before := app.healthRegistry.Load()
+	if before == nil {
+		t.Fatal("health registry was not built before the server started")
+	}
+
+	if err := app.Reload(context.Background(), ReloadSpec{}); err != nil {
+		cancel()
+		t.Fatalf("Reload: %v", err)
+	}
+	after := app.healthRegistry.Load()
+	if after == nil {
+		cancel()
+		t.Fatal("health registry disappeared after reload")
+	}
+	if after == before {
+		cancel()
+		t.Fatal("reload reused the previous health registry: its database check would keep pinging the retired pool")
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// TestReadyzStaysUnavailableUntilMarkReady pins the start-up rule from the
+// design (§3.3): the listener accepts connections before markReady, and a probe
+// in that window must neither see 200 nor make every dependency answer a check.
+// TestReadyzStaysUnavailableUntilMarkReady 固定设计 §3.3 的启动规则：listener 在
+// markReady 之前就已接受连接，这个窗口里的探针既不能看到 200，也不该让每个依赖应答一次
+// 检查。
+func TestReadyzStaysUnavailableUntilMarkReady(t *testing.T) {
+	var calls atomic.Int32
+	app, err := New(WithName("readyz-startup"), WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	app.opts.healthChecks = []healthCheckSpec{{
+		checker: health.Named("counted", func(context.Context) error {
+			calls.Add(1)
+			return nil
+		}),
+		class: health.ClassReadiness,
+	}}
+	app.healthRegistry.Store(app.newHealthRegistry(nil, zap.NewNop()))
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	registerHealth(engine, app)
+
+	code := func(path string) int {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Code
+	}
+
+	if got := code("/readyz"); got != http.StatusServiceUnavailable {
+		t.Fatalf("pre-ready /readyz = %d, want 503", got)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("pre-ready /readyz ran %d checks, want 0", got)
+	}
+	if got := code("/healthz"); got != http.StatusOK {
+		t.Fatalf("pre-ready /healthz = %d, want 200", got)
+	}
+
+	app.markReady()
+	if got := code("/readyz"); got != http.StatusOK {
+		t.Fatalf("post-ready /readyz = %d, want 200", got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("post-ready /readyz ran %d checks, want 1", got)
+	}
+}
+
+// TestHandlerModeBuildsTheHealthRegistry: Handler() serves the health endpoints
+// without listening, and a nil registry there would answer /readyz 200 without
+// checking the database — a silent downgrade compared with Run().
+// TestHandlerModeBuildsTheHealthRegistry：Handler() 不监听端口也提供健康端点，若那里
+// 的注册表为 nil，/readyz 会在不检查数据库的情况下回答 200——相对 Run() 是静默降级。
+func TestHandlerModeBuildsTheHealthRegistry(t *testing.T) {
+	app, err := New(
+		WithName("handler-health"),
+		WithLogger(zap.NewNop()),
+		WithHealthEndpoints(true),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := app.Handler(context.Background())
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	if app.healthRegistry.Load() == nil {
+		t.Fatal("Handler mode skipped the health registry")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/readyz = %d, want 200 with no checks configured", rec.Code)
+	}
+
+	if err := app.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }

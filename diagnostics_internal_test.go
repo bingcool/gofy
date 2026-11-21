@@ -2,6 +2,7 @@ package gofy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/bingcool/gofy/support"
 	"github.com/bingcool/gofy/support/diagnostics"
+	"github.com/bingcool/gofy/support/health"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -26,6 +28,83 @@ func (diagTestModule) Name() string { return "diag-test" }
 func (diagTestModule) Register(router *support.Router) error {
 	router.GET("/orders/:id", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 	return nil
+}
+
+// TestAppServesHealthDetailOnDiagnosticsPort pins the Phase 1 wiring end to end:
+// one registry decides /readyz on the application port, and the detail lands on
+// the diagnostics listener only. The listener runs with metrics and pprof off,
+// which is the health-only configuration the relaxed ErrNothingEnabled rule
+// exists for.
+// TestAppServesHealthDetailOnDiagnosticsPort 端到端固定 Phase 1 的接线：同一个注册表决定
+// 应用端口上的 /readyz，明细只出现在诊断监听上。该监听关闭 metrics 与 pprof，正是放宽
+// ErrNothingEnabled 后支持的"只开 health"配置。
+func TestAppServesHealthDetailOnDiagnosticsPort(t *testing.T) {
+	httpPort := freePort(t)
+	diagPort := freePort(t)
+
+	app, err := New(
+		WithName("health-wiring-test"),
+		WithEnv("test"),
+		WithHTTP(HTTPConfig{Host: "127.0.0.1", Port: httpPort, Mode: "test"}),
+		WithLogger(zap.NewNop()),
+		WithHealthEndpoints(true),
+		WithHealthChecks(health.Named("downstream", func(context.Context) error {
+			return errors.New("downstream is down")
+		})),
+		WithDiagnostics(diagnostics.Config{
+			Enabled:        true,
+			Addr:           fmt.Sprintf("127.0.0.1:%d", diagPort),
+			DisablePprof:   true,
+			DisableMetrics: true,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(context.Background()) }()
+	waitReady(t, app)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	probe := func(url string) (int, string) {
+		t.Helper()
+		resp, err := client.Get(url)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", url, err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	appBase := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
+	if code, _ := probe(appBase + "/healthz"); code != http.StatusOK {
+		t.Fatalf("/healthz = %d, want 200", code)
+	}
+	if code, body := probe(appBase + "/readyz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz = %d (%s), want 503 from the failing check", code, body)
+	}
+	// The detail belongs to the operational listener, never the public port.
+	// 明细属于运维监听，绝不放到业务端口上。
+	if code, _ := probe(appBase + "/health"); code != http.StatusNotFound {
+		t.Fatalf("/health on the application port = %d, want 404", code)
+	}
+
+	code, body := probe(fmt.Sprintf("http://127.0.0.1:%d/health", diagPort))
+	if code != http.StatusOK {
+		t.Fatalf("diagnostics /health = %d, want 200", code)
+	}
+	for _, want := range []string{`"status":"unavailable"`, `"name":"downstream"`, `"class":"readiness"`, `"status":"failed"`, "downstream is down"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("detail body is missing %q\n%s", want, body)
+		}
+	}
+
+	shutdownApp(t, app, runDone)
 }
 
 // TestAppServesMetricsOnDiagnosticsPort pins the whole wiring: WithDiagnostics

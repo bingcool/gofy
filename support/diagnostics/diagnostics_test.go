@@ -20,11 +20,13 @@ func TestConfigValidate(t *testing.T) {
 		{"defaults apply", Config{Enabled: true}, false},
 		{"explicit loopback", Config{Enabled: true, Addr: "127.0.0.1:9090"}, false},
 		{"all interfaces", Config{Enabled: true, Addr: "0.0.0.0:6060"}, false},
-		{"metrics only", Config{Enabled: true, DisablePprof: true}, false},
-		{"pprof only", Config{Enabled: true, DisableMetrics: true}, false},
-		{"nothing enabled", Config{Enabled: true, DisableMetrics: true, DisablePprof: true}, true},
+		{"metrics only", Config{Enabled: true, DisablePprof: true, DisableHealth: true}, false},
+		{"pprof only", Config{Enabled: true, DisableMetrics: true, DisableHealth: true}, false},
+		{"health only", Config{Enabled: true, DisableMetrics: true, DisablePprof: true}, false},
+		{"nothing enabled", Config{Enabled: true, DisableMetrics: true, DisablePprof: true, DisableHealth: true}, true},
 		{"missing port", Config{Enabled: true, Addr: "127.0.0.1"}, true},
 		{"bad metrics path", Config{Enabled: true, MetricsPath: "metrics"}, true},
+		{"bad health path", Config{Enabled: true, HealthPath: "health"}, true},
 		{"disabled without endpoints", Config{DisableMetrics: true, DisablePprof: true}, false},
 	}
 	for _, tc := range cases {
@@ -38,8 +40,8 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
-	if err := (Config{Enabled: true, DisableMetrics: true, DisablePprof: true}).Validate(); !errors.Is(err, ErrNothingEnabled) {
-		t.Fatalf("both-disabled error = %v, want ErrNothingEnabled", err)
+	if err := (Config{Enabled: true, DisableMetrics: true, DisablePprof: true, DisableHealth: true}).Validate(); !errors.Is(err, ErrNothingEnabled) {
+		t.Fatalf("all-disabled error = %v, want ErrNothingEnabled", err)
 	}
 }
 
@@ -216,5 +218,99 @@ func TestIsLoopbackAddr(t *testing.T) {
 		if got := isLoopbackAddr(addr); got != want {
 			t.Fatalf("isLoopbackAddr(%q) = %v, want %v", addr, got, want)
 		}
+	}
+}
+
+// TestHandlerMountsHealthDetail pins the endpoint that makes one diagnostics
+// port enough: /readyz decides traffic on the application listener, and /health
+// explains which check failed without putting that detail on the public port.
+// TestHandlerMountsHealthDetail 固定"一个诊断端口就够用"的那个端点：/readyz 在应用监听上
+// 决定流量，/health 说明是哪个检查失败，同时不把明细放到业务端口上。
+func TestHandlerMountsHealthDetail(t *testing.T) {
+	detail := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"ready":false}`)
+	})
+	// Health-only configuration: this is the deployment the relaxed
+	// ErrNothingEnabled rule exists for.
+	// 只开 health 的配置：放宽 ErrNothingEnabled 正是为了这种部署。
+	srv, err := New(Config{Enabled: true, DisableMetrics: true, DisablePprof: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	handler, err := srv.Handler(Endpoints{Health: detail})
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/health status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); body != `{"ready":false}` {
+		t.Fatalf("/health body = %q", body)
+	}
+}
+
+// TestHandlerHealthPathAndDisable pins the two escape hatches: a deployment can
+// move the detail off the conventional path, or turn it off entirely, without
+// losing metrics or pprof.
+// TestHandlerHealthPathAndDisable 固定两个逃生口：部署可以把明细移到非约定路径，或完全
+// 关掉它，而不影响 metrics 与 pprof。
+func TestHandlerHealthPathAndDisable(t *testing.T) {
+	detail := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "detail")
+	})
+
+	srv, err := New(Config{Enabled: true, DisablePprof: true, HealthPath: "/internal/health"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	moved, err := srv.Handler(Endpoints{
+		Metrics: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Health:  detail,
+		// The request-level path wins over the config value.
+		// 请求级路径优先于配置值。
+		HealthPath: "/probe/health",
+	})
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	moved.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/probe/health", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "detail" {
+		t.Fatalf("moved path: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	moved.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("default path status = %d, want 404 after the move", rec.Code)
+	}
+
+	// Disabled: the handler is not mounted, and the listener still serves
+	// metrics.
+	// 关闭：不挂载 handler，监听仍提供 metrics。
+	off, err := New(Config{Enabled: true, DisablePprof: true, DisableHealth: true})
+	if err != nil {
+		t.Fatalf("New(disabled health): %v", err)
+	}
+	withoutHealth, err := off.Handler(Endpoints{
+		Metrics: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "scraped")
+		}),
+		Health: detail,
+	})
+	if err != nil {
+		t.Fatalf("Handler(disabled health): %v", err)
+	}
+	rec = httptest.NewRecorder()
+	withoutHealth.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("disabled /health status = %d, want 404", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	withoutHealth.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "scraped" {
+		t.Fatalf("metrics with health disabled: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }

@@ -2,7 +2,9 @@ package gofy
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -226,6 +228,18 @@ func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch s.gate.admit(gen.lease) {
 		case admitClosed:
+			// The liveness probe stays green while the process drains: restarting
+			// a process that is shutting down cleanly turns a rollout into a crash
+			// loop. The answer is produced here, not through the generation, because
+			// entering a generation whose lease was refused would keep its drain open
+			// and let a probe read module state that is already being torn down.
+			// 摘流期间 liveness 探针保持绿色：重启一个正在干净停机的进程会把滚动发布变成
+			// 崩溃循环。应答在这里产生而不是穿过 generation：进入一个 lease 已被拒绝的代
+			// 会把它的 drain 拖住，也会让探针读到正在拆除的模块状态。
+			if isLivenessRequest(r) {
+				writeLivenessOK(w, r)
+				return
+			}
 			w.Header().Set("Connection", "close")
 			http.Error(w, "service is draining", http.StatusServiceUnavailable)
 			return
@@ -238,6 +252,40 @@ func (s *handlerSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+}
+
+// livenessPath is the one path answered while the admission gate is closed. The
+// match is exact, so a module route that happens to contain "healthz" is never
+// exempted by accident.
+// livenessPath 是闸门关闭期间唯一仍然应答的路径。匹配是精确的，因此包含 "healthz" 的
+// 模块路由绝不会被误豁免。
+const livenessPath = "/healthz"
+
+// isLivenessRequest reports whether r is the liveness probe.
+// isLivenessRequest 报告 r 是否是 liveness 探针。
+func isLivenessRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	return r.URL.Path == livenessPath
+}
+
+// writeLivenessOK answers the liveness probe without entering a generation. The
+// body matches the handler in start.go, so a probe that parses it keeps working.
+// writeLivenessOK 不进入任何代就应答 liveness 探针。响应体与 start.go 里的处理器一致，
+// 因此解析响应体的探针继续可用。
+func writeLivenessOK(w http.ResponseWriter, r *http.Request) {
+	const body = `{"status":"ok"}`
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	if r != nil && r.Method == http.MethodHead {
+		return
+	}
+	_, _ = io.WriteString(w, body)
 }
 
 // serve runs one generation whose lease admission already took. The release is

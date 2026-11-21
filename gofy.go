@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bingcool/gofy/command"
@@ -23,6 +24,7 @@ import (
 	"github.com/bingcool/gofy/support"
 	gofydb "github.com/bingcool/gofy/support/db"
 	"github.com/bingcool/gofy/support/diagnostics"
+	"github.com/bingcool/gofy/support/health"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/otel"
 	"go.uber.org/zap"
@@ -93,6 +95,23 @@ type App struct {
 	// 是否可以拆除这些实例正在使用的资源。它由 worker 宿主在 cleanup 之前写入，
 	// 之后不再修改。
 	abandonedWorkers []string
+
+	// healthRegistry answers /readyz and feeds the diagnostic /health endpoint.
+	// It is built at startup once the database exists and replaced by a reload
+	// that rebuilds the runtime, so the checks never ping a retired pool. The
+	// handlers read it per request; nil means the health endpoints are not
+	// registered.
+	// healthRegistry 应答 /readyz 并为诊断 /health 端点提供明细。它在启动期、数据库
+	// 就绪后构建，并在重建 runtime 的 Reload 中整体替换，因此检查不会 ping 已退役的
+	// 连接池。处理器按请求读取；nil 表示没有注册健康端点。
+	healthRegistry atomic.Pointer[health.Registry]
+
+	// workerHealthRegistry is the worker process's registry: group readiness plus
+	// the checks registered with WithWorkerHealthChecks. The HTTP process never
+	// builds it.
+	// workerHealthRegistry 是 worker 进程的注册表：分组就绪状态加上
+	// WithWorkerHealthChecks 注册的检查。HTTP 进程不构建它。
+	workerHealthRegistry *health.Registry
 
 	// reloadMu serializes Reload with cleanup and with other Reload calls, so a
 	// runtime swap never races a shutdown or a second swap.
@@ -518,6 +537,9 @@ func (a *App) startDiagnostics(logger *zap.Logger) error {
 	if a.metrics != nil {
 		endpoints.Metrics = a.metrics.Handler()
 		endpoints.MetricsPath = a.metrics.Path()
+	}
+	if a.healthRegistry.Load() != nil {
+		endpoints.Health = a.healthDetailHandler()
 	}
 	if err := srv.Start(endpoints); err != nil {
 		return fmt.Errorf("gofy: diagnostics: %w", err)

@@ -48,10 +48,15 @@ func (w *slowStartingWorker) Run(ctx context.Context) error {
 	return nil
 }
 
-func workerHealthCode(t *testing.T, port int) int {
+// workerProbeCode reads one probe endpoint. Liveness and readiness answer
+// different questions now, so the caller has to name the path it is asking
+// about.
+// workerProbeCode 读取一个探针端点。liveness 与 readiness 现在回答不同的问题，调用方
+// 必须指明问的是哪一个。
+func workerProbeCode(t *testing.T, port int, path string) int {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/healthz")
+	resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + path)
 	if err != nil {
 		return 0
 	}
@@ -100,8 +105,14 @@ func TestWorkerProbeWaitsForRealStartup(t *testing.T) {
 	// subscription.
 	// Run 还没建完连接时探针必须回 503：如果这时报 200，调度器会把活派给一个尚未
 	// 订阅的消费者。
-	waitFor(t, func() bool { return workerHealthCode(t, healthPort) == http.StatusServiceUnavailable },
-		"the probe to report 503 before the worker connects")
+	waitFor(t, func() bool { return workerProbeCode(t, healthPort, "/readyz") == http.StatusServiceUnavailable },
+		"readiness to report 503 before the worker connects")
+	// Liveness answers while the process is starting: a scheduler that sees a
+	// restart here would kill a process that is still connecting.
+	// 启动期间 liveness 就要应答：这里若失败，调度器会重启一个仍在建连的进程。
+	if got := workerProbeCode(t, healthPort, "/healthz"); got != http.StatusOK {
+		t.Fatalf("liveness before the worker connects = %d, want 200", got)
+	}
 
 	close(w.connect)
 	select {
@@ -109,8 +120,8 @@ func TestWorkerProbeWaitsForRealStartup(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not report readiness")
 	}
-	waitFor(t, func() bool { return workerHealthCode(t, healthPort) == http.StatusOK },
-		"the probe to report 200 after the worker connected")
+	waitFor(t, func() bool { return workerProbeCode(t, healthPort, "/readyz") == http.StatusOK },
+		"readiness to report 200 after the worker connected")
 
 	cancel()
 	// Drain starts now. The worker is still inside Run waiting for release, so
@@ -118,8 +129,14 @@ func TestWorkerProbeWaitsForRealStartup(t *testing.T) {
 	// answering 200 through the whole window.
 	// drain 从此刻开始。worker 仍停在 Run 里等待 release，因此"等最后一个 runner
 	// 返回才转 503"的探针会在整个窗口里继续回 200。
-	waitFor(t, func() bool { return workerHealthCode(t, healthPort) == http.StatusServiceUnavailable },
-		"the probe to report 503 as soon as the drain starts")
+	waitFor(t, func() bool { return workerProbeCode(t, healthPort, "/readyz") == http.StatusServiceUnavailable },
+		"readiness to report 503 as soon as the drain starts")
+	// Liveness stays green through the drain window: restarting a process that
+	// is shutting down cleanly turns a rollout into a crash loop.
+	// drain 窗口内 liveness 保持绿色：重启一个正在干净停机的进程会把滚动发布变成崩溃循环。
+	if got := workerProbeCode(t, healthPort, "/healthz"); got != http.StatusOK {
+		t.Fatalf("liveness during the drain = %d, want 200", got)
+	}
 
 	close(w.release)
 	select {
