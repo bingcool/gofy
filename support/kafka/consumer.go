@@ -242,6 +242,11 @@ type ConsumeOptions struct {
 	// OnError 接收拉取、handler、提交与 panic 错误，回调在 Consume 的
 	// goroutine 中执行，不应阻塞。
 	OnError func(error)
+	// OnAckError receives offset commit failures only, so a metric can count
+	// broker acknowledgements without also counting handler errors.
+	// OnAckError 只接收位点提交失败，指标因此可以只统计 broker 确认错误，
+	// 而不会把 handler 错误也算进去。
+	OnAckError func(error)
 	// OnReady runs once, after the first poll that completed without a fatal
 	// error. That is the first moment the consumer group session is live: the
 	// client has joined, been assigned partitions and taken a fetch response.
@@ -527,6 +532,9 @@ func (c *Consumer) commit(ctx context.Context, record *kgo.Record, opts ConsumeO
 	if err := c.raw.CommitRecords(ctx, record); err != nil {
 		report(opts, fmt.Errorf("kafka: commit %s/%d@%d: %w",
 			record.Topic, record.Partition, record.Offset, err))
+		if opts.OnAckError != nil {
+			opts.OnAckError(err)
+		}
 	}
 }
 

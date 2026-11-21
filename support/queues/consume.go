@@ -98,6 +98,10 @@ type ConsumeOptions struct {
 	// OnError 接收 handler 失败、重试安排失败与被丢弃的消息，在 Consume 的
 	// goroutine 中调用，不得阻塞。
 	OnError func(error)
+	// OnNackError receives only retry/write-back failures, so a metric never
+	// counts handler errors as broker errors.
+	// OnNackError 只接收重试与回写失败，指标因此不会把 handler 错误算成 broker 错误。
+	OnNackError func(error)
 	// OnReady runs once, after the first successful pop. An empty result counts:
 	// it proves the connection and the command path work, which is all this
 	// queue can promise — there is no subscription to wait for.
@@ -198,7 +202,7 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 				// 失败，消耗预算可能在另一个 handler 仍会失败时丢掉最后一份副本。
 				// DiscardOnError 同样不适用。
 				if err := q.RetryInFlight(ctx, msg, opts.InFlightDelay); err != nil {
-					report(opts, err)
+					reportNack(opts, err)
 				}
 				continue
 			}
@@ -208,7 +212,7 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 			}
 			retried, retryErr := q.Retry(ctx, msg, opts.RetryDelay)
 			if retryErr != nil {
-				report(opts, retryErr)
+				reportNack(opts, retryErr)
 				continue
 			}
 			if !retried {
@@ -235,7 +239,7 @@ func (q *Queue) requeueAfterCancel(ctx context.Context, opts ConsumeOptions, msg
 	defer cancel()
 	for _, msg := range msgs {
 		if err := q.RetryInFlight(writeCtx, msg, 0); err != nil {
-			report(opts, err)
+			reportNack(opts, err)
 		}
 	}
 }
@@ -264,6 +268,13 @@ func report(opts ConsumeOptions, err error) {
 	if opts.OnError != nil {
 		opts.OnError(err)
 	}
+}
+
+func reportNack(opts ConsumeOptions, err error) {
+	if opts.OnNackError != nil {
+		opts.OnNackError(err)
+	}
+	report(opts, err)
 }
 
 // requeueTimeout bounds the write-back that runs after the consume context has

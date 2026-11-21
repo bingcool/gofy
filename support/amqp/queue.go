@@ -280,6 +280,12 @@ type ConsumeOptions struct {
 	// OnError 接收 handler 失败、ack/nack 失败与重连错误。回调在消费者
 	// goroutine 中执行，不应阻塞。
 	OnError func(error)
+	// OnAckError and OnNackError receive only acknowledgement failures, so a
+	// metric never counts handler errors as broker errors.
+	// OnAckError 与 OnNackError 只接收确认失败，指标因此不会把 handler 错误
+	// 算成 broker 错误。
+	OnAckError  func(error)
+	OnNackError func(error)
 	// OnReady runs once, after the channel is open, the topology is declared and
 	// ConsumeWithContext returned a delivery stream. Before that the broker has
 	// not registered this consumer, and a declare failure would never reach the
@@ -431,11 +437,17 @@ func (q *Queue) handle(ctx context.Context, delivery amqp091.Delivery, handler H
 		if err == nil {
 			if ackErr := delivery.Ack(false); ackErr != nil {
 				report(opts, fmt.Errorf("amqp: ack message: %w", ackErr))
+				if opts.OnAckError != nil {
+					opts.OnAckError(ackErr)
+				}
 			}
 			return
 		}
 		if nackErr := delivery.Nack(false, !opts.DiscardOnError); nackErr != nil {
 			report(opts, fmt.Errorf("amqp: nack message: %w", nackErr))
+			if opts.OnNackError != nil {
+				opts.OnNackError(nackErr)
+			}
 		}
 	}
 	if err != nil {

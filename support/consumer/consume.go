@@ -37,6 +37,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -60,7 +61,7 @@ import (
 //
 // 放在这里而不是各 broker 文件里，是为了让四个构造器短到能一眼读完；它们之间的差异
 // 留在"建连与订阅"那一段，那才是值得读的部分。
-func start(ctx context.Context, name string, idempotency bool, maxAttempts int, handler HandlerFunc) (*Processor, *zap.Logger, error) {
+func start(ctx context.Context, name string, idempotency bool, maxAttempts int, topics []string, handler HandlerFunc) (*Processor, *zap.Logger, error) {
 	rt, ok := gofyworker.RuntimeFrom(ctx)
 	if !ok {
 		return nil, nil, fmt.Errorf("%s: worker runtime is missing from the context", name)
@@ -75,10 +76,13 @@ func start(ctx context.Context, name string, idempotency bool, maxAttempts int, 
 		zap.String("consumer", name),
 	)
 	proc, err := NewProcessor(ctx, rt, ProcessorConfig{
-		Consumer:    name,
-		Handler:     handler,
-		Idempotency: idempotency,
-		MaxAttempts: maxAttempts,
+		Consumer:      name,
+		Handler:       handler,
+		Idempotency:   idempotency,
+		MaxAttempts:   maxAttempts,
+		MeterProvider: rt.MeterProvider,
+		Metrics:       rt.Metrics,
+		Topics:        topics,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -343,6 +347,24 @@ type ProcessorConfig struct {
 	// 于现实：该消息下次重投会重做 handler，别人查 "done" 也查不到这行。请把它接到指标或
 	// 告警；不接则只剩一行 Warn 日志。它在消费者 goroutine 上执行，不得阻塞。
 	OnLedgerError func(messageID string, err error)
+
+	// MeterProvider creates the consume-chain instruments. A nil provider
+	// disables creation even when Metrics is true.
+	// MeterProvider 创建消费链路的 instrument。即使 Metrics 为 true，nil provider
+	// 也不会创建任何 instrument。
+	MeterProvider metric.MeterProvider
+	// Metrics reports whether the provider is real; when false no attributes
+	// are built on the message path.
+	// Metrics 表示 provider 是否真实可用；为 false 时消息路径不构造任何标签。
+	Metrics bool
+	// Topics is the whitelist for the topic label. Every allowed AMQP routing
+	// key, Kafka topic, RocketMQ topic or Redis queue key belongs here; a value
+	// outside the list is reported as "unknown" so one delivery cannot create
+	// an unbounded series.
+	// Topics 是 topic 标签的白名单。允许的 AMQP routing key、Kafka topic、
+	// RocketMQ topic 或 Redis 队列键都要列进来；名单外的值记为 "unknown"，
+	// 防止一条消息造出无限序列。
+	Topics []string
 }
 
 // Processor is the shared middle of every consumer: it continues the trace,
@@ -366,6 +388,7 @@ type Processor struct {
 	schemaTimeout time.Duration
 	renewInterval time.Duration
 	onLedgerError func(messageID string, err error)
+	metrics       *consumerMetrics
 }
 
 // NewProcessor builds the shared chain. ctx is the consumer's lifecycle context
@@ -404,6 +427,10 @@ func NewProcessor(ctx context.Context, rt *core.Runtime, cfg ProcessorConfig) (*
 	if cfg.Handler == nil {
 		return nil, errors.New("consumer handler is required")
 	}
+	metrics, err := newConsumerMetrics(cfg.MeterProvider, cfg.Metrics, cfg.Consumer, cfg.Topics)
+	if err != nil {
+		return nil, err
+	}
 	p := &Processor{
 		consumer:      cfg.Consumer,
 		handler:       cfg.Handler,
@@ -414,6 +441,7 @@ func NewProcessor(ctx context.Context, rt *core.Runtime, cfg ProcessorConfig) (*
 		lease:         cfg.ProcessingLease,
 		schemaTimeout: cfg.SchemaTimeout,
 		onLedgerError: cfg.OnLedgerError,
+		metrics:       metrics,
 	}
 	if p.lease <= 0 {
 		p.lease = DefaultProcessingLease
@@ -473,7 +501,16 @@ func NewProcessor(ctx context.Context, rt *core.Runtime, cfg ProcessorConfig) (*
 // 返回值就是确认决定：nil 确认，非 nil 请求重投。永久失败与重复消息会被刻意确认
 // ——重试它们只会白占分区。
 func (p *Processor) Handle(ctx context.Context, msg Message) error {
+	// One defer is the only place a delivery is counted, so received always
+	// equals acked + nacked even when a branch returns early.
+	// 只有这一处 defer 会计数，因此即使分支提前返回，received 也恒等于 acked + nacked。
 	start := time.Now()
+	decision, err := p.handle(ctx, msg, start)
+	p.metrics.record(msg, decision, time.Since(start))
+	return err
+}
+
+func (p *Processor) handle(ctx context.Context, msg Message, start time.Time) (consumeDecision, error) {
 	if strings.TrimSpace(msg.ID) == "" {
 		// A message without an id cannot be deduplicated; give it one so the
 		// log line and the span still correlate.
@@ -528,7 +565,8 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "claim")
 			lg.Error("consume claim failed", zap.Error(err), zap.Duration("duration", time.Since(start)))
-			return fmt.Errorf("claim message %s: %w", msg.ID, err)
+			p.metrics.recordLedger("claim")
+			return consumeDecision{reason: "ledger"}, fmt.Errorf("claim message %s: %w", msg.ID, err)
 		}
 		if c.inFlight {
 			// Another instance holds a valid processing lease. Acknowledge
@@ -541,7 +579,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			lg.Info("message still in flight on another instance, asking for redelivery",
 				zap.Duration("duration", time.Since(start)),
 			)
-			return fmt.Errorf("message %s: %w", msg.ID, ErrInFlight)
+			return consumeDecision{reason: "inflight"}, fmt.Errorf("message %s: %w", msg.ID, ErrInFlight)
 		}
 		if !c.proceed {
 			span.SetAttributes(attribute.Bool("messaging.duplicate", true))
@@ -549,7 +587,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 				zap.String("reason", c.reason),
 				zap.Duration("duration", time.Since(start)),
 			)
-			return nil
+			return consumeDecision{ack: true, reason: "duplicate"}, nil
 		}
 		attempt = c.attempt
 	}
@@ -570,7 +608,11 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			zap.NamedError("park_error", parkErr),
 			zap.Duration("duration", time.Since(start)),
 		)
-		return parkErr
+		if parkErr != nil {
+			// The dead row is not durable, so the broker must redeliver.
+			return consumeDecision{reason: "decode"}, parkErr
+		}
+		return consumeDecision{ack: true, reason: "decode", dead: true}, nil
 	}
 
 	err = p.runHandler(ctx, msg, env, attempt, ledgerID, lg)
@@ -592,7 +634,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			zap.String("event_type", env.Type),
 			zap.Duration("duration", time.Since(start)),
 		)
-		return nil
+		return consumeDecision{ack: true, reason: "success"}, nil
 	case IsPermanent(err):
 		parkErr := p.park(ctx, ledgerID, attempt, err)
 		span.RecordError(err)
@@ -604,7 +646,10 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			zap.NamedError("park_error", parkErr),
 			zap.Duration("duration", time.Since(start)),
 		)
-		return parkErr
+		if parkErr != nil {
+			return consumeDecision{reason: "permanent"}, parkErr
+		}
+		return consumeDecision{ack: true, reason: "permanent", dead: true}, nil
 	default:
 		if p.deduper != nil {
 			if markErr := p.deduper.fail(ctx, ledgerID, attempt, err); markErr != nil {
@@ -622,7 +667,7 @@ func (p *Processor) Handle(ctx context.Context, msg Message) error {
 			zap.Error(err),
 			zap.Duration("duration", time.Since(start)),
 		)
-		return err
+		return consumeDecision{reason: "retry"}, err
 	}
 }
 
@@ -701,6 +746,7 @@ func (p *Processor) runHandler(ctx context.Context, msg Message, env Envelope, a
 // ledgerFailed 是上报"决定之后台账写失败"的唯一入口：日志 Warn，配置了就再调
 // OnLedgerError 钩子。确认决定仍由 handler 结果决定——台账只记录结果，不决定结果。
 func (p *Processor) ledgerFailed(lg *zap.Logger, marker, messageID string, err error) {
+	p.metrics.recordLedger(marker)
 	lg.Warn("consume ledger mark failed",
 		zap.String("marker", marker),
 		zap.Error(err),

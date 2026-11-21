@@ -170,13 +170,14 @@ func (c *AMQPConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurrenc
 // Run 拥有订阅本身：建连、声明 topology、消费到 ctx 取消，并在退出时释放连接。
 func (c *AMQPConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
-	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)
+	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, []string{c.cfg.BindingKey, c.cfg.RoutingKey}, c.handle)
 	if err != nil {
 		return err
 	}
 
 	client, err := gofyamqp.New(ctx, c.conn)
 	if err != nil {
+		proc.metrics.recordConnectError("amqp", "connect")
 		return fmt.Errorf("%s: connect: %w", name, err)
 	}
 	defer func() { _ = client.Close() }()
@@ -192,6 +193,7 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 		},
 	})
 	if err != nil {
+		proc.metrics.recordConnectError("amqp", "subscribe")
 		return fmt.Errorf("%s: declare queue %s: %w", name, c.cfg.Queue, err)
 	}
 	// Closed twice for the same reason as Kafka: the adapter keeps the queue
@@ -231,6 +233,8 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("amqp consume error", zap.Error(err))
 			},
+			OnAckError:  func(error) { proc.metrics.recordBrokerError("amqp", "ack") },
+			OnNackError: func(error) { proc.metrics.recordBrokerError("amqp", "nack") },
 			// Ready comes from the adapter once the channel is open, the
 			// topology is declared and the delivery stream exists.
 			// 就绪由适配器在 channel 打开、拓扑声明完成、投递流建立之后上报。

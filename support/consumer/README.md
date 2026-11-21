@@ -261,6 +261,25 @@ DDL（`examples/demo-service` 提供）。
 `InFlightDelay` 由消费者适配器统一设为 `DefaultProcessingLease`（5 分钟），因此副本
 不会在原 handler 仍持有租约时提前重投。
 
+## 指标
+
+开启 `gofy.WithMetrics` 后，worker 宿主注入的 `core.Runtime.MeterProvider` 会自动进入共用
+消费链路，无需在每个订阅的配置里重复注入。直接构造 `Processor` 时可以填
+`ProcessorConfig.MeterProvider`/`Metrics`；`Topics` 填该订阅允许的 topic、routing key 或队列名，
+名单外的值统一记为 `topic="unknown"`，避免一条意外消息造出一条新时间线。
+
+| 指标 | 说明 |
+| --- | --- |
+| `gofy_consumer_received` | 进入 `Handle` 的投递数 |
+| `gofy_consumer_acked` / `gofy_consumer_nacked` | 按 `reason` 划分的确认与重投数，二者之和恒等于 received |
+| `gofy_consumer_dead` | park 成功落为 dead 的消息数 |
+| `gofy_consumer_handle_duration` | 消费链路耗时（不含 broker 确认） |
+| `gofy_consumer_ledger_errors` | 决定之后失败的台账写入，按 `stage` 划分 |
+| `gofy_consumer_ack_errors` / `gofy_consumer_connect_errors` | broker 确认失败与建连/订阅失败 |
+
+确认错误来自 broker 包新增的 `OnAckError`/`OnNackError` 钩子：`OnError` 同时承载 handler 与
+拉取错误，不能用来区分 `op`。指标关闭时所有记录路径在构造标签前返回。
+
 ## 只跑其中一个
 
 ```bash

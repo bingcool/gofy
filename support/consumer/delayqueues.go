@@ -130,13 +130,14 @@ func (c DelayQueuesConsumer) RequiresDefaultDB() bool { return c.cfg.Idempotency
 // Run 拥有订阅：建连、轮询延迟 ZSET 到 ctx 取消，并在退出时释放客户端。
 func (c *DelayQueuesConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
-	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)
+	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, []string{c.cfg.Key}, c.handle)
 	if err != nil {
 		return err
 	}
 
 	client, err := gofyredis.New(ctx, c.conn)
 	if err != nil {
+		proc.metrics.recordConnectError("queues", "connect")
 		return fmt.Errorf("%s: connect: %w", name, err)
 	}
 	defer func() { _ = client.Close() }()
@@ -146,6 +147,7 @@ func (c *DelayQueuesConsumer) Run(ctx context.Context) error {
 		MaxRetries: c.cfg.MaxRetries,
 	})
 	if err != nil {
+		proc.metrics.recordConnectError("queues", "subscribe")
 		return fmt.Errorf("%s: open delayed queue %s: %w", name, c.cfg.Key, err)
 	}
 
@@ -168,7 +170,8 @@ func (c *DelayQueuesConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("delay queues consume error", zap.Error(err))
 			},
-			OnReady: func() { gofyworker.Ready(ctx) },
+			OnNackError: func(error) { proc.metrics.recordBrokerError("queues", "nack") },
+			OnReady:     func() { gofyworker.Ready(ctx) },
 		},
 	})
 	if err != nil {

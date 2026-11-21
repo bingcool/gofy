@@ -663,13 +663,45 @@ worker 宿主探针测试改探 `/readyz`（并断言 `/healthz` 在启动与 dr
 
 | 文件 | 变更 |
 |---|---|
-| `support/consumer/consume.go` | `ProcessorConfig` 增加 `MeterProvider`；`Handle` 分支计数与耗时 |
-| `support/consumer/{kafka,amqp,rocketmq,queues}.go` | ack/nack、connect 错误计数 |
-| `support/claim/runner.go` | `RunnerConfig.MeterProvider`；claim/outcome/duration |
-| `support/lease/lease.go` | `RunConfig.Name` 与 `MeterProvider`；acquire/renew 失败计数 |
+| `support/consumer/consume.go`、`metrics.go` | `ProcessorConfig` 增加 `MeterProvider`/`Metrics`/`Topics`；`Handle` 包装层唯一计数 |
+| `support/consumer/{kafka,amqp,rocketmq,queues,delayamqp,delayqueues}.go` | connect 错误计数；挂 broker 的 ack/nack 钩子 |
+| `support/{kafka,amqp,rocketmq,queues}` | `ConsumeOptions` 增加 `OnAckError`/`OnNackError`，只在确认失败时回调 |
+| `support/claim/runner.go`、`metrics.go` | `RunnerConfig.MeterProvider`/`Metrics`；claim/outcome/duration |
+| `support/lease/lease.go`、`metrics.go` | `RunConfig.Name`/`MeterProvider`/`Metrics`；acquire/renew 失败计数 |
 
 验收：1000 条消息只产生固定序列数；`received == acked + nacked`，同一条消息只计一次终态；
 日志与指标不重复计数。
+
+#### Phase 3 落地记录（2026-11-21）
+
+代码已落地并通过验证：
+
+| 验证项 | 命令 | 结果 |
+|---|---|---|
+| 格式 | `gofmt -l .` | 无输出 |
+| 编译 / 静态检查 | `go build ./...`、`go vet ./...` | 通过 |
+| 单元 + 集成 | `go test ./...` | 通过 |
+| 并发 | `go test -race ./support/consumer/... ./support/claim/... ./support/lease/... ./support/{kafka,amqp,rocketmq,queues}/...` | 通过 |
+| 依赖方向 | `make guards` | 通过 |
+| 压力 | 1000 条混合结果连跑两轮，`-count=20` | 序列数不变 |
+
+实现要点与相对原设计的收敛：
+
+1. **一次决定**：原 `Handle` 的七个返回分支改为内部 `handle` 返回 `consumeDecision`，外层 `Handle`
+   用一个 defer 统一计数。回归验证：临时去掉这次计数，`received = 0`、验收用例立即失败。
+   `dead` 只在 park 成功时计，因此 `dead ≤ acked{reason=permanent|decode}` 成立。
+2. **topic 白名单**：`ProcessorConfig.Topics` 接收 broker 配置里声明的 topic/routing key/queue key。
+   AMQP 同时接受 binding key 与 routing key（延迟消费者再带上延迟拓扑的两个 key）；名单外的值记
+   `unknown`，`Source` 也按四种 broker 白名单化，其余记 `unknown`。
+3. **broker 错误区分**：`OnError` 同时承载 handler、拉取与确认错误，无法据此判断 `op`。因此在四个
+   broker 包的 `ConsumeOptions` 上增加只在确认失败时触发的 `OnAckError`/`OnNackError`，由
+   `support/consumer` 的六个适配器挂接计数；Redis 队列没有 ACK，回写失败归为 `nack`。建连、
+   ping、声明订阅的失败在适配器里直接计 `connect.errors`，不复用 `OnError`。
+4. **认领**：`recordOutcome` 与结果 hook 同点调用，每条认领行恰好一次；收尾写库失败没有确定终态，
+   不进 outcomes。`lease_lost` 不记 handler 耗时，因为 handler 没有收尾成功。
+5. **租约**：`renew.failures` 实际带 `outcome=error|lost` 两个值（原表格只列了 `lease`），
+   与正文「ErrLeaseLost 单独计 outcome=lost」一致；暂时错误与升级为丢失分别计一次。
+6. 禁用指标时 consumer/claim/lease 三个记录路径均通过 `testing.AllocsPerRun` 断言 0 分配。
 
 ### Phase 4：增强（可选）
 

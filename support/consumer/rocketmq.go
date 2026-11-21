@@ -152,7 +152,7 @@ func (c *RocketMQConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concur
 // Run 拥有订阅本身：建连、消费到 ctx 取消，并在退出时释放消费者。
 func (c *RocketMQConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
-	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)
+	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, []string{c.cfg.Topic}, c.handle)
 	if err != nil {
 		return err
 	}
@@ -167,6 +167,7 @@ func (c *RocketMQConsumer) Run(ctx context.Context) error {
 		InvisibleDuration: c.cfg.InvisibleDuration,
 	})
 	if err != nil {
+		proc.metrics.recordConnectError("rocketmq", "subscribe")
 		return fmt.Errorf("%s: subscribe %s: %w", name, c.cfg.Topic, err)
 	}
 	// The adapter closes on shutdown; this close covers the restart path.
@@ -186,6 +187,7 @@ func (c *RocketMQConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("rocketmq consume error", zap.Error(err))
 			},
+			OnAckError: func(error) { proc.metrics.recordBrokerError("rocketmq", "ack") },
 			// Ready comes from the adapter after the SDK consumer started and
 			// registered the subscription with the broker.
 			// 就绪由适配器在 SDK 消费者启动、订阅注册到 broker 之后上报。

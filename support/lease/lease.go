@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/metric"
 )
 
 var (
@@ -126,6 +128,19 @@ type RunConfig struct {
 	// Interval 是受保护操作的两次调用之间的间隔。为 0 表示只调用一次、函数返回
 	// Run 就返回，因此只有自己阻塞到 ctx 取消的函数才该传 0。
 	Interval time.Duration
+
+	// Name labels lease metrics. Empty means the aggregate series only, so a
+	// deployment that runs one lease does not need a name to get counters.
+	// Name 是 lease 指标的标签。为空时只发聚合序列，因此只跑一个租约的部署
+	// 不必为了拿到计数器而特意起名。
+	Name string
+	// MeterProvider creates this Run's instruments; nil disables creation.
+	// MeterProvider 创建本次 Run 的 instrument；nil 表示不创建。
+	MeterProvider metric.MeterProvider
+	// Metrics reports whether the provider is real; when false hot paths skip
+	// attribute construction entirely.
+	// Metrics 表示 provider 是否真实可用；为 false 时热路径不构造标签。
+	Metrics bool
 }
 
 // Run holds key for the duration of fn and renews the lease behind it.
@@ -162,6 +177,10 @@ func Run(ctx context.Context, l Locker, key string, cfg RunConfig, fn func(conte
 	if err := ValidateTTL(ttl); err != nil {
 		return err
 	}
+	metrics, err := newLeaseMetrics(cfg.MeterProvider, cfg.Metrics, cfg.Name)
+	if err != nil {
+		return err
+	}
 
 	retry := ttl / 3
 	if retry < time.Second {
@@ -171,7 +190,7 @@ func Run(ctx context.Context, l Locker, key string, cfg RunConfig, fn func(conte
 		held, err := l.Acquire(ctx, key, ttl)
 		switch {
 		case err == nil:
-			return hold(ctx, held, ttl, cfg.Interval, fn)
+			return hold(ctx, held, ttl, cfg.Interval, fn, metrics)
 		case errors.Is(err, ErrHeld):
 			// Standing by is the normal state of a standby: poll at a third of
 			// the ttl so a dead leader is picked up within roughly one term.
@@ -181,6 +200,7 @@ func Run(ctx context.Context, l Locker, key string, cfg RunConfig, fn func(conte
 				return nil
 			}
 		default:
+			metrics.recordAcquireFailure()
 			return fmt.Errorf("lease: acquire %q: %w", key, err)
 		}
 	}
@@ -188,13 +208,13 @@ func Run(ctx context.Context, l Locker, key string, cfg RunConfig, fn func(conte
 
 // hold runs fn under a renewing lease and settles the outcome.
 // hold 在续约中的租约下运行 fn，并结算最终结果。
-func hold(ctx context.Context, held Lease, ttl, interval time.Duration, fn func(context.Context, int64) error) error {
+func hold(ctx context.Context, held Lease, ttl, interval time.Duration, fn func(context.Context, int64) error, metrics *leaseMetrics) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	renewed := make(chan error, 1)
 	go func() {
-		err := keep(runCtx, held, ttl)
+		err := keep(runCtx, held, ttl, metrics)
 		// Losing the lease cancels fn: it must stop before its token is
 		// rejected by the resource, not after.
 		// 丢失租约时取消 fn：它必须在 token 被资源拒绝之前停下，而不是之后。
@@ -238,7 +258,7 @@ func call(ctx context.Context, interval time.Duration, fn func(context.Context, 
 
 // keep renews the lease until the context ends or the lease is gone.
 // keep 持续续约，直到 context 结束或租约消失。
-func keep(ctx context.Context, l Lease, ttl time.Duration) error {
+func keep(ctx context.Context, l Lease, ttl time.Duration, metrics *leaseMetrics) error {
 	interval := ttl / 3
 	deadline := time.Now().Add(ttl)
 	for {
@@ -251,14 +271,19 @@ func keep(ctx context.Context, l Lease, ttl time.Duration) error {
 			continue
 		}
 		if errors.Is(err, ErrLeaseLost) {
+			metrics.recordRenewFailure(true)
 			return err
 		}
+		metrics.recordRenewFailure(false)
 		// A failed round trip is not proof the lease is gone: the store may be
 		// unreachable while the key still points at us. Keep trying until the
 		// term we already paid for runs out, then report the loss.
 		// 一次往返失败并不等于租约消失：存储可能只是暂时不可达，而键仍指向我们。
 		// 继续重试直到已经买到的那段租期用完，再报告丢失。
 		if !time.Now().Before(deadline) {
+			// The stored error was counted above; this is the moment it turns
+			// into a loss, so the lost outcome is counted separately.
+			metrics.recordRenewFailure(true)
 			return fmt.Errorf("%w: renew: %v", ErrLeaseLost, err)
 		}
 	}

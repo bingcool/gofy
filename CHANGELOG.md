@@ -54,6 +54,20 @@ All notable changes to this project are documented here. The format follows
   `run.duration`、`tick.duration/errors` 与 `abandoned`。所有耗时直方图共用 `0.005…10`
   的边界；指标关闭时记录路径零分配。
 
+- **Phase 3 consumer/claim/lease metrics**: `gofy_consumer_received/acked/nacked/dead`,
+  `handle.duration`, `ledger.errors`, `ack.errors`, `connect.errors`, the four
+  `gofy_claim_*` series and the two `gofy_lease_*` failure counters. Delivery
+  decisions are recorded once at `Handle`'s exit, so `received == acked + nacked`;
+  the topic label is whitelisted from configuration, and broker acknowledgement
+  errors use dedicated `OnAckError`/`OnNackError` hooks instead of the mixed
+  `OnError` callback. `ProcessorConfig`, `claim.RunnerConfig` and `lease.RunConfig`
+  accept a meter provider; disabled pipelines skip attribute construction.
+  **Phase 3 消费/认领/租约指标**：新增 `gofy_consumer_*` 的接收/确认/重投/死信与耗时、
+  `gofy_claim_*` 四个序列以及两个 `gofy_lease_*` 失败计数器。投递在 `Handle` 出口只计一次，
+  因此 `received == acked + nacked`；topic 标签按配置白名单化，broker 确认错误使用独立的
+  `OnAckError`/`OnNackError` 钩子，不再混用 `OnError`。三个配置结构都可注入 meter provider，
+  指标关闭时不构造标签。
+
 - `support/health`: the probe registry behind `/healthz`, `/readyz` and the
   diagnostics `/health`. Checks run with a per-check timeout (default 2s), a round
   budget (3s), a concurrency cap (4), TTL caches (readiness 1s, diagnostic 2s),

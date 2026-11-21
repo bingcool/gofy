@@ -242,19 +242,21 @@ func (c DelayAMQPConfig) QueueConfig() gofyamqp.QueueConfig {
 // 释放连接。
 func (c *DelayAMQPConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
-	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)
+	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, []string{c.cfg.BindingKey, c.cfg.RoutingKey, c.cfg.DelayBindingKey, c.cfg.DelayRoutingKey}, c.handle)
 	if err != nil {
 		return err
 	}
 
 	client, err := gofyamqp.New(ctx, c.conn)
 	if err != nil {
+		proc.metrics.recordConnectError("amqp", "connect")
 		return fmt.Errorf("%s: connect: %w", name, err)
 	}
 	defer func() { _ = client.Close() }()
 
 	queue, err := gofyamqp.NewQueue(client, c.cfg.QueueConfig())
 	if err != nil {
+		proc.metrics.recordConnectError("amqp", "subscribe")
 		return fmt.Errorf("%s: declare delay queue %s: %w", name, c.cfg.DelayQueue, err)
 	}
 	defer func() { _ = queue.Close() }()
@@ -288,6 +290,8 @@ func (c *DelayAMQPConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("delay amqp consume error", zap.Error(err))
 			},
+			OnAckError:  func(error) { proc.metrics.recordBrokerError("amqp", "ack") },
+			OnNackError: func(error) { proc.metrics.recordBrokerError("amqp", "nack") },
 			// Both halves of the delayed topology must exist and the target
 			// consumer must be registered before this subscription can accept
 			// work.

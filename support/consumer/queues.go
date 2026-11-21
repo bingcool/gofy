@@ -152,13 +152,14 @@ func (c *QueuesConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurre
 // Run 拥有订阅本身：建连、弹出到 ctx 取消，并在退出时释放客户端。
 func (c *QueuesConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
-	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)
+	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, []string{c.cfg.Key}, c.handle)
 	if err != nil {
 		return err
 	}
 
 	client, err := gofyredis.New(ctx, c.conn)
 	if err != nil {
+		proc.metrics.recordConnectError("queues", "connect")
 		return fmt.Errorf("%s: connect: %w", name, err)
 	}
 	defer func() { _ = client.Close() }()
@@ -168,6 +169,7 @@ func (c *QueuesConsumer) Run(ctx context.Context) error {
 		MaxRetries: c.cfg.MaxRetries,
 	})
 	if err != nil {
+		proc.metrics.recordConnectError("queues", "subscribe")
 		return fmt.Errorf("%s: open queue %s: %w", name, c.cfg.Key, err)
 	}
 
@@ -186,6 +188,7 @@ func (c *QueuesConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("queues consume error", zap.Error(err))
 			},
+			OnNackError: func(error) { proc.metrics.recordBrokerError("queues", "nack") },
 			// Ready comes from the first successful pop: a lazy Redis client
 			// proves nothing until a command round-trips.
 			// 就绪来自第一次成功弹出：惰性 Redis 客户端在一条命令往返之前什么都证明不了。

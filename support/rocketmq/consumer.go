@@ -227,6 +227,10 @@ type ConsumeOptions struct {
 	// OnError 接收 handler、panic、拉取与 ack 错误，回调在拉取 worker 的
 	// goroutine 中执行，不应阻塞。
 	OnError func(error)
+	// OnAckError receives acknowledgement failures only, so a metric never
+	// counts handler errors as broker errors.
+	// OnAckError 只接收确认失败，指标因此不会把 handler 错误算成 broker 错误。
+	OnAckError func(error)
 	// OnReady runs once, after the SDK consumer started: the client is up, the
 	// topic route resolved and the subscription registered with the broker.
 	// Constructing the consumer only validates configuration, so this is the
@@ -520,6 +524,9 @@ func (c *Consumer) ack(ctx context.Context, delivery deliveredMessage, action st
 	if err := c.raw.Ack(ctx, delivery); err != nil && ctx.Err() == nil {
 		report(opts, fmt.Errorf("rocketmq: %s %s@%s: %w",
 			action, delivery.message.Topic, delivery.message.MessageID, err))
+		if opts.OnAckError != nil {
+			opts.OnAckError(err)
+		}
 	}
 }
 

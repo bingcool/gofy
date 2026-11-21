@@ -205,13 +205,14 @@ func (c *KafkaConsumer) Concurrency() uint8 { return concurrency(c.cfg.Concurren
 // Run 拥有订阅本身：建连、消费到 ctx 取消，并在退出时释放客户端与消费者。
 func (c *KafkaConsumer) Run(ctx context.Context) error {
 	name := c.cfg.Name
-	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, c.handle)
+	proc, lg, err := start(ctx, name, c.cfg.Idempotency, c.cfg.MaxAttempts, []string{c.cfg.Topic}, c.handle)
 	if err != nil {
 		return err
 	}
 
 	client, err := gofykafka.New(ctx, c.conn)
 	if err != nil {
+		proc.metrics.recordConnectError("kafka", "connect")
 		return fmt.Errorf("%s: connect: %w", name, err)
 	}
 	defer func() { _ = client.Close() }()
@@ -226,6 +227,7 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 		BlockRebalanceOnPoll: c.cfg.BlockRebalanceOnPoll,
 	})
 	if err != nil {
+		proc.metrics.recordConnectError("kafka", "subscribe")
 		return fmt.Errorf("%s: subscribe %s: %w", name, c.cfg.Topic, err)
 	}
 	// The adapter closes the consumer on shutdown; this second close covers the
@@ -249,6 +251,7 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 			OnError: func(err error) {
 				lg.Error("kafka consume error", zap.Error(err))
 			},
+			OnAckError: func(error) { proc.metrics.recordBrokerError("kafka", "ack") },
 			// Ready is reported by the first successful poll, not here: only
 			// that proves the group session exists. The ping below stays as a
 			// fast failure for an unreachable broker, not as a readiness claim.
@@ -267,6 +270,7 @@ func (c *KafkaConsumer) Run(ctx context.Context) error {
 	// 客户端是惰性的：New 不拨号，消费循环要等到 poll 才会暴露失败。Ping 让这条路径
 	// 快速失败，而不是让 Run 卡在一个不存在的 broker 上。
 	if err := client.Ping(ctx); err != nil {
+		proc.metrics.recordConnectError("kafka", "timeout")
 		return fmt.Errorf("%s: ping broker: %w", name, err)
 	}
 

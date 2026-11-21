@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"gorm.io/gorm"
 )
 
@@ -183,6 +184,14 @@ type RunnerConfig struct {
 	// 之后执行，因此日志与指标不需要第二个真相来源。
 	OnSuccess func(Result)
 	OnFailure func(Result)
+
+	// MeterProvider creates this runner's instruments; nil disables creation.
+	// MeterProvider 创建本 runner 的 instrument；nil 表示不创建。
+	MeterProvider metric.MeterProvider
+	// Metrics reports whether the provider is real. When false no attributes
+	// are built on the polling path.
+	// Metrics 表示 provider 是否真实可用；为 false 时轮询路径不构造标签。
+	Metrics bool
 }
 
 // Runner turns one claim round into one callback plus two outcome hooks.
@@ -193,6 +202,7 @@ type Runner struct {
 	handlerTimeout time.Duration
 	onSuccessHook  func(Result)
 	onFailureHook  func(Result)
+	metrics        *claimMetrics
 }
 
 // NewRunner validates the config and builds the queue. The queue is built here,
@@ -231,12 +241,17 @@ func NewRunner(db *gorm.DB, cfg RunnerConfig) (*Runner, error) {
 	if failureHook == nil {
 		failureHook = func(Result) {}
 	}
+	metrics, err := newClaimMetrics(cfg.MeterProvider, cfg.Metrics, cfg.Job)
+	if err != nil {
+		return nil, err
+	}
 	return &Runner{
 		queue:          q,
 		handler:        cfg.Handler,
 		handlerTimeout: cfg.HandlerTimeout,
 		onSuccessHook:  successHook,
 		onFailureHook:  failureHook,
+		metrics:        metrics,
 	}, nil
 }
 
@@ -285,6 +300,7 @@ func (r *Runner) Run(ctx context.Context, owner string) error {
 	if err != nil {
 		return errors.Join(reapErr, err)
 	}
+	r.metrics.recordClaimed(len(tasks))
 	if len(tasks) == 0 {
 		// No due row: give the worker one callback with nil data for heartbeats,
 		// ignore its return values, and still surface a reap failure if any.
@@ -350,6 +366,7 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 		if errors.Is(err, ErrLeaseLost) {
 			res.LeaseLost = true
 			res.Err = err
+			r.metrics.recordOutcome("lease_lost", 0)
 			r.onFailureHook(res)
 			return nil
 		}
@@ -377,6 +394,7 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 		dead, failErr := r.queue.Fail(ctx, task, handleErr)
 		if errors.Is(failErr, ErrLeaseLost) {
 			res.LeaseLost = true
+			r.metrics.recordOutcome("lease_lost", res.Elapsed)
 			r.onFailureHook(res)
 			return nil
 		}
@@ -384,6 +402,11 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 			return failErr
 		}
 		res.Dead = dead
+		outcome := "failed"
+		if dead {
+			outcome = "dead"
+		}
+		r.metrics.recordOutcome(outcome, res.Elapsed)
 		r.onFailureHook(res)
 		return nil
 	}
@@ -393,6 +416,7 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 	if succErr := r.queue.Succeed(ctx, task); succErr != nil {
 		if errors.Is(succErr, ErrLeaseLost) {
 			res.LeaseLost = true
+			r.metrics.recordOutcome("lease_lost", res.Elapsed)
 			r.onFailureHook(res)
 			return nil
 		}
@@ -401,8 +425,7 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 		// 活已经干了但行仍是 claimed。上抛错误把修复交给 Reap，这正是 handler 必须幂等的原因。
 		return succErr
 	}
-	if r.onSuccessHook != nil {
-		r.onSuccessHook(res)
-	}
+	r.metrics.recordOutcome("succeeded", res.Elapsed)
+	r.onSuccessHook(res)
 	return nil
 }
