@@ -1117,6 +1117,11 @@ GOFY_TEST_PG_DSN='postgres://user:pass@127.0.0.1:5432/app?sslmode=disable' \
   go test ./support/pg -run Integration -v
 ```
 
+Redis、RabbitMQ、Kafka、RocketMQ 与 Nacos 的真实中间件集成测试遵循同一约定，
+各自的 `GOFY_TEST_*` 入口、场景矩阵与运行方式见
+`docs/integration-tests-2026-11-22.md`；AI 供应商链路（超时、重试、SSE 断连）
+的集成用例基于 httptest，随 `go test ./support/ai` 默认执行。
+
 ## 目录结构
 
 ```text

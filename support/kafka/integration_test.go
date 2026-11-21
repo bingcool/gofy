@@ -319,3 +319,185 @@ func TestIntegrationUnreachableBrokerFailsFast(t *testing.T) {
 		t.Fatalf("New error = %v", err)
 	}
 }
+
+// TestIntegrationRebalanceHandsOffWithoutLoss: two consumers join the same
+// group; closing the first forces a rebalance and the second must observe
+// every produced message exactly through at-least-once semantics — no loss.
+// TestIntegrationRebalanceHandsOffWithoutLoss：两个消费者加入同一个组；关闭第一
+// 个会触发再平衡，第二个必须在 at-least-once 语义下见到全部消息——不允许丢失。
+func TestIntegrationRebalanceHandsOffWithoutLoss(t *testing.T) {
+	brokers := testBrokers(t)
+	client := testClient(t, brokers)
+	topic := testName(t, "rebalance")
+	group := testName(t, "group")
+	createTopic(t, brokers, topic)
+
+	const total = 6
+	producer, err := NewProducer(client, ProducerConfig{Topic: topic, FlushTimeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	for i := 0; i < total; i++ {
+		if err := producer.Publish(context.Background(), []byte(fmt.Sprintf("msg-%d", i)), PublishOptions{
+			Key: fmt.Sprintf("key-%d", i%2), // two keys so both partitions see work
+		}); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+
+	newConsumer := func() *Consumer {
+		c, err := NewConsumer(client, ConsumerConfig{
+			Topic:           topic,
+			Group:           group,
+			AutoOffsetReset: "earliest",
+			SessionTimeout:  6 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("NewConsumer: %v", err)
+		}
+		return c
+	}
+
+	first := newConsumer()
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer firstCancel()
+
+	var (
+		mu     sync.Mutex
+		seen   = map[string]int{}
+		firstN int
+	)
+	// The first consumer exits the group as soon as it has processed one
+	// message: closing the consumer sends a LeaveGroup, which forces the
+	// rebalance the test is about to observe.
+	// 第一个消费者处理一条消息后就退出组：关闭消费者会发送 LeaveGroup，
+	// 立即触发本用例要观察的再平衡。
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- first.Consume(firstCtx, func(_ context.Context, record *kgo.Record) error {
+			mu.Lock()
+			seen[string(record.Value)]++
+			firstN++
+			enough := firstN >= 1
+			mu.Unlock()
+			if enough {
+				firstCancel()
+			}
+			return nil
+		}, ConsumeOptions{})
+	}()
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	mu.Lock()
+	handledByFirst := append([]string(nil), keysOf(seen)...)
+	mu.Unlock()
+	if len(handledByFirst) == 0 {
+		t.Fatal("first consumer processed nothing — rebalance scenario has no handover")
+	}
+
+	// The second consumer joins the same group and must drain the rest.
+	// 第二个消费者加入同组并清空剩余消息。
+	second := newConsumer()
+	t.Cleanup(func() { _ = second.Close() })
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer secondCancel()
+
+	secondErr := make(chan error, 1)
+	go func() {
+		secondErr <- second.Consume(secondCtx, func(_ context.Context, record *kgo.Record) error {
+			mu.Lock()
+			seen[string(record.Value)]++
+			complete := len(seen) == total
+			mu.Unlock()
+			if complete {
+				secondCancel()
+			}
+			return nil
+		}, ConsumeOptions{})
+	}()
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second Consume: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != total {
+		t.Fatalf("received %d distinct messages, want %d: %v", len(seen), total, seen)
+	}
+	for i := 0; i < total; i++ {
+		if seen[fmt.Sprintf("msg-%d", i)] == 0 {
+			t.Fatalf("message msg-%d was lost during rebalance", i)
+		}
+	}
+}
+
+// TestIntegrationRedeliveryWithoutCommit: in manual mode a failing handler
+// must not commit the offset, so the same record is delivered again. This is
+// the duplicate-delivery contract at-least-once depends on.
+// TestIntegrationRedeliveryWithoutCommit：手动模式下 handler 失败不得提交位点，
+// 同一条记录会再次投递。这是 at-least-once 语义依赖的重复投递契约。
+func TestIntegrationRedeliveryWithoutCommit(t *testing.T) {
+	brokers := testBrokers(t)
+	client := testClient(t, brokers)
+	topic := testName(t, "redeliver")
+	group := testName(t, "group")
+	createTopic(t, brokers, topic)
+
+	producer, err := NewProducer(client, ProducerConfig{Topic: topic, FlushTimeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), []byte("must-redeliver"), PublishOptions{Key: "dup"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	consumer, err := NewConsumer(client, ConsumerConfig{
+		Topic:           topic,
+		Group:           group,
+		AutoOffsetReset: "earliest",
+		SessionTimeout:  10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	t.Cleanup(func() { _ = consumer.Close() })
+
+	consumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	deliveries := 0
+	err = consumer.Consume(consumeCtx, func(_ context.Context, record *kgo.Record) error {
+		mu.Lock()
+		deliveries++
+		count := deliveries
+		mu.Unlock()
+		if count == 1 {
+			// First delivery fails and must not be committed.
+			// 第一次投递失败且不得提交。
+			return errors.New("integration: fail the first delivery")
+		}
+		cancel()
+		return nil
+	}, ConsumeOptions{})
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if deliveries < 2 {
+		t.Fatalf("record delivered %d time(s), want at least 2 (failed delivery must not be committed)", deliveries)
+	}
+}
+
+func keysOf(seen map[string]int) []string {
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	return out
+}
