@@ -332,6 +332,22 @@ tenant:
   # tenant_id 不能选租户。只有刻意提权的连接才写 false；跨租户写入请用 tenant.Without(ctx)。
   # overwrite_explicit: false
 
+# 多语言文案（support/i18n）。消息文件内嵌在 app/locale/active.<语言>.json，
+# 随二进制编译，所以改文案要重新构建；中间件在启动时安装，改 enabled 需要
+# 重启（配置热更新只重建模块，不会重新安装中间件）。
+# enabled: false 或整段缺失时：不加载任何消息、中间件原样放行请求，handler
+# 里的 Translate 直接返回消息 ID，请求不受影响；整段不配置不是错误。
+# default_language 必须与某个文件名完全一致（zh 对应 active.zh.json）；
+# 没有对应文件时启动直接失败，而不是让所有翻译静默回落到消息 ID。
+# 协商顺序：?lang=/?locale= → X-Locale/X-Language → Accept-Language → 默认语言。
+# 只有已加载的语言会被选中：不支持的值继续看下一个来源，全都落空才用默认语言。
+# 业务代码用 i18n.Translate(ctx, id, data) 取文案，ctx 来自 c.Request.Context()；
+# 复数用 i18n.TranslatePlural(ctx, id, count, data)。消息文件是 go-i18n v2 的
+# JSON 格式，复数写成 {"one": "...", "other": "..."} 对象，中文只有 other。
+i18n:
+  enabled: true
+  default_language: zh
+
 # LLM 接入（support/ai）。alias 是业务代码使用的名字，与 provider 的 wire model id
 # 解耦；模块按 alias 调用，不关心 base_url 与凭证来自哪里。
 #

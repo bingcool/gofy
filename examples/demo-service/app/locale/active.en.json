@@ -1,0 +1,25 @@
+[
+  {
+    "id": "common.success",
+    "translation": "Success"
+  },
+  {
+    "id": "common.invalidArgument",
+    "translation": "Invalid argument: {{.Field}}"
+  },
+  {
+    "id": "order.notFound",
+    "translation": "Order {{.OrderNo}} was not found"
+  },
+  {
+    "id": "order.items",
+    "translation": {
+      "one": "{{.PluralCount}} item",
+      "other": "{{.PluralCount}} items"
+    }
+  },
+  {
+    "id": "auth.tokenMissing",
+    "translation": "Missing bearer token"
+  }
+]

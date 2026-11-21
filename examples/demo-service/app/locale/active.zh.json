@@ -1,0 +1,24 @@
+[
+  {
+    "id": "common.success",
+    "translation": "成功"
+  },
+  {
+    "id": "common.invalidArgument",
+    "translation": "参数无效：{{.Field}}"
+  },
+  {
+    "id": "order.notFound",
+    "translation": "订单 {{.OrderNo}} 不存在"
+  },
+  {
+    "id": "order.items",
+    "translation": {
+      "other": "共 {{.PluralCount}} 件商品"
+    }
+  },
+  {
+    "id": "auth.tokenMissing",
+    "translation": "缺少 Bearer Token"
+  }
+]

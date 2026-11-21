@@ -11,6 +11,7 @@ import (
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logger"
 	supportai "github.com/bingcool/gofy/support/ai"
+	gofyi18n "github.com/bingcool/gofy/support/i18n"
 	gofylock "github.com/bingcool/gofy/support/lock"
 	"github.com/bingcool/gofy/support/sqllog"
 	appamqp "github.com/yourorg/demo-service/app/appio/amqp"
@@ -57,8 +58,18 @@ type Config struct {
 	// section or enabled: false means nothing builds a client, and startup is
 	// unaffected. The demo exercises it from worker/group3/ai_check.go instead
 	// of exposing routes.
-	LLMAI   supportai.Config     `yaml:"llm_ai"`
-	Tenant  *TenantConfig        `yaml:"tenant"` // nil 表示这套部署完全不用租户隔离
+	LLMAI  supportai.Config `yaml:"llm_ai"`
+	Tenant *TenantConfig    `yaml:"tenant"` // nil 表示这套部署完全不用租户隔离
+	// I18n 是文案翻译配置。整段缺失时解码为零值（未启用），部署照常启动，
+	// handler 里的 Translate 直接返回消息 ID。消息文件内嵌在 app/locale，随
+	// 二进制编译，因此改文案需要重新构建；中间件在启动时安装，热更新只重建
+	// 模块，改了 enabled 也要重启才生效。
+	// I18n configures user-facing text. A missing section decodes to the zero
+	// value (disabled) and the deployment starts normally, with Translate
+	// returning message IDs. The message files are embedded from app/locale at
+	// build time, so editing text needs a rebuild; the middleware is installed
+	// at startup, so a changed enabled flag also needs a restart.
+	I18n    gofyi18n.Config      `yaml:"i18n"`
 	PIDFile string               `yaml:"pid_file"`
 	JWT     middleware.JWTConfig `yaml:"jwt"`
 }

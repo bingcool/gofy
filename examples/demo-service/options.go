@@ -6,11 +6,13 @@ import (
 
 	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/core/systemenv"
+	gofyi18n "github.com/bingcool/gofy/support/i18n"
 	"github.com/bingcool/gofy/support/nacos"
 	"github.com/bingcool/gofy/support/worker"
 	"github.com/yourorg/demo-service/app/appio"
 	appdb "github.com/yourorg/demo-service/app/appio/db"
 	"github.com/yourorg/demo-service/app/config"
+	"github.com/yourorg/demo-service/app/locale"
 	"github.com/yourorg/demo-service/app/middleware"
 	appscript "github.com/yourorg/demo-service/script"
 )
@@ -101,6 +103,22 @@ func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg
 	if dbCfg, ok := cfg.Database(config.DefaultDatabase); ok {
 		opts = append(opts, gofy.WithDatabase(dbCfg))
 	}
+	// The bundle is built once per process: message files are embedded, so there
+	// is nothing to reload, and the immutable bundle is shared by every request.
+	// The i18n section is optional — without it New returns a disabled bundle and
+	// the middleware passes requests through — so this wiring needs no branch;
+	// only an enabled-but-broken section fails startup, because a missing message
+	// file for the default language would otherwise turn every translation into a
+	// message ID and nobody would notice until a user does.
+	// bundle 每个进程只构建一次：消息文件是内嵌的，没有可热更新的内容，构建好的
+	// 不可变实例被所有请求共享。i18n 段是可选的——没有它时 New 返回禁用态 bundle，
+	// 中间件原样放行请求——因此这里不需要分支；只有"启用了但写错"才让启动失败：
+	// 默认语言没有对应消息文件时，否则所有翻译都会变成消息 ID，直到用户发现才有人知道。
+	bundle, err := gofyi18n.New(cfg.I18n, locale.FS)
+	if err != nil {
+		fatalf("init i18n: %v", err)
+	}
+	opts = append(opts, gofy.WithMiddleware(gofyi18n.Middleware(bundle)))
 	return append(opts,
 		gofy.WithTelemetry(cfg.OTel),
 		// 运维端点跑独立端口：/metrics 给 Prometheus，/debug/pprof/ 给排障。

@@ -26,6 +26,13 @@ All notable changes to this project are documented here. The format follows
   configuration nor a wiring branch. An enabled-but-broken section still fails
   startup. The bundle is immutable and shared across requests; message files
   are embedded at build time, so edits need a rebuild, not a reload.
+- `examples/demo-service`: `app/locale` embeds `active.en.json` /
+  `active.zh.json`, and `options.go` wires i18n unconditionally — a missing
+  `i18n` section yields a disabled bundle whose middleware is a pass-through.
+  One demo test drives the real files through the real middleware and pins both
+  plural forms and the negotiation precedence; another fails when a message ID
+  is missing from one language, since go-i18n's runtime fallback would
+  otherwise hide the gap.
 - `support/ai`: a configuration-driven LLM client over `github.com/zendev-sh/goai`.
   An application declares aliases under the `llm_ai` section and business code
   calls them by name; provider, base URL and credentials stay in configuration.
