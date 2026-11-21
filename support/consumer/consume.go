@@ -355,15 +355,21 @@ type ProcessorConfig struct {
 	MeterProvider metric.MeterProvider
 	// Metrics reports whether the provider is real; when false no attributes
 	// are built on the message path.
+	// The two fields must be set together: the provider alone with Metrics=false
+	// is silently ignored, and Metrics=true with a nil provider is rejected by
+	// NewProcessor. Wire both from core.Runtime (rt.MeterProvider, rt.Metrics).
 	// Metrics 表示 provider 是否真实可用；为 false 时消息路径不构造任何标签。
+	// 两个字段必须成对设置：只给 provider 而留 false 会被静默忽略；true 配 nil
+	// provider 会被 NewProcessor 拒绝。请一并从 core.Runtime 接线
+	// （rt.MeterProvider、rt.Metrics）。
 	Metrics bool
 	// Topics is the whitelist for the topic label. Every allowed AMQP routing
 	// key, Kafka topic, RocketMQ topic or Redis queue key belongs here; a value
 	// outside the list is reported as "unknown" so one delivery cannot create
-	// an unbounded series.
+	// an unbounded series. An empty whitelist reports every topic as "unknown".
 	// Topics 是 topic 标签的白名单。允许的 AMQP routing key、Kafka topic、
 	// RocketMQ topic 或 Redis 队列键都要列进来；名单外的值记为 "unknown"，
-	// 防止一条消息造出无限序列。
+	// 防止一条消息造出无限序列。空白名单会把所有 topic 记为 "unknown"。
 	Topics []string
 }
 
@@ -502,11 +508,21 @@ func NewProcessor(ctx context.Context, rt *core.Runtime, cfg ProcessorConfig) (*
 // ——重试它们只会白占分区。
 func (p *Processor) Handle(ctx context.Context, msg Message) error {
 	// One defer is the only place a delivery is counted, so received always
-	// equals acked + nacked even when a branch returns early.
-	// 只有这一处 defer 会计数，因此即使分支提前返回，received 也恒等于 acked + nacked。
+	// equals acked + nacked even when a branch returns early — including a
+	// handler panic. The broker layer recovers the panic and asks for
+	// redelivery, so the fallback decision mirrors that: nacked with the
+	// retry reason. The zero value would leak an out-of-vocabulary "" label
+	// into the scrape.
+	// 只有这一处 defer 会计数，因此即使分支提前返回——包括 handler panic——
+	// received 也恒等于 acked + nacked。broker 层会 recover panic 并请求重投，
+	// 所以兜底决定与之一致：按 retry 记 nack。零值会把枚举外的 "" 标签漏进抓取。
 	start := time.Now()
-	decision, err := p.handle(ctx, msg, start)
-	p.metrics.record(msg, decision, time.Since(start))
+	decision := consumeDecision{reason: "retry"}
+	var err error
+	defer func() {
+		p.metrics.record(msg, decision, time.Since(start))
+	}()
+	decision, err = p.handle(ctx, msg, start)
 	return err
 }
 

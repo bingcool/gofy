@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -225,5 +226,48 @@ func TestReadyIsNotClosedByARepeatedSignal(t *testing.T) {
 	case <-runner.Ready():
 	case <-time.After(5 * time.Second):
 		t.Fatal("group did not report ready after both instances connected")
+	}
+}
+
+// TestReadyGateLastPublishCarriesFinalState is the M-05 regression test: the
+// gate publishes metrics outside its mutex, so concurrent signals must not let
+// a stale count win. The chronologically last published snapshot always
+// equals the final pending set.
+// TestReadyGateLastPublishCarriesFinalState 是 M-05 的回归用例：闸门在锁外发布
+// 指标，并发的上报不得让过期计数胜出——时序上最后一次发布的快照必须等于
+// 最终的待上报集合。
+func TestReadyGateLastPublishCarriesFinalState(t *testing.T) {
+	const instances = 8
+	gate := newReadyGate()
+
+	var mu sync.Mutex
+	var last int
+	gate.onChange = func(pending []Identity) {
+		mu.Lock()
+		last = len(pending)
+		mu.Unlock()
+	}
+
+	ids := make([]Identity, instances)
+	for i := range ids {
+		ids[i] = Identity{Group: "orders", Name: "consumer", Index: i}
+	}
+	gate.add(ids)
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id Identity) {
+			defer wg.Done()
+			gate.signal(id)
+		}(id)
+	}
+	wg.Wait()
+	<-gate.wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if last != 0 {
+		t.Fatalf("last published pending count = %d, want 0 (a stale snapshot won the race)", last)
 	}
 }

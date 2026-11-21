@@ -124,6 +124,66 @@ func TestConsumerMetricsInvariantAndCardinality(t *testing.T) {
 	}
 }
 
+// TestConsumerMetricsCountPanicDelivery is the M-01 regression test: a handler
+// panic escapes Handle (the broker layers recover it and ask for redelivery),
+// but the delivery must still be counted as nacked with the retry reason.
+// TestConsumerMetricsCountPanicDelivery 是 M-01 的回归用例：handler panic 会逃出
+// Handle（broker 层 recover 后请求重投），但这次投递必须按 retry 记入 nack。
+func TestConsumerMetricsCountPanicDelivery(t *testing.T) {
+	metrics, err := otel.NewMetrics(otel.MetricsConfig{Enabled: true}, otel.WithServiceName("consumer-panic-test"))
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	defer func() { _ = metrics.Shutdown(context.Background()) }()
+
+	rt := core.NewRuntime(core.RuntimeConfig{
+		Logger:        zap.NewNop(),
+		MeterProvider: metrics.MeterProvider(),
+		Metrics:       true,
+	})
+	proc, err := NewProcessor(context.Background(), rt, ProcessorConfig{
+		Consumer: "orders-consumer",
+		Handler: func(context.Context, Message, Envelope) error {
+			panic("handler exploded")
+		},
+		MaxAttempts:   5,
+		MeterProvider: metrics.MeterProvider(),
+		Metrics:       true,
+		Topics:        []string{"orders"},
+	})
+	if err != nil {
+		t.Fatalf("NewProcessor: %v", err)
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("handler panic did not escape Handle")
+			}
+		}()
+		_ = proc.Handle(context.Background(), Message{
+			ID:     "m-panic",
+			Source: "kafka",
+			Topic:  "orders",
+			Body:   []byte(`{"type":"order.paid","payload":{"order_id":1}}`),
+		})
+	}()
+
+	body := scrapeConsumerMetrics(t, metrics)
+	if got := consumerSum(body, "gofy_consumer_received_total", ""); got != 1 {
+		t.Fatalf("received = %g, want 1\n%s", got, body)
+	}
+	if got := consumerSum(body, "gofy_consumer_nacked_total", `reason="retry"`); got != 1 {
+		t.Fatalf("nacked{reason=retry} = %g, want 1\n%s", got, body)
+	}
+	if got := consumerSum(body, "gofy_consumer_acked_total", ""); got != 0 {
+		t.Fatalf("acked = %g, want 0\n%s", got, body)
+	}
+	if !containsSeries(body, "gofy_consumer_handle_duration_seconds_count") {
+		t.Fatalf("handle duration histogram is missing\n%s", body)
+	}
+}
+
 func TestDisabledConsumerMetricsDoNotAllocate(t *testing.T) {
 	m := &consumerMetrics{
 		consumer: "orders-consumer",
@@ -203,4 +263,43 @@ func consumerSum(body, name, label string) float64 {
 		total += value
 	}
 	return total
+}
+
+// TestNewProcessorRejectsMetricsWithoutProvider is the M-06 regression test:
+// the switch without a provider can only be a wiring mistake.
+// TestNewProcessorRejectsMetricsWithoutProvider 是 M-06 的回归用例：开关配 nil
+// provider 只可能是接线错误。
+func TestNewProcessorRejectsMetricsWithoutProvider(t *testing.T) {
+	rt := core.NewRuntime(core.RuntimeConfig{Logger: zap.NewNop()})
+	_, err := NewProcessor(context.Background(), rt, ProcessorConfig{
+		Consumer: "orders-consumer",
+		Handler:  func(context.Context, Message, Envelope) error { return nil },
+		Metrics:  true,
+	})
+	if err == nil {
+		t.Fatal("NewProcessor with Metrics=true and a nil provider must fail")
+	} else if !strings.Contains(err.Error(), "set both fields together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestLabelTopicCollapsesWithoutWhitelist is the M-07 regression test: an empty
+// whitelist has no configured value, so every topic — including rogue ones —
+// collapses to "unknown" instead of passing through.
+// TestLabelTopicCollapsesWithoutWhitelist 是 M-07 的回归用例：空白名单没有任何
+// 配置值，因此所有 topic——包括意外值——都收敛为 "unknown"，不再透传。
+func TestLabelTopicCollapsesWithoutWhitelist(t *testing.T) {
+	m := &consumerMetrics{}
+	for _, topic := range []string{"", "orders", "rogue-topic"} {
+		if got := m.labelTopic(topic); got != "unknown" {
+			t.Fatalf("labelTopic(%q) = %q, want unknown with an empty whitelist", topic, got)
+		}
+	}
+	m2 := &consumerMetrics{topics: map[string]struct{}{"orders": {}}}
+	if got := m2.labelTopic("orders"); got != "orders" {
+		t.Fatalf("labelTopic(orders) = %q, want orders with a configured whitelist", got)
+	}
+	if got := m2.labelTopic("rogue-topic"); got != "unknown" {
+		t.Fatalf("labelTopic(rogue-topic) = %q, want unknown", got)
+	}
 }

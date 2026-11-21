@@ -2,6 +2,7 @@ package claim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,7 +34,15 @@ type claimMetrics struct {
 
 func newClaimMetrics(provider metric.MeterProvider, enabled bool, job string) (*claimMetrics, error) {
 	m := &claimMetrics{job: job}
-	if !enabled || provider == nil {
+	// Metrics=true with a nil provider can only be a wiring mistake — no valid
+	// configuration looks like this — so reject it instead of silently
+	// running without metrics.
+	// Metrics=true 且 provider 为 nil 只可能是接线错误——没有任何合法配置长这样
+	// ——因此直接拒绝，而不是静默地跑成无指标。
+	if enabled && provider == nil {
+		return nil, errors.New("claim: Metrics is true but MeterProvider is nil; set both fields together")
+	}
+	if !enabled {
 		return m, nil
 	}
 	meter := provider.Meter(claimMeterScope)

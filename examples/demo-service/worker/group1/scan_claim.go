@@ -346,6 +346,12 @@ func newClaimScanConsumer(cfg ClaimScanConfig) gofyworker.Worker {
 		// 新一代重新进入 Run。从"行被认领"到"结果落库"之间的事现在都在 claim.Runner 里——
 		// 这个 worker 只提供参数、一个 Handler 和两个结果钩子。
 		runner, err := gofyclaim.NewRunner(db, gofyclaim.RunnerConfig{
+			// The two metrics fields travel together: the provider without the
+			// switch is silently ignored (see claim.RunnerConfig docs).
+			// 两个指标字段必须成对：只给 provider 不开开关会被静默忽略
+			// （见 claim.RunnerConfig 的文档）。
+			MeterProvider: rt.MeterProvider,
+			Metrics:       rt.Metrics,
 			Config: gofyclaim.Config{
 				Table:       cfg.Table,
 				Job:         cfg.Job,

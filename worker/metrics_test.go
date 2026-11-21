@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/support/otel"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // readinessMetricWorker behaves like a consumer: Run reports readiness only
@@ -282,5 +283,29 @@ func waitForRunnerReady(t *testing.T, runner *Runner) {
 	}
 	if !runner.IsReady() {
 		t.Fatal("runner never became ready")
+	}
+}
+
+// TestRunnerRejectsMetricsWithoutProvider is the M-06 regression test: the
+// switch without a provider can only be a wiring mistake, so NewRunner must
+// reject it instead of silently running without metrics.
+// TestRunnerRejectsMetricsWithoutProvider 是 M-06 的回归用例：开关配 nil provider
+// 只可能是接线错误，NewRunner 必须拒绝而不是静默跑成无指标。
+func TestRunnerRejectsMetricsWithoutProvider(t *testing.T) {
+	worker := &readinessMetricWorker{name: "consumer"}
+	group, err := NewGroup("orders", worker)
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	if _, err := NewRunner(group, RunConfig{Metrics: true}); err == nil {
+		t.Fatal("NewRunner with Metrics=true and a nil provider must fail")
+	} else if !strings.Contains(err.Error(), "set both fields together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The reverse pairing stays legal: a real-looking provider with the switch
+	// off is the noop-provider wiring, not an error.
+	// 反向组合仍然合法：provider + 关闭开关是 noop 接线，不算错误。
+	if _, err := NewRunner(group, RunConfig{MeterProvider: noop.NewMeterProvider()}); err != nil {
+		t.Fatalf("provider with Metrics=false must be accepted: %v", err)
 	}
 }

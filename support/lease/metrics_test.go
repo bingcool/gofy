@@ -109,3 +109,18 @@ func leaseContainsSeries(body, want string) bool {
 	}
 	return false
 }
+
+// TestRunRejectsMetricsWithoutProvider is the M-06 regression test: the switch
+// without a provider can only be a wiring mistake.
+// TestRunRejectsMetricsWithoutProvider 是 M-06 的回归用例：开关配 nil provider
+// 只可能是接线错误。
+func TestRunRejectsMetricsWithoutProvider(t *testing.T) {
+	err := lease.Run(context.Background(), &fakeLocker{}, "settle",
+		lease.RunConfig{TTL: time.Second, Metrics: true},
+		func(context.Context, int64) error { return nil })
+	if err == nil {
+		t.Fatal("Run with Metrics=true and a nil provider must fail")
+	} else if !strings.Contains(err.Error(), "set both fields together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

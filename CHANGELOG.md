@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Metrics review fixes (M-01–M-07). `Processor.Handle` records its delivery
+  inside a `defer`, so a handler panic — recovered by the broker layer — is
+  still counted as `nacked{reason="retry"}` instead of vanishing from the
+  scrape. The demo claim runner now wires `MeterProvider`/`Metrics` from the
+  runtime. All four metric config structs reject `Metrics=true` with a nil
+  `MeterProvider` (no valid configuration looks like that) and document that
+  the two fields must be set together. The worker readiness gate serializes
+  its gauge callback outside the gate mutex, so `Ready()` no longer waits on
+  metric recording while concurrent signals still cannot let a stale count
+  overwrite the final value. `labelTopic` no longer passes topics through on
+  an empty whitelist: everything outside the configured values — including
+  every topic when none are configured — is reported as `unknown`.
+  指标复核修复（M-01–M-07）。`Processor.Handle` 把投递计数放进 `defer`，handler
+  panic（由 broker 层 recover）也会按 `nacked{reason="retry"}` 计数，不再从抓取
+  端点消失。demo 的 claim runner 接上了 runtime 的 `MeterProvider`/`Metrics`。
+  四个指标配置结构对 `Metrics=true` 配 nil `MeterProvider` 直接报错（没有任何
+  合法配置长这样），并在 godoc 写明两字段必须成对。worker 就绪闸门把 gauge 回调
+  移到闸门锁之外串行执行，`Ready()` 不再等待指标记录，并发上报也不会让过期计数
+  覆盖最终值。`labelTopic` 在空白名单时不再透传：配置值之外的一切——包括完全
+  未配置时的所有 topic——都记为 `unknown`。
+
 ### Changed
 
 - **Breaking import path: `support/worker` moved to `worker`.** The package name is

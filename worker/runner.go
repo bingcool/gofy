@@ -64,8 +64,17 @@ type RunConfig struct {
 	// Metrics reports whether the provider is real. When false the runner skips
 	// building labels entirely, which keeps a metrics-free process allocation-free
 	// on its hot paths.
+	// The two fields must be set together: the provider alone with Metrics=false
+	// is silently ignored, and Metrics=true with a nil provider is rejected by
+	// NewRunner. Wire both from core.Runtime (rt.MeterProvider, rt.Metrics);
+	// the runtime always carries a provider — a no-op one when metrics are off —
+	// so the switch, not nil-ness, is the source of truth.
 	// Metrics 表示 provider 是否真实可用。为 false 时 runner 连标签都不构造，
 	// 没有指标管道的进程热路径因此没有额外分配。
+	// 两个字段必须成对设置：只给 provider 而留 false 会被静默忽略；true 配 nil
+	// provider 会被 NewRunner 拒绝。请一并从 core.Runtime 接线（rt.MeterProvider、
+	// rt.Metrics）——runtime 上的 provider 永不为 nil（指标关闭时是 no-op），
+	// 所以开关布尔才是唯一的事实来源。
 	Metrics bool
 }
 

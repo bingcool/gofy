@@ -2,6 +2,7 @@ package lease
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -30,7 +31,15 @@ type leaseMetrics struct {
 
 func newLeaseMetrics(provider metric.MeterProvider, enabled bool, name string) (*leaseMetrics, error) {
 	m := &leaseMetrics{name: name}
-	if !enabled || provider == nil {
+	// Metrics=true with a nil provider can only be a wiring mistake — no valid
+	// configuration looks like this — so reject it instead of silently
+	// running without metrics.
+	// Metrics=true 且 provider 为 nil 只可能是接线错误——没有任何合法配置长这样
+	// ——因此直接拒绝，而不是静默地跑成无指标。
+	if enabled && provider == nil {
+		return nil, errors.New("lease: Metrics is true but MeterProvider is nil; set both fields together")
+	}
+	if !enabled {
 		return m, nil
 	}
 	meter := provider.Meter(leaseMeterScope)

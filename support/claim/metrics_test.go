@@ -129,3 +129,20 @@ func claimContainsSeries(body, want string) bool {
 	}
 	return false
 }
+
+// TestNewRunnerRejectsMetricsWithoutProvider is the M-06 regression test: the
+// switch without a provider can only be a wiring mistake.
+// TestNewRunnerRejectsMetricsWithoutProvider 是 M-06 的回归用例：开关配 nil provider
+// 只可能是接线错误。
+func TestNewRunnerRejectsMetricsWithoutProvider(t *testing.T) {
+	_, err := NewRunner(new(gorm.DB), RunnerConfig{
+		Config:  Config{Table: "job_task", Job: "order"},
+		Handler: func(context.Context, []byte) (uint64, error) { return 0, nil },
+		Metrics: true,
+	})
+	if err == nil {
+		t.Fatal("NewRunner with Metrics=true and a nil provider must fail")
+	} else if !strings.Contains(err.Error(), "set both fields together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

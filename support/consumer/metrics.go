@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -66,7 +67,15 @@ func newConsumerMetrics(provider metric.MeterProvider, enabled bool, consumer st
 			}
 		}
 	}
-	if !enabled || provider == nil {
+	// Metrics=true with a nil provider can only be a wiring mistake — no valid
+	// configuration looks like this — so reject it instead of silently
+	// running without metrics.
+	// Metrics=true 且 provider 为 nil 只可能是接线错误——没有任何合法配置长这样
+	// ——因此直接拒绝，而不是静默地跑成无指标。
+	if enabled && provider == nil {
+		return nil, errors.New("consumer: Metrics is true but MeterProvider is nil; set both fields together")
+	}
+	if !enabled {
 		return m, nil
 	}
 	meter := provider.Meter(consumerMeterScope)
@@ -114,12 +123,11 @@ func newConsumerMetrics(provider metric.MeterProvider, enabled bool, consumer st
 // labelTopic 把 topic 标签限制在配置值内。AMQP routing key 若与配置的 binding 不符，
 // 与任意字符串一样意外，不能因此造出新时间线。
 func (m *consumerMetrics) labelTopic(topic string) string {
-	if len(m.topics) == 0 {
-		if topic == "" {
-			return "unknown"
-		}
-		return topic
-	}
+	// An empty whitelist has no configured value, so nothing can match and
+	// every topic collapses to "unknown". The passthrough branch that used to
+	// live here turned one rogue delivery into unbounded series.
+	// 空白名单没有任何配置值，因此什么都不可能匹配，所有 topic 一律收敛为
+	// "unknown"。原先这里的透传分支会让一条意外消息造出无限序列。
 	if _, ok := m.topics[topic]; ok {
 		return topic
 	}

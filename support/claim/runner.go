@@ -190,7 +190,13 @@ type RunnerConfig struct {
 	MeterProvider metric.MeterProvider
 	// Metrics reports whether the provider is real. When false no attributes
 	// are built on the polling path.
+	// The two fields must be set together: the provider alone with Metrics=false
+	// is silently ignored, and Metrics=true with a nil provider is rejected by
+	// NewRunner. Wire both from core.Runtime (rt.MeterProvider, rt.Metrics).
 	// Metrics 表示 provider 是否真实可用；为 false 时轮询路径不构造标签。
+	// 两个字段必须成对设置：只给 provider 而留 false 会被静默忽略；true 配 nil
+	// provider 会被 NewRunner 拒绝。请一并从 core.Runtime 接线（rt.MeterProvider、
+	// rt.Metrics）。
 	Metrics bool
 }
 

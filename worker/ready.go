@@ -47,12 +47,20 @@ type readyGate struct {
 	done    chan struct{}
 	// onChange reports a snapshot of the pending set after it changes. The
 	// runner turns it into an instances.ready gauge; nil keeps standalone gates
-	// free of metrics wiring. It is called with the mutex held so snapshots are
-	// published in the same order as the state changes they describe.
+	// free of metrics wiring. Callbacks are serialized by publishMu and each
+	// re-reads the pending set under mu at its turn, so the chronologically
+	// last callback always reports the final state — concurrent signals cannot
+	// let a stale count overwrite it, and Ready() never waits on the callback.
 	// onChange 在待上报集合变化后给出快照。runner 用它更新 instances.ready gauge；
-	// nil 让独立使用的闸门无需接指标。调用时持有互斥锁，保证快照的发布顺序与
-	// 状态变化顺序一致。
+	// nil 让独立使用的闸门无需接指标。回调由 publishMu 串行化，且每次执行都会在
+	// 自己的轮次里重新持 mu 读取待上报集合——时序上最后一次回调必然报出最终状态，
+	// 并发上报不会让过期计数覆盖它，Ready() 也不再等待回调完成。
 	onChange func([]Identity)
+	// publishMu serializes onChange. Nobody holds mu while taking publishMu
+	// (add and signal release it first), so the nesting has no cycle.
+	// publishMu 串行化 onChange。没有人会在持有 mu 时再取 publishMu（add 与 signal
+	// 都先释放），嵌套因此无环。
+	publishMu sync.Mutex
 }
 
 func newReadyGate() *readyGate {
@@ -73,29 +81,36 @@ func (g *readyGate) add(ids []Identity) {
 	if closeNow {
 		g.closed = true
 	}
-	// Publish while holding the lock: two concurrent signals must not let a
-	// stale snapshot overwrite the final count after the gate closed.
-	// 持锁发布：两个并发上报的快照若乱序落盘，旧值会在闸门关闭后覆盖最终计数。
-	g.publishLocked()
 	g.mu.Unlock()
+	// Publish after releasing the lock: the callback re-reads the set under mu
+	// inside its own serialized turn, so no snapshot can go stale-published.
+	// 释放锁之后再发布：回调在自己被串行化的轮次里重新持 mu 读取集合，
+	// 任何快照都不会以过期状态落盘。
+	g.publish()
 	if closeNow {
 		close(g.done)
 	}
 }
 
-// publishLocked reports the pending set to the runner's gauge. The caller must
-// hold g.mu, and onChange must not call back into the gate; the runner's only
-// callback records metrics.
-// publishLocked 把待上报集合报给 runner 的 gauge。调用方必须持有 g.mu，且 onChange
-// 不得回调闸门；runner 的回调只记录指标。
-func (g *readyGate) publishLocked() {
+// publish reports the current pending set to the runner's gauge. Publishes are
+// serialized by publishMu and each re-reads the set under mu, so the last one
+// always carries the final state even when signals race. onChange must not call
+// back into the gate; the runner's only callback records metrics.
+// publish 把当前待上报集合报给 runner 的 gauge。发布由 publishMu 串行化，且每次
+// 都重新持 mu 读取集合，因此即使上报并发竞争，最后一次发布也一定携带最终状态。
+// onChange 不得回调闸门；runner 的回调只记录指标。
+func (g *readyGate) publish() {
 	if g.onChange == nil {
 		return
 	}
+	g.publishMu.Lock()
+	defer g.publishMu.Unlock()
+	g.mu.Lock()
 	pending := make([]Identity, 0, len(g.pending))
 	for id := range g.pending {
 		pending = append(pending, id)
 	}
+	g.mu.Unlock()
 	g.onChange(pending)
 }
 
@@ -117,10 +132,10 @@ func (g *readyGate) signal(id Identity) {
 	if closeNow {
 		g.closed = true
 	}
-	if ok {
-		g.publishLocked()
-	}
 	g.mu.Unlock()
+	if ok {
+		g.publish()
+	}
 	if closeNow {
 		close(g.done)
 	}
