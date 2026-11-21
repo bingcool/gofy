@@ -13,6 +13,9 @@ RUN CGO_ENABLED=0 go build -trimpath \
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/{{.Name}} /app/{{.Name}}
-COPY config.yaml /app/config.yaml
+# config.yaml is the local fallback; application.yaml holds the Nacos behaviour
+# and nacos.yaml the connection. Nacos itself stays disabled in this image —
+# enable it per environment with NACOS_ENABLED=true, or mount a real nacos.yaml.
+COPY config.yaml application.yaml nacos.yaml /app/
 EXPOSE 8080
 ENTRYPOINT ["/app/{{.Name}}"]

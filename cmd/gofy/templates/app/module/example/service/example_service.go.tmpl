@@ -1,0 +1,113 @@
+// Package service owns the example module's use cases. It depends on the
+// repository and on one business config section, both injected through Deps; it
+// never reads config.yaml and never imports HTTP types.
+// 包 service 负责示例模块的用例。它依赖 repository 与一段业务配置，两者都经 Deps
+// 注入；它从不读 config.yaml，也不 import HTTP 类型。
+package service
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"{{.Module}}/app/config"
+	"{{.Module}}/app/module/example/innerapi"
+	"{{.Module}}/app/module/example/model/examplemodel"
+	"{{.Module}}/app/module/example/repository"
+)
+
+// ErrNotFound means the example does not exist. The controller maps it to 404;
+// callers must not compare against repository.ErrNotFound.
+// ErrNotFound 表示记录不存在。controller 把它映射成 404；调用方不应比较
+// repository.ErrNotFound。
+var ErrNotFound = errors.New("example: not found")
+
+// View is what this module returns to its controller. It is a plain value: no
+// model tags, no gorm types.
+// View 是本模块交给 controller 的返回值。它是普通值：没有 model 标签，也没有 gorm 类型。
+type View struct {
+	ID        uint64
+	Name      string
+	CreatedAt time.Time
+}
+
+// ExampleService implements innerapi.ExampleAPI.
+// ExampleService 实现 innerapi.ExampleAPI。
+type ExampleService struct {
+	repository *repository.ExampleRepository
+	config     config.ExampleConfig
+}
+
+var _ innerapi.ExampleAPI = (*ExampleService)(nil)
+
+// NewExampleService builds the service from its declared dependencies.
+// NewExampleService 按声明的依赖构造 service。
+func NewExampleService(deps Dependencies) *ExampleService {
+	return &ExampleService{repository: deps.Repository, config: deps.Config}
+}
+
+// Create adds one example. A duplicate name is reported as innerapi.ErrConflict
+// so the controller does not have to know repository sentinels.
+// Create 新增一条记录。重名以 innerapi.ErrConflict 上报，controller 因此不必了解
+// repository 的哨兵错误。
+func (s *ExampleService) Create(ctx context.Context, name string) (*View, error) {
+	row, err := s.repository.Create(ctx, name)
+	if err != nil {
+		if errors.Is(err, repository.ErrDuplicateName) {
+			return nil, innerapi.ErrConflict
+		}
+		return nil, err
+	}
+	return toView(row), nil
+}
+
+// Get returns one example.
+// Get 返回一条记录。
+func (s *ExampleService) Get(ctx context.Context, id uint64) (*View, error) {
+	row, err := s.repository.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return toView(row), nil
+}
+
+// List returns every example.
+// List 返回全部记录。
+func (s *ExampleService) List(ctx context.Context) ([]View, error) {
+	rows, err := s.repository.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]View, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, *toView(row))
+	}
+	return out, nil
+}
+
+// Greeting exposes the business config section so a caller can see the wiring
+// work: change example.greeting in config.yaml, reload, and this value changes.
+// Greeting 暴露业务配置段，让接线可见：改 config.yaml 里的 example.greeting 并热更新，
+// 这个值就会变。
+func (s *ExampleService) Greeting() string { return s.config.Greeting }
+
+// GetExample implements innerapi.ExampleAPI. Sibling modules get the contract
+// view, not this package's View.
+// GetExample 实现 innerapi.ExampleAPI。兄弟模块拿到的是契约视图，而不是本包的 View。
+func (s *ExampleService) GetExample(ctx context.Context, id uint64) (*innerapi.Example, error) {
+	row, err := s.repository.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, innerapi.ErrNotFound
+		}
+		return nil, err
+	}
+	return &innerapi.Example{ID: row.ID, Name: row.Name, CreatedAt: row.CreatedAt}, nil
+}
+
+func toView(row *examplemodel.Example) *View {
+	return &View{ID: row.ID, Name: row.Name, CreatedAt: row.CreatedAt}
+}

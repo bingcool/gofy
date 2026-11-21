@@ -1,0 +1,119 @@
+package controller
+
+import (
+	"errors"
+	"strconv"
+	"time"
+
+	"github.com/bingcool/gofy/apperr"
+	"github.com/bingcool/gofy/support"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
+	"{{.Module}}/app/module/example/dto"
+	"{{.Module}}/app/module/example/innerapi"
+	"{{.Module}}/app/module/example/service"
+)
+
+// ExampleController adapts HTTP to the service: it binds and validates input,
+// maps service views to DTOs, and turns sentinel errors into status codes. It
+// imports no model and no repository.
+// ExampleController 把 HTTP 适配到 service：绑定与校验入参、把 service 视图映射成
+// DTO、把哨兵错误映射成状态码。它不 import model 与 repository。
+type ExampleController struct {
+	service   *service.ExampleService
+	logger    *zap.Logger
+	responder support.Responder
+}
+
+// NewExampleController binds the use cases and the responder this router uses.
+// A nil logger disables logs.
+// NewExampleController 绑定用例与当前路由使用的 responder。logger 为 nil 时静默。
+func NewExampleController(svc *service.ExampleService, logger *zap.Logger, responder support.Responder) *ExampleController {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if responder == nil {
+		responder = support.NewResponder(support.ResponderConfig{})
+	}
+	return &ExampleController{
+		service:   svc,
+		logger:    logger.With(zap.String("component", "example.controller")),
+		responder: responder,
+	}
+}
+
+// Create handles POST /examples.
+// Create 处理 POST /examples。
+func (c *ExampleController) Create(g *gin.Context) {
+	var req dto.CreateExampleRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		c.responder.Error(g, apperr.InvalidArgument(err.Error()))
+		return
+	}
+	view, err := c.service.Create(g.Request.Context(), req.Name)
+	if err != nil {
+		c.fail(g, err)
+		return
+	}
+	c.responder.Success(g, toDTO(view))
+}
+
+// Get handles GET /examples/:id.
+// Get 处理 GET /examples/:id。
+func (c *ExampleController) Get(g *gin.Context) {
+	id, err := strconv.ParseUint(g.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.responder.Error(g, apperr.InvalidArgument("id must be a positive integer"))
+		return
+	}
+	view, err := c.service.Get(g.Request.Context(), id)
+	if err != nil {
+		c.fail(g, err)
+		return
+	}
+	c.responder.Success(g, toDTO(view))
+}
+
+// List handles GET /examples.
+// List 处理 GET /examples。
+func (c *ExampleController) List(g *gin.Context) {
+	views, err := c.service.List(g.Request.Context())
+	if err != nil {
+		c.fail(g, err)
+		return
+	}
+	items := make([]dto.Example, 0, len(views))
+	for i := range views {
+		items = append(items, *toDTO(&views[i]))
+	}
+	c.responder.Success(g, dto.ListExamplesResponse{
+		Items:    items,
+		Total:    len(items),
+		Greeting: c.service.Greeting(),
+	})
+}
+
+// fail maps domain errors to HTTP. Unexpected errors are logged with their
+// cause and returned as a generic 500: the client must not see internals.
+// fail 把领域错误映射成 HTTP。意外错误连同 cause 记日志并返回通用 500：客户端不该
+// 看到内部细节。
+func (c *ExampleController) fail(g *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrNotFound), errors.Is(err, innerapi.ErrNotFound):
+		c.responder.Error(g, apperr.NotFound("example not found"))
+	case errors.Is(err, innerapi.ErrConflict):
+		c.responder.Error(g, apperr.Conflict("example name already exists"))
+	default:
+		c.logger.Error("example request failed", zap.Error(err))
+		c.responder.Error(g, apperr.Internal("example request failed").WithCause(err))
+	}
+}
+
+func toDTO(view *service.View) *dto.Example {
+	return &dto.Example{
+		ID:        view.ID,
+		Name:      view.Name,
+		CreatedAt: view.CreatedAt.Format(time.RFC3339),
+	}
+}

@@ -1,0 +1,114 @@
+package appio
+
+import (
+	"context"
+	"strings"
+
+	"github.com/bingcool/gofy/support"
+	gofydb "github.com/bingcool/gofy/support/db"
+	"github.com/bingcool/gofy/support/generation"
+	"{{.Module}}/app/appio/db"
+	"gorm.io/gorm"
+)
+
+// Snapshot is the read-only view of one IO generation: the default database and
+// the named instances. It separates the resources on either side of a reload —
+// a request pins one snapshot on entry, so queries that cross a reload still run
+// on the same generation of connections.
+//
+// The snapshot is immutable: fields are written while Start assembles it and
+// never modified after publication.
+// Snapshot 是一代 IO 句柄的只读视图：默认库与命名实例。它把一次 Reload 前后的资源
+// 隔离开——请求进入时固定一个 Snapshot，后续查询即使横跨 Reload 也落在同一代连接上。
+// Snapshot 本身不可变：字段只在 Start 组装时写入，发布后不再修改。
+type Snapshot struct {
+	db *db.Set
+}
+
+// currentSnapshot points at the current generation; publication, reading and
+// per-request pinning all come from support/generation.
+// currentSnapshot 指向当前一代；发布、读取与请求级固定都由 support/generation 提供。
+var currentSnapshot = generation.NewSet[Snapshot]("app/appio")
+
+// Current returns the published Snapshot, or nil when none is installed.
+// Current 返回已发布的 Snapshot；尚未安装时为 nil。
+func Current() *Snapshot { return currentSnapshot.Current() }
+
+// Publish installs s as the current generation; a nil s withdraws it at the end
+// of a script or in test cleanup.
+// Publish 把 s 发布为当前一代；s 为 nil 时撤回发布（脚本结束、测试清理）。
+func Publish(s *Snapshot) { currentSnapshot.Publish(s) }
+
+// NewSnapshotDB builds a generation that carries only the framework-managed
+// default pool. Unit tests and scripts that need nothing else use it; the Set
+// owns no extra pool, so closing this generation never closes db.
+// NewSnapshotDB 构造只带框架托管 default 池的一代。只需要它的单测与脚本使用；
+// 这个 Set 不拥有额外连接池，因此关闭这一代永远不会关闭 db。
+func NewSnapshotDB(conn *gorm.DB) *Snapshot {
+	return &Snapshot{db: db.NewSet(conn)}
+}
+
+// PublishDB publishes a generation that carries only the default database.
+// PublishDB 发布只带默认数据库的一代。
+func PublishDB(conn *gorm.DB) {
+	Publish(NewSnapshotDB(conn))
+}
+
+// NewDBIO resolves a database connection by alias in this generation's registry,
+// opening it on first use. The handle is not bound to ctx and carries no
+// transaction from it: opening a transaction and writing something that must
+// commit on its own both need such a handle.
+// NewDBIO 在本代 registry 中按别名解析数据库连接（首次访问才建连）。返回的句柄不绑定
+// ctx，也不叠加 ctx 中的事务：开启事务与必须独立提交的写入都需要这样的句柄。
+func (s *Snapshot) NewDBIO(ctx context.Context, name string) (*gorm.DB, error) {
+	if s == nil {
+		return nil, gofydb.ErrNotConfigured
+	}
+	if strings.TrimSpace(name) == db.DefaultInstance {
+		if conn := s.db.Default(); conn != nil {
+			return conn, nil
+		}
+		return nil, gofydb.ErrNotConfigured
+	}
+	return s.db.NewIO(ctx, name)
+}
+
+// DBConnect returns the connection this call should use, already bound to ctx:
+// the transaction in ctx when present, otherwise this generation's connection.
+// Queries and writes go through here, so a caller inside gofydb.Transaction
+// transparently joins it.
+// DBConnect 返回本次调用应使用的连接，并且已经绑定 ctx：ctx 中有事务时返回该事务，
+// 否则返回本代的连接。查询与写入走这里，处于 gofydb.Transaction 内的调用会自动加入事务。
+func (s *Snapshot) DBConnect(ctx context.Context, name string) (*gorm.DB, error) {
+	conn, err := s.NewDBIO(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return gofydb.WithContext(ctx, conn).WithContext(ctx), nil
+}
+
+// WithSnapshot pins s to ctx for this request, script or background task.
+// WithSnapshot 把 s 固定到 ctx，供请求内的 repository、service 与后台任务取用。
+func WithSnapshot(ctx context.Context, s *Snapshot) context.Context {
+	return currentSnapshot.WithSnapshot(ctx, s)
+}
+
+// WithContext returns the Snapshot pinned in ctx, falling back to Current().
+// A missing pin and a missing publication mean the entry point failed to
+// publish a generation, so this panics instead of handing a nil handle to code
+// that would dereference it far from the cause.
+// WithContext 返回 ctx 中固定的 Snapshot，没有固定值时回退到 Current()。两者都没有
+// 说明入口没有发布本代，因此直接 panic，而不是把 nil 句柄留给下游解引用。
+func WithContext(ctx context.Context) *Snapshot {
+	return currentSnapshot.WithContext(ctx)
+}
+
+// Middleware pins the generation that is current when a request enters, unless
+// the request already carries one. HTTP requests are normally pinned by the
+// framework's generation binder (see Module.RequestBinder); this is the fallback
+// for an engine built outside the framework and never overwrites that pin.
+// Middleware 把进入请求时的当前一代固定到上下文；ctx 已经固定过则不覆盖。HTTP 请求
+// 通常由框架的代际 binder 固定，这里只服务框架之外自建的 engine。
+func Middleware() support.MiddlewareFunc {
+	return currentSnapshot.Middleware()
+}

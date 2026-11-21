@@ -1,0 +1,47 @@
+package group1
+
+import (
+	"context"
+	"errors"
+
+	"go.uber.org/zap"
+
+	gofyworker "github.com/bingcool/gofy/support/worker"
+)
+
+// newHeartbeatWorker logs one line per interval. It is the shape every worker
+// in this repository follows: take the Runtime from ctx, derive a logger with
+// the worker identity, then run a Ticker loop that returns on cancellation.
+//
+// To touch the database, resolve the generation's handle instead of opening
+// one:
+//
+//	db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
+//
+// newHeartbeatWorker 每隔一个间隔记一行日志。本仓库的 worker 都遵循这个形状：从 ctx
+// 取 Runtime、用 worker 身份派生 logger，然后跑一个响应取消的 Ticker 循环。
+//
+// 需要访问数据库时，解析本代句柄而不是自己建连：
+//
+//	db, err := appio.WithContext(ctx).DBConnect(ctx, appdb.DefaultInstance)
+func newHeartbeatWorker(intervalMS uint32) gofyworker.Worker {
+	if intervalMS == 0 {
+		intervalMS = 30_000
+	}
+	return gofyworker.Func("heartbeat", 1, func(ctx context.Context) error {
+		rt, ok := gofyworker.RuntimeFrom(ctx)
+		if !ok {
+			return errors.New("heartbeat: runtime is required")
+		}
+		id, _ := gofyworker.IdentityFrom(ctx)
+		lg := rt.Logger.With(zap.String("worker", id.String()))
+
+		lg.Info("heartbeat started", zap.Uint32("interval_ms", intervalMS))
+		defer lg.Info("heartbeat stopped")
+
+		return gofyworker.Ticker(ctx, intervalMS, func(context.Context) error {
+			lg.Info("heartbeat")
+			return nil
+		})
+	})
+}

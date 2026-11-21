@@ -1,11 +1,30 @@
+// Package dto is the HTTP shape of the example module: request bodies and
+// response payloads. Keeping it separate from service views means an internal
+// field rename cannot silently change the wire format.
+// 包 dto 是示例模块的 HTTP 形状：请求体与响应载荷。它与 service 视图分开，内部字段
+// 改名因此不会悄悄改变线上格式。
 package dto
 
-// HelloRequest is bound from the query string.
-type HelloRequest struct {
-	Name string `form:"name" json:"name" validate:"max=64" message:"max:name must be at most 64 characters"`
+// CreateExampleRequest is the body of POST /examples.
+// CreateExampleRequest 是 POST /examples 的请求体。
+type CreateExampleRequest struct {
+	Name string `json:"name" binding:"required,min=1,max=64"`
 }
 
-// HelloResponse is rendered as the response body.
-type HelloResponse struct {
-	Message string `json:"message"`
+// Example is one item in a response.
+// Example 是响应中的一条记录。
+type Example struct {
+	ID        uint64 `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ListExamplesResponse is the body of GET /examples. Greeting comes from
+// config.yaml (example.greeting), so a reload is visible in the response.
+// ListExamplesResponse 是 GET /examples 的响应体。Greeting 来自 config.yaml
+// （example.greeting），因此热更新能在响应里看到。
+type ListExamplesResponse struct {
+	Items    []Example `json:"items"`
+	Total    int       `json:"total"`
+	Greeting string    `json:"greeting"`
 }

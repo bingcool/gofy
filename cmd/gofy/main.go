@@ -207,7 +207,7 @@ func (s scaffold) Generate(dir string, force bool) error {
 			merged = append(merged, f.out)
 			continue
 		}
-		if err := os.WriteFile(out, f.content, 0o644); err != nil {
+		if err := os.WriteFile(out, f.content, filePerm(f.out)); err != nil {
 			return fmt.Errorf("write %s: %w", out, err)
 		}
 	}
@@ -228,6 +228,18 @@ func (s scaffold) Generate(dir string, force bool) error {
 type generatedFile struct {
 	out     string
 	content []byte
+}
+
+// filePerm keeps shell scripts executable: the import guard is meant to be run
+// from CI or a pre-commit hook, and a non-executable file there is a papercut
+// somebody has to debug.
+// filePerm 让 shell 脚本保持可执行：import 守卫要在 CI 或 pre-commit 里跑，一个不可
+// 执行的文件会变成需要有人去排查的小坑。
+func filePerm(out string) os.FileMode {
+	if strings.HasSuffix(out, ".sh") {
+		return 0o755
+	}
+	return 0o644
 }
 
 func (s scaffold) files() ([]generatedFile, error) {
@@ -274,14 +286,14 @@ func (s scaffold) files() ([]generatedFile, error) {
 }
 
 func (s scaffold) enabled(out string) bool {
-	switch out {
-	case "Dockerfile", ".dockerignore":
+	switch {
+	case out == "Dockerfile" || out == ".dockerignore":
 		return s.WithDocker
-	case "Makefile":
+	case out == "Makefile":
 		return s.WithMakefile
-	case "script/register.go", "script/example.go":
+	case strings.HasPrefix(out, "script/"):
 		return s.WithScripts
-	case "worker/register.go", "worker/example.go":
+	case strings.HasPrefix(out, "worker/"):
 		return s.WithWorker
 	default:
 		return true

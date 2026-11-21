@@ -1,0 +1,94 @@
+// Package repository owns persistence for the example module. It returns model
+// values only: no service views, no HTTP types.
+//
+// The implementation below is in-memory so a freshly generated application runs
+// without a database. To use MySQL, keep the method set and replace the bodies
+// with appio.WithContext(ctx).DBConnect(ctx, "default"); the model already
+// carries the gorm tags and migrations/0001_example.sql creates the table.
+//
+// 包 repository 负责示例模块的持久化，只返回 model：不碰 service 视图与 HTTP 类型。
+// 下面的实现是内存版，因此刚生成的应用不需要数据库就能跑。接 MySQL 时保持方法签名不变，
+// 把方法体换成 appio.WithContext(ctx).DBConnect(ctx, "default")；model 已带 gorm 标签，
+// migrations/0001_example.sql 建好了表。
+package repository
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"{{.Module}}/app/module/example/model/examplemodel"
+)
+
+var (
+	// ErrNotFound means the row does not exist.
+	// ErrNotFound 表示行不存在。
+	ErrNotFound = errors.New("example: not found")
+	// ErrDuplicateName means the name is already taken.
+	// ErrDuplicateName 表示名字已被占用。
+	ErrDuplicateName = errors.New("example: duplicate name")
+)
+
+// ExampleRepository is the module's only data-access type. It is safe for
+// concurrent use: HTTP handlers and workers share one instance per generation.
+// ExampleRepository 是模块唯一的数据访问类型。它可并发使用：HTTP handler 与 worker
+// 共用每代一个实例。
+type ExampleRepository struct {
+	mu    sync.RWMutex
+	seq   uint64
+	items map[uint64]*examplemodel.Example
+}
+
+// NewExampleRepository builds an empty repository.
+// NewExampleRepository 构造一个空仓库。
+func NewExampleRepository() *ExampleRepository {
+	return &ExampleRepository{items: make(map[uint64]*examplemodel.Example)}
+}
+
+// Create stores one example. The name must be unique.
+// Create 保存一条记录，名字必须唯一。
+func (r *ExampleRepository) Create(_ context.Context, name string) (*examplemodel.Example, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, item := range r.items {
+		if item.Name == name {
+			return nil, ErrDuplicateName
+		}
+	}
+	r.seq++
+	row := &examplemodel.Example{ID: r.seq, Name: name, CreatedAt: time.Now()}
+	r.items[row.ID] = row
+	// Return a copy: callers must not be able to mutate stored state.
+	// 返回副本：调用方不能改到已存储的状态。
+	out := *row
+	return &out, nil
+}
+
+// Get returns one example, or ErrNotFound.
+// Get 返回一条记录，不存在时返回 ErrNotFound。
+func (r *ExampleRepository) Get(_ context.Context, id uint64) (*examplemodel.Example, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	row, ok := r.items[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := *row
+	return &out, nil
+}
+
+// List returns every example in insertion order.
+// List 按插入顺序返回全部记录。
+func (r *ExampleRepository) List(_ context.Context) ([]*examplemodel.Example, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]*examplemodel.Example, 0, len(r.items))
+	for id := uint64(1); id <= r.seq; id++ {
+		if row, ok := r.items[id]; ok {
+			copied := *row
+			out = append(out, &copied)
+		}
+	}
+	return out, nil
+}

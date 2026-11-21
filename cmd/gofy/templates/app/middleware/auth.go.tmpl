@@ -1,0 +1,27 @@
+package middleware
+
+import (
+	"crypto/subtle"
+	"strings"
+
+	"github.com/bingcool/gofy/apperr"
+	"github.com/bingcool/gofy/support"
+	"github.com/gin-gonic/gin"
+)
+
+// APIKey authenticates a request by the X-API-Key header. The comparison is
+// constant time: a byte-by-byte early exit leaks the length of the matching
+// prefix.
+// APIKey 用 X-API-Key 头认证请求。比较是常量时间的：逐字节提前返回会泄漏匹配前缀的长度。
+func APIKey(key string, responder support.Responder) support.MiddlewareFunc {
+	expected := []byte(key)
+	return func(c *gin.Context) {
+		got := []byte(strings.TrimSpace(c.GetHeader("X-API-Key")))
+		if subtle.ConstantTimeCompare(got, expected) != 1 {
+			responder.Error(c, apperr.Unauthorized("invalid api key"))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}

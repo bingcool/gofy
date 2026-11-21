@@ -1,0 +1,65 @@
+package config
+
+import (
+	"path/filepath"
+
+	"github.com/bingcool/gofy/core/systemenv"
+)
+
+// applyLogPaths appends per-mode log files to the configured outputs, matching
+// swoolefy's http/worker/script split. Paths are appended, not replaced, so
+// outputs such as stdout from config.yaml survive; a reload that loads the
+// config again appends to the new config.
+// applyLogPaths 按执行模式追加日志文件，与 swoolefy 的 http/worker/script 分目录
+// 一致。这里追加而不是覆盖，config.yaml 里的 stdout 等输出仍然保留；热更新重新
+// Load 时会再次追加到新配置上。
+func applyLogPaths(cfg *Config) {
+	// SQL entries get their own tree in every mode: what a process executed is
+	// a process-level record, and keeping statements out of info.log stops them
+	// from becoming the bulk of that file.
+	// SQL 条目在所有模式下都写自己那棵树：进程执行过什么是进程级记录，与 info.log
+	// 分开也让语句不再占满那个文件。
+	cfg.Log.SQLOutputs = append(cfg.Log.SQLOutputs,
+		filepath.Join("storage", "log", "sql", "sql.log"))
+
+	if systemenv.IsWorkerService() {
+		// Worker logs are named after the worker that produced them, so the
+		// file name answers "which worker is this" without opening the log.
+		// worker 日志按产出它的 worker 命名，文件名本身就回答了"这是哪个 worker"。
+		dateDir := filepath.Join("storage", "log", "worker", "{date}")
+		name := workerLogName()
+		cfg.Log.Outputs = append(cfg.Log.Outputs, filepath.Join(dateDir, "info", name+".log"))
+		cfg.Log.ErrorOutputs = append(cfg.Log.ErrorOutputs, filepath.Join(dateDir, "error", name+".log"))
+		cfg.Log.SystemErrorOutputs = append(cfg.Log.SystemErrorOutputs, filepath.Join(dateDir, "error", name+"-system_error.log"))
+		return
+	}
+	if systemenv.IsScriptService() {
+		dateDir := filepath.Join("storage", "log", "script", "{date}")
+		infoName, errorName, systemName := "info.log", "error.log", "system_error.log"
+		if name := systemenv.ScriptName(); name != "" {
+			infoName = name + ".log"
+			errorName = name + ".log"
+			systemName = name + "-system_error.log"
+		}
+		cfg.Log.Outputs = append(cfg.Log.Outputs, filepath.Join(dateDir, "info", infoName))
+		cfg.Log.ErrorOutputs = append(cfg.Log.ErrorOutputs, filepath.Join(dateDir, "error", errorName))
+		cfg.Log.SystemErrorOutputs = append(cfg.Log.SystemErrorOutputs, filepath.Join(dateDir, "error", systemName))
+		return
+	}
+	dir := filepath.Join("storage", "log", "http")
+	cfg.Log.Outputs = append(cfg.Log.Outputs, filepath.Join(dir, "info.log"))
+	cfg.Log.ErrorOutputs = append(cfg.Log.ErrorOutputs, filepath.Join(dir, "error.log"))
+	cfg.Log.SystemErrorOutputs = append(cfg.Log.SystemErrorOutputs, filepath.Join(dir, "system_error.log"))
+	cfg.Log.AccessOutputs = append(cfg.Log.AccessOutputs, filepath.Join("storage", "log", "access", "access.log"))
+}
+
+// workerLogName picks the file stem for worker logs: the worker's own name when
+// the process runs exactly one, otherwise "worker".
+// workerLogName 选择 worker 日志的文件名主干：进程只跑一个 worker 时用它的名字，
+// 否则用 "worker"。
+func workerLogName() string {
+	if names := systemenv.WorkerNames(); len(names) == 1 {
+		return names[0]
+	}
+	return "worker"
+}

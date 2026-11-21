@@ -1,0 +1,32 @@
+package container
+
+import (
+	"{{.Module}}/app/module/example/repository"
+)
+
+// RepositoryDeclare is where this generation's repositories are built. One
+// field per repository: adding a repository means adding a slot and a module
+// factory that asks for it, and no other module's wiring changes.
+// RepositoryDeclare 是本代仓库的构建处。一个仓库一个字段：新增仓库就是加一个槽位与
+// 一个取用它的模块工厂，其它模块的接线不变。
+type RepositoryDeclare struct {
+	example *repository.ExampleRepository
+}
+
+// NewRepositoryDeclare creates an empty declaration.
+// NewRepositoryDeclare 创建空的声明。
+func NewRepositoryDeclare() *RepositoryDeclare {
+	return &RepositoryDeclare{}
+}
+
+// Example returns this generation's example repository, building it on first
+// use. The same instance is returned afterwards, so its in-memory state lives
+// exactly one generation.
+// Example 返回本代的示例仓库，首次使用时构造。之后返回同一实例，因此它的内存状态
+// 生命周期正好是一代。
+func (d *RepositoryDeclare) Example() *repository.ExampleRepository {
+	if d.example == nil {
+		d.example = repository.NewExampleRepository()
+	}
+	return d.example
+}

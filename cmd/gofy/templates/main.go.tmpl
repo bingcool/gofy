@@ -2,25 +2,23 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
-	"time"
+	"strings"
 
-	"github.com/bingcool/gofy"
 	"go.uber.org/zap"
 
-	"{{.Module}}/app/config"
-{{- if .WithScripts }}
-	appscript "{{.Module}}/script"
-{{- end }}
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/support/nacos"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
 {{- if .WithWorker }}
+	"github.com/bingcool/gofy/support/worker"
 	appworker "{{.Module}}/worker"
 {{- end }}
-	"{{.Module}}/app/module/example"
+	"{{.Module}}/app/config"
 )
 
 var (
-	version   = "dev"
+	version   = "1.0.0"
 	commit    = "none"
 	buildTime = "unknown"
 )
@@ -29,57 +27,103 @@ func main() {
 	ctx, stop := gofy.SignalContext(context.Background())
 	defer stop()
 
-	cfg, err := config.Load(ctx, configPath())
-	if err != nil {
-		log.Fatalf("load config: %v", err)
+	// Classify the command line before opening any file. `stop` must work while
+	// nacos.yaml is broken, and `version` must work while config.yaml is broken,
+	// so a command that needs neither reads neither.
+	// 先给命令行分类，再打开任何文件：`stop` 必须在 nacos.yaml 损坏时可用，
+	// `version` 必须在 config.yaml 损坏时可用——两个都不需要的命令，一个都不读。
+	plan := planCommand(os.Args[1:])
+
+	var nacosCfg nacos.Config
+	if plan.LoadNacos {
+		loaded, err := loadNacosConfig()
+		if err != nil {
+			fatalf("load nacos config: %v", err)
+		}
+		nacosCfg = loaded
+		if strings.TrimSpace(os.Getenv("NACOS_FILE")) == "" {
+			nacosCfg.File = configPath()
+		}
+		// Pull once before serving: a freshly launched process never runs on a
+		// stale local config.yaml. `restart` is a start too, and it pulls before
+		// the old process is stopped, so a failed pull leaves the old one running.
+		// 启动前先拉一次：新进程不会用陈旧的本地 config.yaml。restart 也属于启动，
+		// 它在停旧进程之前拉取，拉取失败时旧进程继续运行。
+		if nacosCfg.Enabled && plan.Sync {
+			if _, err := nacos.Sync(ctx, nacosCfg); err != nil {
+				fatalf("sync nacos config: %v", err)
+			}
+		}
+	}
+	// Only the HTTP process hosts the watcher: workers stay immutable at runtime
+	// and pick changes up through a rolling restart.
+	// 只有 HTTP 进程挂监听：worker 运行期保持不变，配置变更由部署层滚动重启生效。
+	watchEnabled := plan.Watch && nacosCfg.Enabled && nacosCfg.Watch
+
+	cfg := &config.Config{}
+	if plan.LoadConfig {
+		loaded, err := config.Load(ctx, configPath())
+		if err != nil {
+			fatalf("load config: %v", err)
+		}
+		cfg = loaded
+		// An explicit GOFY_ENV wins; otherwise it follows config.yaml so
+		// systemenv and Runtime.Env agree.
+		// 进程显式设置了 GOFY_ENV 时以它为准；否则跟随 config.yaml，让 systemenv
+		// 与 Runtime.Env 保持一致。
+		if strings.TrimSpace(os.Getenv("GOFY_ENV")) == "" {
+			if err := os.Setenv("GOFY_ENV", cfg.Env); err != nil {
+				fatalf("set GOFY_ENV: %v", err)
+			}
+		}
 	}
 
-	opts := []gofy.Option{
-		gofy.WithName("{{.Name}}"),
-		gofy.WithEnv(cfg.Env),
-		gofy.WithLogConfig(cfg.Log),
-		gofy.WithHTTP(cfg.HTTP),
-		gofy.WithAPIPrefix("/api/v1"),
-		gofy.WithPIDFile(cfg.PIDFile),
-		gofy.WithHealthEndpoints(true),
-		gofy.WithModuleFactories(example.NewModuleFactory()),
-		gofy.WithVersionInfo(gofy.VersionInfo{
-			Version:   version,
-			Commit:    commit,
-			BuildTime: buildTime,
-		}),
-		gofy.WithShutdownTimeout(10 * time.Second),
+	// The SQL log policy is built once per process: its sampler and rate
+	// limiters mean "this process writes at most N per second", so the framework
+	// and the app-side io generation must share this exact pointer.
+	// SQL 日志策略每进程只构造一次：它的采样器与限流器意味着"本进程每秒最多写 N 条"，
+	// 因此框架与应用的 io 代际必须共用这一个指针。
+	policy, err := gofysqllog.NewPolicy(cfg.SQLLog)
+	if err != nil {
+		fatalf("build sql log policy: %v", err)
 	}
-{{- if .WithDB }}
-	opts = append(opts, gofy.WithDatabase(cfg.DB))
-{{- end }}
-{{- if .WithScripts }}
-	opts = append(opts, gofy.WithScripts(appscript.Register()...))
-{{- end }}
+
+	reload := &reloader{
+		nacosCfg:       nacosCfg,
+		watch:          watchEnabled,
+		httpCfg:        cfg.HTTP,
+		envFromProcess: strings.TrimSpace(os.Getenv("GOFY_ENV")) != "",
+		policy:         policy,
+	}
+
 {{- if .WithWorker }}
-	// Long-running tasks live in their own process: `{{.Name}} worker --group=default`.
-	// HTTP never starts them, so the same image can run as a Deployment or a worker.
-	workerGroups, err := appworker.Register()
-	if err != nil {
-		log.Fatalf("register workers: %v", err)
+	// Groups are a worker-process concern: HTTP reads the same config but does
+	// not construct what it never runs.
+	// 分组属于 worker 进程：HTTP 读同一份配置，但不构造自己不会运行的东西。
+	var groups []*worker.Group
+	if plan.RegisterGroups {
+		built, err := appworker.Register()
+		if err != nil {
+			fatalf("build worker groups: %v", err)
+		}
+		groups = built
 	}
-	opts = append(opts, gofy.WithWorkerGroups(workerGroups...))
+	app, err := gofy.New(appOptions(cfg, plan, reload, nacosCfg, groups, policy)...)
+{{- else }}
+	app, err := gofy.New(appOptions(cfg, plan, reload, nacosCfg, policy)...)
 {{- end }}
-
-	app, err := gofy.New(opts...)
 	if err != nil {
-		log.Fatalf("init application: %v", err)
+		fatalf("init application: %v", err)
 	}
+
+	// Publish the app before Execute starts the watcher: a config change may
+	// arrive as soon as the watcher polls, and the callback must find it.
+	// 必须在 Execute 启动监听之前发布 app：监听首次轮询就可能带来配置变更，
+	// 回调需要立刻能找到运行中的应用。
+	reload.app.Store(app)
 
 	if err := app.Execute(ctx); err != nil {
 		app.Logger().Error("{{.Name}} exit", zap.Error(err))
 		os.Exit(gofy.ExitCode(err))
 	}
-}
-
-func configPath() string {
-	if p := os.Getenv("{{.EnvPrefix}}_CONFIG"); p != "" {
-		return p
-	}
-	return "config.yaml"
 }

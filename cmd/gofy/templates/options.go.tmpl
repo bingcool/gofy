@@ -1,0 +1,125 @@
+package main
+
+import (
+	"runtime"
+	"time"
+
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/core/systemenv"
+	"github.com/bingcool/gofy/support/nacos"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
+{{- if .WithWorker }}
+	"github.com/bingcool/gofy/support/worker"
+{{- end }}
+	"{{.Module}}/app/appio"
+	appdb "{{.Module}}/app/appio/db"
+	"{{.Module}}/app/config"
+	"{{.Module}}/app/middleware"
+{{- if .WithScripts }}
+	appscript "{{.Module}}/script"
+{{- end }}
+)
+
+// middlewareRegistrar registers the application middleware into the registry
+// the App builds for this composition. Startup and every reload run it with a
+// fresh registry, so a changed api_key takes effect without a restart.
+// middlewareRegistrar 把应用中间件注册进 App 为本次装配创建的注册表。启动与每次
+// 热更新都会用新注册表执行一次，因此改了 api_key 无需重启。
+func middlewareRegistrar(cfg *config.Config) gofy.MiddlewareRegistrar {
+	return func(reg gofy.MiddlewareRegistration) error {
+		return middleware.Register(reg.Registry, middleware.Deps{
+			Logger:    reg.Runtime.Logger,
+			Responder: reg.Responder,
+			Config:    cfg.Middleware,
+		})
+	}
+}
+
+// appOptions assembles the startup options. Options are layered by the command
+// plan: control commands only get identity, pid file and version, so a broken
+// database never blocks `stop`.
+// appOptions 组装启动选项。选项按命令的 plan 分层：控制命令只拿到身份、pid 文件与
+// 版本，数据库故障因此不会挡住 `stop`。
+func appOptions(cfg *config.Config, plan commandPlan, reload *reloader, nacosCfg nacos.Config{{if .WithWorker}}, groups []*worker.Group{{end}}, policy *gofysqllog.Policy) []gofy.Option {
+	opts := []gofy.Option{
+		gofy.WithName("{{.Name}}"),
+		gofy.WithEnv(systemenv.GetEnv()),
+		gofy.WithPIDFile(cfg.PIDFile),
+		// WithVersionInfo replaces the framework default wholesale, so every
+		// field it wants to report has to be filled here.
+		// WithVersionInfo 是整体替换框架默认值，因此它想报告的每个字段都必须在这里填。
+		gofy.WithVersionInfo(gofy.VersionInfo{
+			Version:   version,
+			Commit:    commit,
+			BuildTime: buildTime,
+			GoVersion: runtime.Version(),
+		}),
+		gofy.WithShutdownTimeout(10 * time.Second),
+	}
+	if plan.BuildServices {
+		// Control commands keep the default logger: sending a signal must not
+		// depend on the log directory being writable.
+		// 控制命令沿用默认 logger：发信号不应该依赖日志目录可写。
+		opts = append(opts, gofy.WithLogConfig(cfg.Log))
+	}
+{{- if .WithWorker }}
+	if plan.RegisterGroups {
+		// Workers run only through the worker subcommand; HTTP never starts
+		// them. The IO generation carries the database only — a consumer
+		// resolves its own broker connections.
+		// 常驻任务只通过 worker 子命令运行，HTTP 不会启动它们。IO 代际只装数据库——
+		// 消费者的 broker 连接由它自己解析。
+		dbOpts := appdbOptions(reload.policy)
+		opts = append(opts,
+			gofy.WithWorkerGroups(groups...),
+			gofy.WithWorkerModules(appio.NewDBOnlyModuleFactory(cfg.DB, dbOpts...)),
+		)
+	}
+{{- end }}
+	// Health endpoints are a property of the deployment's configuration, not of
+	// the process asking: `status` runs elsewhere and must know whether probing
+	// the target's /healthz is meaningful.
+	// 健康端点是这套部署的配置属性，不是"发问的那个进程"的属性：`status` 跑在另一个
+	// 进程里，它需要知道探测目标的 /healthz 是否有意义。
+	opts = append(opts, gofy.WithHealthEndpoints(true))
+	if !plan.BuildServices {
+		return opts
+	}
+	// The database section changes an option's presence rather than its value:
+	// WithDatabase validates the DSN, so a zero-value config for an absent
+	// section would fail startup with "db: dsn is required".
+	// 数据库是唯一"要不要传"而非"传什么值"的段落：WithDatabase 会校验 DSN，为缺失的
+	// 段传零值配置会以 "db: dsn is required" 启动失败。
+	if dbCfg, ok := cfg.Database(config.DefaultDatabase); ok {
+		opts = append(opts, gofy.WithDatabase(dbCfg))
+	}
+	return append(opts,
+		gofy.WithHTTP(cfg.HTTP),
+		// One shared prefix for every module: module routes start at the
+		// resource ("/examples"), never repeat "/api/v1".
+		// 所有模块共用一个前缀：模块路由从资源开始（"/examples"），不重复写 "/api/v1"。
+		gofy.WithAPIPrefix("/api/v1"),
+		gofy.WithNacosRegistration(nacosCfg),
+		// The IO snapshot is bound to a request by the framework's generation
+		// binder; this middleware is only the fallback for engines built
+		// outside the framework and never overwrites an existing pin.
+		// 请求的 IO 快照由框架的代际 binder 绑定；这里的中间件只服务框架之外自建的
+		// engine，且不覆盖已有的固定值。
+		gofy.WithMiddleware(appio.Middleware()),
+		gofy.WithMiddlewareRegistrar(middlewareRegistrar(cfg)),
+		gofy.WithSQLPolicy(policy),
+		gofy.WithModuleFactories(reload.factories(cfg)...),
+{{- if .WithScripts }}
+		gofy.WithScripts(appscript.Register(cfg)...),
+{{- end }}
+	)
+}
+
+// appdbOptions returns the options every generation of pools is opened with.
+// appdbOptions 返回每一代连接池打开时共用的选项。
+func appdbOptions(policy *gofysqllog.Policy) []appdb.OpenOption {
+	if policy == nil {
+		return nil
+	}
+	return []appdb.OpenOption{appdb.WithSQLPolicy(policy)}
+}

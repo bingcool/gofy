@@ -2,24 +2,19 @@ package worker
 
 import (
 	gofyworker "github.com/bingcool/gofy/support/worker"
+
+	"{{.Module}}/worker/group1"
 )
 
-// Register returns the long-running groups started by
-// `go run . worker --group=default`. It is wired in main next to the HTTP
-// modules and shares their config, logger and database; nothing here runs while
-// the HTTP server is up.
-//
-// A second group is another constructor plus one entry in the returned slice:
-// `worker --group=<name>` picks one at startup, so main does not change.
-// Register 返回 `go run . worker --group=default` 启动的常驻分组。它在 main 里与
-// HTTP 模块一起装配，共用同一份配置、日志与数据库；HTTP 服务运行时它不会启动。
-//
-// 第二个分组是"再写一个构造函数 + 在返回的切片里加一项"：`worker --group=<名字>`
-// 在启动时选一个，main 不用改。
+// Register builds every group the binary knows about, in the order
+// `worker --list` prints them. Adding a group means adding a package and one
+// line here; nothing else in the binary changes.
+// Register 构造二进制认识的所有分组，顺序与 `worker --list` 的输出一致。新增一个分组
+// 只需加一个子包加这里一行，二进制其它部分不用改。
 func Register() ([]*gofyworker.Group, error) {
-	group, err := gofyworker.NewGroup("default", Example())
+	first, err := group1.NewGroup()
 	if err != nil {
 		return nil, err
 	}
-	return []*gofyworker.Group{group}, nil
+	return []*gofyworker.Group{first}, nil
 }

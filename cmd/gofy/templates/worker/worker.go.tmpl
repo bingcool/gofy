@@ -1,0 +1,12 @@
+// Package worker builds the long-running groups started by
+// `{{.Name}} worker --group=<group>`.
+//
+// A group is the deployment unit: every worker in one group lives and dies in
+// the same process. Workers never touch support.Router — a worker process has
+// no HTTP stack — and they reuse the repository/service layer instead of
+// reimplementing data access.
+//
+// 包 worker 构造 `{{.Name}} worker --group=<分组>` 启动的常驻分组。
+// 分组是部署单位：同组 worker 在同一进程里同生共死。worker 不碰 support.Router——
+// worker 进程没有 HTTP 栈——并且复用 repository/service 层，而不是另写一套数据访问。
+package worker

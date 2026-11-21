@@ -1,0 +1,51 @@
+// Package middleware holds the application-level middleware aliases. Modules
+// ask for them by logical name from the registry the App builds for this
+// composition, so a module never constructs or injects a middleware itself.
+// 包 middleware 存放应用层中间件的别名。模块按逻辑名向 App 为本次装配创建的注册表
+// 请求它们，因此模块既不构造也不注入中间件。
+package middleware
+
+import (
+	gofymiddleware "github.com/bingcool/gofy/support/middleware"
+	"github.com/bingcool/gofy/support"
+	"{{.Module}}/app/config"
+	"go.uber.org/zap"
+)
+
+// Logical names used by modules. Keep them lowercase: they travel through
+// route declarations and logs.
+// 模块使用的逻辑名。保持小写：它们会出现在路由声明与日志里。
+const (
+	NameAuth  = "auth"
+	NameAudit = "audit"
+)
+
+// Deps is what the middleware needs, filled by the App's registration.
+// Deps 是中间件需要的依赖，由 App 的注册流程填充。
+type Deps struct {
+	Logger    *zap.Logger
+	Responder support.Responder
+	Config    config.MiddlewareConfig
+}
+
+// Register installs the aliases into the shared registry. It runs at startup
+// and again on every reload with a fresh registry, so a changed api_key takes
+// effect without a restart.
+// Register 把别名装进共享注册表。启动与每次热更新都会用新注册表执行一次，因此改了
+// api_key 无需重启。
+func Register(reg *gofymiddleware.Registry, deps Deps) error {
+	if err := reg.Register(NameAudit, Audit(deps.Logger)); err != nil {
+		return err
+	}
+	// An empty key means "no auth in this deployment": registering nothing is
+	// better than registering a middleware that accepts every caller.
+	// 空 key 表示"这套部署不用认证"：什么都不注册，好过注册一个放行所有调用方的中间件。
+	if !deps.Config.IsConfigured() {
+		return nil
+	}
+	responder := deps.Responder
+	if responder == nil {
+		responder = support.NewResponder(support.ResponderConfig{})
+	}
+	return reg.Register(NameAuth, APIKey(deps.Config.APIKey, responder))
+}

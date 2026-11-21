@@ -1,0 +1,10 @@
+-- examples is the table behind app/module/example/model/examplemodel. The
+-- generated repository is in-memory; applying this migration is what lets you
+-- switch it to appio.WithContext(ctx).DBConnect without changing the model.
+CREATE TABLE IF NOT EXISTS `examples` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name`       VARCHAR(64)     NOT NULL,
+  `created_at` DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_examples_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='example module rows';

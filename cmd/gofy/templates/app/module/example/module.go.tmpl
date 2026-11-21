@@ -1,35 +1,72 @@
+// Package example is the example module root. It owns the route table and
+// nothing else: the service is built by the assembly root (app/container), and
+// the controller is built here because it needs this router's responder.
+//
+// Layering convention:
+//   - innerapi is the pure contract published to other modules;
+//   - service implements innerapi.ExampleAPI and owns the use cases;
+//   - repository owns persistence and returns model only;
+//   - controller speaks HTTP and imports no model or repository.
+//
+// 包 example 是示例模块根：它只拥有路由表。service 由装配根（app/container）构造，
+// controller 在这里构造，因为它需要当前路由的 responder。
+//
+// 分层约定：innerapi 是发布给其它模块的纯契约；service 实现 innerapi.ExampleAPI 并
+// 拥有用例；repository 拥有持久化且只返回 model；controller 只说 HTTP，不 import
+// model 与 repository。
 package example
 
 import (
-	"github.com/bingcool/gofy"
 	"github.com/bingcool/gofy/support"
+	"go.uber.org/zap"
 
-	"{{.Module}}/app/module/example/handler"
+	"{{.Module}}/app/middleware"
+	"{{.Module}}/app/module/example/controller"
+	"{{.Module}}/app/module/example/service"
 )
 
-// Module registers the example HTTP routes.
-type Module struct{}
+// Module is the example module root.
+// Module 是示例模块根。
+type Module struct {
+	service *service.ExampleService
+	logger  *zap.Logger
+}
 
-// NewModuleFactory builds the module during application startup.
-func NewModuleFactory() gofy.ModuleFactory {
-	return func(_ *gofy.Runtime) (support.Module, error) {
-		return NewModule(), nil
+// NewModule builds a module around an existing service.
+// NewModule 用已构造的 service 建立模块。
+func NewModule(svc *service.ExampleService, logger *zap.Logger) *Module {
+	if logger == nil {
+		logger = zap.NewNop()
 	}
+	return &Module{service: svc, logger: logger}
 }
 
-// NewModule builds the module without a runtime. It is useful in tests.
-func NewModule() *Module {
-	return &Module{}
-}
+// Name is the module identity used for deduplication and error messages.
+// Name 返回模块标识，用于去重与错误信息。
+func (m *Module) Name() string { return "example" }
 
-// Name satisfies support.Module.
-func (m *Module) Name() string {
-	return "example"
-}
+// Prefix mounts the module at the application root: the shared /api/v1 prefix is
+// added by WithAPIPrefix, so routes here must not repeat it.
+// Prefix 把模块挂在应用根上：共享的 /api/v1 前缀由 WithAPIPrefix 添加，这里的路由
+// 不能重复它。
+func (m *Module) Prefix() string { return "" }
 
-// Register mounts the module at /api/v1/example.
+// Register binds the routes. The "auth" middleware is resolved by logical name
+// from the App's registry; when the deployment sets no api_key the alias does
+// not exist, and the write route is registered without it — a generator that
+// never configures auth must still start.
+//
+// Register 绑定路由。"auth" 中间件按逻辑名从 App 的注册表解析；部署没有配置 api_key
+// 时该别名不存在，写路由就不带它注册——从不配置认证的生成结果仍然能启动。
 func (m *Module) Register(r *support.Router) error {
-	h := handler.New()
-	support.GET(r, "/hello", h.Hello)
+	c := controller.NewExampleController(m.service, m.logger, r.Responder())
+	group := r.Group("/examples")
+	if auth, ok := r.Middleware(middleware.NameAuth); ok {
+		group.POST("", c.Create, auth)
+	} else {
+		group.POST("", c.Create)
+	}
+	group.GET("", c.List)
+	group.GET("/:id", c.Get)
 	return nil
 }

@@ -1,7 +1,9 @@
 # gofy 脚手架
 
-`gofy` 生成一个能立即启动的 gofy 应用：一个 HTTP 模块、一个常驻 worker 分组、一个维护
-脚本，加上配置、Makefile 与可选的数据库接线。生成物不含密钥、不预生成 `go.sum`，
+`gofy` 生成一个**可立即启动**的 gofy 应用，目录形状与 `examples/demo-service` 一致：
+入口层拆成 `main/config/options/reload/fatal/nacos_watch`，`app/` 下是
+`config / appio / container / middleware / module`，再加 `script/`、`worker/`、
+`migrations/` 与 `shell/`。不含 `internal/`，生成物不含密钥、不预生成 `go.sum`，
 `go mod tidy` 之后 `go run . start` 就能跑。
 
 ## 安装
@@ -27,8 +29,11 @@ go run . start
 
 ```
 $ curl localhost:8080/healthz
-$ curl "localhost:8080/api/v1/example/hello?name=gofy"
-{"code":0,"msg":"success","data":{"message":"hello gofy"},"req_id":"..."}
+{"status":"ok"}
+$ curl localhost:8080/api/v1/examples
+{"code":0,"msg":"success","data":{"items":[],"total":0,"greeting":"hello"},"req_id":"..."}
+$ curl -X POST localhost:8080/api/v1/examples -H 'Content-Type: application/json' -d '{"name":"first"}'
+{"code":0,"msg":"success","data":{"id":1,"name":"first","created_at":"..."},"req_id":"..."}
 ```
 
 ### B. 在已有 `go mod init` 的目录里生成
@@ -53,50 +58,74 @@ go run . start
 
 ```
 ai-service/
-├── main.go                     # 装配：配置 → 选项 → app.Execute
-├── config.yaml                 # HTTP/日志/pid，--with-db 时含 db 段
-├── go.mod                      # 模块路径 + 框架依赖（+ 可选 replace）
-├── Makefile                    # build / test / fmt / vet / run / script / clean
+├── main.go                     # 入口：命令行分类 → Nacos 拉取 → 配置 → app.Execute
+├── config.go                   # configPath / loadNacosConfig / planCommand
+├── options.go                  # appOptions：按命令分层装配 gofy.Option
+├── reload.go                   # reloader：热更新重建 logger、连接池与模块
+├── nacos_watch.go              # Nacos 配置监听模块（reload / restart / exit 三种策略）
+├── fatal.go                    # 启动期致命错误的彩色输出
+├── config.yaml                 # 应用配置：http / log / sql_log / example / middleware / pid
+├── application.yaml            # Nacos 行为：注册、发现、变更策略
+├── nacos.yaml                  # Nacos 连接（默认 enabled: false）
+├── Makefile                    # build / test / fmt / vet / run / script / worker / clean
 ├── .gitignore
 ├── app/
-│   ├── config/config.go        # 配置结构体与 gofyconfig.Load
-│   └── module/example/
-│       ├── module.go           # 模块注册：/api/v1/example
-│       ├── dto/example.go      # 请求/响应结构
-│       └── handler/example.go  # GET /hello
-├── script/                     # go run . script <name>
+│   ├── config/                 # Config 类型、Load 校验、按模式追加日志路径
+│   ├── appio/                  # IO 装配代：db + 快照 + RequestBinder
+│   │   └── db/                 # 命名 MySQL 连接与 registry
+│   ├── container/              # 装配根：仓库、service 构造槽、模块工厂
+│   ├── middleware/             # 应用层中间件别名：auth / audit
+│   └── module/example/         # 一个完整模块
+│       ├── module.go           # 路由表
+│       ├── controller/         # HTTP 适配，不碰 model/repository
+│       ├── dto/                # 请求/响应结构
+│       ├── service/            # 用例，实现 innerapi
+│       ├── repository/         # 持久化（默认内存，注释说明如何换 MySQL）
+│       ├── model/examplemodel/ # gorm 模型
+│       └── innerapi/           # 跨模块契约
+├── migrations/0001_example.sql # 切到 MySQL 时使用
+├── script/                     # go run . script ping
 │   ├── register.go
-│   └── example.go
-└── worker/                     # go run . worker --group=default
-    ├── register.go
-    └── example.go
+│   └── ping.go
+├── worker/                     # go run . worker --group=group1
+│   ├── register.go
+│   ├── worker.go
+│   └── group1/
+│       ├── abc_register.go     # 分组构造
+│       └── heartbeat.go        # 一个常驻任务
+└── shell/check-imports.sh      # 守卫：controller 不得 import 兄弟模块的内部包
 ```
+
+## 分层职责
 
 | 目录 | 职责 | 换成业务代码时改哪里 |
 |---|---|---|
-| `app/module/<name>` | HTTP 模块：路由、DTO、handler | 复制一份改包名，在 `main.go` 的 `WithModuleFactories` 里追加 |
-| `worker/` | 常驻任务，独立进程运行 | 替换 `Example()` 里的 ticker |
-| `script/` | 一次性维护脚本，跑完退出 | 在 `Register()` 里追加脚本 |
-| `app/config` | 配置结构与加载 | 加字段后同步 `config.yaml` |
-
-模块之间不互相 import service/repository，跨模块走 `innerapi` 或 HTTP 契约；这条约束
-在生成的目录里天然成立，因为只有一个模块。
+| `main.go` / `config.go` | 命令分类、配置文件定位 | 一般不动 |
+| `options.go` | 装配选项：HTTP、日志、中间件、模块、脚本、worker | 新增能力时加一个 `gofy.With...` |
+| `reload.go` | 热更新重建；新旧代各自一套仓库与 service | 新增模块时改 `factories()` |
+| `app/config` | 配置结构与校验，一段一个类型 | 加字段后同步 `config.yaml` |
+| `app/appio` | 每代 IO 句柄与快照；请求由框架 binder 固定 | 接 Redis/Kafka 时在这里扩 |
+| `app/container` | 仓库与 service 的惰性构造槽 | 新增模块时加一个 `ModuleFactories` 条目 |
+| `app/module/<name>` | 业务模块，按 controller→service→repository→model 分层 | 复制 `example` 改包名 |
+| `app/middleware` | 应用层中间件，按逻辑名注册进共享注册表 | 加别名后在模块里 `r.Middleware("name")` |
+| `worker/` | 常驻任务，独立进程运行，复用 service/repository | 在 `group1` 加一个文件，或在 `register.go` 加分组 |
+| `script/` | 一次性维护脚本，跑完退出 | 在 `Register()` 里追加 |
 
 ## 生成后能做什么
 
 | 命令 | 行为 |
 |---|---|
 | `go run . start` | 前台启动 HTTP 服务（默认 `:8080`，API 前缀 `/api/v1`） |
-| `go run . start --daemon=1` | 后台启动，父进程等到子进程上报 ready 才返回（仅 Unix） |
-| `./bin/ai-service stop --force=1` | 停止 pid 文件对应的实例 |
-| `./bin/ai-service status --json` | 只读 pid 文件，报告状态/PID/监听地址/健康检查 |
-| `./bin/ai-service worker --group=default` | 启动一个 worker 分组（HTTP 进程不会启动它） |
+| `go run . start --daemon` | 后台启动，父进程等到子进程上报 ready 才返回（仅 Unix） |
+| `./bin/ai-service stop --force` | 停止 pid 文件对应的实例 |
+| `./bin/ai-service status` | 只读 pid 文件，报告状态/PID/监听地址/健康检查 |
+| `./bin/ai-service worker --group=group1` | 启动一个 worker 分组（HTTP 进程不会启动它） |
 | `./bin/ai-service worker --list` | 列出分组与并发度 |
-| `./bin/ai-service script example --message=hi` | 执行维护脚本 |
+| `./bin/ai-service script ping` | 打印生效配置并探测数据库 |
 | `./bin/ai-service script --list` | 列出已注册脚本 |
 | `./bin/ai-service version` | 构建信息（由 Makefile 的 ldflags 注入） |
 
-`make build` 产出 `bin/<name>`；`stop` 默认要求输入 `yes`，容器/CI 里用 `--force=1`。
+`make build` 产出 `bin/<name>`；`stop` 默认要求输入 `yes`，容器/CI 里用 `--force`。
 
 ## 参数
 
@@ -104,8 +133,8 @@ ai-service/
 |---|---|---|
 | `--module` | 读 `<dir>/go.mod` | 模块路径。目标没有 `go.mod` 时必填；与已有 `go.mod` 不一致会直接报错 |
 | `--dir` | `./<name>` | 输出目录。`gofy new .` 表示当前目录 |
-| `--with-db` | `false` | 生成 `db` 配置段、`gofy.WithDatabase`，脚本里加一条 `SELECT 1` |
-| `--with-scripts` | `true` | 生成 `script/` |
+| `--with-db` | `false` | 在 `config.yaml` 生成启用的 `db.default` 段（DSN 为 `${DB_DSN}`）。数据库接线本身始终存在，只是默认没有配置段 |
+| `--with-scripts` | `true` | 生成 `script/` 与 `WithScripts` |
 | `--with-worker` | `true` | 生成 `worker/` 与 `WithWorkerGroups` |
 | `--with-makefile` | `true` | 生成 `Makefile` |
 | `--with-docker` | `false` | 生成多阶段 `Dockerfile` 与 `.dockerignore` |
@@ -138,27 +167,53 @@ gofy new ai-service --module example.com/ai-service --replace /path/to/gofy
 
 ## 配置与环境变量
 
+三个文件各管一件事，互不覆盖：
+
+| 文件 | 内容 | 是否从 Nacos 拉取 |
+|---|---|---|
+| `config.yaml` | 应用配置：http、log、sql_log、db、example、middleware、pid | 是（Nacos 会覆盖它） |
+| `application.yaml` | Nacos 行为：注册、发现、变更策略、监听参数 | 否，属于本机部署属性 |
+| `nacos.yaml` | Nacos 连接：地址、账号、命名空间，`enabled` 默认 false | 否 |
+
 `config.yaml` 由 `<NAME>_CONFIG` 指向（默认当前目录的 `config.yaml`）：
 
 ```bash
 AI_SERVICE_CONFIG=/etc/ai-service/config.yaml ./bin/ai-service start
 ```
 
-`--with-db` 生成的 `db.dsn` 写成 `${DB_DSN}` 占位，启动时从环境变量解析，**不要**把
-连接串写进配置文件。`make run` 会先检查 `DB_DSN` 是否设置。
+**认证默认关闭**。`middleware.api_key` 写成 `${AI_SERVICE_API_KEY}`，未导出该变量时展开
+为空，`auth` 中间件不注册，写接口不带认证也照常启动。需要认证时：
+
+```bash
+export AI_SERVICE_API_KEY=secret
+curl -X POST localhost:8080/api/v1/examples -H 'X-API-Key: secret' ...
+```
+
+**数据库默认不配置**。`--with-db` 生成的 `db.dsn` 写成 `${DB_DSN}`，启动时从环境变量
+解析，**不要**把连接串写进配置文件。`make run` 会先检查 `DB_DSN` 是否设置。
 
 ## 与 `examples/demo-service` 的关系
 
-`demo-service` 是全量示例：多模块、多实例装配、Nacos、租户、限流、审计、集成测试。
-脚手架刻意只保留最小可运行子集——一个模块、一个 worker、一个脚本——目录形状一致，
-所以从脚手架长到 demo 的规模不需要重新组织工程。需要看某项能力怎么接，到
-`examples/demo-service` 找对应目录即可。
+`demo-service` 是全量示例：多模块、多实例装配、Nacos、租户、限流、审计、契约路由、
+集成测试。脚手架保留同样的目录形状与装配顺序，但只带一个模块、一个 worker、一个脚本，
+并且**不生成 `internal/`**（那是 demo 自己的集成测试目录，不属于应用骨架）。
+
+需要看某项能力怎么接，到 `examples/demo-service` 找对应目录即可：`app/appio` 的 broker
+装配、`app/middleware/rate_limit.go`、`internal/integration` 的端到端测试。
 
 ## 常见问题
 
 **`go mod tidy` 拉不到 `github.com/bingcool/gofy`**
 框架未发布到你的代理时，加 `--replace /path/to/gofy`，或在 `go.mod` 里手动补一条
 `replace`。在框架仓库内运行脚手架会自动处理。
+
+**接口返回 404**
+模块挂在共享前缀 `/api/v1` 下，模块自身的 `Prefix()` 返回空串。路由是
+`/api/v1/examples`，不是 `/examples`，也不是 `/api/v1/example/examples`。
+
+**`auth` 没生效**
+检查 `AI_SERVICE_API_KEY` 是否导出；未设置时启动日志里不会有 `auth`，写接口也不要求
+`X-API-Key`。这是"没配就不启用"，不是静默失败。
 
 **端口被占用**
 改 `config.yaml` 的 `http.port`。配置加载默认开启 `${VAR}` 展开，所以也可以写
@@ -172,7 +227,8 @@ AI_SERVICE_CONFIG=/etc/ai-service/config.yaml ./bin/ai-service start
 
 **想加第二个模块**
 复制 `app/module/example` 为新包名，改 `module.go` 里的 `Name()` 与路由前缀，然后在
-`main.go` 的 `WithModuleFactories(...)` 里追加一个工厂。
+`app/container/module_factories.go` 追加一个工厂，并在 `app/container` 里加一个仓库与
+service 构造槽。跨模块能力走 `innerapi`，不要 import 兄弟模块的 service/repository。
 
 ## 子命令：`gofy new interface-service`
 

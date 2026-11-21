@@ -1,0 +1,140 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"sync/atomic"
+
+	"go.uber.org/zap"
+
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/core/systemenv"
+	"github.com/bingcool/gofy/support"
+	"github.com/bingcool/gofy/support/nacos"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
+	"{{.Module}}/app/appio"
+	"{{.Module}}/app/config"
+	"{{.Module}}/app/container"
+)
+
+// reloader rebuilds the modules from a freshly loaded config and applies them
+// to the running application without restarting the process.
+// reloader 用新加载的配置重建模块并应用到运行中的进程，无需重启。
+type reloader struct {
+	// nacosCfg is fixed at startup: changing the Nacos connection itself still
+	// requires a process restart.
+	// nacosCfg 在启动时固定：改 Nacos 连接参数仍需重启进程。
+	nacosCfg nacos.Config
+	// watch reports whether every rebuild should include the watcher module.
+	// watch 决定每次重建是否附带监听模块。
+	watch bool
+	// httpCfg is the address the listener was bound to; Reload cannot move it.
+	// httpCfg 是监听已绑定的地址；Reload 不重新绑定，只记下来给出告警。
+	httpCfg gofy.HTTPConfig
+	// envFromProcess records whether GOFY_ENV was set explicitly.
+	// envFromProcess 记录 GOFY_ENV 是否由进程显式设置。
+	envFromProcess bool
+	// policy is the process-wide SQL log policy, built once in main.
+	// policy 是 main 里构造一次的进程级 SQL 日志策略。
+	policy *gofysqllog.Policy
+	// app is stored after New and before Execute so the watcher callback can
+	// reach the running application.
+	// app 在 New 之后、Execute 之前存入，监听回调据此拿到运行中的应用句柄。
+	app atomic.Pointer[gofy.App]
+}
+
+// factories returns the module list for cfg. It is used at startup and again
+// on every Nacos change, so each call builds a fresh container: the old
+// generation keeps serving requests while the new one is being assembled.
+// factories 按 cfg 返回本次的模块工厂列表，启动与每次 Nacos 变更都走这里。每次调用
+// 新建一个容器：新代装配期间，旧代继续服务在途请求。
+func (r *reloader) factories(cfg *config.Config) []gofy.ModuleFactory {
+	ctr := container.NewContainer(cfg)
+	factories := []gofy.ModuleFactory{
+		appio.NewModuleFactory(cfg.DB, appdbOptions(r.policy)...),
+	}
+	factories = append(factories, ctr.ModuleFactories()...)
+	if r.watch {
+		factories = append(factories, func(rt *gofy.Runtime) (support.Module, error) {
+			return &nacosWatchModule{
+				cfg:      r.nacosCfg,
+				logger:   rt.Logger,
+				onChange: r.reload,
+				onDrain:  r.stopAccepting,
+				onResume: r.resumeAccepting,
+			}, nil
+		})
+	}
+	return factories
+}
+
+// stopAccepting is the watcher's drain hook for the restart and exit
+// strategies. It only flips the App's gate: a full Shutdown here would stop the
+// module that is calling this hook and deadlock waiting for it.
+// stopAccepting 是 restart / exit 策略的摘流钩子：它只翻 App 的闸门；在这里执行完整
+// Shutdown 会停掉正在调用本钩子的模块，并等它退出而死锁。
+func (r *reloader) stopAccepting(ctx context.Context) error {
+	app := r.app.Load()
+	if app == nil {
+		return errors.New("gofy: application is not ready")
+	}
+	return app.StopAccepting(ctx)
+}
+
+// resumeAccepting is the counterpart of stopAccepting: when the process action
+// failed, the app has to keep serving.
+// resumeAccepting 是 stopAccepting 的逆操作：进程动作失败时应用必须继续服务。
+func (r *reloader) resumeAccepting(ctx context.Context) error {
+	app := r.app.Load()
+	if app == nil {
+		return errors.New("gofy: application is not ready")
+	}
+	return app.ResumeAccepting(ctx)
+}
+
+// reload re-reads the config file and swaps the logger, database pool and
+// modules in place. The HTTP listener keeps its startup address.
+// reload 重新读取配置文件，就地替换 logger、数据库连接池和模块；HTTP 监听沿用启动地址。
+func (r *reloader) reload(ctx context.Context) error {
+	app := r.app.Load()
+	if app == nil {
+		return errors.New("gofy: application is not ready")
+	}
+	cfg, err := config.Load(ctx, configPath())
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if cfg.HTTP.Host != r.httpCfg.Host || cfg.HTTP.Port != r.httpCfg.Port {
+		app.Logger().Warn("http address changes require a restart; keeping the current listener",
+			zap.String("current", net.JoinHostPort(r.httpCfg.Host, strconv.Itoa(r.httpCfg.Port))),
+			zap.String("requested", net.JoinHostPort(cfg.HTTP.Host, strconv.Itoa(cfg.HTTP.Port))),
+		)
+	}
+	env := cfg.Env
+	if !r.envFromProcess {
+		if err := os.Setenv("GOFY_ENV", cfg.Env); err != nil {
+			return fmt.Errorf("set GOFY_ENV: %w", err)
+		}
+		env = systemenv.GetEnv()
+	}
+	// nil, not a zero-value config: ReloadSpec.Database non-nil means "reconnect
+	// the pool", and validation would reject an empty DSN. A deployment without
+	// a db section reloads its modules while keeping Runtime.DB nil.
+	// nil 而不是零值配置：ReloadSpec.Database 非 nil 表示"重连连接池"，校验会以
+	// "db: dsn is required" 拒绝空 DSN。没有 db 段的部署重载模块时保持 Runtime.DB 为 nil。
+	var dbCfg *gofy.DatabaseConfig
+	if conf, ok := cfg.Database(config.DefaultDatabase); ok {
+		dbCfg = &conf
+	}
+	return app.Reload(ctx, gofy.ReloadSpec{
+		Env:                  env,
+		Log:                  &cfg.Log,
+		Database:             dbCfg,
+		ModuleFactories:      r.factories(cfg),
+		MiddlewareRegistrars: []gofy.MiddlewareRegistrar{middlewareRegistrar(cfg)},
+	})
+}

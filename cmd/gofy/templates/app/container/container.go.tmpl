@@ -1,0 +1,91 @@
+// Package container is the application's assembly root. Each assembly
+// generation (one startup, one reload) creates a Container; repositories and
+// services are built lazily on first use, so nothing a module does not mount is
+// ever constructed.
+//
+// Dependencies are injected explicitly at construction time: cross-module
+// capabilities arrive as innerapi interfaces, and in-module collaborators are
+// built here. There are no package-level singletons and no runtime lookups.
+//
+// 包 container 是应用的装配根。每一代装配（启动一次、Reload 一次）新建一个
+// Container；仓库与 service 在首次取用时惰性构造，模块没有挂载的能力不会被构建。
+// 依赖只在构造期显式注入：跨模块能力以 innerapi 接口传入，模块内协作对象由这里构造，
+// 不存在包级单例或运行期查找。
+package container
+
+import (
+	"sync"
+
+	"go.uber.org/zap"
+
+	"{{.Module}}/app/config"
+)
+
+// Container holds this generation's repositories, service slots, business
+// config and logger. It is not a package global: the assembly root creates one
+// per generation, and module factories capture it, so reload generations and
+// tests never share state.
+// Container 持有本次装配的仓库、service 构造槽、业务配置与 logger。它不是包级全局：
+// 装配方每代新建一个实例，模块工厂闭包捕获它，因此热更新代际隔离、测试之间也互不影响。
+type Container struct {
+	cfg      *config.Config
+	repos    *RepositoryDeclare
+	services *ServiceDeclare
+
+	loggerMu  sync.Mutex
+	zapLogger *zap.Logger
+}
+
+// NewContainer creates a container that has built no service yet. cfg is the
+// config loaded for this assembly; each module receives only its own section.
+// NewContainer 创建尚未构建任何 service 的容器。cfg 是本次装配加载的配置；各模块只
+// 拿到自己那一段。
+func NewContainer(cfg *config.Config) *Container {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	return &Container{
+		cfg:      cfg,
+		repos:    NewRepositoryDeclare(),
+		services: NewServiceDeclare(),
+	}
+}
+
+// exampleConfig returns this assembly's example section. The container is the
+// only holder of the whole config.Config; returning a copy means a caller
+// cannot mutate this generation's snapshot.
+// exampleConfig 返回本次装配的示例配置。容器是唯一持有整份 config.Config 的地方；
+// 返回拷贝，调用方改它不会影响本代快照。
+func (c *Container) exampleConfig() config.ExampleConfig {
+	if c == nil || c.cfg == nil {
+		return config.ExampleConfig{}
+	}
+	return c.cfg.Example
+}
+
+// Init records this generation's logger for later lazy construction. It keeps
+// the first value and degrades a nil logger to a no-op.
+// Init 记录本代的 logger，供后续惰性构造使用。重复调用保留第一次的值，nil 退化为 no-op。
+func (c *Container) Init(logger *zap.Logger) {
+	c.loggerMu.Lock()
+	defer c.loggerMu.Unlock()
+	if c.zapLogger != nil {
+		return
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	c.zapLogger = logger
+}
+
+// logger returns the recorded logger; a no-op before Init, so callers never
+// have to check for nil.
+// logger 取 Init 记录的 logger；未初始化时返回 no-op，调用方不必判空。
+func (c *Container) logger() *zap.Logger {
+	c.loggerMu.Lock()
+	defer c.loggerMu.Unlock()
+	if c.zapLogger == nil {
+		return zap.NewNop()
+	}
+	return c.zapLogger
+}

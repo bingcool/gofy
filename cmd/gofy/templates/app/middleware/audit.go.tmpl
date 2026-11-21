@@ -1,0 +1,32 @@
+package middleware
+
+import (
+	"time"
+
+	"github.com/bingcool/gofy/support"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+)
+
+// Audit logs one line per request after the handler returns. Successful
+// requests are left to the access log; the handler's own errors are recorded by
+// the responder. This middleware covers what neither does: the route, the
+// status and the latency in one place.
+// Audit 在 handler 返回后为每个请求记一行。成功请求交给访问日志，handler 自身的错误
+// 由 responder 记录；本中间件覆盖两者都不管的部分：路由、状态与耗时。
+func Audit(logger *zap.Logger) support.MiddlewareFunc {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		logger.Info("request audit",
+			zap.String("method", c.Request.Method),
+			zap.String("path", c.FullPath()),
+			zap.Int("status", c.Writer.Status()),
+			zap.Duration("latency", time.Since(start)),
+			zap.String("request_id", c.GetString(support.RequestIDKey)),
+		)
+	}
+}

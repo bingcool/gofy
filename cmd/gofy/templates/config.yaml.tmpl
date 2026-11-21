@@ -1,3 +1,4 @@
+# 应用配置。除 http 外每一段都可选：删掉一整段表示这套部署不用它。
 env: dev
 
 http:
@@ -13,22 +14,62 @@ http:
 log:
   level: info
   encoding: json
+  # auto 只在 TTY 上着色；always 供 IDE 控制台强制开启；never 关闭。
+  color: auto
+  # 日志文件由 app/config 按启动模式追加：HTTP 写 storage/log/http/，访问日志写
+  # storage/log/access/，worker 与脚本按名字分目录，SQL 条目统一写 storage/log/sql/。
+  # 这里保留 stdout 方便本地查看。
   outputs:
     - stdout
+  rotation:
+    enabled: true
+    mode: size
+    max_size_mb: 100
+    max_age_days: 30
+    max_backups: 7
+    compress: true
+    local_time: true
   base_fields:
     service: {{.Name}}
-{{- if .WithDB }}
 
-# The DSN is read from the environment; never commit credentials.
+# SQL 日志（进程级，所有连接共享）。enabled 是总开关，默认关闭：关闭时不产生任何
+# SQL 日志行，也不校验本节其余字段。开启后 mode 决定文本形态：off 只留错误与耗时，
+# placeholder 是模板（默认），full 是展开后的语句。
+sql_log:
+  enabled: false
+  mode: placeholder
+  sample_rate: 1
+  max_length: 4096
+  error_rate_limit: 20
+  mask:
+    enabled: false
+    strategy: mask
+
+# 示例模块的业务配置：一段一个类型，由 app/container 作为构造参数交给 service。
+# 改这里并触发一次热更新（Nacos reload 或 restart），GET /api/v1/examples 的
+# greeting 字段就会变。
+example:
+  greeting: hello
+
+# 应用层中间件。api_key 为空表示不注册 "auth"：写接口因此不带认证注册，应用照常启动。
+# 需要认证时导出环境变量 {{.EnvPrefix}}_API_KEY，请求带 X-API-Key 头。
+middleware:
+  api_key: {{ printf "${%s_API_KEY}" .EnvPrefix }}
+
+{{- if .WithDB }}
+# MySQL 协议连接。default 由框架托管（Runtime.DB），其余名字由 app/appio 的 registry
+# 首次使用时建连。DSN 从环境变量读取，避免把口令写进仓库。
 db:
-  dsn: ${DB_DSN}
-  max_idle_conns: 10
-  max_open_conns: 50
-  conn_max_lifetime: 1h
-  conn_max_idle_time: 10m
-  ping_timeout: 5s
-  slow_threshold: 200ms
-  log_level: warn
+  default:
+    dsn: ${DB_DSN}
+    max_idle_conns: 10
+    max_open_conns: 50
+    conn_max_lifetime: 1h
+    conn_max_idle_time: 10m
+    ping_timeout: 5s
+    slow_threshold: 200ms
+    log_level: warn
+    prepare_stmt: false
 {{- end }}
 
 pid_file: app/{{.Name}}.pid

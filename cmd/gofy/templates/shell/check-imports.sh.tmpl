@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Guard the one boundary that is load-bearing: a module's controller must not
+# import a sibling module's service, repository or model. Cross-module calls go
+# through innerapi or the HTTP contract; everything below the controller is a
+# recommendation, not a rule.
+#
+# 只守一条真正要紧的边界：模块的 controller 不得 import 兄弟模块的
+# service/repository/model。跨模块调用走 innerapi 或 HTTP 契约；controller 以下的
+# 分层是建议而不是强制。
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+status=0
+
+while IFS= read -r file; do
+  module="${file#"$root"/app/module/}"
+  module="${module%%/*}"
+  while IFS= read -r dep; do
+    case "$dep" in
+      */app/module/*/service|*/app/module/*/repository|*/app/module/*/model/*)
+        case "$dep" in
+          */app/module/"$module"/*) ;;
+          *)
+            echo "forbidden import in $file: $dep" >&2
+            status=1
+            ;;
+        esac
+        ;;
+    esac
+  done < <(grep -o '"[^"]*"' "$file" | tr -d '"' | grep 'app/module/' || true)
+done < <(find "$root/app/module" -path '*/controller/*.go' -type f)
+
+exit "$status"

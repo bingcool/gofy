@@ -1,0 +1,175 @@
+// Package db exposes this application's named MySQL-protocol connections.
+//
+// Business code never reads package variables: it takes a handle from the
+// app/appio snapshot (appio.WithContext(ctx).DBConnect(ctx, "default")), so
+// requests, scripts and workers all use the same path. The current generation
+// is published as a whole through an atomic pointer.
+// 包 db 暴露本应用的命名 MySQL 连接。业务代码不直接读包级变量：一律通过 app/appio
+// 的快照取连接（appio.WithContext(ctx).DBConnect(ctx, "default")），请求、脚本与
+// worker 因此走同一条路径。当前一代通过原子指针整体发布。
+package db
+
+import (
+	"context"
+	"sync/atomic"
+
+	"github.com/bingcool/gofy"
+	gofydb "github.com/bingcool/gofy/support/db"
+	gofysqllog "github.com/bingcool/gofy/support/sqllog"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// DefaultInstance is the framework-managed db.default. It is opened by the
+// Runtime and deliberately kept out of the registry, so resolving it goes
+// through Set.Default instead of creating a second pool.
+// DefaultInstance 是框架托管的 db.default：它由 Runtime 打开，刻意不进 registry，
+// 因此按这个名字解析时走 Set.Default，而不是再建一个池。
+const DefaultInstance = "default"
+
+// current points at the installed generation.
+// current 指向当前一代。
+var current atomic.Pointer[Set]
+
+// Default returns the current generation's db.default; nil when none is
+// installed.
+// Default 返回当前一代的 db.default；尚未安装时为 nil。
+func Default() *gorm.DB {
+	return current.Load().Default()
+}
+
+// Set holds one generation of connections. Open builds it, Install publishes it
+// and Close releases the extra instances; the default connection belongs to the
+// framework and is never closed here.
+// Set 持有一个装配代的连接：Open 构建、Install 发布、Close 只释放额外实例；
+// db.default 由框架持有，本包从不关闭它。
+type Set struct {
+	defaultDB *gorm.DB
+	registry  *gofydb.Registry
+}
+
+// NewSet builds a generation that carries only db.default and owns no extra
+// pool. It is the script/test path: the caller publishes a pool the framework
+// opened instead of running the io module lifecycle.
+// NewSet 构造只含 db.default、不持有额外连接池的一代，供脚本与测试使用。
+func NewSet(defaultDB *gorm.DB) *Set {
+	return &Set{defaultDB: defaultDB}
+}
+
+// Default returns the framework-managed db.default of this generation.
+// Default 返回本代的 db.default；它的生命周期归框架，与本包无关。
+func (s *Set) Default() *gorm.DB {
+	if s == nil {
+		return nil
+	}
+	return s.defaultDB
+}
+
+// OpenOption configures the pools this generation opens.
+// OpenOption 配置本代打开的连接池。
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	sqlPolicy *gofysqllog.Policy
+	sqlLogger *zap.Logger
+}
+
+// WithSQLPolicy hands the process-wide SQL log policy to every pool this
+// generation opens, so named instances and the default pool report into one set
+// of counters.
+// WithSQLPolicy 把进程级 SQL 日志策略交给本代打开的每个池，因此命名实例与 default
+// 池共用一组计数器。
+func WithSQLPolicy(policy *gofysqllog.Policy) OpenOption {
+	return func(o *openOptions) { o.sqlPolicy = policy }
+}
+
+// WithSQLLogger sends SQL entries to the dedicated channel.
+// WithSQLLogger 把 SQL 条目送到独立通道。
+func WithSQLLogger(l *zap.Logger) OpenOption {
+	return func(o *openOptions) { o.sqlLogger = l }
+}
+
+// Open builds this generation's Set. defaultDB may be nil: a deployment that
+// configures no db.default (or no db section at all) still builds a generation,
+// it simply has no framework-managed pool. Named instances are opened on first
+// use through the registry.
+// Open 构建本代的 Set。defaultDB 允许为 nil：没有配 db.default（甚至整段 db 都不
+// 存在）的部署同样有一代句柄，只是没有框架托管的连接池。命名实例经 registry 首次
+// 使用时才建连。
+func Open(ctx context.Context, defaultDB *gorm.DB, cfg map[string]gofy.DatabaseConfig, rt *gofy.Runtime, opts ...OpenOption) (*Set, error) {
+	var o openOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	logger := zap.NewNop()
+	if rt != nil && rt.Logger != nil {
+		logger = rt.Logger
+	}
+	extra := make(map[string]gofydb.Config, len(cfg))
+	for name, c := range cfg {
+		if name == DefaultInstance {
+			// db.default is opened by the framework; NewIO would create a
+			// second pool, so it stays out of the registry.
+			// db.default 由框架打开，再走 NewIO 会多建一个池，因此不进 registry。
+			continue
+		}
+		extra[name] = c
+	}
+	registry, err := gofydb.NewRegistry(extra, logger,
+		gofydb.WithSQLPolicy(o.sqlPolicy),
+		gofydb.WithSQLLogger(o.sqlLogger),
+	)
+	if err != nil {
+		return nil, err
+	}
+	set := &Set{defaultDB: defaultDB, registry: registry}
+	// Install only after the registry is fully built: a failed Open leaves the
+	// previous generation serving.
+	// 全部就绪之后才安装：失败的 Open 不会影响正在服务的上一代。
+	registry.Install()
+	return set, nil
+}
+
+// NewIO returns the pool registered under name in the installed generation,
+// opening the connection on first use.
+// NewIO 返回已安装一代中 name 对应的连接池，首次调用时才真正建连。
+func NewIO(ctx context.Context, name string) (*gorm.DB, error) {
+	return current.Load().NewIO(ctx, name)
+}
+
+// NewIO returns this generation's pool for name.
+// NewIO 返回本代 name 对应的连接池。
+func (s *Set) NewIO(ctx context.Context, name string) (*gorm.DB, error) {
+	if s == nil || s.registry == nil {
+		return nil, gofydb.ErrNotConfigured
+	}
+	return s.registry.NewIO(ctx, name)
+}
+
+// Install publishes this generation. Readers see the whole set or the previous
+// one, never a half-updated handle.
+// Install 发布本代：读方看到的要么是整代、要么是上一代，不会读到半更新的句柄。
+func (s *Set) Install() {
+	if s == nil {
+		return
+	}
+	current.Store(s)
+}
+
+// Close releases every extra pool of this generation. The installed pointer is
+// cleared only while it still points at this set, so a reload that already
+// installed new connections keeps them intact.
+// Close 释放本代全部额外连接池。只有发布指针仍指向自己时才清空，Reload 已安装的
+// 新连接不会被旧代误删。
+func (s *Set) Close() error {
+	if s == nil {
+		return nil
+	}
+	current.CompareAndSwap(s, nil)
+	if s.registry == nil {
+		return nil
+	}
+	return s.registry.Close()
+}

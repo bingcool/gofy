@@ -1,0 +1,16 @@
+package group1
+
+import (
+	gofyworker "github.com/bingcool/gofy/support/worker"
+)
+
+// NewGroup builds group1. It is a function rather than an init-time variable so
+// a construction error is returned, not crashed on, and tests can build the
+// group without starting a process.
+// NewGroup 构造 group1。它是函数而不是 init 期变量，因此构造错误会被返回而不是直接
+// 崩溃，测试也能在不启动进程的情况下构造分组。
+func NewGroup() (*gofyworker.Group, error) {
+	return gofyworker.NewGroup("group1",
+		newHeartbeatWorker(30_000),
+	)
+}

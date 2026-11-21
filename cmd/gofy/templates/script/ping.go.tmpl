@@ -1,0 +1,37 @@
+package script
+
+import (
+	"context"
+	"fmt"
+
+	gofyscript "github.com/bingcool/gofy/script"
+	"github.com/spf13/pflag"
+
+	"{{.Module}}/app/config"
+)
+
+// Ping prints the effective runtime settings and probes the database when one
+// is configured. It never opens a connection itself: `rt.DB` is the pool the
+// framework already opened for this process, which is also what a script
+// sharing the service layer uses through appio.
+//
+// Ping 打印生效的运行参数，并在配置了数据库时探测一次。它自己不建连：`rt.DB` 是框架
+// 为这个进程已经打开的池，也是复用 service 层的脚本通过 appio 使用的那个。
+func Ping(cfg *config.Config) gofyscript.Script {
+	return gofyscript.Script{
+		Name:  "ping",
+		Short: "print runtime settings and check the database",
+		Run: func(ctx context.Context, rt *gofyscript.Runtime, _ *pflag.FlagSet) error {
+			dbState := "not configured"
+			if rt.DB != nil {
+				if err := rt.DB.WithContext(ctx).Exec("SELECT 1").Error; err != nil {
+					dbState = "error: " + err.Error()
+				} else {
+					dbState = "ok"
+				}
+			}
+			fmt.Printf("env=%s greeting=%q db=%s\n", rt.Env, cfg.Example.Greeting, dbState)
+			return nil
+		},
+	}
+}

@@ -1,0 +1,14 @@
+package service
+
+import (
+	"{{.Module}}/app/config"
+	"{{.Module}}/app/module/example/repository"
+)
+
+// Dependencies declares everything the service needs. The repository and the
+// business config section are required; the assembly root builds both.
+// Dependencies 声明 service 需要的全部依赖。仓库与业务配置段必填，由装配根构造。
+type Dependencies struct {
+	Repository *repository.ExampleRepository
+	Config     config.ExampleConfig
+}

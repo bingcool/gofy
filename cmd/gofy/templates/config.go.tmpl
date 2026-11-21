@@ -1,0 +1,196 @@
+package main
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+
+	"github.com/bingcool/gofy/support/nacos"
+)
+
+// configPath returns the application config file: {{.EnvPrefix}}_CONFIG wins,
+// otherwise config.yaml in the working directory.
+// configPath 返回应用配置文件：{{.EnvPrefix}}_CONFIG 优先，否则用工作目录下的
+// config.yaml。
+func configPath() string {
+	if p := os.Getenv("{{.EnvPrefix}}_CONFIG"); p != "" {
+		return p
+	}
+	return "config.yaml"
+}
+
+// loadNacosConfig prefers the swoolefy-style nacos.yaml + application.yaml pair
+// and falls back to NACOS_* environment variables when nacos.yaml is absent.
+// loadNacosConfig 优先读 nacos.yaml + application.yaml 组合；nacos.yaml 不存在时
+// 回退到 NACOS_* 环境变量，两者都没有表示未启用同步。
+func loadNacosConfig() (nacos.Config, error) {
+	cfg, err := nacos.Load("nacos.yaml", "application.yaml")
+	if errors.Is(err, fs.ErrNotExist) {
+		return nacos.FromEnv(), nil
+	}
+	return cfg, err
+}
+
+// commandPlan is what one command line needs before the App exists. The ordering
+// matters more than the fields: reading nacos.yaml or config.yaml can fail, and a
+// failure there must not block a command that never needed the file.
+// commandPlan 是一条命令行在 App 存在之前需要什么。比起字段，顺序更要紧：读
+// nacos.yaml 或 config.yaml 都可能失败，而这个失败不应该挡住一个根本不需要该文件的命令。
+type commandPlan struct {
+	// Kind names the command, for tests and for the startup log.
+	// Kind 是命令名称，供测试与启动日志使用。
+	Kind string
+	// LoadNacos reads nacos.yaml / application.yaml.
+	// LoadNacos 表示读取 nacos.yaml / application.yaml。
+	LoadNacos bool
+	// Sync pulls the remote config once before anything else happens.
+	// Sync 表示在做任何事之前先拉一次远端配置。
+	Sync bool
+	// Watch hosts the config watcher. HTTP only.
+	// Watch 表示挂配置监听，只属于 HTTP 进程。
+	Watch bool
+	// LoadConfig reads config.yaml. Only print commands skip it.
+	// LoadConfig 表示读取 config.yaml，只有打印类命令跳过它。
+	LoadConfig bool
+	// RegisterGroups builds the worker groups from config.
+	// RegisterGroups 表示按配置构建 worker 分组。
+	RegisterGroups bool
+	// BuildServices wires HTTP, database, modules and middleware.
+	// BuildServices 表示装配 HTTP、数据库、模块与中间件。
+	BuildServices bool
+}
+
+// planCommand classifies the command line before any file is opened.
+// planCommand 在打开任何文件之前对命令行分类。
+func planCommand(args []string) commandPlan {
+	if hasHelpFlag(args) {
+		return commandPlan{Kind: "help"}
+	}
+	switch firstCommand(args) {
+	case "", "start":
+		return httpStartPlan("http-start")
+	case "stop":
+		// Signals only: the pid path comes from config.yaml.
+		// 只发信号：pid 路径来自 config.yaml。
+		return commandPlan{Kind: "stop", LoadConfig: true}
+	case "status":
+		// Read-only: pid path and listen address only.
+		// 只读：只取 pid 路径与监听地址。
+		return commandPlan{Kind: "status", LoadConfig: true}
+	case "restart":
+		return commandPlan{Kind: "http-restart", LoadNacos: true, Sync: true, LoadConfig: true, BuildServices: true}
+	case "script":
+		return commandPlan{Kind: "script", LoadConfig: true, BuildServices: true}
+	case "version", "help":
+		return commandPlan{Kind: "print"}
+	case "worker":
+		return planWorker(args)
+	default:
+		// An unknown command is reported by the CLI; loading the config first
+		// keeps the behaviour identical to a valid command.
+		// 未知命令由 CLI 报错；先加载配置让行为与合法命令一致。
+		return commandPlan{Kind: "command", LoadConfig: true, BuildServices: true}
+	}
+}
+
+func httpStartPlan(kind string) commandPlan {
+	// RegisterGroups stays false: groups are a worker-process concern, and
+	// building them in HTTP would make every broker section mandatory there.
+	// RegisterGroups 保持 false：分组属于 worker 进程，在 HTTP 里构建会让每个 broker
+	// 段都变成必填。
+	return commandPlan{
+		Kind:          kind,
+		LoadNacos:     true,
+		Sync:          true,
+		Watch:         true,
+		LoadConfig:    true,
+		BuildServices: true,
+	}
+}
+
+// planWorker classifies the worker subcommands. stop/status only need the pid
+// path; --list needs the groups but no broker and no Nacos.
+// planWorker 对 worker 子命令分类。stop/status 只需要 pid 路径；--list 需要分组但
+// 不需要 broker 与 Nacos。
+func planWorker(args []string) commandPlan {
+	for _, arg := range args {
+		if arg == "--list" || strings.HasPrefix(arg, "--list=") {
+			return commandPlan{Kind: "worker-list", LoadConfig: true, RegisterGroups: true}
+		}
+	}
+	index := -1
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if arg == "worker" {
+			index = i
+		}
+		break
+	}
+	if index < 0 {
+		return commandPlan{Kind: "worker-run", LoadConfig: true, RegisterGroups: true, BuildServices: true}
+	}
+	sub := workerSubcommand(args[index+1:])
+	switch sub {
+	case "stop", "status":
+		// Both only read pid files: no broker connections and no Nacos, so a
+		// worker can be inspected and stopped while its dependencies are down.
+		// 两者都只读 pid 文件：不建 broker 连接也不碰 Nacos，因此依赖挂着时仍能查看和
+		// 停止 worker。
+		return commandPlan{Kind: "worker-" + sub, LoadConfig: true}
+	case "restart":
+		return commandPlan{Kind: "worker-restart", LoadNacos: true, Sync: true, LoadConfig: true, RegisterGroups: true, BuildServices: true}
+	default:
+		return commandPlan{Kind: "worker-run", LoadNacos: true, Sync: true, LoadConfig: true, RegisterGroups: true, BuildServices: true}
+	}
+}
+
+// firstCommand returns the first token that is not a flag, or "" when the whole
+// line is flags (the bare `app` form starts HTTP).
+// firstCommand 返回第一个非旗标 token；整行都是旗标时返回空串（裸 `app` 形态启动 HTTP）。
+func firstCommand(args []string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+// hasHelpFlag reports whether the line asks for help, wherever the flag sits.
+// hasHelpFlag 判断命令行是否在求助，无论旗标出现在哪里。
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+// workerSubcommand returns the first token after `worker` that is not a flag
+// value, which is where cobra looks for a subcommand.
+// workerSubcommand 返回 `worker` 之后第一个不是旗标取值的 token，也就是 cobra 找子命令
+// 的位置。
+func workerSubcommand(args []string) string {
+	valueFlags := map[string]struct{}{
+		"--group":           {},
+		"--name":            {},
+		"--concurrency":     {},
+		"--timeout":         {},
+		"--startup-timeout": {},
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
+		if _, ok := valueFlags[arg]; ok {
+			i++
+		}
+	}
+	return ""
+}

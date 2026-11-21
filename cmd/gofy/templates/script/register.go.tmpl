@@ -2,11 +2,17 @@ package script
 
 import (
 	gofyscript "github.com/bingcool/gofy/script"
+
+	"{{.Module}}/app/config"
 )
 
-// Register returns the maintenance scripts exposed by `go run . script`.
-func Register() []gofyscript.Script {
+// Register returns the application's maintenance scripts. Adding one means
+// adding a Script value here and a file next to it; nothing else in the binary
+// changes.
+// Register 返回应用的维护脚本。新增一个脚本就是在这里加一个 Script 值、旁边加一个
+// 文件，二进制其它部分不用改。
+func Register(cfg *config.Config) []gofyscript.Script {
 	return []gofyscript.Script{
-		Example(),
+		Ping(cfg),
 	}
 }

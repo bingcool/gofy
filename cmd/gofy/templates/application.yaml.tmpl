@@ -1,0 +1,47 @@
+# 应用 Nacos 行为配置（服务注册 / 服务发现 / 配置变更监听）
+nacos:
+  # 是否启用 Nacos 注册
+  enable_nacos_register: true
+  # Nacos 配置中心 dataId / group / tenant（按项目区分，与 nacos.yaml 连接配置分离）
+  service_config:
+    data_id: {{.Name}}
+    group: GO_GROUP
+    tenant: ''
+  # 本服务器信息注册到 Nacos
+  service_register:
+    # 注册 IP 读取顺序：NACOS_SERVICE_REGISTER_HOST（本地开发）→ POD_IP（K8s/ACK）→ YAML ip → 自动探测
+    ip: ${POD_IP}
+    # 优先读取 NACOS_SERVICE_REGISTER_PORT 环境变量；未设置时使用 HTTP 监听端口
+    service_name: {{.Name}}
+    heartbeat_interval: 10   # 心跳间隔（秒）
+    namespace_id: dev
+    group_name: GO_GROUP
+    weight: 1
+    metadata:
+      version: 1.0.0
+
+  # 客户端的服务发现配置
+  discovery_service_client:
+    load_balancer: random   # random | round_robin | weight
+    cache_ttl: 60
+    stale_ttl: 180
+    # 单次实例列表请求的超时，默认 2000ms。发现位于请求路径上，不能沿用配置中心的
+    # timeout_ms（那是给 Sync/Listen 用的，默认 10s）。
+    timeout_ms: 2000
+    healthy_only: true
+    namespace_id: dev
+    group_name: GO_GROUP
+
+  # 监控配置变化。这里就是总开关：true 时 main 启动期拉取一次并持续监听。
+  enable_nacos_config_change_restart: true
+  # 配置变更后的处理策略：
+  #   reload  - 原地热更新，进程与 pid 不变（本地开发，默认）
+  #   restart - 重新执行当前进程，pid 不变，无需外部监管（物理机 / 云主机）
+  #   exit    - 退出进程，交给 k8s / docker restart policy / systemd 拉起新进程
+  # 该键放在本地 application.yaml 而非远端配置：Sync 会覆盖后者。
+  config_change_strategy: reload
+  # restart / exit 前先摘流（新请求返回 503、从 Nacos 注销），再固定等待这些秒数。
+  restart_grace_period: 5
+  monitor_config_change:
+    listener_timeout_ms: 30000
+    failed_wait_ms: 3000

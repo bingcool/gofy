@@ -1,28 +1,110 @@
+// Package config is the application's typed view of config.yaml. Only this
+// package reads the file: every other package receives the one section it
+// needs as a constructor argument, so business code cannot re-read the file at
+// request time or see sections it does not own.
+// Package config 是 config.yaml 的类型化视图。只有本包读文件：其它包只经构造参数
+// 拿到自己那一段，业务代码因此无法在请求期重新读文件，也看不到不属于它的段。
 package config
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 
 	"github.com/bingcool/gofy"
 	gofyconfig "github.com/bingcool/gofy/config"
 	"github.com/bingcool/gofy/logger"
-{{- if .WithDB }}
-	gofydb "github.com/bingcool/gofy/support/db"
-{{- end }}
+	"github.com/bingcool/gofy/support/sqllog"
 )
 
-// Config is the application configuration loaded from config.yaml.
+// DefaultDatabase is the instance the framework manages and scripts use.
+// DefaultDatabase 是框架托管、脚本也使用的实例名。
+const DefaultDatabase = "default"
+
+// Config is the whole file. Every section except http is optional: an absent
+// `db` or `middleware` block means this deployment does not use it, not that
+// the file is wrong.
+// Config 是整份配置。除 http 外每一段都是可选的：缺少 `db` 或 `middleware` 表示
+// 这套部署用不到它，而不是文件有问题。
 type Config struct {
-	Env     string          `yaml:"env" default:"dev"`
-	HTTP    gofy.HTTPConfig `yaml:"http"`
-	Log     logger.Config  `yaml:"log"`
-{{- if .WithDB }}
-	DB      gofydb.Config   `yaml:"db"`
-{{- end }}
-	PIDFile string          `yaml:"pid_file"`
+	Env  string          `yaml:"env" default:"dev"`
+	HTTP gofy.HTTPConfig `yaml:"http"`
+	Log  logger.Config   `yaml:"log"`
+	// SQLLog is the top-level SQL log policy, shared by every connection.
+	// SQLLog 是顶层的 SQL 日志策略，被所有连接共享。
+	SQLLog   sqllog.Config                  `yaml:"sql_log"`
+	DB       map[string]gofy.DatabaseConfig `yaml:"db"`
+	Example  ExampleConfig                  `yaml:"example"`
+	Middleware MiddlewareConfig             `yaml:"middleware"`
+	PIDFile  string                         `yaml:"pid_file"`
 }
 
-// Load reads and validates the configuration file.
+// ExampleConfig is the example module's business section: one section, one
+// type, handed to the service as a constructor argument.
+// ExampleConfig 是示例模块的业务配置：一段一个类型，作为构造参数交给 service。
+type ExampleConfig struct {
+	Greeting string `yaml:"greeting" default:"hello"`
+}
+
+// MiddlewareConfig configures application middleware.
+// MiddlewareConfig 配置应用层中间件。
+type MiddlewareConfig struct {
+	// APIKey enables the "auth" middleware. Empty means auth is not
+	// registered at all, so a route that asks for it fails at startup instead
+	// of silently accepting every caller. Read it from the environment:
+	// `api_key: ${EXAMPLE_API_KEY}`.
+	// APIKey 启用 "auth" 中间件。为空表示根本不注册 auth，请求它的路由会在启动期
+	// 失败，而不是静默放行所有调用方。用环境变量提供：`api_key: ${EXAMPLE_API_KEY}`。
+	APIKey string `yaml:"api_key"`
+}
+
+// Database returns the named instance and whether the section configures it.
+// The bool is the point: a caller must not read a zero-value config as
+// "configured with empty DSN".
+// Database 返回指定实例，以及该段是否配置了它。布尔返回值是关键：调用方不能把零值
+// 配置当成"已配置但 DSN 为空"。
+func (c *Config) Database(name string) (gofy.DatabaseConfig, bool) {
+	if c == nil {
+		return gofy.DatabaseConfig{}, false
+	}
+	cfg, ok := c.DB[name]
+	return cfg, ok
+}
+
+// warnMissingEnv writes the missing-variable warning. Config loading happens
+// before the logger exists, so the warning goes to stderr.
+// warnMissingEnv 输出缺失环境变量的告警。配置加载早于 logger 构建，因此写 stderr。
+var warnMissingEnv = func(names []string) {
+	fmt.Fprintf(os.Stderr, "warning: config: missing environment variables %s; expanded to empty strings\n", strings.Join(names, ", "))
+}
+
+// Load reads and validates the file. Every optional section is validated only
+// when present, so a deployment without a database still starts.
+// Load 读取并校验配置文件。可选段只在出现时校验，因此没有数据库的部署照常启动。
 func Load(ctx context.Context, path string) (*Config, error) {
-	return gofyconfig.Load[Config](ctx, path, gofyconfig.WithStrict(true))
+	cfg, err := gofyconfig.Load[Config](ctx, path,
+		gofyconfig.WithStrict(true),
+		gofyconfig.WithAllowMissingEnv(true),
+		gofyconfig.WithEnvWarning(warnMissingEnv),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for name, conf := range cfg.DB {
+		if err := conf.Validate(); err != nil {
+			return nil, fmt.Errorf("config: db.%s: %w", name, err)
+		}
+	}
+	if strings.TrimSpace(cfg.Example.Greeting) == "" {
+		cfg.Example.Greeting = "hello"
+	}
+	applyLogPaths(cfg)
+	return cfg, nil
+}
+
+// IsConfigured reports whether the middleware section asks for auth.
+// IsConfigured 报告中间件是否要求认证。
+func (m MiddlewareConfig) IsConfigured() bool {
+	return strings.TrimSpace(m.APIKey) != ""
 }

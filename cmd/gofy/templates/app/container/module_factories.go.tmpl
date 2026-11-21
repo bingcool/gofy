@@ -1,0 +1,23 @@
+package container
+
+import (
+	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/support"
+
+	"{{.Module}}/app/module/example"
+)
+
+// ModuleFactories returns this generation's module factories in their fixed
+// construction order. Each factory is called once per generation, after the
+// Runtime exists and before the HTTP handler is published.
+// ModuleFactories 按固定的构造顺序返回本代的模块工厂。每个工厂每代调用一次，时机是
+// Runtime 就绪之后、HTTP handler 发布之前。
+func (c *Container) ModuleFactories() []gofy.ModuleFactory {
+	return []gofy.ModuleFactory{
+		func(rt *gofy.Runtime) (support.Module, error) {
+			c.Init(rt.Logger)
+			svc := c.services.Example(c.repos.Example(), c.exampleConfig())
+			return example.NewModule(svc, c.logger()), nil
+		},
+	}
+}

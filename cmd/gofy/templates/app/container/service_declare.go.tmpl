@@ -1,0 +1,34 @@
+package container
+
+import (
+	"{{.Module}}/app/config"
+	"{{.Module}}/app/module/example/repository"
+	"{{.Module}}/app/module/example/service"
+)
+
+// ServiceDeclare is where this generation's services are built. Each method
+// takes the collaborators it needs as arguments instead of reaching into the
+// container, so the dependency chain is visible at the call site.
+// ServiceDeclare 是本代 service 的构建处。每个方法把需要的协作者作为参数接收，而不是
+// 反过来向容器索取，依赖链因此在调用处可见。
+type ServiceDeclare struct {
+	example *service.ExampleService
+}
+
+// NewServiceDeclare creates an empty declaration.
+// NewServiceDeclare 创建空的声明。
+func NewServiceDeclare() *ServiceDeclare {
+	return &ServiceDeclare{}
+}
+
+// Example builds the example service once per generation.
+// Example 每代构造一次示例 service。
+func (d *ServiceDeclare) Example(repo *repository.ExampleRepository, cfg config.ExampleConfig) *service.ExampleService {
+	if d.example == nil {
+		d.example = service.NewExampleService(service.Dependencies{
+			Repository: repo,
+			Config:     cfg,
+		})
+	}
+	return d.example
+}

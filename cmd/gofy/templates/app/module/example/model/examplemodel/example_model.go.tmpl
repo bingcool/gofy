@@ -1,0 +1,20 @@
+// Package examplemodel is the module's persistence model. It carries gorm tags
+// so the same type can be used once the repository talks to a database; the
+// in-memory repository ignores them.
+// 包 examplemodel 是模块的持久化模型。它带 gorm 标签，因此 repository 接上数据库后
+// 可以直接复用这个类型；当前的内存实现忽略这些标签。
+package examplemodel
+
+import "time"
+
+// Example is one row of the examples table.
+// Example 是 examples 表的一行。
+type Example struct {
+	ID        uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	Name      string    `gorm:"column:name;size:64;not null"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+// TableName is what GORM uses when the repository switches to SQL.
+// TableName 是 repository 切到 SQL 时 GORM 使用的表名。
+func (Example) TableName() string { return "examples" }

@@ -4,7 +4,7 @@ COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_AT ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_AT)
 
-.PHONY: build test fmt vet run{{if .WithScripts}} script{{end}} clean
+.PHONY: build test fmt vet run{{if .WithScripts}} script{{end}}{{if .WithWorker}} worker{{end}} clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(APP) .
@@ -17,22 +17,24 @@ fmt:
 
 vet:
 	go vet ./...
-
+{{if .WithDB}}
+# DB_DSN is required when config.yaml carries an enabled db section.
 run:
-{{- if .WithDB }}
 	DB_DSN="$${DB_DSN:?set DB_DSN}" go run . start
-{{- else }}
+{{else}}
+run:
 	go run . start
-{{- end }}
-{{- if .WithScripts }}
+{{end}}
+{{- if .WithScripts}}
 
 script:
-{{- if .WithDB }}
-	DB_DSN="$${DB_DSN:?set DB_DSN}" go run . script $(ARGS)
-{{- else }}
 	go run . script $(ARGS)
-{{- end }}
-{{- end }}
+{{- end}}
+{{- if .WithWorker}}
+
+worker:
+	go run . worker --group=$(GROUP) $(ARGS)
+{{- end}}
 
 clean:
 	rm -rf bin
