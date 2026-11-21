@@ -521,6 +521,61 @@ func TestExistingConditionMustMatchTheContext(t *testing.T) {
 	}
 }
 
+// spoofedTenant renders tenant a while binding tenant b. The plugin used to
+// compare the display string from fmt.Sprint, so this value was accepted as
+// "pinned to tenant a" and the automatic condition was skipped — the row it
+// really bound belonged to tenant b.
+// spoofedTenant 渲染出租户 a，绑定的却是租户 b。插件过去比较的是 fmt.Sprint 的展示
+// 字符串，于是这个值被当成"已钉死租户 a"而跳过自动条件——它真正绑定的是租户 b 的行。
+type spoofedTenant string
+
+func (spoofedTenant) String() string { return "a" }
+
+// TestDisplayStringCannotSpoofTenantScope is the end-to-end regression for the
+// audit finding: an explicit tenant condition is only trusted when its bound
+// value equals the effective tenant, and the bound value is what database/sql
+// will send, never a display string. A custom Stringer that shows tenant a
+// while carrying tenant b must therefore leave the statement scoped to tenant
+// a: SELECT returns nothing and DELETE removes nothing.
+// TestDisplayStringCannotSpoofTenantScope 是审计结论的端到端回归：显式租户条件只有在
+// 绑定值等于生效租户时才被信任，而绑定值是 database/sql 真正会发送的值，绝不是展示字符串。
+// 自定义 Stringer 展示租户 a、携带租户 b 时，语句必须仍然被限定在租户 a：SELECT 查不到
+// 数据，DELETE 也删不掉任何行。
+func TestDisplayStringCannotSpoofTenantScope(t *testing.T) {
+	db := openDB(t, tenant.Options{})
+	seed(t, db,
+		order{TenantID: "a", Code: "mine"},
+		order{TenantID: "b", Code: "theirs"},
+	)
+
+	var got []order
+	err := db.WithContext(ctxFor("a")).
+		Where("tenant_id = ?", spoofedTenant("b")).Find(&got).Error
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("display string spoofed the scope, read %+v", got)
+	}
+
+	res := db.WithContext(ctxFor("a")).
+		Where("tenant_id = ?", spoofedTenant("b")).Delete(&order{})
+	if res.Error != nil {
+		t.Fatalf("Delete: %v", res.Error)
+	}
+	if res.RowsAffected != 0 {
+		t.Fatalf("Delete RowsAffected = %d, want 0", res.RowsAffected)
+	}
+
+	var raw []order
+	if err := db.WithContext(tenant.Without(context.Background())).Find(&raw).Error; err != nil {
+		t.Fatalf("Find all: %v", err)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("rows = %d, want 2 intact: %+v", len(raw), raw)
+	}
+}
+
 // TestWithTenantKeepsAnotherTenantReachable guards the escape hatch: WithTenant
 // sets the effective tenant, so a matching explicit condition is still deduped
 // and the query returns that tenant's rows. Without this, the comparison above

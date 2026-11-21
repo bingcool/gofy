@@ -346,14 +346,19 @@ swoolefy 在 PDO 层**改写 SQL 字符串**来实现租户隔离；gofy 应以 
 租户 a 的请求读出 b 的数据，既不报错也不追加条件——审计 P1-01。
 
 现在 `pinsTenant` / `exprsPinTenant` 除了形状，还要求绑定值等于本次生效租户：
-`clause.Eq.Value`（map / struct）或 `clause.Expr.Vars[0]`（手写 SQL），按字符串形态比较
-（`string` / `[]byte` / `driver.Valuer` / `fmt.Sprint`），所以 `"42"`、`42`、`int64(42)`
-与命名 string 类型是同一个租户。证明不了相等就追加，得到
+`clause.Eq.Value`（map / struct）或 `clause.Expr.Vars[0]`（手写 SQL）。比较的是
+`driver.DefaultParameterConverter` 转换后的形态，也就是 database/sql 真正发给数据库的值：
+只认 `string` / `[]byte` / `int64` / `float64` / `bool` 这些标量结果，`driver.Valuer` 因为
+`Value()` 本身就是绑定契约而受信任。展示字符串一律不参与判断——实现了 `fmt.Stringer`、
+`error` 或 `fmt.Formatter` 的类型若被拿来比较，就会出现"日志里是租户 a、数据库绑定的是
+租户 b"的伪造路径。于是 `"42"`、`42` 与命名 string 类型是同一个租户；认不出的形态返回
+false，代价只是多一个冗余谓词。证明不了相等就追加，得到
 `tenant_id = 'b' AND tenant_id = 'a'`——零行，而不是跨租户读取。
 
 `tenant.WithTenant(ctx, id)` 设定生效租户，因此管理端路径不受影响：显式条件与之相等时仍然
 只绑定一次。回归测试：`TestExistingConditionMustMatchTheContext`（raw SQL / map / struct
-三种写法）与 `TestSameTenant`（值归一化）。
+三种写法）、`TestSameTenant`（值归一化，含展示字符串与绑定值相反的类型）与
+`TestDisplayStringCannotSpoofTenantScope`（Stringer 伪造的 SELECT / DELETE 端到端验证）。
 
 ### 11.4 本轮审计的其他修复（2026-11-21）
 

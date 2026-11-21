@@ -107,6 +107,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `support/tenant`: the tenant dedup no longer trusts a display string. When a
+  caller's WHERE already carried `tenant_id = ?`, the plugin compared the bound
+  value's `fmt.Sprint` output against the effective tenant; a type implementing
+  `fmt.Stringer`, `error` or `fmt.Formatter` could render tenant a while binding
+  tenant b, so the automatic condition was skipped and the statement read — or
+  deleted — another tenant's rows. `sameTenant` now compares the form
+  `driver.DefaultParameterConverter` produces, which is what database/sql
+  actually binds: scalars only, `driver.Valuer` honoured because `Value()` is
+  the binding contract, and any unrecognised shape answers false — the safe
+  direction, which costs one redundant predicate instead of a cross-tenant
+  read. `TestSameTenant` gains the display-string rows in both directions, and
+  `TestDisplayStringCannotSpoofTenantScope` proves a spoofed SELECT returns
+  nothing and a spoofed DELETE removes nothing.
 - `support/sqllog`: masking now maps values for quoted column lists and for
   `IN` lists. `INSERT INTO \`users\` (\`password\`, ...) VALUES (...)` — the shape
   GORM actually emits on MySQL — collected no columns at all, because the

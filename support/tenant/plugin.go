@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
@@ -482,39 +483,45 @@ func isTenantEquality(sql, column string) bool {
 
 // sameTenant reports whether a bound value is the given tenant.
 //
-// Comparison is by string form because the column's Go type belongs to the
-// application: the same tenant may arrive as "42", 42, int64(42) or a named
-// string type. Values implementing driver.Valuer — sql.NullString, uuid.UUID —
-// are asked for their database form first.
+// The comparison uses the form database/sql will bind: the value goes through
+// driver.DefaultParameterConverter, and only scalar results are compared. A
+// display string is never consulted — a type implementing fmt.Stringer, error
+// or fmt.Formatter would otherwise decide the answer while the database sees
+// its underlying value, which is exactly how a spoofed value could skip the
+// tenant condition. driver.Valuer is trusted because Value() is the binding
+// contract itself; anything the converter rejects is false.
 //
 // A false result is always safe: the caller's condition stays and the plugin
 // appends its own, so an unrecognised value costs a redundant predicate instead
 // of a cross-tenant read. A wrong "true" is what would be dangerous, and it
-// requires the two string forms to be identical.
+// requires the two bound forms to be identical.
 // sameTenant 报告绑定值是否就是给定租户。
 //
-// 按字符串形态比较，因为租户列的 Go 类型由应用决定：同一个租户可能是 "42"、42、int64(42)
-// 或一个命名 string 类型。实现了 driver.Valuer 的值（sql.NullString、uuid.UUID）先问它
-// 的数据库形态。
+// 比较用的是 database/sql 真正会绑定的形态：值先经过 driver.DefaultParameterConverter，
+// 只比较标量结果。展示字符串永远不参与判断——否则实现了 fmt.Stringer、error 或
+// fmt.Formatter 的类型会决定答案，而数据库看到的是它的底层值，这正是伪造值跳过租户条件的
+// 路径。driver.Valuer 受信任，因为 Value() 本身就是绑定契约；转换器拒绝的值一律为 false。
 //
 // 返回 false 永远是安全的：调用方的条件保留，插件追加自己的条件，认不出的值只多一个谓词，
-// 不会变成跨租户读取。危险的是错误的 true，而它要求两边字符串完全一致。
+// 不会变成跨租户读取。危险的是错误的 true，而它要求两边的绑定形态完全一致。
 func sameTenant(v any, id string) bool {
-	switch x := v.(type) {
-	case nil:
+	bound, err := driver.DefaultParameterConverter.ConvertValue(v)
+	if err != nil || bound == nil {
 		return false
+	}
+	switch x := bound.(type) {
 	case string:
 		return x == id
 	case []byte:
 		return string(x) == id
-	case driver.Valuer:
-		got, err := x.Value()
-		if err != nil {
-			return false
-		}
-		return sameTenant(got, id)
+	case int64:
+		return strconv.FormatInt(x, 10) == id
+	case float64:
+		return strconv.FormatFloat(x, 'g', -1, 64) == id
+	case bool:
+		return strconv.FormatBool(x) == id
 	}
-	return fmt.Sprint(v) == id
+	return false
 }
 
 func columnName(v any) string {
