@@ -20,7 +20,7 @@ func TestRotatingSinkHourlySwitchesDirectoryAndFile(t *testing.T) {
 		MaxSizeMB:  100,
 		MaxBackups: 7,
 		Compress:   true,
-	}, "")
+	}, "", 0o600)
 	now := time.Date(2026, 11, 6, 23, 10, 0, 0, time.Local)
 	sink.now = func() time.Time { return now }
 
@@ -56,7 +56,7 @@ func TestRotatingSinkDatePlaceholderOrdersDateBeforeStreamDir(t *testing.T) {
 		DateDirMaxAgeDays: 7,
 		MaxSizeMB:         100,
 		LocalTime:         true,
-	}, "")
+	}, "", 0o600)
 	now := time.Date(2026, 11, 6, 23, 10, 0, 0, time.Local)
 	sink.now = func() time.Time { return now }
 
@@ -101,7 +101,7 @@ func TestRotatingSinkPlaceholderPrunesDateRoot(t *testing.T) {
 		DateDirMaxAgeDays: 7,
 		MaxSizeMB:         1,
 		LocalTime:         true,
-	}, rotationModeSize)
+	}, rotationModeSize, 0o600)
 	sink.now = func() time.Time {
 		return time.Date(2026, 11, 6, 9, 0, 0, 0, time.Local)
 	}
@@ -132,7 +132,7 @@ func TestRotatingSinkSizeModeUsesDateDirectory(t *testing.T) {
 		MaxBackups: 7,
 		Compress:   true,
 		LocalTime:  true,
-	}, rotationModeSize)
+	}, rotationModeSize, 0o600)
 	sink.now = func() time.Time {
 		return time.Date(2026, 11, 6, 9, 0, 0, 0, time.Local)
 	}
@@ -170,7 +170,7 @@ func TestRotatingSinkPrunesExpiredDateDirs(t *testing.T) {
 		// DateDirMaxAgeDays 为 0 时使用默认值 7。
 		MaxSizeMB: 1,
 		LocalTime: true,
-	}, rotationModeSize)
+	}, rotationModeSize, 0o600)
 	sink.now = func() time.Time {
 		return time.Date(2026, 11, 6, 9, 0, 0, 0, time.Local)
 	}
@@ -195,4 +195,32 @@ func readLogFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// TestRotatingSinkAppliesAndTightensFilePerm: lumberjack keeps the mode of an
+// existing file, so the sink has to create it with the configured mode first;
+// otherwise an old 0644 survives the upgrade.
+// TestRotatingSinkAppliesAndTightensFilePerm：lumberjack 会沿用已存在文件的权限，
+// 因此 sink 必须先按配置的权限把文件建好；否则旧版本留下的 0644 会一直留着。
+func TestRotatingSinkAppliesAndTightensFilePerm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "info.log")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	sink := newRotatingFileSink(path, RotationConfig{Enabled: true}, "", 0o600)
+	sink.now = func() time.Time { return time.Date(2026, 11, 6, 9, 0, 0, 0, time.Local) }
+	if _, err := sink.Write([]byte("x\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("mode = %o, want 600", perm)
+	}
 }

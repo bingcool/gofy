@@ -496,3 +496,95 @@ func TestCleanupSyncsSQLLogger(t *testing.T) {
 		t.Fatal("cleanup did not sync the SQL logger")
 	}
 }
+
+// stopCounterModule counts Stop calls so cleanup's abandonment branch is
+// observable without a database.
+// stopCounterModule 记录 Stop 次数，让 cleanup 的放弃分支无需数据库即可观测。
+type stopCounterModule struct {
+	name  string
+	stops int
+}
+
+func (m *stopCounterModule) Name() string                   { return m.name }
+func (m *stopCounterModule) Register(*support.Router) error { return nil }
+func (m *stopCounterModule) Stop(context.Context) error {
+	m.stops++
+	return nil
+}
+
+// TestCleanupSkipsModuleStopWhenWorkersAreAbandoned: instances that outlived
+// the drain budget still use the module resources, so stopping them here is
+// exactly the "closed under a running handler" failure P2-02 describes.
+// TestCleanupSkipsModuleStopWhenWorkersAreAbandoned：超出 drain 预算的实例仍在
+// 使用模块资源，在这里停止它们正是 P2-02 描述的"在运行中的 handler 脚下关闭"。
+func TestCleanupSkipsModuleStopWhenWorkersAreAbandoned(t *testing.T) {
+	app, err := New(WithName("cleanup-abandoned"), WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m := &stopCounterModule{name: "metrics-reporter"}
+	app.started = []support.Module{m}
+	app.abandonWorkers([]string{"orders"})
+
+	if err := app.cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if m.stops != 0 {
+		t.Fatalf("module stopped %d times although a worker instance is still running", m.stops)
+	}
+}
+
+// TestCleanupStopsModulesWhenNothingWasAbandoned pins the normal path.
+// TestCleanupStopsModulesWhenNothingWasAbandoned 固定正常路径。
+func TestCleanupStopsModulesWhenNothingWasAbandoned(t *testing.T) {
+	app, err := New(WithName("cleanup-normal"), WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m := &stopCounterModule{name: "metrics-reporter"}
+	app.started = []support.Module{m}
+
+	if err := app.cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if m.stops != 1 {
+		t.Fatalf("module stopped %d times, want 1", m.stops)
+	}
+}
+
+// TestCleanupWaitsForPIDRefreshBeforeRemovingTheFile: an in-flight refresh
+// renames a temp file over the pid file, so deleting first lets the file come
+// back — possibly on top of a new instance's record.
+// TestCleanupWaitsForPIDRefreshBeforeRemovingTheFile：在途刷新会把临时文件 rename
+// 到 pid 文件上，先删就会让文件复活——甚至盖住新实例的记录。
+func TestCleanupWaitsForPIDRefreshBeforeRemovingTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.pid")
+	app, err := New(
+		WithName("pid-refresh-test"),
+		WithLogger(zap.NewNop()),
+		WithPIDFile(path),
+		WithPIDRefreshInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	app.pidPath = path
+	if err := pidfile.WriteRecord(path, pidfile.NewRecord(os.Getpid()), app.opts.pidPerm); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	app.startPIDRefresh(zap.NewNop())
+	time.Sleep(20 * time.Millisecond) // let several ticks run
+
+	if err := app.cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	select {
+	case <-app.pidRefreshExited:
+	default:
+		t.Fatal("cleanup returned before the refresh goroutine exited")
+	}
+	time.Sleep(20 * time.Millisecond) // several further intervals
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("pid file reappeared after cleanup: %v", err)
+	}
+}

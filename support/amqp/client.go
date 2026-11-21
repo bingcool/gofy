@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
+	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
@@ -34,6 +36,12 @@ type Client struct {
 	// next 是最后连接成功的主机下标，重连时从这里开始尝试。
 	next   int
 	closed bool
+
+	// dialing is non-nil while one goroutine is dialing. Other callers wait on
+	// it instead of dialing in parallel, and Close is never blocked by a dial.
+	// dialing 非空表示已有 goroutine 正在拨号。其它调用方等待它而不是并行拨号，
+	// Close 也不会被拨号阻塞。
+	dialing chan struct{}
 }
 
 // ErrClientClosed is returned once Close has been called.
@@ -61,9 +69,12 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	client := &Client{cfg: cfg, managed: true}
-	if err := client.connectLocked(ctx); err != nil {
+	conn, index, err := client.dial(ctx, 0)
+	if err != nil {
 		return nil, err
 	}
+	client.conn = conn
+	client.next = index
 	return client, nil
 }
 
@@ -76,24 +87,33 @@ func Wrap(conn *amqp091.Connection) *Client {
 	return &Client{conn: conn}
 }
 
-// Channel opens a channel, rebuilding the connection first when it was closed
-// unexpectedly. It reports ErrClientClosed after Close and ErrNotConfigured
-// when a wrapped connection is no longer usable.
-// Channel 打开一个 channel，连接意外关闭时先重建连接。Close 之后返回
-// ErrClientClosed；Wrap 的连接不可用时返回 ErrNotConfigured。
+// Channel opens a channel with a background context. See ChannelContext.
+// Channel 用后台 context 打开一个 channel，语义见 ChannelContext。
 func (c *Client) Channel() (*amqp091.Channel, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.ChannelContext(context.Background())
+}
 
-	if c.closed {
-		return nil, ErrClientClosed
+// ChannelContext opens a channel, rebuilding the connection first when it was
+// closed unexpectedly. It reports ErrClientClosed after Close and
+// ErrNotConfigured when a wrapped connection is no longer usable.
+//
+// ctx bounds the reconnect, not the channel itself: cancelling it aborts a
+// dial in flight, so shutdown does not have to wait out every host. Dialing
+// happens outside the client lock, so a concurrent Close is never blocked.
+// ChannelContext 打开一个 channel，连接意外关闭时先重建。Close 之后返回
+// ErrClientClosed；Wrap 的连接不可用时返回 ErrNotConfigured。
+//
+// ctx 约束的是重连而不是 channel 本身：取消它会中止在途拨号，停机不必等完
+// 每个 host。拨号在客户端锁之外进行，因此并发的 Close 不会被阻塞。
+func (c *Client) ChannelContext(ctx context.Context) (*amqp091.Channel, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if c.conn == nil || c.conn.IsClosed() {
-		if err := c.connectLocked(context.Background()); err != nil {
-			return nil, err
-		}
+	conn, err := c.connection(ctx)
+	if err != nil {
+		return nil, err
 	}
-	ch, err := c.conn.Channel()
+	ch, err := conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("amqp: open channel: %w", err)
 	}
@@ -143,35 +163,133 @@ func (c *Client) Config() Config {
 	return out
 }
 
-func (c *Client) connectLocked(ctx context.Context) error {
-	if c.closed {
-		return ErrClientClosed
-	}
-	if !c.managed {
-		return ErrNotConfigured
-	}
-
-	var errs []error
-	for i := 0; i < len(c.cfg.Hosts); i++ {
-		if err := ctx.Err(); err != nil {
-			return err
+// connection returns a live connection, dialing one when needed. Only one
+// goroutine dials at a time; the others wait for its result and re-check,
+// because a dial that fails for the leader may still succeed on a retry with
+// another context.
+// connection 返回可用连接，必要时拨号建立。同一时刻只有一个 goroutine 拨号，其余
+// 等待结果后重新检查：领头的拨号失败不代表带另一个 context 的重试也会失败。
+func (c *Client) connection(ctx context.Context) (*amqp091.Connection, error) {
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return nil, ErrClientClosed
 		}
-		index := (c.next + i) % len(c.cfg.Hosts)
-		host := c.cfg.Hosts[index]
-		conn, err := amqp091.DialConfig(host.uri(), amqp091.Config{
-			Heartbeat: c.cfg.Heartbeat,
-			Locale:    c.cfg.Locale,
-			Dial:      amqp091.DefaultDial(c.cfg.ConnectionTimeout),
-		})
-		if err == nil {
+		if !c.managed {
+			c.mu.Unlock()
+			return nil, ErrNotConfigured
+		}
+		if c.conn != nil && !c.conn.IsClosed() {
+			conn := c.conn
+			c.mu.Unlock()
+			return conn, nil
+		}
+		if wait := c.dialing; wait != nil {
+			c.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		wait := make(chan struct{})
+		c.dialing = wait
+		start := c.next
+		c.mu.Unlock()
+
+		conn, index, err := c.dial(ctx, start)
+
+		c.mu.Lock()
+		c.dialing = nil
+		closed := c.closed
+		if err == nil && !closed {
 			c.conn = conn
 			c.next = index
-			return nil
+		}
+		close(wait)
+		c.mu.Unlock()
+
+		if err != nil {
+			return nil, err
+		}
+		if closed {
+			// Close ran while the dial was in flight: the new connection must
+			// not outlive the client.
+			// 拨号期间 Close 已经执行：新连接不能比客户端活得更久。
+			_ = conn.Close()
+			return nil, ErrClientClosed
+		}
+		return conn, nil
+	}
+}
+
+// dial tries every host once, starting at start. Each attempt is bounded by
+// ConnectionTimeout and by ctx, so a cancelled caller stops before the next
+// host instead of waiting out the whole list.
+// dial 从 start 开始把每个 host 试一次。每次尝试都受 ConnectionTimeout 与 ctx
+// 约束，调用方取消后不会继续尝试后续 host。
+func (c *Client) dial(ctx context.Context, start int) (*amqp091.Connection, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hosts := c.cfg.Hosts
+	var errs []error
+	for i := 0; i < len(hosts); i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		index := (start + i) % len(hosts)
+		host := hosts[index]
+		conn, err := c.dialHost(ctx, host)
+		if err == nil {
+			return conn, index, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, 0, ctxErr
 		}
 		// Only the address is kept, so a URI password never enters the error
 		// chain.
 		// 只带 address，避免把 URI 里的密码写进错误链。
 		errs = append(errs, fmt.Errorf("%s: %w", host.address(), err))
 	}
-	return fmt.Errorf("amqp: connect failed: %w", errors.Join(errs...))
+	return nil, 0, fmt.Errorf("amqp: connect failed: %w", errors.Join(errs...))
+}
+
+func (c *Client) dialHost(ctx context.Context, host Host) (*amqp091.Connection, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, c.cfg.ConnectionTimeout)
+	var stopInterrupt func() bool
+	defer func() {
+		// Unregister before cancel: cancelling dialCtx would otherwise close
+		// the connection the handshake just established.
+		// 先注销再 cancel：否则 cancel 会关掉刚握手成功的连接。
+		if stopInterrupt != nil {
+			stopInterrupt()
+		}
+		cancel()
+	}()
+
+	conn, err := amqp091.DialConfig(host.uri(), amqp091.Config{
+		Heartbeat: c.cfg.Heartbeat,
+		Locale:    c.cfg.Locale,
+		Dial: func(network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			nc, err := d.DialContext(dialCtx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			// The AMQP handshake runs on this connection; bound it and let a
+			// cancelled dial interrupt it instead of waiting for the deadline.
+			// AMQP 握手跑在这条连接上：给它一个上限，并让取消能打断握手，
+			// 而不是等到 deadline。
+			if err := nc.SetDeadline(time.Now().Add(c.cfg.ConnectionTimeout)); err != nil {
+				_ = nc.Close()
+				return nil, err
+			}
+			stopInterrupt = context.AfterFunc(dialCtx, func() { _ = nc.Close() })
+			return nc, nil
+		},
+	})
+	return conn, err
 }

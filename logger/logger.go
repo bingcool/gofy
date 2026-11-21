@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +33,14 @@ type Config struct {
 	// log: says where entries go, sql_log: says what a SQL entry contains.
 	// SQLOutputs 只接收 SQL 条目；为空表示复用应用 logger。它和 AccessOutputs 并列，
 	// 因为两者都是"去哪"：`log:` 管日志去哪，`sql_log:` 管 SQL 条目记什么。
-	SQLOutputs []string          `yaml:"sql_outputs"`
-	TimeLayout string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
+	SQLOutputs []string `yaml:"sql_outputs"`
+	TimeLayout string   `yaml:"time_layout" default:"2006-01-02 15:04:05"`
+	// FilePerm is the octal mode for log files, for example "0600". It applies
+	// to files that already exist too, because os.OpenFile only honors perm
+	// when it creates one. Empty uses 0600.
+	// FilePerm 是日志文件的八进制权限，例如 "0600"。它同样作用于已存在的文件：
+	// os.OpenFile 的 perm 只在创建时生效。留空表示 0600。
+	FilePerm   string            `yaml:"file_perm" default:"0600"`
 	Rotation   RotationConfig    `yaml:"rotation"`
 	BaseFields map[string]string `yaml:"base_fields"`
 }
@@ -89,6 +96,9 @@ func (c Config) Validate() error {
 	if strings.ContainsAny(c.Rotation.DateLayout, `/\`) {
 		return fmt.Errorf("logger: invalid date_layout %q (must not contain path separators)", c.Rotation.DateLayout)
 	}
+	if _, err := parseFilePerm(c.FilePerm); err != nil {
+		return err
+	}
 	for _, out := range append(append(append(append(append([]string{}, c.Outputs...), c.ErrorOutputs...), c.SystemErrorOutputs...), c.AccessOutputs...), c.SQLOutputs...) {
 		if strings.TrimSpace(out) == "" {
 			return errors.New("logger: output path must not be empty")
@@ -114,14 +124,14 @@ func New(cfg Config) (*zap.Logger, error) {
 
 	cores := make([]zapcore.Core, 0, len(outputs)+len(cfg.ErrorOutputs))
 	for _, out := range outputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
+		sink, file, err := openSink(out, cfg, os.Stdout, "")
 		if err != nil {
 			return nil, err
 		}
 		cores = append(cores, zapcore.NewCore(newSinkEncoder(cfg, file), sink, level))
 	}
 	for _, out := range cfg.ErrorOutputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stderr, rotationModeSize)
+		sink, file, err := openSink(out, cfg, os.Stderr, rotationModeSize)
 		if err != nil {
 			return nil, err
 		}
@@ -146,7 +156,7 @@ func NewSystem(cfg Config) (*zap.Logger, error) {
 	}
 	cores := make([]zapcore.Core, 0, len(cfg.SystemErrorOutputs))
 	for _, out := range cfg.SystemErrorOutputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stderr, rotationModeSize)
+		sink, file, err := openSink(out, cfg, os.Stderr, rotationModeSize)
 		if err != nil {
 			return nil, err
 		}
@@ -171,7 +181,7 @@ func NewAccess(cfg Config) (*zap.Logger, error) {
 	}
 	cores := make([]zapcore.Core, 0, len(cfg.AccessOutputs))
 	for _, out := range cfg.AccessOutputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
+		sink, file, err := openSink(out, cfg, os.Stdout, "")
 		if err != nil {
 			return nil, err
 		}
@@ -197,7 +207,7 @@ func NewSQL(cfg Config) (*zap.Logger, error) {
 	}
 	cores := make([]zapcore.Core, 0, len(cfg.SQLOutputs))
 	for _, out := range cfg.SQLOutputs {
-		sink, file, err := openSink(out, cfg.Rotation, os.Stdout, "")
+		sink, file, err := openSink(out, cfg, os.Stdout, "")
 		if err != nil {
 			return nil, err
 		}
@@ -316,13 +326,41 @@ func newSinkEncoder(cfg Config, file *os.File) zapcore.Encoder {
 	return encoder
 }
 
+// defaultFilePerm keeps log files private. Access logs can record queries and
+// SQL logs can carry statements, so group and other read access is opt-in
+// through file_perm rather than the default.
+// defaultFilePerm 让日志文件默认私有。访问日志可能记录 query，SQL 日志可能带语句，
+// 因此同组与其他用户的读权限要通过 file_perm 显式开启，而不是默认给予。
+const defaultFilePerm os.FileMode = 0o600
+
+func parseFilePerm(value string) (os.FileMode, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultFilePerm, nil
+	}
+	digits := strings.TrimPrefix(strings.TrimPrefix(value, "0o"), "0O")
+	n, err := strconv.ParseUint(digits, 8, 32)
+	if err != nil || n > 0o777 {
+		return 0, fmt.Errorf("logger: invalid file_perm %q (want octal like \"0600\")", value)
+	}
+	return os.FileMode(n), nil
+}
+
+func (c Config) filePerm() os.FileMode {
+	perm, err := parseFilePerm(c.FilePerm)
+	if err != nil {
+		return defaultFilePerm
+	}
+	return perm
+}
+
 // openSink builds one output. mode is "" for info outputs (they follow
 // Rotation.Mode) and "size" for error streams. The second result is the console
 // file (stdout/stderr) or nil for file sinks, which never get ANSI colors.
 // openSink 构建单个输出。mode 为空表示 info 输出（跟随 Rotation.Mode），传 "size"
 // 表示错误流。第二个返回值是控制台文件（stdout/stderr），文件 sink 时为 nil，
 // 调用方据此判断该输出是否允许着色。
-func openSink(target string, rotation RotationConfig, fallback *os.File, mode string) (zapcore.WriteSyncer, *os.File, error) {
+func openSink(target string, cfg Config, fallback *os.File, mode string) (zapcore.WriteSyncer, *os.File, error) {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "stdout":
 		return zapcore.AddSync(os.Stdout), os.Stdout, nil
@@ -331,8 +369,10 @@ func openSink(target string, rotation RotationConfig, fallback *os.File, mode st
 	case "":
 		return zapcore.AddSync(fallback), fallback, nil
 	}
-	if rotation.Enabled {
-		return zapcore.AddSync(newRotatingFileSink(target, rotation, mode)), nil, nil
+	perm := cfg.filePerm()
+	rotation := cfg.Rotation
+	if cfg.Rotation.Enabled {
+		return zapcore.AddSync(newRotatingFileSink(target, cfg.Rotation, mode, perm)), nil, nil
 	}
 	// With rotation off, {date} is expanded only once at open time so the literal
 	// token never ends up in the file name.
@@ -345,9 +385,16 @@ func openSink(target string, rotation RotationConfig, fallback *os.File, mode st
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return nil, nil, fmt.Errorf("logger: create dir for %s: %w", target, err)
 	}
-	f, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, perm)
 	if err != nil {
 		return nil, nil, fmt.Errorf("logger: open %s: %w", target, err)
+	}
+	// The mode above only applies to a newly created file; an existing one
+	// keeps whatever it had, including a 0644 left by an older release.
+	// 上面的 perm 只对新建文件生效；已存在的文件保留原有权限，包括旧版本留下的 0644。
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("logger: chmod %s: %w", target, err)
 	}
 	return zapcore.AddSync(f), nil, nil
 }

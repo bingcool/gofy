@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -66,9 +67,33 @@ func NewClient(cfg Config) (*Client, error) {
 // Pod IP 或内网域名），经 HTTP_PROXY 转发会把"注册中心不可达"变成代理自己的错误——
 // 更糟的是变成一次超时，再被发现的节流窗口缓存下来。
 func newHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := defaultTransport()
 	transport.Proxy = nil
 	return &http.Client{Transport: transport}
+}
+
+// defaultTransport clones the process default so its dialer timeouts and HTTP/2
+// settings survive. The replacement is not necessarily an *http.Transport — a
+// test or an APM SDK may install its own RoundTripper — and a zero-value
+// Transport would dial without any timeout, which is harder to diagnose than
+// the panic it replaces. The fallback therefore carries its own dialer.
+// defaultTransport 复制进程默认 Transport，保留拨号超时与 HTTP/2 设置。替换实现
+// 不一定是 *http.Transport——测试或 APM SDK 可能安装自己的 RoundTripper——而零值
+// Transport 的拨号没有超时，比它替代的 panic 更难排查，因此兜底自带 Dialer。
+func defaultTransport() *http.Transport {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		return base.Clone()
+	}
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 }
 
 // Config returns the normalized config used by the client.

@@ -12,7 +12,7 @@
 > 与端到端运行结果。Rev.2 的复核环境报告已跑过基线验证，但未附日志；本次执行环境仍无法复核，见 §0 与 §6。
 > 每条发现都给出了可复核的 `文件:行号`；修复上线前请按 §6 的建议命令重跑一遍。
 
-## 0. 修订记录（Rev.2–Rev.5，2026-11-21）
+## 0. 修订记录（Rev.2–Rev.6，2026-11-21）
 
 Rev.2 由主审在 `3a6a851` 上逐条回源码复核。复核环境报告该提交在入库前已通过
 `go build ./...`、`go vet ./...`、`go test ./... -count=1` 与改动包的 `-race`；该结论未附日志，
@@ -60,6 +60,23 @@ Rev.3 只改两处**修订理由本身**，发现、分级与修复状态不变�
 | P3-01 影响 | 成立，但停机路径需再精确 | `stopPIDFile` 的顺序是 `ReadRecord` → `process.Alive`（`stop.go:89-92`）→ `Verify`（`:100-122`）。陈旧记录指向已退进程时先命中 `Alive=false`，报 `ErrNotRunning` 并删文件；`IdentityUnknown`（不带 `--force` 即拒绝）要求 pid 仍存活但无法验证，是另一条路径。另补：同配置下新实例的刷新 tick 会覆盖陈旧记录，最长存活一个 `pidRefresh` 周期 |
 | O-02 | 成立 | `Runner.Run` 按实例各起一个 goroutine（`runner.go:236-242`），每个实例的 `Run` 调用 `start → NewProcessor`（`consume.go:64,77`），因此实例数 N = Processor 数 N = `ensureSchema` 次数 N；原否定句确实会让读者以为重复次数变少 |
 
+### 0.4 Rev.6 修复（2026-11-21 18:38）
+
+八条 P2/P3 中七条已修，一条证伪；每条新用例都先在旧实现（或去掉该修复的版本）上确认失败。
+优化项 O-01…O-05 未动。
+
+| 编号 | 改动 | 验证 |
+|---|---|---|
+| P2-01 | `Client.ChannelContext(ctx)`，`Channel()` 退化为 `context.Background()` 包装；拨号移出 `c.mu`，用 `dialing` 通道合并并发重连；每 host 一次 `WithTimeout`，并用 `context.AfterFunc` 让取消能打断握手；`consumeOnce` 与 `Publish` 传入各自 ctx | `client_context_test.go`：取消后 100ms 内返回；Close 不再等 5s 拨号 |
+| P2-02 | `Runner.Abandoned()` 记录 drain 超时；宿主把被放弃的分组交给 `App.abandonWorkers`；`cleanup` 命中时跳过模块 Stop、DB 关闭与遥测 Shutdown，只 flush 日志 | `runner_abandon_test.go`（2 例）、`start_internal_test.go`（2 例） |
+| P2-03 | `defaultTransport()` 用 comma-ok 断言，失败时回落到带 30s Dialer、`ForceAttemptHTTP2` 的基线 Transport | `client_transport_test.go`：替换全局 Transport 后不再 panic，且 `DialContext` 非空 |
+| P2-04 | 展开改在 `yaml.Node` 的字符串标量上；普通标量替换后清 tag 让类型重新推断，引号标量保持字符串；无占位符的文件原样返回 | `config/load_env_test.go`：多行 PEM、`" #"`、`: `、`- `、`{}` 均保持单值；`port: ${PORT}` 仍解码为 int |
+| P3-01 | `pidRefreshExited` 在 goroutine 返回时关闭，`cleanup` 先 join 再 `RemoveIfOwner`；新增 `pidfile.WriteRecordIfOwner`，文件属于他人时刷新停止 | `start_internal_test.go`：去掉 join 即失败；`pidfile_test.go`：外来 pid 拒绝写入 |
+| P3-02 | **证伪**：启动与 Reload 都把注入模块排在工厂模块之后，逆序停止时两者一致，从未出现"Reload 后先停" | `reload_order_test.go` 固定最终停止顺序为 `injected-mod → factory-mod` |
+| P3-04 | `bytes` 在 `Size() < 0` 时归零 | `middleware_test.go`：204 请求记录 0 而不是 -1 |
+| P3-05 | `log.file_perm`（默认 `0600`）；直写路径与轮转 sink 都对已存在文件 `Chmod`；lumberjack 前先按目标权限建好文件 | `logger_test.go`（4 例）、`rotation_internal_test.go`（1 例）：新建、收紧旧文件、自定义 0640 均生效 |
+
+
 
 ---
 
@@ -81,19 +98,19 @@ Rev.3 只改两处**修订理由本身**，发现、分级与修复状态不变�
 
 ### 1.1 问题清单与修复状态
 
-本轮为只读审计，未改动任何源码，因此下表 13 条发现的初始状态均为「未修复」；
-每修完一条请把对应行的「修复状态」改为「已修复」，并补上提交号。
+初版为只读审计。Rev.6 已修复 8 条中的 7 条，并证伪 1 条（P3-02）；5 条优化项
+（O-01…O-05）仍是建议，本轮未实施。修复范围与验证见 §0.4。
 
 | 编号 | 级别 | 问题 | 定位 | 修复状态 |
 |---|---|---|---|---|
-| P2-01 | P2 | AMQP 重连忽略调用方 ctx，且在持锁状态下拨号 | `support/amqp/client.go:84-104,146-176` | 未修复 |
-| P2-02 | P2 | drain 超时后仍关闭 DB/logger，实例 goroutine 可能仍在运行 | `support/worker/runner.go:262-284`；`worker_host.go:320`；`start.go:1053` | 未修复 |
-| P2-03 | P2 | Nacos 对 `http.DefaultTransport` 做无保护类型断言 | `support/nacos/client.go:69` | 未修复 |
-| P3-01 | P3 | pid 刷新 goroutine 未 join 就删除 pid 文件 | `start.go:757-783,1077-1084` | 未修复 |
-| P3-02 | P3 | Reload 后注入模块的停止顺序发生变化 | `reload.go:276-278,312`；`start.go:1041` | 未修复 |
-| P2-04（原 P3-03） | P2 | 配置在 YAML 解析前展开 `${VAR}`，多行值可破坏结构 | `config/load.go:159-164,168-203` | 未修复 |
-| P3-04 | P3 | 未写响应体时访问日志记录 `bytes=-1` | `support/middleware/accesslog.go:200` | 未修复 |
-| P3-05 | P3 | 日志文件以 0644 创建 | `logger/logger.go:348`；`logger/rotation.go:200` | 未修复 |
+| P2-01 | P2 | AMQP 重连忽略调用方 ctx，且在持锁状态下拨号 | `support/amqp/client.go:84-104,146-176` | ✅ 已修复 |
+| P2-02 | P2 | drain 超时后仍关闭 DB/logger，实例 goroutine 可能仍在运行 | `support/worker/runner.go:262-284`；`worker_host.go:320`；`start.go:1053` | ✅ 已修复 |
+| P2-03 | P2 | Nacos 对 `http.DefaultTransport` 做无保护类型断言 | `support/nacos/client.go:69` | ✅ 已修复 |
+| P3-01 | P3 | pid 刷新 goroutine 未 join 就删除 pid 文件 | `start.go:757-783,1077-1084` | ✅ 已修复 |
+| P3-02 | P3 | Reload 后注入模块的停止顺序发生变化 | `reload.go:276-278,312`；`start.go:1041` | ❌ 不成立（误报） |
+| P2-04（原 P3-03） | P2 | 配置在 YAML 解析前展开 `${VAR}`，多行值可破坏结构 | `config/load.go:159-164,168-203` | ✅ 已修复 |
+| P3-04 | P3 | 未写响应体时访问日志记录 `bytes=-1` | `support/middleware/accesslog.go:200` | ✅ 已修复 |
+| P3-05 | P3 | 日志文件以 0644 创建 | `logger/logger.go:348`；`logger/rotation.go:200` | ✅ 已修复 |
 | O-01 | 优化 | `HeaderFromContext` 为取一个 header 复制整张表 | `support/headerpropagation/headerpropagation.go:230-251` | 未修复 |
 | O-02 | 优化 | 每个 `Processor` 重复执行台账建表检查 | `support/consumer/consume.go:984-993` | 未修复 |
 | O-03 | 优化 | AMQP 重连循环每次迭代分配 timer | `support/amqp/queue.go:340` | 未修复 |
@@ -306,7 +323,8 @@ transport.Proxy = nil
 
 **定位**
 - `start.go:582-594`：启动时 `a.started` 按“工厂模块 → 注入模块”的注册顺序排列。
-- `start.go:1041-1051`：`cleanup` 逆序停止，因此启动时注入模块最后停止。
+- `start.go:1041-1051`：`cleanup` 逆序停止。~~因此启动时注入模块最后停止。~~
+  （Rev.6 更正：逆序停止意味着列表**末位先停**，注入模块在启动时就已经是先停的那个。）
 - `reload.go:276-278`：`allStarted = append(started, injectedStarted...)`，
   注入模块被移到列表末尾；`reload.go:312` 写回 `a.started`。
 
@@ -322,6 +340,16 @@ Reload 之后注入模块变成**最先**停止，可能先于它依赖的模块
 **建议**
 不要用“两段拼接”表达顺序：为每个模块记录稳定的序号（启动与 Reload 共用），
 或把注入模块固定放在列表头部（逆序时最后停止）；补一条“Reload 后停止顺序与启动一致”的断言。
+
+**Rev.6 复核：不成立（误报）**
+- `cleanup` 从 `len(a.started)-1` 往前停止，列表末位最先停。启动时
+  `a.started = [工厂模块..., 注入模块...]`（`buildModulesWith` 先工厂后注入），
+  注入模块本来就是先停的那个。
+- `reload.go:276-278` 拼出的 `allStarted` 同样是 `[本次启动的工厂模块..., 注入模块...]`，
+  逆序后仍是注入先停：两条轨迹的顺序一致，不存在“Reload 后变了”。
+- `reload_order_test.go` 在**未改任何源码**的情况下通过，断言最终停止顺序为
+  `injected-mod → factory-mod`，可作为该结论的回归守卫。
+- 结论：本条不需要改代码；原“启动时注入最后停止”的推理是把逆序停止读成了顺序停止。
 
 ---
 

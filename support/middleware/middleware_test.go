@@ -544,3 +544,25 @@ func TestAccessLogRejectsNegativeMaxPathLength(t *testing.T) {
 		t.Fatalf("path = %v, want /orders", got)
 	}
 }
+
+// TestAccessLogReportsZeroBytesWhenNoBodyWasWritten: gin returns -1 from
+// Writer.Size() until something is written, and a 204 never writes. Logging -1
+// poisons byte-based dashboards.
+// TestAccessLogReportsZeroBytesWhenNoBodyWasWritten：gin 的 Writer.Size() 在写入
+// 之前返回 -1，而 204 从不写入。记录 -1 会污染按字节聚合的看板。
+func TestAccessLogReportsZeroBytesWhenNoBodyWasWritten(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	engine := newGin()
+	engine.Use(middleware.AccessLog(zap.New(core), middleware.DefaultAccessLogOptions()))
+	engine.GET("/no-content", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/no-content", nil))
+
+	entries := logs.FilterMessage("http access").All()
+	if len(entries) != 1 {
+		t.Fatalf("access log entries = %d, want 1", len(entries))
+	}
+	if got := entries[0].ContextMap()["bytes"]; got != int64(0) {
+		t.Fatalf("bytes = %v, want 0", got)
+	}
+}

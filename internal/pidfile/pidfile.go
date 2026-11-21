@@ -4,6 +4,7 @@ package pidfile
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,6 +114,37 @@ func Resolve(path, workDir string) string {
 // Record，这样之后的 `stop` 才能分辨被复用的 pid 与原进程。
 func Write(path string, pid int, perm os.FileMode) error {
 	return WriteRecord(path, Record{PID: pid}, perm)
+}
+
+// ErrNotOwner is returned by WriteRecordIfOwner when the file names another
+// process.
+// ErrNotOwner 表示文件属于另一个进程，WriteRecordIfOwner 因此拒绝写入。
+var ErrNotOwner = errors.New("pidfile: owned by another process")
+
+// WriteRecordIfOwner writes record only when path is absent or already names
+// record.PID.
+//
+// A plain rewrite is wrong for a periodic refresh: cleanup may have just
+// removed the file, or a new instance may have written its own record, and
+// renaming over either undoes that work. The read and the rename are not one
+// atomic step, so this narrows rather than eliminates the window — the caller
+// still has to stop refreshing before it deletes.
+// WriteRecordIfOwner 只在文件不存在或已记录 record.PID 时写入。
+//
+// 周期性刷新不能用无条件重写：cleanup 可能刚删掉文件，或新实例已写入自己的记录，
+// rename 覆盖过去就把对方的工作抹掉了。读取与 rename 不是一步原子操作，因此这只能
+// 缩小而不是消除窗口——调用方仍必须在删除前停止刷新。
+func WriteRecordIfOwner(path string, record Record, perm os.FileMode) error {
+	current, err := Read(path)
+	switch {
+	case err == nil:
+		if current != record.PID {
+			return ErrNotOwner
+		}
+	case !os.IsNotExist(err):
+		return err
+	}
+	return WriteRecord(path, record, perm)
 }
 
 // WriteRecord atomically writes record to path. The parent directory is created

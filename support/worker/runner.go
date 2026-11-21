@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -94,7 +95,17 @@ type Runner struct {
 	// 上报的分组在 Run 开始时即就绪，轮询任务因此保持原有行为。
 	ready    chan struct{}
 	readyOne sync.Once
+
+	// abandoned records that Run returned while instances were still working.
+	// The host must not tear down resources those instances are using.
+	// abandoned 记录 Run 返回时仍有实例在跑。宿主不能拆除这些实例正在使用的资源。
+	abandoned atomic.Bool
 }
+
+// Abandoned reports whether Run returned with instances still running, which
+// only happens when the drain budget was exhausted.
+// Abandoned 报告 Run 返回时是否仍有实例在跑；只有 drain 预算耗尽才会如此。
+func (r *Runner) Abandoned() bool { return r.abandoned.Load() }
 
 // NewRunner validates the group and its concurrency map.
 // NewRunner 校验分组与并发配置。
@@ -262,6 +273,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	stopRuns()
 	drained := r.wait(done, cfg.DrainTimeout+time.Second)
 	stopDrain()
+	if !drained {
+		// Instances are still inside their handlers: remember it so the host
+		// keeps the database and module resources open until the process exits.
+		// 实例仍在 handler 里：记下来，让宿主把数据库与模块资源留到进程退出。
+		r.abandoned.Store(true)
+	}
 
 	if fatal == nil {
 		// fail may have fired while we were draining, or while select was

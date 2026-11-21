@@ -167,7 +167,7 @@ func (q *Queue) Publish(ctx context.Context, body []byte, opts PublishOptions) e
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	ch, err := q.channel()
+	ch, err := q.channel(ctx)
 	if err != nil {
 		return err
 	}
@@ -369,7 +369,7 @@ func (q *Queue) consumeQueue() string {
 }
 
 func (q *Queue) consumeOnce(ctx context.Context, handler HandlerFunc, opts ConsumeOptions) error {
-	ch, err := q.client.Channel()
+	ch, err := q.client.ChannelContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -496,11 +496,11 @@ func (o ConsumeOptions) withDefaults() ConsumeOptions {
 	return o
 }
 
-func (q *Queue) channel() (*amqp091.Channel, error) {
+func (q *Queue) channel(ctx context.Context) (*amqp091.Channel, error) {
 	if q.ch != nil && !q.ch.IsClosed() {
 		return q.ch, nil
 	}
-	ch, err := q.client.Channel()
+	ch, err := q.client.ChannelContext(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -1328,6 +1328,7 @@ type Config struct {
     SystemErrorOutputs []string          `yaml:"system_error_outputs"`        // 仅框架捕获的系统错误
     AccessOutputs      []string          `yaml:"access_outputs"`              // 仅 HTTP 访问日志，为空时复用应用 logger
     TimeLayout         string            `yaml:"time_layout" default:"2006-01-02 15:04:05"`
+    FilePerm           string            `yaml:"file_perm" default:"0600"`   // 八进制；同时收紧已存在的文件
     Rotation           RotationConfig    `yaml:"rotation"`
     BaseFields         map[string]string `yaml:"base_fields"`
 }

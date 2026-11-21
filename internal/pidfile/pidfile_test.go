@@ -1,6 +1,7 @@
 package pidfile_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -177,5 +178,51 @@ func TestVerifyDetectsRecycledPID(t *testing.T) {
 	record.Token = "different-process"
 	if got := record.Verify(); got != pidfile.IdentityMismatch {
 		t.Fatalf("Verify = %v, want IdentityMismatch for a token that cannot be the current process", got)
+	}
+}
+
+// TestWriteRecordIfOwnerRefusesAForeignFile pins the guard that keeps a refresh
+// from overwriting a newer instance's record.
+// TestWriteRecordIfOwnerRefusesAForeignFile 固定"刷新不得覆盖新实例记录"这一保护。
+func TestWriteRecordIfOwnerRefusesAForeignFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.pid")
+	if err := pidfile.Write(path, 4242, 0o640); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	err := pidfile.WriteRecordIfOwner(path, pidfile.NewRecord(9999), 0o640)
+	if !errors.Is(err, pidfile.ErrNotOwner) {
+		t.Fatalf("WriteRecordIfOwner(foreign) = %v, want ErrNotOwner", err)
+	}
+	pid, readErr := pidfile.Read(path)
+	if readErr != nil {
+		t.Fatalf("Read: %v", readErr)
+	}
+	if pid != 4242 {
+		t.Fatalf("pid = %d, want the original 4242", pid)
+	}
+}
+
+// TestWriteRecordIfOwnerCreatesAndRewritesItsOwnFile covers the two allowed
+// paths: the first write and a later refresh.
+// TestWriteRecordIfOwnerCreatesAndRewritesItsOwnFile 覆盖两条允许路径：首次写入与
+// 之后的刷新。
+func TestWriteRecordIfOwnerCreatesAndRewritesItsOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.pid")
+
+	if err := pidfile.WriteRecordIfOwner(path, pidfile.NewRecord(4242), 0o640); err != nil {
+		t.Fatalf("WriteRecordIfOwner(missing file): %v", err)
+	}
+	if err := pidfile.WriteRecordIfOwner(path, pidfile.NewRecord(4242), 0o640); err != nil {
+		t.Fatalf("WriteRecordIfOwner(own file): %v", err)
+	}
+	pid, err := pidfile.Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if pid != 4242 {
+		t.Fatalf("pid = %d, want 4242", pid)
 	}
 }

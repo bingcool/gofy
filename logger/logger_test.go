@@ -377,3 +377,95 @@ func TestNopAndSync(t *testing.T) {
 		t.Fatalf("Sync(Nop) = %v", err)
 	}
 }
+
+// TestNewCreatesPrivateLogFiles: access logs can record queries and SQL logs
+// can carry statements, so the default mode must not be world-readable.
+// TestNewCreatesPrivateLogFiles：访问日志可能记录 query，SQL 日志可能带语句，
+// 默认权限不能对所有人可读。
+func TestNewCreatesPrivateLogFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	lg, err := logger.New(logger.Config{Level: "info", Encoding: "json", Outputs: []string{path}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	lg.Info("hello")
+	if err := logger.Sync(lg); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("mode = %o, want 600", perm)
+	}
+}
+
+// TestNewTightensAnExistingLogFile: os.OpenFile only honors perm when it
+// creates the file, so a 0644 left by an older release has to be corrected
+// explicitly or the setting silently does nothing.
+// TestNewTightensAnExistingLogFile：os.OpenFile 的 perm 只在创建时生效，旧版本
+// 留下的 0644 必须显式纠正，否则配置形同虚设。
+func TestNewTightensAnExistingLogFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	lg, err := logger.New(logger.Config{Level: "info", Encoding: "json", Outputs: []string{path}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	lg.Info("hello")
+	if err := logger.Sync(lg); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("mode = %o, want 600 after tightening", perm)
+	}
+}
+
+// TestNewHonorsConfiguredFilePerm keeps the setting usable for deployments where
+// a log shipper runs as another user in the same group.
+// TestNewHonorsConfiguredFilePerm 让"日志采集器以同组其它用户运行"的部署仍可配置。
+func TestNewHonorsConfiguredFilePerm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	lg, err := logger.New(logger.Config{
+		Level: "info", Encoding: "json", Outputs: []string{path}, FilePerm: "0640",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	lg.Info("hello")
+	if err := logger.Sync(lg); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o640 {
+		t.Fatalf("mode = %o, want 640", perm)
+	}
+}
+
+// TestConfigRejectsInvalidFilePerm rejects a value that would otherwise be
+// silently replaced by the default.
+// TestConfigRejectsInvalidFilePerm 拒绝会被静默换成默认值的写法。
+func TestConfigRejectsInvalidFilePerm(t *testing.T) {
+	for _, value := range []string{"0644x", "999", "888"} {
+		if err := (logger.Config{FilePerm: value}).Validate(); err == nil {
+			t.Fatalf("Validate accepted file_perm %q", value)
+		}
+	}
+}

@@ -45,6 +45,7 @@ type rotatingFileSink struct {
 	target   string
 	rotation RotationConfig
 	mode     string
+	perm     os.FileMode
 	now      func() time.Time
 
 	mu        sync.Mutex
@@ -53,14 +54,18 @@ type rotatingFileSink struct {
 	prunedDay string
 }
 
-func newRotatingFileSink(target string, rotation RotationConfig, mode string) *rotatingFileSink {
+func newRotatingFileSink(target string, rotation RotationConfig, mode string, perm os.FileMode) *rotatingFileSink {
 	if mode == "" {
 		mode = normalizeRotationMode(rotation.Mode)
+	}
+	if perm == 0 {
+		perm = defaultFilePerm
 	}
 	return &rotatingFileSink{
 		target:   target,
 		rotation: rotation,
 		mode:     mode,
+		perm:     perm,
 		now:      time.Now,
 	}
 }
@@ -185,9 +190,14 @@ func (s *rotatingFileSink) open(path string) (io.WriteCloser, error) {
 		return nil, fmt.Errorf("logger: create dir for %s: %w", path, err)
 	}
 	if s.mode == rotationModeSize {
-		// lumberjack rotates by size inside the current day's directory; after the day
-		// changes this sink switches to the new directory itself.
-		// lumberjack 在当天目录内按大小轮转，跨天后由本 sink 换到新目录。
+		// lumberjack opens the file itself and keeps the mode of an existing
+		// one, so create it with the configured mode first: otherwise a file
+		// left at 0644 by an older release stays readable to everyone.
+		// lumberjack 自己打开文件，并沿用已存在文件的权限，因此先用配置的权限建好：
+		// 否则旧版本留下的 0644 文件会一直对所有人可读。
+		if err := s.prepareFile(path); err != nil {
+			return nil, err
+		}
 		return &lumberjack.Logger{
 			Filename:   path,
 			MaxSize:    s.rotation.MaxSizeMB,
@@ -197,11 +207,31 @@ func (s *rotatingFileSink) open(path string) (io.WriteCloser, error) {
 			LocalTime:  s.rotation.LocalTime,
 		}, nil
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, s.perm)
 	if err != nil {
 		return nil, fmt.Errorf("logger: open %s: %w", path, err)
 	}
+	if err := f.Chmod(s.perm); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("logger: chmod %s: %w", path, err)
+	}
 	return f, nil
+}
+
+// prepareFile creates path with the configured mode and normalises an existing
+// file to it. lumberjack needs the file to exist for the mode to stick.
+// prepareFile 用配置的权限创建 path，并把已存在的文件归一化。lumberjack 需要文件
+// 先存在，权限才会按这里的结果保留。
+func (s *rotatingFileSink) prepareFile(path string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, s.perm)
+	if err != nil {
+		return fmt.Errorf("logger: open %s: %w", path, err)
+	}
+	if err := f.Chmod(s.perm); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("logger: chmod %s: %w", path, err)
+	}
+	return f.Close()
 }
 
 func (s *rotatingFileSink) dateLayout() string {

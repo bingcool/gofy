@@ -193,11 +193,21 @@ func AccessLog(logger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc {
 			path = path[:opts.MaxPathLength]
 		}
 		status := c.Writer.Status()
+		// gin returns -1 until a body is written; a 204, a 304 or a handler that
+		// only sets headers never writes one. Reporting 0 keeps "no body"
+		// distinct from "unknown" and stops byte-based dashboards from seeing
+		// negative values.
+		// gin 在写入 body 之前返回 -1；204、304 或只设响应头的 handler 从不写 body。
+		// 记 0 既把"没有 body"与"未知"区分开，也不会让按字节聚合的看板出现负值。
+		size := c.Writer.Size()
+		if size < 0 {
+			size = 0
+		}
 		fields := []zap.Field{
 			zap.String("method", c.Request.Method),
 			zap.String("path", path),
 			zap.Int("status", status),
-			zap.Int("bytes", c.Writer.Size()),
+			zap.Int("bytes", size),
 			zap.Float64("latency_ms", float64(latency.Microseconds())/1000),
 		}
 		// Sanitize before truncating: truncation only bounds length, it cannot

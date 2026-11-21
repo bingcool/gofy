@@ -85,6 +85,15 @@ type App struct {
 	cleanupOnce sync.Once
 	cleanupErr  error
 
+	// abandonedWorkers lists the worker groups whose instances were still
+	// running when the drain budget ran out. cleanup reads it to decide whether
+	// the resources those instances use may be torn down. It is written by the
+	// worker host before cleanup and never mutated afterwards.
+	// abandonedWorkers 记录 drain 预算耗尽时仍有实例在跑的分组。cleanup 据此决定
+	// 是否可以拆除这些实例正在使用的资源。它由 worker 宿主在 cleanup 之前写入，
+	// 之后不再修改。
+	abandonedWorkers []string
+
 	// reloadMu serializes Reload with cleanup and with other Reload calls, so a
 	// runtime swap never races a shutdown or a second swap.
 	// reloadMu 让 Reload 与清理、以及多个 Reload 之间串行，避免运行时换代
@@ -136,6 +145,12 @@ type App struct {
 	pidPath       string
 	pidTicker     *time.Ticker
 	pidTickerDone chan struct{}
+	// pidRefreshExited closes when the refresh goroutine has returned. cleanup
+	// waits on it before removing the file, otherwise a rename already in
+	// flight recreates the file after deletion.
+	// pidRefreshExited 在刷新 goroutine 返回时关闭。cleanup 先等它再删文件，
+	// 否则一次已在途的 rename 会在删除之后把文件重建出来。
+	pidRefreshExited chan struct{}
 }
 
 // New validates options and builds an App. It reads no configuration file,

@@ -760,8 +760,10 @@ func (a *App) startPIDRefresh(lg *zap.Logger) {
 	}
 	ticker := time.NewTicker(a.opts.pidRefresh)
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	a.pidTicker = ticker
 	a.pidTickerDone = done
+	a.pidRefreshExited = exited
 	path := a.pidPath
 	perm := a.opts.pidPerm
 	// One record, refreshed as-is: rebuilding it each tick would keep resetting
@@ -769,12 +771,24 @@ func (a *App) startPIDRefresh(lg *zap.Logger) {
 	// 一份记录原样重写：每个 tick 重建会把 claimed_at 一直刷新，文件看起来永远是刚声明的。
 	record := pidfile.NewRecord(os.Getpid())
 	go func() {
+		defer close(exited)
 		for {
 			select {
 			case <-done:
 				return
 			case <-ticker.C:
-				if err := pidfile.WriteRecord(path, record, perm); err != nil {
+				// WriteRecordIfOwner refuses to recreate the file once another
+				// process owns it, and skips a rewrite cleanup already removed:
+				// the join in cleanup closes the local window, this closes the
+				// one where a new instance already wrote its own record.
+				// WriteRecordIfOwner 在文件已属于其它进程时拒绝重建，也会跳过
+				// cleanup 已删除的写入：cleanup 的 join 关掉本地窗口，这里关掉
+				// "新实例已写入自己的记录"那个窗口。
+				if err := pidfile.WriteRecordIfOwner(path, record, perm); err != nil {
+					if errors.Is(err, pidfile.ErrNotOwner) {
+						lg.Warn("pid file belongs to another process; refresh stopped", zap.String("path", path))
+						return
+					}
 					lg.Warn("refresh pid file failed", zap.String("path", path), zap.Error(err))
 				}
 			}
@@ -955,6 +969,14 @@ func (a *App) abort(err error) error {
 // 跑 30s；让它消耗共享预算，主服务与模块就会拿到过期的 ctx，在途业务请求被强制断开。
 const diagnosticsShutdownBudget = 2 * time.Second
 
+// abandonWorkers records worker groups that outlived the drain budget. cleanup
+// keeps the database and module resources open for them.
+// abandonWorkers 记录超出 drain 预算的 worker 分组；cleanup 会为它们保留数据库与
+// 模块资源。
+func (a *App) abandonWorkers(groups []string) {
+	a.abandonedWorkers = append([]string(nil), groups...)
+}
+
 // cleanup runs once and releases every resource the App owns.
 // cleanup 只执行一次，释放 App 持有的全部资源；重复调用返回首次的结果。
 func (a *App) cleanup() error {
@@ -985,6 +1007,24 @@ func (a *App) cleanup() error {
 
 		lg := a.Logger()
 		var errs []error
+
+		// A worker instance that outlived the drain budget is still inside its
+		// handler, using the database, the module resources and the logger.
+		// Stopping or closing them here turns a slow handler into a "database
+		// is closed" error or a panic in a goroutine nobody waits for, so those
+		// resources are left to the OS. The logger is still flushed: the reason
+		// has to survive the exit.
+		// 超出 drain 预算的 worker 实例仍在 handler 里，正在使用数据库、模块资源与
+		// 日志。在这里停止或关闭它们，会把"慢 handler"变成 "database is closed" 或
+		// 没人等待的 goroutine panic，因此这些资源留给 OS。日志仍然 flush：原因必须
+		// 留到进程退出之后。
+		abandoned := len(a.abandonedWorkers) > 0
+		if abandoned {
+			lg.Error("skipping module stop and database close: worker instances are still running",
+				zap.Int("abandoned_groups", len(a.abandonedWorkers)),
+				zap.Strings("groups", a.abandonedWorkers),
+			)
+		}
 
 		// Deregister before closing the server so discovery clients stop
 		// routing new requests here while in-flight ones finish.
@@ -1038,22 +1078,24 @@ func (a *App) cleanup() error {
 			}
 		}
 
-		for i := len(a.started) - 1; i >= 0; i-- {
-			m := a.started[i]
-			stopper, ok := m.(support.Stopper)
-			if !ok {
-				continue
+		if !abandoned {
+			for i := len(a.started) - 1; i >= 0; i-- {
+				m := a.started[i]
+				stopper, ok := m.(support.Stopper)
+				if !ok {
+					continue
+				}
+				if err := stopModule(stopper, ctx); err != nil {
+					lg.Error("module stop failed", zap.String("module", m.Name()), zap.Error(err))
+					errs = append(errs, fmt.Errorf("gofy: module %q stop: %w", m.Name(), err))
+				}
 			}
-			if err := stopModule(stopper, ctx); err != nil {
-				lg.Error("module stop failed", zap.String("module", m.Name()), zap.Error(err))
-				errs = append(errs, fmt.Errorf("gofy: module %q stop: %w", m.Name(), err))
-			}
-		}
 
-		if a.ownDB && a.db != nil {
-			if err := gofydb.Close(a.db); err != nil {
-				lg.Error("close database failed", zap.Error(err))
-				errs = append(errs, err)
+			if a.ownDB && a.db != nil {
+				if err := gofydb.Close(a.db); err != nil {
+					lg.Error("close database failed", zap.Error(err))
+					errs = append(errs, err)
+				}
 			}
 		}
 
@@ -1067,8 +1109,10 @@ func (a *App) cleanup() error {
 		// a trace export failure.
 		// 指标是拉取而非推送，没有需要 flush 的内容；关闭 provider 只是释放 instrument。
 		// 失败的处理方式与追踪导出失败相同。
-		_ = a.metrics.Shutdown(ctx)
-		_ = a.telemetry.Shutdown(ctx)
+		if !abandoned {
+			_ = a.metrics.Shutdown(ctx)
+			_ = a.telemetry.Shutdown(ctx)
+		}
 
 		if a.cancel != nil {
 			a.cancel(nil)
@@ -1076,6 +1120,14 @@ func (a *App) cleanup() error {
 		if a.pidTicker != nil {
 			a.pidTicker.Stop()
 			close(a.pidTickerDone)
+			// Wait for the refresh goroutine: an in-flight write renames a
+			// temp file over the pid file, so deleting first lets it reappear
+			// — possibly over the record a new instance already wrote.
+			// 等刷新 goroutine 退出：在途的写会把临时文件 rename 到 pid 文件上，
+			// 先删就会让它重新出现——甚至覆盖新实例已经写入的记录。
+			if a.pidRefreshExited != nil {
+				<-a.pidRefreshExited
+			}
 		}
 		if a.pidPath != "" {
 			if err := pidfile.RemoveIfOwner(a.pidPath, os.Getpid()); err != nil {

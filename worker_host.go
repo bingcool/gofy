@@ -227,10 +227,19 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		}()
 	}
 
-	errCh := make(chan error, len(runners))
+	// runnerExit carries the runner alongside its result: an instance that
+	// outlived the drain budget still needs its database, so the host has to
+	// know which groups were abandoned before it tears anything down.
+	// runnerExit 把 runner 和结果一起带回：超出 drain 预算的实例仍需要数据库，宿主
+	// 必须在拆除资源之前知道哪些分组被放弃。
+	type runnerExit struct {
+		runner *worker.Runner
+		err    error
+	}
+	errCh := make(chan runnerExit, len(runners))
 	for _, runner := range runners {
 		go func(r *worker.Runner) {
-			errCh <- r.Run(worker.WithRuntime(runCtx, rt))
+			errCh <- runnerExit{runner: r, err: r.Run(worker.WithRuntime(runCtx, rt))}
 		}(runner)
 	}
 
@@ -253,6 +262,7 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	}()
 
 	var runErr error
+	var abandonedGroups []string
 	remaining := len(runners)
 	ready := false
 	// A local alias so the shutdown case can be disarmed after it fires: a
@@ -309,13 +319,28 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 			// 两条入口就共用同一个停机路径：走同一段排空、关闭 a.done、返回。
 			cancelRunners(nil)
 			stopCh = nil
-		case err := <-errCh:
+		case exit := <-errCh:
 			remaining--
-			if err != nil {
-				runErr = errors.Join(runErr, err)
-				cancelRunners(err)
+			if exit.err != nil {
+				runErr = errors.Join(runErr, exit.err)
+				cancelRunners(exit.err)
+			}
+			if exit.runner.Abandoned() {
+				abandonedGroups = append(abandonedGroups, exit.runner.Group().Name())
 			}
 		}
+	}
+	if len(abandonedGroups) > 0 {
+		// The process is leaving, but handlers are still running: closing the
+		// database under them turns a slow handler into a crash in a goroutine
+		// nobody waits for. Keep the resources and let the OS reclaim them.
+		// 进程要退出了，但 handler 还在跑：在它们脚下关数据库，会把"慢 handler"变成
+		// 没人等待的 goroutine 崩溃。保留资源，交给 OS 回收。
+		lg.Error("worker instances still running after the drain budget; keeping database and module resources open",
+			zap.Int("abandoned_groups", len(abandonedGroups)),
+			zap.Strings("groups", abandonedGroups),
+		)
+		a.abandonWorkers(abandonedGroups)
 	}
 	if cerr := a.cleanup(); cerr != nil {
 		runErr = errors.Join(runErr, cerr)
