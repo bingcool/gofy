@@ -63,6 +63,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `GET /metrics-format` on the diagnostics listener renders the same data as
+  `/metrics` as a human-readable table: one section per metric family with type
+  and help text, exporter scope labels dropped, histograms merged into
+  count/sum with approximated p50/p90/p99 (linear interpolation inside the
+  bucket; a rank falling into the +Inf bucket prints its lower bound). The
+  route reuses the scrape handler in-process and passes non-200 responses
+  through untouched. Prometheus must keep scraping the standard `/metrics`
+  path — the formatted view is for curl, not for collectors.
+  diagnostics 监听新增 `GET /metrics-format`，把与 `/metrics` 相同的数据渲染成
+  人类可读表格：每个指标 family 一段（带类型与帮助文本）、隐去 exporter scope
+  标签、直方图合并为 count/sum 与近似 p50/p90/p99（桶内线性插值；秩落入 +Inf
+  桶时显示下界）。该路由在进程内复用抓取 handler，非 200 响应原样透传。
+  Prometheus 必须继续抓标准 `/metrics` 路径——格式化视图是给 curl 用的，不是给
+  采集器的。
+
 - `WithMetrics(otel.MetricsConfig)` builds the Prometheus pipeline independently
   of `WithDiagnostics`; an explicit `Enabled:false` now turns off the pipeline
   that diagnostics would otherwise enable. `otel.Metrics.MeterProvider()` and

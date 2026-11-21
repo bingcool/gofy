@@ -243,6 +243,11 @@ func (s *Server) Handler(ep Endpoints) (http.Handler, error) {
 			path = "/metrics"
 		}
 		mux.Handle(path, ep.Metrics)
+		// The formatted view reuses the scrape handler and parses its output;
+		// it is for curl, not for Prometheus — scrapers must keep using path.
+		// 格式化视图复用抓取 handler 并解析其输出；它是给 curl 用的，不是给
+		// Prometheus——抓取器必须继续用 path。
+		mux.Handle(path+"-format", prettyMetrics(ep.Metrics))
 	}
 
 	if !s.cfg.DisableHealth && ep.Health != nil {

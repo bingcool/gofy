@@ -154,6 +154,13 @@
 - **Diagnostic 不驱动任何动作**，只给人和看板看；返回 200 是为了让抓取端拿到明细，而不是把
   「某个依赖坏了」变成一次 HTTP 失败。
 
+**`/metrics-format`（2026-11-22 新增）**：diagnostics 在挂载 `/metrics` 的同时挂载
+`MetricsPath + "-format"`，复用同一个抓取 handler 并把 exposition 渲染成人类可读表格——
+每个 family 一段（类型与帮助文本）、隐去 `otel_scope_*`、直方图合并为 count/sum 与近似
+p50/p90/p99（桶内线性插值；秩落入 +Inf 桶时显示 `>下界`）。它是给 curl 用的视图，不是
+线上格式：Prometheus 必须继续抓 `MetricsPath`，内层响应非 200 时原样透传不做渲染。
+实现：`support/diagnostics/pretty.go`。
+
 ### 3.2 注册机制与 API
 
 新增独立包 `support/health`（不依赖根包，符合 `shell/check-imports.sh` 的分层约束）：
