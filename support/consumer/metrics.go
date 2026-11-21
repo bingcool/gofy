@@ -134,10 +134,23 @@ func (m *consumerMetrics) labelTopic(topic string) string {
 	return "unknown"
 }
 
+// labelBroker maps the Message source onto the four canonical broker names.
+// The two delay adapters deliberately keep a distinct Source ("amqp_delay",
+// "delay_queues") so logs and traces can tell delayed deliveries apart; the
+// metric label still has to name the owning broker.
+// labelBroker 把 Message source 映射到四个规范 broker 名。两个延迟适配器刻意
+// 保留独立的 Source（"amqp_delay"、"delay_queues"），让日志与 trace 能区分延迟
+// 投递；指标标签则要归到所属的 broker。
 func labelBroker(source string) string {
 	switch source {
-	case "kafka", "amqp", "rocketmq", "queues":
-		return source
+	case "kafka":
+		return "kafka"
+	case "amqp", "amqp_delay":
+		return "amqp"
+	case "rocketmq":
+		return "rocketmq"
+	case "queues", "delay_queues":
+		return "queues"
 	default:
 		return "unknown"
 	}

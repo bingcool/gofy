@@ -303,3 +303,25 @@ func TestLabelTopicCollapsesWithoutWhitelist(t *testing.T) {
 		t.Fatalf("labelTopic(rogue-topic) = %q, want unknown", got)
 	}
 }
+
+// TestLabelBrokerMapsDelaySources: the delay adapters keep distinct Message
+// sources for logs and traces; the broker label must still name the owning
+// broker, not fall through to "unknown".
+// TestLabelBrokerMapsDelaySources：延迟适配器为日志与 trace 保留独立的 Message
+// source；broker 标签必须归到所属 broker，而不是落进 "unknown"。
+func TestLabelBrokerMapsDelaySources(t *testing.T) {
+	for source, want := range map[string]string{
+		"kafka":        "kafka",
+		"amqp":         "amqp",
+		"rocketmq":     "rocketmq",
+		"queues":       "queues",
+		"amqp_delay":   "amqp",
+		"delay_queues": "queues",
+		"":             "unknown",
+		"bogus":        "unknown",
+	} {
+		if got := labelBroker(source); got != want {
+			t.Fatalf("labelBroker(%q) = %q, want %q", source, got, want)
+		}
+	}
+}

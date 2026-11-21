@@ -728,7 +728,9 @@ worker 宿主探针测试改探 `/readyz`（并断言 `/healthz` 在启动与 dr
    `dead` 只在 park 成功时计，因此 `dead ≤ acked{reason=permanent|decode}` 成立。
 2. **topic 白名单**：`ProcessorConfig.Topics` 接收 broker 配置里声明的 topic/routing key/queue key。
    AMQP 同时接受 binding key 与 routing key（延迟消费者再带上延迟拓扑的两个 key）；名单外的值记
-   `unknown`，`Source` 也按四种 broker 白名单化，其余记 `unknown`。
+   `unknown`，`Source` 也按四种 broker 白名单化，其余记 `unknown`（延迟投递的
+   `amqp_delay`/`delay_queues` 是日志与 trace 维度的独立 source，broker 标签上归入
+   `amqp`/`queues`——2026-11-22 修复，此前它们整条序列都落 `unknown`）。
 3. **broker 错误区分**：`OnError` 同时承载 handler、拉取与确认错误，无法据此判断 `op`。因此在四个
    broker 包的 `ConsumeOptions` 上增加只在确认失败时触发的 `OnAckError`/`OnNackError`，由
    `support/consumer` 的六个适配器挂接计数；Redis 队列没有 ACK，回写失败归为 `nack`。建连、
