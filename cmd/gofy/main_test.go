@@ -147,14 +147,51 @@ func TestGenerateWithoutWorker(t *testing.T) {
 	}
 }
 
-func TestGenerateRefusesNonEmptyDirectory(t *testing.T) {
+// TestGenerateIsIdempotent: re-running the scaffold in a directory it already
+// generated leaves the files alone instead of failing. Only --force rewrites.
+// TestGenerateIsIdempotent：在已生成过的目录里重跑脚手架会保留文件而不是报错。只有
+// --force 才重写。
+func TestGenerateIsIdempotent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "demo")
 	s := newTestScaffold("demo")
 	if err := s.Generate(dir, false); err != nil {
 		t.Fatalf("first Generate: %v", err)
 	}
+	edited := "package main\n\n// locally edited\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Generate(dir, false); err != nil {
+		t.Fatalf("second Generate: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "main.go")); got != edited {
+		t.Errorf("re-run overwrote an edited file:\n%s", got)
+	}
+	if err := s.Generate(dir, true); err != nil {
+		t.Fatalf("Generate with force: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "main.go")); got == edited {
+		t.Error("--force did not rewrite the file")
+	}
+}
+
+// TestGenerateRefusesForeignDirectory: a directory with unrelated content is a
+// mistake, and it is reported before anything is written.
+// TestGenerateRefusesForeignDirectory：含无关内容的目录是误用，必须在写文件之前报错。
+func TestGenerateRefusesForeignDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "existing")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("someone else's project"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestScaffold("existing")
 	if err := s.Generate(dir, false); err == nil {
-		t.Fatal("expected Generate to refuse a non-empty directory")
+		t.Fatal("expected Generate to refuse a foreign directory")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main.go")); !os.IsNotExist(err) {
+		t.Error("a file was written into the refused directory")
 	}
 	if err := s.Generate(dir, true); err != nil {
 		t.Fatalf("Generate with force: %v", err)
@@ -186,4 +223,241 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// TestGenerateIntoExistingModule covers the documented flow: `go mod init`
+// first, scaffold second. The module line and the caller's requirements must
+// survive; only the framework requirement and the replace are added.
+// TestGenerateIntoExistingModule 覆盖文档化的流程：先 `go mod init`，再生成。module 行
+// 与调用方已有的依赖必须保留，只补框架依赖与 replace。
+func TestGenerateIntoExistingModule(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ai-service")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := "module example.com/ai-service\n\ngo 1.26\n\nrequire github.com/google/uuid v1.6.0\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestScaffold("ai-service")
+	s.Module = "example.com/ai-service"
+	s.Replace = "/src/gofy"
+	if err := s.Generate(dir, false); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	goMod := readFile(t, filepath.Join(dir, "go.mod"))
+	for _, want := range []string{
+		"module example.com/ai-service",
+		"github.com/google/uuid v1.6.0",
+		"require github.com/bingcool/gofy v1.0.0",
+		"replace github.com/bingcool/gofy => /src/gofy",
+	} {
+		if !strings.Contains(goMod, want) {
+			t.Errorf("go.mod missing %q:\n%s", want, goMod)
+		}
+	}
+	main := readFile(t, filepath.Join(dir, "main.go"))
+	if !strings.Contains(main, `"example.com/ai-service/app/config"`) {
+		t.Errorf("main.go does not import the existing module path:\n%s", main)
+	}
+}
+
+// TestMergeGoModIsIdempotent: running the scaffold twice must not append a
+// second require or a second replace — the latter is a syntax error.
+// TestMergeGoModIsIdempotent：重复执行脚手架不得追加第二条 require 或 replace——后者
+// 是语法错误。
+func TestMergeGoModIsIdempotent(t *testing.T) {
+	s := scaffold{Module: "example.com/app", Replace: "/src/gofy"}
+	first, changed := mergeGoMod([]byte("module example.com/app\n\ngo 1.26\n"), s)
+	if !changed {
+		t.Fatal("first merge reported no change")
+	}
+	second, changed := mergeGoMod(first, s)
+	if changed {
+		t.Fatalf("second merge changed the file again:\n%s", second)
+	}
+	if got := strings.Count(string(second), "require github.com/bingcool/gofy"); got != 1 {
+		t.Errorf("require count = %d, want 1:\n%s", got, second)
+	}
+	if got := strings.Count(string(second), "replace github.com/bingcool/gofy"); got != 1 {
+		t.Errorf("replace count = %d, want 1:\n%s", got, second)
+	}
+}
+
+// TestGenerateKeepsExistingFiles: the scaffold must not overwrite a file it did
+// not create. Everything else is still generated around it.
+// TestGenerateKeepsExistingFiles：脚手架不得覆盖不是它创建的文件，其余文件照常生成。
+func TestGenerateKeepsExistingFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "demo")
+	if err := os.MkdirAll(filepath.Join(dir, "app", "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mine := "package config\n\n// my own file\n"
+	if err := os.WriteFile(filepath.Join(dir, "app", "config", "config.go"), []byte(mine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestScaffold("demo")
+	if err := s.Generate(dir, false); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "app", "config", "config.go")); got != mine {
+		t.Errorf("existing file was overwritten:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main.go")); err != nil {
+		t.Errorf("main.go was not generated next to the existing file: %v", err)
+	}
+}
+
+// TestCheckTargetAllowsModuleDirectory pins what counts as "already used": a
+// fresh `go mod init` directory is a valid target, a directory with source is
+// not.
+// TestCheckTargetAllowsModuleDirectory 固定"已被占用"的判定：刚 `go mod init` 的目录是
+// 合法目标，含源码的目录不是。
+func TestCheckTargetAllowsModuleDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outs := []string{"main.go", "app/config/config.go"}
+	if err := checkAppTarget(dir, false, outs); err != nil {
+		t.Fatalf("module directory rejected: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkAppTarget(dir, false, outs); err == nil {
+		t.Fatal("directory with an unrelated file was accepted")
+	}
+	if err := checkAppTarget(dir, true, outs); err != nil {
+		t.Fatalf("--force rejected: %v", err)
+	}
+}
+
+// TestReadModulePath covers quoted module paths, which `go mod init` writes when
+// the path contains characters it cannot leave bare.
+// TestReadModulePath 覆盖带引号的模块路径——`go mod init` 在路径含特殊字符时会加引号。
+func TestReadModulePath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module \"example.com/a b\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := readModulePath(dir); !ok || got != "example.com/a b" {
+		t.Fatalf("readModulePath = %q, %v", got, ok)
+	}
+	if _, ok := readModulePath(t.TempDir()); ok {
+		t.Fatal("readModulePath reported a module for a directory without go.mod")
+	}
+}
+
+// TestNewCmdScaffoldsInPlace is the command-level version of the documented
+// flow: `go mod init` in the project directory, then `gofy new .`.
+// TestNewCmdScaffoldsInPlace 是文档流程的命令级版本：在项目目录里 `go mod init`，
+// 然后 `gofy new .`。
+func TestNewCmdScaffoldsInPlace(t *testing.T) {
+	// A named subdirectory: the app name comes from the base name, and a
+	// t.TempDir() base ("001" on macOS) is not a valid app name.
+	// 用带名字的子目录：应用名取自目录名，而 t.TempDir() 的末段（macOS 上是 "001"）
+	// 不是合法应用名。
+	dir := filepath.Join(t.TempDir(), "ai-service")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/ai-service\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	cmd := newNewCmd()
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetArgs([]string{"."})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	for _, name := range []string{"main.go", "config.yaml", "app/config/config.go", "app/module/example/module.go"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("missing %s: %v", name, err)
+		}
+	}
+	goMod := readFile(t, filepath.Join(dir, "go.mod"))
+	if !strings.Contains(goMod, "module example.com/ai-service") {
+		t.Errorf("module line lost:\n%s", goMod)
+	}
+	if !strings.Contains(goMod, "require github.com/bingcool/gofy") {
+		t.Errorf("framework requirement missing:\n%s", goMod)
+	}
+	main := readFile(t, filepath.Join(dir, "main.go"))
+	if !strings.Contains(main, `gofy.WithName("ai-service")`) {
+		t.Errorf("app name not derived from the directory:\n%s", main)
+	}
+}
+
+// TestNewCmdRejectsModuleMismatch: a --module that disagrees with go.mod would
+// generate imports that cannot compile, so it is an error rather than a
+// silent preference.
+// TestNewCmdRejectsModuleMismatch：与 go.mod 不一致的 --module 会生成编译不过的
+// import，因此直接报错而不是默默选一个。
+func TestNewCmdRejectsModuleMismatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/real\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newNewCmd()
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetArgs([]string{"app", "--dir", dir, "--module", "example.com/other"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "does not match go.mod") {
+		t.Fatalf("Execute = %v, want a module mismatch error", err)
+	}
+}
+
+// TestMergeGoModSeesBlockReplace: gofmt rewrites a single replace into a block
+// once there are several, so the idempotency check has to read the block form.
+// Appending a second replace for the same module would not compile.
+// TestMergeGoModSeesBlockReplace：replace 条目多时 gofmt 会改写成块，幂等判断因此
+// 必须能读块形式。同一模块再追加一条 replace 会直接编译不过。
+func TestMergeGoModSeesBlockReplace(t *testing.T) {
+	existing := `module example.com/app
+
+go 1.26
+
+replace (
+	github.com/bingcool/gofy => /old/gofy
+	github.com/other/dep => /old/dep
+)
+`
+	got, changed := mergeGoMod([]byte(existing), scaffold{Module: "example.com/app", Replace: "/new/gofy"})
+	if changed {
+		t.Fatalf("merge added a duplicate replace:\n%s", got)
+	}
+	if count := strings.Count(string(got), "github.com/bingcool/gofy"); count != 1 {
+		t.Fatalf("gofy mentioned %d times, want 1:\n%s", count, got)
+	}
+}
+
+// TestHasReplaceDirective pins the forms a go.mod can use.
+// TestHasReplaceDirective 固定 go.mod 可能出现的几种写法。
+func TestHasReplaceDirective(t *testing.T) {
+	const mod = "github.com/bingcool/gofy"
+	cases := map[string]bool{
+		"replace " + mod + " => /x":                true,
+		"replace " + mod + " v1.0.0 => /x":         true,
+		"replace (\n\t" + mod + " => /x\n)":        true,
+		"replace (\n\t" + mod + " v1.0.0 => /x\n)": true,
+		"replace github.com/other => /x":           false,
+		"// replace " + mod + " => /x":             false,
+		"require " + mod + " v1.0.0":               false,
+		"replace (\n\tgithub.com/other => /x\n)":   false,
+		"replace " + mod + "x => /x":               false,
+	}
+	for text, want := range cases {
+		if got := hasReplaceDirective(text, mod); got != want {
+			t.Errorf("hasReplaceDirective(%q) = %v, want %v", text, got, want)
+		}
+	}
 }

@@ -73,17 +73,57 @@ func newNewCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
+			if dir == "" {
+				// `gofy new .` scaffolds the directory it is run in: the name comes
+				// from the directory, which is the shape used after `go mod init`.
+				// `gofy new .` 表示就地生成：名字取自目录名，正是 `go mod init` 之后的用法。
+				if name == "." {
+					dir = "."
+				} else {
+					dir = "./" + name
+				}
+			}
+			if name == "." {
+				abs, err := filepath.Abs(dir)
+				if err != nil {
+					return fmt.Errorf("resolve %s: %w", dir, err)
+				}
+				name = filepath.Base(abs)
+			}
 			if !namePattern.MatchString(name) {
 				return fmt.Errorf("invalid name %q (want lowercase letters, digits and dashes)", name)
 			}
-			if strings.TrimSpace(module) == "" {
-				return errors.New("--module is required")
+
+			// The module path comes from go.mod when it is already there: the
+			// usual flow is `go mod init` first, then this command. Passing both
+			// and having them disagree would generate imports that never compile,
+			// so that is rejected instead of silently preferred.
+			// 已有的 go.mod 决定模块路径——常见流程是先 `go mod init` 再执行本命令。
+			// 两者都给且不一致会生成编译不过的 import，因此直接拒绝而不是默默取一个。
+			mod := strings.TrimSpace(module)
+			if existing, ok := readModulePath(dir); ok {
+				if mod == "" {
+					mod = existing
+					fmt.Printf("using module %q from %s\n", mod, filepath.Join(dir, "go.mod"))
+				} else if existing != mod {
+					return fmt.Errorf("--module %q does not match go.mod (%q)", mod, existing)
+				}
 			}
-			if dir == "" {
-				dir = "./" + name
+			if mod == "" {
+				return errors.New("--module is required when the target has no go.mod")
 			}
+
 			absReplace := replace
-			if absReplace != "" {
+			if absReplace == "" {
+				// Running from inside this repository is the common way to try the
+				// scaffold, so point the replace at it instead of demanding a flag
+				// the caller would have to look up first.
+				// 在框架仓库内试用脚手架是常见场景，直接指向本仓库，省去查路径的步骤。
+				absReplace = enclosingGofyRoot()
+				if absReplace != "" {
+					fmt.Printf("using local framework at %s\n", absReplace)
+				}
+			} else {
 				abs, err := filepath.Abs(absReplace)
 				if err != nil {
 					return fmt.Errorf("resolve --replace: %w", err)
@@ -93,7 +133,7 @@ func newNewCmd() *cobra.Command {
 			s := scaffold{
 				Name:         name,
 				EnvPrefix:    strings.ToUpper(strings.ReplaceAll(name, "-", "_")),
-				Module:       strings.TrimSpace(module),
+				Module:       mod,
 				Replace:      absReplace,
 				WithDB:       withDB,
 				WithScripts:  withScripts,
@@ -105,8 +145,8 @@ func newNewCmd() *cobra.Command {
 			return s.Generate(dir, force)
 		},
 	}
-	cmd.Flags().StringVar(&module, "module", "", "Go module path (required)")
-	cmd.Flags().StringVar(&dir, "dir", "", "output directory (default ./<name>)")
+	cmd.Flags().StringVar(&module, "module", "", "Go module path (default: read from <dir>/go.mod)")
+	cmd.Flags().StringVar(&dir, "dir", "", "output directory (default ./<name>; use with `new .` for the current one)")
 	cmd.Flags().BoolVar(&withDB, "with-db", false, "include MySQL/GORM wiring")
 	cmd.Flags().BoolVar(&withScripts, "with-scripts", true, "include the script/ directory")
 	cmd.Flags().BoolVar(&withWorker, "with-worker", true, "include the worker/ entry for long-running tasks")
@@ -114,31 +154,72 @@ func newNewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&withMakefile, "with-makefile", true, "include a Makefile")
 	cmd.Flags().BoolVar(&force, "force", false, "write into a non-empty directory")
 	cmd.Flags().StringVar(&replace, "replace", "", "add a local replace directive for github.com/bingcool/gofy")
-	cmd.Flags().StringVar(&goVersion, "go", "1.24", "go directive in go.mod")
+	cmd.Flags().StringVar(&goVersion, "go", "1.26", "go directive in go.mod")
 	cmd.AddCommand(newInterfaceServiceCmd())
 	return cmd
 }
 
 // Generate renders the embedded templates into dir.
-// Generate 把内嵌模板渲染到 dir；force 为 false 时拒绝写入非空目录，避免覆盖
-// 用户已有的文件。
+//
+// A directory that already holds a Go module is a normal target, not a
+// conflict: the flow this command is built for is `go mod init` first. In that
+// case go.mod is merged (the framework requirement and replace are added, the
+// module line and the caller's other requirements stay), and every other file
+// that already exists is left alone unless force is set — the scaffold must not
+// overwrite work it did not create.
+// Generate 把内嵌模板渲染到 dir。
+//
+// 已有 Go module 的目录是正常目标而不是冲突：本命令面向的流程就是先 `go mod init`。
+// 这种情况下 go.mod 走合并（补框架依赖与 replace，module 行和调用方其它依赖原样保留），
+// 其余已存在的文件在未指定 force 时保持不动——脚手架不该覆盖不是它创建的内容。
 func (s scaffold) Generate(dir string, force bool) error {
 	dir = filepath.Clean(dir)
-	if err := checkTarget(dir, force); err != nil {
-		return err
-	}
 	files, err := s.files()
 	if err != nil {
 		return err
 	}
+	outs := make([]string, 0, len(files))
+	for _, f := range files {
+		outs = append(outs, f.out)
+	}
+	if err := checkAppTarget(dir, force, outs); err != nil {
+		return err
+	}
+	var kept, merged []string
 	for _, f := range files {
 		out := filepath.Join(dir, filepath.FromSlash(f.out))
 		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", filepath.Dir(out), err)
 		}
+		if existing, err := os.ReadFile(out); err == nil && !force {
+			if f.out != "go.mod" {
+				kept = append(kept, f.out)
+				continue
+			}
+			content, changed := mergeGoMod(existing, s)
+			if !changed {
+				kept = append(kept, f.out)
+				continue
+			}
+			if err := os.WriteFile(out, content, 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", out, err)
+			}
+			merged = append(merged, f.out)
+			continue
+		}
 		if err := os.WriteFile(out, f.content, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", out, err)
 		}
+	}
+	if len(merged) > 0 {
+		fmt.Printf("updated %s (framework requirement and replace)\n", strings.Join(merged, ", "))
+	}
+	if len(kept) > 0 {
+		fmt.Printf("kept existing: %s\n", strings.Join(kept, ", "))
+	}
+	if dir == "." {
+		fmt.Print("created the current directory\nnext steps:\n  go mod tidy\n  go run . start\n")
+		return nil
 	}
 	fmt.Printf("created %s\nnext steps:\n  cd %s\n  go mod tidy\n  go run . start\n", dir, dir)
 	return nil
@@ -220,6 +301,21 @@ func outputPath(name string) (string, bool) {
 	return strings.TrimSuffix(name, ".tmpl"), true
 }
 
+// moduleFiles are what a freshly initialised module directory may contain
+// without the scaffold treating it as occupied.
+// moduleFiles 是刚初始化的模块目录允许存在的内容，脚手架不把它们视为占用。
+var moduleFiles = map[string]bool{
+	"go.mod": true, "go.sum": true,
+	".git": true, ".gitignore": true, ".gitattributes": true,
+	".gitlab-ci.yml": true, ".github": true,
+	".idea": true, ".vscode": true, ".DS_Store": true,
+}
+
+// checkTarget refuses a directory that holds anything but a go.mod. It belongs
+// to the contract scaffolder, which rewrites every file and therefore needs an
+// empty target.
+// checkTarget 拒绝除 go.mod 之外还有内容的目录。它属于契约脚手架——那个命令会重写
+// 所有文件，因此需要空目标。
 func checkTarget(dir string, force bool) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -228,8 +324,175 @@ func checkTarget(dir string, force bool) error {
 		}
 		return fmt.Errorf("read %s: %w", dir, err)
 	}
-	if len(entries) > 0 && !force {
-		return fmt.Errorf("directory %s is not empty (use --force to overwrite)", dir)
+	if force {
+		return nil
+	}
+	for _, entry := range entries {
+		if moduleFiles[entry.Name()] {
+			continue
+		}
+		return fmt.Errorf("directory %s already contains %s (use --force to write anyway)", dir, entry.Name())
 	}
 	return nil
+}
+
+// checkAppTarget decides whether dir may receive the application scaffold. A
+// fresh module directory and a directory this command already generated both
+// qualify: the first is the documented flow, the second is a re-run, and existing
+// files are kept rather than rewritten. Anything else means the caller pointed at
+// a project that is not ours, which is a mistake worth reporting before files
+// appear in it.
+// checkAppTarget 判断 dir 是否可以接收应用脚手架。刚初始化的模块目录与"本命令已经
+// 生成过的目录"都合格：前者是文档流程，后者是重跑，已存在的文件会保留而不是重写。其它
+// 情况说明调用方指到了一个不属于我们的项目，应在文件落地之前报错。
+func checkAppTarget(dir string, force bool, outs []string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", dir, err)
+	}
+	if force {
+		return nil
+	}
+	allowed := make(map[string]bool, len(outs)*2)
+	for _, out := range outs {
+		parts := strings.Split(out, "/")
+		for i := 1; i <= len(parts); i++ {
+			allowed[strings.Join(parts[:i], "/")] = true
+		}
+	}
+	for _, entry := range entries {
+		if moduleFiles[entry.Name()] || allowed[entry.Name()] {
+			continue
+		}
+		return fmt.Errorf("directory %s already contains %s (use --force to write anyway)", dir, entry.Name())
+	}
+	return nil
+}
+
+// readModulePath reads the module directive of dir/go.mod.
+// readModulePath 读取 dir/go.mod 的 module 指令。
+func readModulePath(dir string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "module "); ok {
+			return strings.Trim(strings.TrimSpace(rest), `"`), true
+		}
+	}
+	return "", false
+}
+
+// mergeGoMod adds the framework requirement and, when set, the local replace to
+// an existing go.mod. Nothing else in the file is touched: the caller's module
+// line, toolchain and requirements stay as they are, and a directive that is
+// already present is not duplicated (a second replace for the same module is a
+// syntax error, a second require is not but would confuse `go mod tidy`).
+// mergeGoMod 把框架依赖与（可选）本地 replace 合并进已有的 go.mod，文件其余内容不动：
+// module 行、toolchain 与调用方的依赖原样保留，已存在的指令不重复添加（同一模块的第二条
+// replace 是语法错误；第二条 require 虽合法却会让 `go mod tidy` 困惑）。
+func mergeGoMod(existing []byte, s scaffold) ([]byte, bool) {
+	text := string(existing)
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	changed := false
+	if !strings.Contains(text, gofyModulePath) {
+		text += "\nrequire " + gofyModulePath + " " + gofyRequireVersion + "\n"
+		changed = true
+	}
+	if s.Replace != "" && !hasReplaceDirective(text, gofyModulePath) {
+		text += "\nreplace " + gofyModulePath + " => " + s.Replace + "\n"
+		changed = true
+	}
+	return []byte(text), changed
+}
+
+// hasReplaceDirective reports whether go.mod already replaces module, reading
+// both the single-line form and the block form. Appending a second replace for
+// the same module is a syntax error, so the check cannot be a substring match on
+// one spelling.
+// hasReplaceDirective 报告 go.mod 是否已经 replace 了 module，单行与块两种写法都读。
+// 同一模块的第二条 replace 是语法错误，因此不能只对一种写法做子串匹配。
+func hasReplaceDirective(text, module string) bool {
+	inBlock := false
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if inBlock {
+			if line == ")" {
+				inBlock = false
+				continue
+			}
+			if replaceTarget(line) == module {
+				return true
+			}
+			continue
+		}
+		rest, ok := strings.CutPrefix(line, "replace ")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(rest) == "(" {
+			inBlock = true
+			continue
+		}
+		if replaceTarget(rest) == module {
+			return true
+		}
+	}
+	return false
+}
+
+// replaceTarget returns the left-hand module of "path => dir" or
+// "path v1.2.3 => dir".
+// replaceTarget 返回 "path => dir" 或 "path v1.2.3 => dir" 左侧的模块路径。
+func replaceTarget(spec string) string {
+	left, _, ok := strings.Cut(spec, "=>")
+	if !ok {
+		return ""
+	}
+	if fields := strings.Fields(left); len(fields) > 0 {
+		return fields[0]
+	}
+	return ""
+}
+
+const (
+	// gofyModulePath is the framework's module path, used both in generated imports and in go.mod.
+	// gofyModulePath 是框架的模块路径，生成的 import 与 go.mod 都用它。
+	gofyModulePath = "github.com/bingcool/gofy"
+	// gofyRequireVersion is the placeholder version written when the caller has not
+	// pinned one. It only needs to satisfy `go mod tidy` with the replace in place;
+	// without a replace, pin the version your proxy actually serves.
+	// gofyRequireVersion 是调用方未指定版本时写入的占位版本。带 replace 时它只用于让
+	// `go mod tidy` 通过；没有 replace 时应改成你的代理上真实存在的版本。
+	gofyRequireVersion = "v1.0.0"
+)
+
+// enclosingGofyRoot reports the directory of this repository when the process
+// runs inside it, so a local trial does not need --replace.
+// enclosingGofyRoot 在进程位于本仓库内时返回仓库目录，本地试用因此不必传 --replace。
+func enclosingGofyRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if module, ok := readModulePath(dir); ok && module == gofyModulePath {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }

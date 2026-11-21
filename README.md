@@ -1033,8 +1033,18 @@ gofy new demo-service \
   --with-docker
 ```
 
-本地开发时加 `--replace /path/to/gofy` 指向本地仓库。生成的项目不包含密钥，
-也不预生成 `go.sum`；执行 `go mod tidy` 后再运行 `go run . start`。
+已有仓库先 `go mod init`，再就地生成——模块路径从 `go.mod` 读取，已存在的文件保留：
+
+```bash
+mkdir demo-service && cd demo-service
+go mod init github.com/yourorg/demo-service
+gofy new .
+```
+
+本地开发时加 `--replace /path/to/gofy` 指向本地仓库（在框架仓库内运行会自动如此）。
+生成的项目不包含密钥，也不预生成 `go.sum`；执行 `go mod tidy` 后再运行 `go run . start`。
+
+生成内容的完整说明见 [cmd/gofy/README.md](cmd/gofy/README.md)。
 
 ## CLI
 

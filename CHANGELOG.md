@@ -830,6 +830,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `cmd/gofy`: `gofy new` now accepts an existing Go module, which is the flow the
+  scaffold is meant for: `go mod init` first, then this command. The module path
+  is read from `<dir>/go.mod` (passing `--module` as well is allowed but must
+  agree — a mismatch would generate imports that never compile), `go.mod` is
+  merged instead of rewritten (the framework requirement and the optional
+  replace are added; the module line, toolchain and existing requirements stay),
+  and files that already exist are kept rather than overwritten, so a re-run is
+  a no-op. `gofy new .` scaffolds the current directory and takes the app name
+  from it. A directory holding unrelated files is still refused before anything
+  is written; `--force` overrides that and rewrites the scaffold's own files
+  without touching the rest. Running the command from inside this repository
+  points `--replace` at it automatically. `cmd/gofy/README.md` documents the
+  generated layout, the flags and the commands the generated project exposes.
 - `support/tenant`: UPDATE statements no longer include `tenant_id` in their
   SET list, and batch inserts fill empty tenant values per row. Applications
   that used a tenant-scoped `Save`/`Select("*").Updates` to move a row to
