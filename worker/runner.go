@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 )
 
@@ -55,6 +56,17 @@ type RunConfig struct {
 	// Logger receives lifecycle events; nil discards them.
 	// Logger 接收生命周期事件；nil 表示丢弃。
 	Logger *zap.Logger
+	// MeterProvider creates this group's instruments. A nil provider disables
+	// metric creation even when Metrics is true.
+	// MeterProvider 创建本分组的 instrument。即使 Metrics 为 true，nil provider
+	// 也不会创建任何 instrument。
+	MeterProvider metric.MeterProvider
+	// Metrics reports whether the provider is real. When false the runner skips
+	// building labels entirely, which keeps a metrics-free process allocation-free
+	// on its hot paths.
+	// Metrics 表示 provider 是否真实可用。为 false 时 runner 连标签都不构造，
+	// 没有指标管道的进程热路径因此没有额外分配。
+	Metrics bool
 }
 
 const defaultDrainTimeout = 20 * time.Second
@@ -107,6 +119,13 @@ type Runner struct {
 	// state 是暴露给宿主的只读生命周期视图：分组上报就绪前为 starting，run context
 	// 取消后为 draining，最后为 stopped。它不改变 Run 的调度行为。
 	state atomic.Int32
+
+	// metrics holds the cached instruments and the per-worker instance totals.
+	// Both are fixed at construction: restarts never change the configured counts.
+	// metrics 持有缓存的 instrument 与各 worker 的实例总数。两者在构造期固定：
+	// 重启不会改变配置里的实例数。
+	metrics *workerMetrics
+	totals  map[string]int
 }
 
 // Abandoned reports whether Run returned with instances still running, which
@@ -159,6 +178,19 @@ func (s State) String() string {
 // State 返回生命周期阶段。
 func (r *Runner) State() State { return State(r.state.Load()) }
 
+// setState is the only writer of the lifecycle view, so the readiness gauge
+// cannot drift from State(). It is bookkeeping: scheduling never reads either.
+// setState 是生命周期视图的唯一写入点，就绪 gauge 因此不会与 State() 脱节。
+// 它只做记录，调度逻辑从不读取它们。
+func (r *Runner) setState(s State) {
+	r.state.Store(int32(s))
+	if s == StateReady {
+		r.metrics.setReady(1)
+		return
+	}
+	r.metrics.setReady(0)
+}
+
 // IsReady reports whether the ready channel is closed. Ready() keeps returning
 // the channel, because existing callers select on it; this boolean view is what
 // the worker probe needs.
@@ -184,10 +216,23 @@ func NewRunner(group *Group, cfg RunConfig) (*Runner, error) {
 			return nil, fmt.Errorf("%w: %s=%d", ErrInvalidConcurrency, name, n)
 		}
 	}
+	cfg = cfg.withDefaults()
+	names := make([]string, 0, len(group.Workers()))
+	totals := make(map[string]int, len(group.Workers()))
+	for _, w := range group.Workers() {
+		names = append(names, w.Name())
+		totals[w.Name()] = cfg.instances(w)
+	}
+	metrics, err := newWorkerMetrics(cfg.MeterProvider, cfg.Metrics, group.Name(), names)
+	if err != nil {
+		return nil, err
+	}
 	return &Runner{
-		group: group,
-		cfg:   cfg.withDefaults(),
-		ready: make(chan struct{}),
+		group:   group,
+		cfg:     cfg,
+		ready:   make(chan struct{}),
+		metrics: metrics,
+		totals:  totals,
 	}, nil
 }
 
@@ -212,7 +257,7 @@ func (r *Runner) Ready() <-chan struct{} { return r.ready }
 // markReady 只关闭一次就绪通道。
 func (r *Runner) markReady() {
 	r.readyOne.Do(func() {
-		r.state.Store(int32(StateReady))
+		r.setState(StateReady)
 		close(r.ready)
 	})
 }
@@ -234,10 +279,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	// clean stop.
 	// 状态视图只做记录，绝不反向影响调度。失败的运行保留 failed 状态，监管方因此能把
 	// 它与干净停机区分开。
-	r.state.Store(int32(StateStarting))
+	r.setState(StateStarting)
 	defer func() {
 		if r.State() != StateFailed {
-			r.state.Store(int32(StateStopped))
+			r.setState(StateStopped)
 		}
 	}()
 
@@ -305,6 +350,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	// 闸门按实例记账而不是按信号次数，且只统计自行上报的 worker：全由轮询任务组成的分组
 	// 在 Run 开始时即就绪。
 	gate := newReadyGate()
+	// The gate owns the pending set; the callback turns each change into an
+	// instances.ready snapshot. Workers without ReadyReporter never enter the
+	// set, so their total is counted as ready from the start.
+	// 闸门持有待上报集合；回调把每次变化转成 instances.ready 快照。没有实现
+	// ReadyReporter 的 worker 不进入集合，因此从一开始就计入就绪数。
+	gate.onChange = func(pending []Identity) { r.metrics.setInstances(r.totals, pending) }
 	var reporters []Identity
 	for _, inst := range instances {
 		if _, ok := inst.worker.(ReadyReporter); ok {
@@ -347,7 +398,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if ctx.Err() != nil {
-		r.state.Store(int32(StateDraining))
+		r.setState(StateDraining)
 	}
 
 	// Stop pulling first, then wait: the order matters because cancelling the
@@ -363,6 +414,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// keeps the database and module resources open until the process exits.
 		// 实例仍在 handler 里：记下来，让宿主把数据库与模块资源留到进程退出。
 		r.abandoned.Store(true)
+		r.metrics.recordAbandoned()
 	}
 
 	if fatal == nil {
@@ -377,7 +429,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	if fatal != nil {
-		r.state.Store(int32(StateFailed))
+		r.setState(StateFailed)
 		return fatal
 	}
 	if ctx.Err() != nil {
@@ -410,8 +462,10 @@ func (r *Runner) supervise(ctx, drain context.Context, w Worker, id Identity, ga
 		// 身份与 drain context 一起下发，消费者适配器因此能在 run context 取消
 		// 后继续处理在途消息。就绪闸门也一起下发，Run 因此能在建连完成后上报，而不必
 		// 让 worker 持有 runner 的引用。
-		runCtx := withReadyGate(WithDrainContext(WithIdentity(ctx, id), drain), gate)
+		runCtx := withMetrics(withReadyGate(WithDrainContext(WithIdentity(ctx, id), drain), gate), r.metrics)
+		start := time.Now()
 		err := w.Run(runCtx)
+		r.metrics.recordRun(id, time.Since(start), err != nil)
 		if ctx.Err() != nil {
 			return
 		}
@@ -424,6 +478,7 @@ func (r *Runner) supervise(ctx, drain context.Context, w Worker, id Identity, ga
 			return
 		}
 		restarts++
+		r.metrics.recordRestart(id)
 		if policy.MaxRestarts > 0 && restarts > policy.MaxRestarts {
 			fail(fmt.Errorf("worker %s: %w (restart limit %d reached)", id, err, policy.MaxRestarts))
 			return

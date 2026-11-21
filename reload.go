@@ -245,6 +245,8 @@ func (a *App) Reload(ctx context.Context, spec ReloadSpec) error {
 		TracerProvider: a.telemetry.TracerProvider(),
 		Propagator:     a.telemetry.Propagator(),
 		Tracing:        a.telemetry.Enabled(),
+		MeterProvider:  a.metrics.MeterProvider(),
+		Metrics:        a.metrics.Enabled(),
 	})
 	engine, modules, err := a.buildHTTPWith(rt, lg, systemLogger, accessLogger, factories, injected, registrars)
 	if err != nil {

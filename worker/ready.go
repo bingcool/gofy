@@ -45,6 +45,14 @@ type readyGate struct {
 	pending map[Identity]struct{}
 	closed  bool
 	done    chan struct{}
+	// onChange reports a snapshot of the pending set after it changes. The
+	// runner turns it into an instances.ready gauge; nil keeps standalone gates
+	// free of metrics wiring. It is called with the mutex held so snapshots are
+	// published in the same order as the state changes they describe.
+	// onChange 在待上报集合变化后给出快照。runner 用它更新 instances.ready gauge；
+	// nil 让独立使用的闸门无需接指标。调用时持有互斥锁，保证快照的发布顺序与
+	// 状态变化顺序一致。
+	onChange func([]Identity)
 }
 
 func newReadyGate() *readyGate {
@@ -65,10 +73,30 @@ func (g *readyGate) add(ids []Identity) {
 	if closeNow {
 		g.closed = true
 	}
+	// Publish while holding the lock: two concurrent signals must not let a
+	// stale snapshot overwrite the final count after the gate closed.
+	// 持锁发布：两个并发上报的快照若乱序落盘，旧值会在闸门关闭后覆盖最终计数。
+	g.publishLocked()
 	g.mu.Unlock()
 	if closeNow {
 		close(g.done)
 	}
+}
+
+// publishLocked reports the pending set to the runner's gauge. The caller must
+// hold g.mu, and onChange must not call back into the gate; the runner's only
+// callback records metrics.
+// publishLocked 把待上报集合报给 runner 的 gauge。调用方必须持有 g.mu，且 onChange
+// 不得回调闸门；runner 的回调只记录指标。
+func (g *readyGate) publishLocked() {
+	if g.onChange == nil {
+		return
+	}
+	pending := make([]Identity, 0, len(g.pending))
+	for id := range g.pending {
+		pending = append(pending, id)
+	}
+	g.onChange(pending)
 }
 
 // signal consumes one pending instance. Signals are keyed by instance, so a
@@ -88,6 +116,9 @@ func (g *readyGate) signal(id Identity) {
 	closeNow := ok && len(g.pending) == 0 && !g.closed
 	if closeNow {
 		g.closed = true
+	}
+	if ok {
+		g.publishLocked()
 	}
 	g.mu.Unlock()
 	if closeNow {

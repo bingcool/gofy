@@ -95,6 +95,16 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	}
 	a.telemetry = telemetry
 
+	// The worker process builds the same pipeline as the HTTP path; without it
+	// there is no MeterProvider for the runners and no /metrics to scrape.
+	// worker 进程与 HTTP 路径构建同一套管道；否则 runner 既拿不到 MeterProvider，
+	// 也没有可供抓取的 /metrics。
+	metrics, err := a.buildMetrics(lg)
+	if err != nil {
+		return a.abort(err)
+	}
+	a.metrics = metrics
+
 	db, ownDB, err := a.buildDB(ctx, lg)
 	if err != nil {
 		return a.abort(err)
@@ -115,6 +125,8 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		TracerProvider: telemetry.TracerProvider(),
 		Propagator:     telemetry.Propagator(),
 		Tracing:        telemetry.Enabled(),
+		MeterProvider:  a.metrics.MeterProvider(),
+		Metrics:        a.metrics.Enabled(),
 	})
 	a.rt = rt
 
@@ -155,10 +167,12 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	runners := make([]*worker.Runner, len(groups))
 	for i, group := range groups {
 		runners[i], err = worker.NewRunner(group, worker.RunConfig{
-			Policy:       a.opts.workerPolicy,
-			Concurrency:  a.workerConcurrency(group, opts.Concurrency),
-			DrainTimeout: a.opts.workerDrain,
-			Logger:       lg,
+			Policy:        a.opts.workerPolicy,
+			Concurrency:   a.workerConcurrency(group, opts.Concurrency),
+			DrainTimeout:  a.opts.workerDrain,
+			Logger:        lg,
+			MeterProvider: rt.MeterProvider,
+			Metrics:       rt.Metrics,
 		})
 		if err != nil {
 			return a.abort(err)
@@ -187,6 +201,7 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		zap.Int("workers", workers),
 		zap.Duration("drain_timeout", a.opts.workerDrain),
 		zap.Bool("telemetry", telemetry.Enabled()),
+		zap.Bool("metrics", a.metrics.Enabled()),
 	}
 	if len(groups) == 1 {
 		startedFields = append(startedFields, zap.String("group", groups[0].Name()))
@@ -218,6 +233,17 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		lg.Warn("register worker group health check failed", zap.Error(err))
 	}
 	a.workerHealthRegistry = reg
+
+	// Only building a provider would leave the worker process with no scrape
+	// endpoint at all. The HTTP path starts its listener in run(); a worker has
+	// no such path, so it has to do it here. A metrics-free worker opens nothing.
+	// 只构建 provider 会让 worker 进程完全没有抓取端点。HTTP 路径在 run() 里启动
+	// 监听，worker 没有那段代码，因此必须在这里启动；未开启指标的 worker 不监听。
+	if a.metrics.Enabled() && a.opts.diagnostics != nil && a.opts.diagnostics.Enabled {
+		if err := a.startDiagnostics(lg); err != nil {
+			return a.abort(fmt.Errorf("gofy: worker diagnostics: %w", err))
+		}
+	}
 
 	var probe *workerHealth
 	if a.opts.workerHealth != "" {

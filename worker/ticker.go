@@ -61,12 +61,23 @@ func Ticker(ctx context.Context, intervalMS uint32, fn func(context.Context) err
 // 循环外。
 func runTick(ctx context.Context, fn func(context.Context) error) {
 	lg := tickerLogger(ctx)
+	metrics := metricsFrom(ctx)
+	start := time.Now()
+	failed := false
 	defer func() {
 		if r := recover(); r != nil {
+			failed = true
 			lg.Error("worker tick panicked", tickerFields(ctx, zap.Any("panic", r), zap.Stack("stack"))...)
+		}
+		// Record after the panic is recovered: one bad tick must still produce
+		// its duration and error count instead of skipping both.
+		// 在 panic 恢复之后再记录：一次坏 tick 仍要留下耗时与错误计数。
+		if metrics != nil {
+			metrics.recordTick(ctx, time.Since(start), failed)
 		}
 	}()
 	if err := fn(ctx); err != nil {
+		failed = true
 		lg.Warn("worker tick failed", tickerFields(ctx, zap.Error(err))...)
 	}
 }

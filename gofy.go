@@ -129,11 +129,11 @@ type App struct {
 	// tracing 关闭时为 nil。
 	telemetry *otel.Provider
 
-	// metrics is built at startup when WithDiagnostics enabled the scrape
-	// endpoint. A nil value is a disabled pipeline: GinMiddleware returns nil and
-	// Shutdown is a no-op, so the HTTP path needs no nil checks.
-	// metrics 在 WithDiagnostics 打开抓取端点时于启动期构建。nil 表示管道禁用：
-	// GinMiddleware 返回 nil、Shutdown 是 no-op，HTTP 路径因此不需要判空。
+	// metrics is built at startup from WithMetrics, or from the legacy
+	// diagnostics settings when that option is absent. A nil value is a disabled
+	// pipeline: every Metrics method tolerates nil, so callers need no checks.
+	// metrics 在启动期由 WithMetrics 构建；未传该选项时沿用旧的诊断配置。nil 表示
+	// 管道禁用：Metrics 的所有方法都能容忍 nil，调用方因此不需要判空。
 	metrics *otel.Metrics
 
 	// diagnostics is the operational listener (metrics + pprof). It is nil when
@@ -497,18 +497,23 @@ func (a *App) buildTelemetry(ctx context.Context, logger *zap.Logger) (*otel.Pro
 	return provider, nil
 }
 
-// buildMetrics builds the Prometheus pipeline when the diagnostics listener has
-// metrics enabled. Metrics are independent of tracing: an application that
-// cannot run a collector still needs a scrape endpoint, so this does not consult
-// the telemetry config.
-// buildMetrics 在诊断监听启用指标时构建 Prometheus 管道。指标与追踪相互独立：
-// 跑不起 collector 的应用仍然需要抓取端点，因此这里不读取 telemetry 配置。
+// buildMetrics builds the Prometheus pipeline. An explicit WithMetrics wins;
+// without it the diagnostics settings keep their old meaning of also enabling
+// metrics. Metrics stay independent of tracing: an application with no collector
+// still needs a scrape endpoint.
+// buildMetrics 构建 Prometheus 管道。显式传入的 WithMetrics 优先；未传入时诊断监听
+// 的既有配置同时决定是否开启指标。指标与追踪相互独立：没有 collector 的应用仍然
+// 需要抓取端点。
 func (a *App) buildMetrics(logger *zap.Logger) (*otel.Metrics, error) {
-	if a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled || a.opts.diagnostics.DisableMetrics {
+	cfg, explicit := a.metricsConfig()
+	if cfg == nil {
 		return nil, nil
 	}
+	if explicit && (a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled || a.opts.diagnostics.DisableMetrics) {
+		logger.Warn("metrics are enabled without a scrape endpoint; pair WithMetrics with WithDiagnostics")
+	}
 	metrics, err := otel.NewMetrics(
-		otel.MetricsConfig{Enabled: true, Path: a.opts.diagnostics.MetricsPath},
+		otel.MetricsConfig{Enabled: true, Path: cfg.Path},
 		otel.WithLogger(logger),
 		otel.WithServiceName(a.opts.name),
 		otel.WithServiceVersion(a.version.Version),
@@ -518,6 +523,24 @@ func (a *App) buildMetrics(logger *zap.Logger) (*otel.Metrics, error) {
 		return nil, fmt.Errorf("gofy: metrics: %w", err)
 	}
 	return metrics, nil
+}
+
+// metricsConfig resolves the effective metrics configuration. The second result
+// reports whether WithMetrics supplied it, which decides whether a missing
+// diagnostics listener deserves a warning.
+// metricsConfig 解析生效的指标配置。第二个返回值说明配置是否来自 WithMetrics，
+// 据此判断缺少诊断监听时是否需要告警。
+func (a *App) metricsConfig() (*otel.MetricsConfig, bool) {
+	if a.opts.metrics != nil {
+		if !a.opts.metrics.Enabled {
+			return nil, true
+		}
+		return a.opts.metrics, true
+	}
+	if a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled || a.opts.diagnostics.DisableMetrics {
+		return nil, false
+	}
+	return &otel.MetricsConfig{Enabled: true, Path: a.opts.diagnostics.MetricsPath}, false
 }
 
 // startDiagnostics binds the operational listener. A bind failure is fatal: an

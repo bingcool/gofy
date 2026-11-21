@@ -63,6 +63,17 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 	}
 	a.telemetry = telemetry
 
+	// Handler mode builds the pipeline too: buildHTTP installs the metrics
+	// middleware, and callers embedding this handler still need a provider in
+	// the runtime. WithMetrics alone remains a no-op for disabled configs.
+	// Handler 模式也构建管道：buildHTTP 会安装指标中间件，嵌入该 handler 的调用方
+	// 也需要 runtime 里有 provider。指标关闭时 WithMetrics 仍然是 no-op。
+	metrics, err := a.buildMetrics(lg)
+	if err != nil {
+		return nil, a.abort(err)
+	}
+	a.metrics = metrics
+
 	db, ownDB, err := a.buildDB(runCtx, lg)
 	if err != nil {
 		return nil, a.abort(err)
@@ -83,6 +94,8 @@ func (a *App) Handler(ctx context.Context) (http.Handler, error) {
 		TracerProvider: telemetry.TracerProvider(),
 		Propagator:     telemetry.Propagator(),
 		Tracing:        telemetry.Enabled(),
+		MeterProvider:  a.metrics.MeterProvider(),
+		Metrics:        a.metrics.Enabled(),
 	})
 	a.rt = rt
 
@@ -153,6 +166,8 @@ func (a *App) run(parent context.Context) error {
 		TracerProvider: telemetry.TracerProvider(),
 		Propagator:     telemetry.Propagator(),
 		Tracing:        telemetry.Enabled(),
+		MeterProvider:  a.metrics.MeterProvider(),
+		Metrics:        a.metrics.Enabled(),
 	})
 	a.rt = rt
 

@@ -150,9 +150,15 @@ type options struct {
 	telemetry *otel.Config // OpenTelemetry 配置
 
 	// diagnostics holds the operational listener configuration. nil means no
-	// diagnostics listener and no metrics pipeline.
-	// diagnostics 保存运维监听配置；nil 表示不启动诊断监听，也不构建指标管道。
+	// diagnostics listener. Metrics can be enabled independently with WithMetrics.
+	// diagnostics 保存运维监听配置；nil 表示不启动诊断监听。指标可通过 WithMetrics
+	// 独立开启。
 	diagnostics *diagnostics.Config
+	// metrics explicitly configures the Prometheus pipeline. nil keeps the
+	// backwards-compatible rule: diagnostics with metrics enabled builds one.
+	// metrics 显式配置 Prometheus 管道；nil 时沿用兼容规则：诊断监听开启且未禁用
+	// metrics 就构建管道。
+	metrics *otel.MetricsConfig
 }
 
 // defaultOptions returns the gofy.New defaults: app name "app", env "dev", console
@@ -1062,6 +1068,32 @@ func WithDiagnostics(cfg diagnostics.Config) Option {
 		}
 		c := cfg
 		o.diagnostics = &c
+		return nil
+	}
+}
+
+// WithMetrics builds the Prometheus pipeline independently of the diagnostics
+// listener. Setting Enabled to false explicitly disables the pipeline even when
+// WithDiagnostics would have enabled it; leaving this option out keeps that
+// legacy behaviour.
+//
+// A provider alone creates no scrape endpoint. Pair it with WithDiagnostics (or
+// mount Metrics.Handler yourself) or the reader accumulates series nobody can
+// collect. Both the HTTP and the worker process build through this option, so
+// their metrics share one configuration.
+// WithMetrics 独立于诊断监听构建 Prometheus 管道。显式把 Enabled 设为 false
+// 会关掉管道，即使 WithDiagnostics 本来会打开它；不传本选项则保持旧的兼容行为。
+//
+// 只有 provider 不会产生抓取端点。请配合 WithDiagnostics 使用（或自行挂载
+// Metrics.Handler），否则 reader 会不断累积无人抓取的序列。HTTP 与 worker 进程
+// 都通过本选项构建，因此两边的指标共用同一份配置。
+func WithMetrics(cfg otel.MetricsConfig) Option {
+	return func(o *options) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		c := cfg
+		o.metrics = &c
 		return nil
 	}
 }

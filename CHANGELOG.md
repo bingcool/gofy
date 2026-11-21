@@ -36,6 +36,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `WithMetrics(otel.MetricsConfig)` builds the Prometheus pipeline independently
+  of `WithDiagnostics`; an explicit `Enabled:false` now turns off the pipeline
+  that diagnostics would otherwise enable. `otel.Metrics.MeterProvider()` and
+  `core.Runtime.MeterProvider`/`Metrics` give business code and worker runtimes a
+  provider without nil checks. When a worker process enables metrics and has a
+  diagnostics config, it now starts that listener so `/metrics` actually exists.
+  **Phase 2 worker metrics**: `gofy_worker_ready`, `instances.ready/total`,
+  `restarts`, `run.duration`, `tick.duration/errors` and `abandoned`. All duration
+  histograms share the `0.005…10` boundaries; disabled metrics allocate nothing
+  on the recording paths.
+  `WithMetrics(otel.MetricsConfig)` 独立于 `WithDiagnostics` 构建 Prometheus 管道；
+  显式 `Enabled:false` 可以关掉诊断监听原本会打开的管道。`otel.Metrics.MeterProvider()`
+  与 `core.Runtime.MeterProvider`/`Metrics` 让业务代码和 worker 运行时无需判空即可拿到
+  provider。worker 进程开启指标且配了 diagnostics 时会启动该监听，`/metrics` 才真正存在。
+  **Phase 2 worker 指标**：`gofy_worker_ready`、`instances.ready/total`、`restarts`、
+  `run.duration`、`tick.duration/errors` 与 `abandoned`。所有耗时直方图共用 `0.005…10`
+  的边界；指标关闭时记录路径零分配。
+
 - `support/health`: the probe registry behind `/healthz`, `/readyz` and the
   diagnostics `/health`. Checks run with a per-check timeout (default 2s), a round
   budget (3s), a concurrency cap (4), TTL caches (readiness 1s, diagnostic 2s),

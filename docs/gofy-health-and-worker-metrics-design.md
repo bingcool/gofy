@@ -404,6 +404,8 @@ app, err := gofy.New(
   但**只有 MeterProvider 不会产生抓取端点**：`worker_host.go` 目前没有任何 diagnostics 引用，
   指标构建完也没有人挂 `Handler()`。Phase 2 必须同时让 worker host 在指标开启时启动诊断监听
   （复用 `diagnostics.Config`）或独立的 metrics 监听，否则 `/metrics` 不存在，验收条件无法成立。
+  落地上复用 `App.startDiagnostics`：只有配置了 `WithDiagnostics` 才监听，避免凭空绑定 6060；
+  没有配置时启动日志给出告警，由调用方决定挂到哪里。
 - 反向注意：`WithMetrics` 打开却没有任何 handler 挂载时，Prometheus reader 会持续累积序列
   而无人抓取，属于内存泄漏式的误配置。文档要求它与 diagnostics 或自挂 `Handler()` 配套使用。
 - `WithDiagnostics` 保持现状：开启诊断且未禁用 metrics 时，等价于同时开启指标（向后兼容）。
@@ -537,12 +539,14 @@ app, err := gofy.New(
 `0.005,0.01,0.025,0.05,0.1,0.25,0.5,1,2.5,5,10` 这组值，**不存在「额外加一组」**。落地时还有
 两件事：
 
-1. 每个新直方图都要注册 `sdkmetric.WithView`。现在只有 `http.server.request.duration` 有 view
+1. 每个新直方图都要落到同一套 view。现在只有 `http.server.request.duration` 有 view
    （`metrics.go:164-171`），其余 instrument 会落回 SDK 默认桶——边界是
    `0,5,10,25,50,75,100,250,500,750,1000,2500,5000,7500,10000`（`_sum`/`_count` 之外 16 个计数桶）。
    问题不是「10s 以上挤进一个桶」：10s–10000 之间仍有 25/50/…/7500 多档。真实风险是同一份看板
    要面对两套边界——HTTP 用 `0.005…10`、消费耗时用 SDK 默认值，单位同为秒但刻度差三个数量级，
-   分位数与阈值会随 SDK 版本变化而漂移。
+   分位数与阈值会随 SDK 版本变化而漂移。落地时改为一条按
+   `(Kind=Histogram, Unit="s")` 匹配的 view：新增 histogram 自动继承同一组边界，不必再逐个登记
+   名字；`worker.run.duration` 的回归用例会断言 `le=0.005` 存在、`le=0/50/10000` 不存在。
 2. 映射表里的 `_seconds` 后缀来自 `metric.WithUnit("s")`（现有直方图已设置）；新直方图必须同样
    设置单位，否则 Prometheus 侧的名字是 `gofy_consumer_handle_duration` 而不是 `_seconds`。
 
@@ -612,14 +616,48 @@ worker 宿主探针测试改探 `/readyz`（并断言 `/healthz` 在启动与 dr
 
 | 文件 | 变更 |
 |---|---|
-| `support/otel/metrics.go` | `MeterProvider()` 访问器；直方图桶补充 |
-| `gofy.go:487-495` | `WithMetrics` 独立构建；worker host 也构建 |
+| `support/otel/metrics.go` | `MeterProvider()` 访问器；view 改为覆盖所有秒级直方图 |
+| `option.go` / `gofy.go` | 新增 `WithMetrics`；`buildMetrics` 显式配置优先，兼容旧的 diagnostics 规则 |
 | `worker_host.go` | 指标开启时启动 diagnostics 监听（`diagnostics.New` + `Endpoints{Metrics: metrics.Handler()}`），否则 worker 的 `/metrics` 不存在 |
 | `core/runtime.go` | `MeterProvider metric.MeterProvider` |
 | `worker/runner.go`、`ticker.go` | `RunConfig.MeterProvider`（或从 Runtime 取）；状态/重启/run/tick 指标 |
 | `worker_host.go` | 构建指标并注入 runner |
 
 验收：指标关闭时所有调用为 no-op、无额外分配；worker 进程 `/metrics` 能看到 `gofy_worker_*`。
+
+#### Phase 2 落地记录（2026-11-21）
+
+代码已落地并通过验证：
+
+| 验证项 | 命令 | 结果 |
+|---|---|---|
+| 格式 | `gofmt -l .` | 无输出 |
+| 编译 / 静态检查 | `go build ./...`、`go vet ./...` | 通过 |
+| 单元 + 集成 | `go test ./...` | 通过 |
+| 并发 | `go test -race ./worker/... ./support/otel/... ./core .` | 通过 |
+| 依赖方向 | `make guards` | 通过 |
+| 示例模块 | `examples/demo-service` 的 `go build ./...`、`go vet ./...` | 通过 |
+
+实现要点与验证过程中确认的问题：
+
+1. **`WithMetrics` 独立构建**：显式配置优先，`Enabled:false` 能关掉 diagnostics 原本会打开的管道；
+   未传该选项时保持「diagnostics 开启且未禁用 metrics 即构建」的旧行为。仅开 provider、没有
+   diagnostics 的进程会在启动日志告警，而不是静默累积无人抓取的序列。
+2. **provider 入口**：`Metrics.MeterProvider()` 在禁用或 nil 接收者时返回 no-op provider；
+   `core.Runtime` 新增 `MeterProvider` 与 `Metrics` 两个字段，HTTP 的 run/Handler、Reload 与
+   worker 进程都装配。脚本路径没有指标管道，沿用 no-op 默认值。
+3. **worker 抓取端点**：`runWorker` 在指标开启且配置了 diagnostics 时调用 `App.startDiagnostics`。
+   回归用例 `TestWorkerServesMetricsEndpoint` 在临时注释掉这段时因 `connection refused` 失败，
+   恢复后通过——单有 MeterProvider 确实不会有 `/metrics`。
+4. **直方图边界**：view 从「按 instrument 名」改为「按 `(Kind=Histogram, Unit="s")`」匹配，
+   所有秒级耗时直方图共用 `0.005…10`。回归用例在旧 view 下拿到 SDK 默认桶（`le=0/50/10000`）
+   而失败，改回后通过。
+5. **worker 埋点**：`worker/metrics.go` 缓存 8 个 instrument；Runner 记录 ready、instances、
+   restarts、run 耗时与 abandoned，Ticker 经 context 取得同一组实例记录 tick 耗时与错误。
+   禁用指标时所有方法在构造标签之前返回，`testing.AllocsPerRun` 断言每次调用 0 分配。
+6. **并发修正（验证中发现）**：readyGate 最初在解锁后才发布 pending 快照，两个实例同时上报时，
+   旧快照可能在闸门关闭之后覆盖 `instances.ready=2`，压测 50 次复现约 4 次。改为持锁按状态
+   变化顺序发布，压测 50 次全过；`-race` 也通过。
 
 ### Phase 3：消费、认领、租约指标（约 4–5 人日）
 

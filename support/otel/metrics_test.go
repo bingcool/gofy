@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 )
 
 func TestMetricsDisabledIsInert(t *testing.T) {
@@ -235,6 +237,89 @@ func TestMetricsShutdownIsIdempotent(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if err := m.Shutdown(context.Background()); err != nil {
 			t.Fatalf("Shutdown call %d: %v", i, err)
+		}
+	}
+}
+
+// TestMeterProviderDisabledIsNoop is the contract the worker host relies on:
+// it can ask every Metrics for a provider without checking whether the pipeline
+// exists. A nil receiver behaves the same way.
+// TestMeterProviderDisabledIsNoop 是 worker 宿主依赖的契约：它可以无条件向任意
+// Metrics 要 provider，不必判断管道是否存在；nil 接收者的行为也一样。
+func TestMeterProviderDisabledIsNoop(t *testing.T) {
+	disabled, err := NewMetrics(MetricsConfig{})
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	var nilMetrics *Metrics
+	for name, m := range map[string]*Metrics{"disabled": disabled, "nil": nilMetrics} {
+		provider := m.MeterProvider()
+		if provider == nil {
+			t.Fatalf("%s: MeterProvider returned nil", name)
+		}
+		if _, ok := provider.(metricnoop.MeterProvider); !ok {
+			t.Fatalf("%s: MeterProvider = %T, want noop", name, provider)
+		}
+		counter, err := provider.Meter("test").Int64Counter("gofy.test.counter")
+		if err != nil {
+			t.Fatalf("%s: noop meter rejected an instrument: %v", name, err)
+		}
+		counter.Add(context.Background(), 1)
+	}
+
+	enabled, err := NewMetrics(MetricsConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("NewMetrics(enabled): %v", err)
+	}
+	defer func() { _ = enabled.Shutdown(context.Background()) }()
+	if _, ok := enabled.MeterProvider().(metricnoop.MeterProvider); ok {
+		t.Fatal("enabled Metrics returned a noop MeterProvider")
+	}
+}
+
+// TestDurationHistogramsUseSharedBuckets guards the dashboard contract for
+// instruments created outside this package: a worker histogram with unit "s"
+// must get the same boundaries as the HTTP one, not the SDK defaults.
+// TestDurationHistogramsUseSharedBuckets 守住跨包创建的 instrument 的看板契约：
+// 单位为 s 的 worker 直方图必须与 HTTP 用同一组边界，而不是 SDK 默认值。
+func TestDurationHistogramsUseSharedBuckets(t *testing.T) {
+	m, err := NewMetrics(MetricsConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	defer func() { _ = m.Shutdown(context.Background()) }()
+
+	histogram, err := m.MeterProvider().Meter("test").Float64Histogram(
+		"gofy.worker.run.duration", metric.WithUnit("s"))
+	if err != nil {
+		t.Fatalf("create histogram: %v", err)
+	}
+	histogram.Record(context.Background(), 0.02)
+
+	body := scrape(t, m)
+	le := make(map[string]bool)
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "gofy_worker_run_duration_seconds_bucket{") {
+			continue
+		}
+		start := strings.Index(line, `le="`)
+		if start < 0 {
+			continue
+		}
+		rest := line[start+len(`le="`):]
+		end := strings.Index(rest, `"`)
+		if end > 0 {
+			le[rest[:end]] = true
+		}
+	}
+	for _, want := range []string{"0.005", "0.025", "10", "+Inf"} {
+		if !le[want] {
+			t.Fatalf("bucket %q is missing from the worker histogram: %v\n%s", want, le, body)
+		}
+	}
+	for _, unwanted := range []string{"0", "50", "10000"} {
+		if le[unwanted] {
+			t.Fatalf("SDK default bucket %q leaked into the worker histogram\n%s", unwanted, body)
 		}
 	}
 }

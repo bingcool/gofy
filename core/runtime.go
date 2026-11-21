@@ -9,6 +9,8 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -51,6 +53,18 @@ type Runtime struct {
 	// GORM、Redis 等可选埋点，避免 no-op tracer 带来的额外开销。
 	Tracing bool
 
+	// MeterProvider lets business code and worker runtimes create instruments.
+	// It is a no-op provider when metrics are off; Metrics reports whether the
+	// pipeline is real, so hot paths can skip building attributes entirely.
+	// MeterProvider 供业务代码与 worker 运行时创建 instrument。指标关闭时它是
+	// no-op provider；Metrics 表示管道是否真实存在，热路径因此可以连属性都不构造。
+	MeterProvider metric.MeterProvider
+	// Metrics reports whether the App built a Prometheus pipeline. Metrics are
+	// independent of tracing: an app can scrape metrics without a collector.
+	// Metrics 表示 App 是否构建了 Prometheus 管道。指标与追踪相互独立：
+	// 没有 collector 的应用仍然可以抓取指标。
+	Metrics bool
+
 	ctx  context.Context
 	fail func(error)
 }
@@ -71,6 +85,8 @@ type RuntimeConfig struct {
 	TracerProvider trace.TracerProvider
 	Propagator     propagation.TextMapPropagator
 	Tracing        bool
+	MeterProvider  metric.MeterProvider
+	Metrics        bool
 }
 
 // NewRuntime builds a Runtime from cfg, filling safe defaults for nil fields.
@@ -97,6 +113,9 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 			propagation.Baggage{},
 		)
 	}
+	if cfg.MeterProvider == nil {
+		cfg.MeterProvider = metricnoop.NewMeterProvider()
+	}
 	return &Runtime{
 		Name:           cfg.Name,
 		Env:            cfg.Env,
@@ -107,6 +126,8 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 		TracerProvider: cfg.TracerProvider,
 		Propagator:     cfg.Propagator,
 		Tracing:        cfg.Tracing,
+		MeterProvider:  cfg.MeterProvider,
+		Metrics:        cfg.Metrics,
 		ctx:            cfg.Ctx,
 		fail:           cfg.Fail,
 	}

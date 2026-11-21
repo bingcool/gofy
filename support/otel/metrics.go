@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.uber.org/zap"
@@ -156,13 +157,15 @@ func NewMetrics(cfg MetricsConfig, opts ...Option) (*Metrics, error) {
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(exporter),
-		// Without this view the SDK uses its own defaults, whose upper bound is
-		// far above any useful HTTP latency. The boundaries are explicit so a
-		// dashboard does not silently change when the SDK default changes.
-		// 没有这个 view 时 SDK 用自己的默认桶，上界远高于有意义的 HTTP 延迟。显式
-		// 给出边界，看板不会因为 SDK 默认值变化而悄悄改变。
+		// Every duration histogram — HTTP, worker, consumer, claim — gets the
+		// same boundaries. Matching by (histogram, unit "s") instead of naming
+		// each instrument means a new probe cannot silently fall back to the
+		// SDK's millisecond-scale defaults and drift away from the dashboards.
+		// 所有耗时直方图（HTTP、worker、消费、认领）共用同一组边界。按
+		// （直方图、单位 s）匹配，而不是逐个列名，新增埋点就不会悄悄落回 SDK 的
+		// 毫秒级默认桶、与看板刻度越走越远。
 		sdkmetric.WithView(sdkmetric.NewView(
-			sdkmetric.Instrument{Name: "http.server.request.duration"},
+			sdkmetric.Instrument{Kind: sdkmetric.InstrumentKindHistogram, Unit: "s"},
 			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
 				Boundaries: append([]float64(nil), durationBuckets...),
 			}},
@@ -202,6 +205,20 @@ func (m *Metrics) Handler() http.Handler {
 		return nil
 	}
 	return m.handler
+}
+
+// MeterProvider returns the provider business code and the worker runtime use
+// to create instruments. A disabled or nil Metrics returns a no-op provider, so
+// callers never have to branch on whether the pipeline exists. The provider is
+// owned by Metrics and must not be shut down by the caller.
+// MeterProvider 返回业务代码与 worker 运行时创建 instrument 用的 provider。
+// 指标关闭或接收者为 nil 时返回 no-op provider，调用方因此无需判断管道是否存在。
+// provider 归 Metrics 所有，调用方不得自行关闭。
+func (m *Metrics) MeterProvider() metric.MeterProvider {
+	if !m.Enabled() {
+		return noop.NewMeterProvider()
+	}
+	return m.provider
 }
 
 // Path returns the configured scrape path.
