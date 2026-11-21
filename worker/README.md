@@ -426,13 +426,22 @@ if err != nil {
 | 绝不能执行两次（对账、日切） | `support/lease` | 选主 + fencing token，旧持有者写入被拒 |
 | 跟随本 HTTP 实例的循环 | `support.Starter` | 本来就该每个副本各跑一份 |
 
-用 worker 包住 `lease.Run` 是最常见的全局型写法：
+用 worker 包住 `lease.Run` 是最常见的全局型写法（`Name`/`MeterProvider`/`Metrics` 必须成对
+给出才会计数，只跑一个租约的部署可以省 `Name`）：
 
 ```go
 w := worker.Func("settle", 1, func(ctx context.Context) error {
+	rt, _ := worker.RuntimeFrom(ctx)
 	return lease.Run(ctx, locker, "settle-reconcile", lease.RunConfig{
 		TTL:      15 * time.Second,
 		Interval: 5 * time.Minute,
+		Name:     "settle-reconcile",
+		// MeterProvider is never nil on the runtime — metrics-off gives a no-op
+		// provider — but Metrics must still say whether it is real.
+		// Runtime 上的 MeterProvider 不会是 nil——指标关闭时也是 no-op——
+		// 但 Metrics 仍要说明它是否真实可用。
+		MeterProvider: rt.MeterProvider,
+		Metrics:       rt.Metrics,
 	}, func(ctx context.Context, token int64) error {
 		return settle(ctx, token)
 	})

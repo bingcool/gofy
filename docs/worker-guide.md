@@ -278,9 +278,13 @@ consumer := queuesconsumer.New("order-notify", queue, queuesconsumer.Config{
 locker, _ := redislease.New(redisClient, redislease.Config{Prefix: "demo:"})
 
 w := worker.Func("settle", 1, func(ctx context.Context) error {
+	rt, _ := worker.RuntimeFrom(ctx)
 	return lease.Run(ctx, locker, "settle:reconcile", lease.RunConfig{
 		TTL:      15 * time.Second, // 续约按 TTL/3 进行
 		Interval: 5 * time.Minute,  // 两次执行之间的间隔
+		Name:     "settle:reconcile", // lease 指标的标签；单租约部署可省
+		MeterProvider: rt.MeterProvider, // 两个字段成对给才有 gofy.lease.* 序列
+		Metrics:       rt.Metrics,
 	}, func(ctx context.Context, token int64) error {
 		return settle(ctx, db, token)
 	})

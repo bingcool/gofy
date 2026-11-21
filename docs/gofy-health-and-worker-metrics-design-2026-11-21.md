@@ -449,6 +449,12 @@ app, err := gofy.New(
 | `gofy.health.check.status` | Gauge | `check`, `class` | 1=健康，0=失败，-1=unknown（Gauge 支持负值） |
 | `gofy.health.check.duration` | Histogram | `check`, `class` | 单检查耗时；发现问题依赖变慢 |
 
+> **未实现**（复核 M-04）：以上三项在 Phase 1–3 中均未落地，全仓无对应 Go 代码；
+> 数据源候选是 registry 的 `Snapshot`（`check` 与 `class` 标签已在快照里），
+> 列入 Phase 4 待办。落地前不要按 §4.6 的 `gofy_health_ready` / `gofy_health_check_status`
+> 配告警——多数告警规则对「没有序列」是静默的，会让故障无从发现。摘流请继续依赖
+> `/healthz`、`/readyz` 端点。
+
 **Worker 生命周期**
 
 | 指标 | 类型 | 标签 | 说明 |
@@ -502,7 +508,7 @@ app, err := gofy.New(
 | `topic` | 投递元数据 | 只允许配置里声明的值；空值记为 `unknown`。来源按 broker：Kafka `record.Topic`、RocketMQ `message.Topic`、AMQP `delivery.RoutingKey`（按配置声明的 binding 白名单化，未命中记 `unknown`）、Redis queues 队列 `key`；与 Kafka 共用同一个标签以免同一 consumer 换 broker 时改名 |
 | `broker` | 构造器决定 | 固定枚举：`kafka/amqp/rocketmq/queues` |
 | `reason` | 分支 | 固定枚举：`success/duplicate/permanent/decode/retry/inflight/ledger` |
-| `outcome` | 分支 | 固定枚举：`success/duplicate/permanent/decode/retry/inflight/succeeded/failed/dead/lease_lost` |
+| `outcome` | 分支 | 固定枚举：`success/duplicate/permanent/decode/retry/inflight/succeeded/failed/dead/lease_lost`；reason=ledger 的投递在耗时直方图按 `retry` 计（实现见 `support/consumer/metrics.go` 的 `record` 注释） |
 | `job` | `claim.Config.Job` | 配置期校验 |
 | `lease` | `lease.RunConfig.Name`（新增） | 可选；为空时只记聚合指标 |
 
@@ -581,7 +587,6 @@ app, err := gofy.New(
 
 | 告警 | 条件 | 说明 |
 |---|---|---|
-| NotReady | `gofy_health_ready == 0` 持续 2m | 区分 `check` 标签定位依赖 |
 | Worker 抖动 | `rate(gofy_worker_restarts_total[5m]) > 0.2` | 持续重启说明连接或配置问题 |
 | 消费停滞 | `rate(gofy_consumer_received_total[5m]) == 0` 且应有流量 | 与 topic 维度一起看 |
 | 重投升高 | `rate(gofy_consumer_nacked_total{reason="retry"}[5m]) / rate(gofy_consumer_received_total[5m]) > 0.2` | 可能是下游故障或 handler 非幂等 |
@@ -589,6 +594,10 @@ app, err := gofy.New(
 | 台账落后 | `rate(gofy_consumer_ledger_errors_total[5m]) > 0` | 去重失效风险 |
 | 认领失败 | `rate(gofy_claim_outcomes_total{outcome="failed"}[5m]) + rate(gofy_claim_outcomes_total{outcome="dead"}[5m]) > 0` | 扫表任务健康 |
 | 租约丢失 | `rate(gofy_lease_renew_failures_total{outcome="lost"}[5m]) > 0` | 长任务被接管 |
+
+> NotReady 告警暂缺：`gofy.health.ready` / `gofy.health.check.status` 属于 §4.2 标注的
+> 「未实现」组，Phase 4 落地后再补回 `gofy_health_ready == 0 持续 2m` 这一条；
+> 在此之前摘流与告警请基于 `/healthz`、`/readyz` 端点探测。
 
 ---
 
@@ -729,6 +738,10 @@ worker 宿主探针测试改探 `/readyz`（并断言 `/healthz` 在启动与 dr
 5. **租约**：`renew.failures` 实际带 `outcome=error|lost` 两个值（原表格只列了 `lease`），
    与正文「ErrLeaseLost 单独计 outcome=lost」一致；暂时错误与升级为丢失分别计一次。
 6. 禁用指标时 consumer/claim/lease 三个记录路径均通过 `testing.AllocsPerRun` 断言 0 分配。
+7. **验收口径**（复核 M-03）：lease 是库级能力，仓库内没有运行时调用点，其验收为
+   「库级实现 + 单元测试」；`gofy.lease.*` 序列要等业务按 §4.1 接线后才会出现，接线示例见
+   `worker/README.md` 与 `docs/worker-guide.md` 的 lease 章节。claim 在 demo 的
+   `scan_claim.go` 已接线（复核 M-02）。
 
 ### Phase 4：增强（可选）
 
@@ -830,3 +843,245 @@ func (r *Runner) State() State // Starting/Ready/Draining/Stopped/Failed
 Phase 1 约 4–5 人日，Phase 2 约 3–4 人日，Phase 3 约 4–5 人日，Phase 4 按需。
 测试与文档约占总量 30%。全部完成后，gofy 的健康与可观测能力覆盖「HTTP + worker + 消费 + 认领 + 租约」
 五个面，且不引入新的运行时依赖。
+
+---
+
+## 9. Phase 2 / Phase 3 实现复核（2026-11-21 23:15）
+
+### 9.1 复核方式与边界
+
+复核对象是 `7def447`（Phase 2）与 `3ceb9dc`（Phase 3）的实际代码，不采信 §5 落地记录的自述。
+本机 `go` 工具链被沙箱的执行白名单拦住（`/usr/local/go/bin` 不在名单，`execve` 返回 EPERM），
+因此**没有重跑** `gofmt`、`go build`、`go vet`、`go test`、`-race`；以下结论全部来自源码静态
+阅读与交叉引用。任何涉及"编译是否通过""测试是否变绿"的判断都标为**未验证**，不以 §5 的命令
+结果为依据。
+
+分级：**bug**（会产生错误或缺失数据）、**接线/缺口**（实现正确但没接上，数据为零）、
+**不严谨**（注释、文档、API 与实现不一致）、**优化**（当前正确，可改进）。
+
+**二次复核修正（2026-11-21 23:47）**：上述结论已在可执行 `go` 工具链的环境里逐条回读源码复核。
+M-01～M-07 成立，其中 M-01、M-03、M-05、M-06 的证据或修法已就地修正；**M-08、M-09、M-10 撤销**
+——三处的原始证据分别误读了代码归属（`cleanup()` 是共享函数）、设计枚举（outcome 枚举不含
+`ledger`）与行为对称性（HTTP 路径行为完全相同），撤销理由见 9.3 对应条目；由此新增「确认无
+问题」的项补入 9.4。9.5 的修复顺序已同步更新。
+
+### 9.2 汇总
+
+| 编号 | 级别 | 问题 | 位置 | 影响 |
+|---|---|---|---|---|
+| M-01 | bug (P2) | `Handle` 的投递计数不是 `defer`，panic 时漏计 | `support/consumer/consume.go:504-510` | panic 那次投递不计入指标；broker 层 recover 后按失败重投，重投那次计入 |
+| M-02 | 接线 (P2) | demo 的 claim runner 未传 `MeterProvider`/`Metrics` | `examples/demo-service/worker/group1/scan_claim.go:355-380` | `gofy.claim.*` 在示例进程永远为空 |
+| M-03 | 文档缺口 (P3) | `lease.Run` 无非测试调用点，两处文档示例也没带指标字段 | `worker/README.md:433`、`docs/worker-guide.md:281` | 照抄示例拿不到 `gofy.lease.*`；验收口径需注明库级 |
+| M-04 | 文档缺口 (P3) | `gofy.health.*` 三个指标没有实现 | §4.2 / §4.6；全仓无 Go 命中 | 按 §4.6 配的告警永久无数据 |
+| M-05 | 优化 (P3) | `readyGate` 在持锁状态下记录指标 | `worker/ready.go:91-100`、`worker/runner.go:358` | 建连上报与指标记录串行 |
+| M-06 | API (P3) | `Metrics bool` 与 `MeterProvider` 必须成对，否则静默失效 | 四个配置结构（见 9.3） | 漏一个字段就完全没有指标 |
+| M-07 | 防御 (P3) | `labelTopic` 在空白名单时透传任意值 | `support/consumer/metrics.go:116-121` | 白名单退化后基数不受控 |
+| M-08 | **撤销** | 原判不成立：`start.go:1162-1163` 就在共享的 `cleanup()` 内部，worker 路径经 `worker_host.go:397` 调用同一函数，停机语义与 HTTP 一致 | `start.go:1031-1198` | 无 |
+| M-09 | **撤销** | 原判不成立：§4.3 的 outcome 枚举本就不含 `ledger`（它在 reason 枚举里），ledger→retry 恰是按设计执行 | `support/consumer/metrics.go:138-142` | 无 |
+| M-10 | **撤销** | 症状属实但 HTTP 路径（`start.go:208`）行为完全相同；原修法会制造两条入口的分叉并顺带关掉 pprof | `worker_host.go:242`、`start.go:208` | 无 |
+
+### 9.3 逐条说明
+
+**M-01 `Handle` 的计数不是 defer，panic 会漏计（bug）**
+
+`support/consumer/consume.go:504-510` 的实际代码是顺序调用：
+
+```go
+start := time.Now()
+decision, err := p.handle(ctx, msg, start)
+p.metrics.record(msg, decision, time.Since(start))
+return err
+```
+
+但同一处注释写着"One defer is the only place a delivery is counted / 只有这一处 defer 会计数"。
+`support/consumer/*.go` 里没有任何 `recover()`，`p.handle` 内部的 handler panic 会直接逃出
+`Handle`，`record` 那一行不执行：该投递的 `received`、`acked`/`nacked`、`handle.duration`
+全部缺失。
+
+复核修正：`support/consumer` 包内确实没有 recover，但四个 broker 包的 `callHandler` 都有
+（`kafka/consumer.go:541-548`、`amqp/queue.go:458-465`、`rocketmq/consumer.go:638-645`、
+`queues/consume.go:250-257`），panic 在 `Handle` 之上的一层就被转成错误。因此进程不会崩：
+Kafka 不提交该记录（`consumer.go:473-500`）、AMQP Nack 重投、Redis 回写重试、RocketMQ 不 ack，
+`OnError` 也会带上 panic 栈记日志。影响限定为「panic 的那次投递不计入指标」，重投成功后照常
+计入；持续 panic 的毒消息每轮都被跳过，指标上始终为零、只能靠日志发现。
+
+`received == acked + nacked` 这个等式仍然成立（三者同时缺失），但"每条投递恰好计一次 received"
+不成立——而 panic 恰好是最需要告警的故障类型，它会在看板上表现为"没有流量"而不是"在处理中崩溃"。
+
+修法：把 `record` 放进 `defer`（`decision` 提到外面先声明），与注释描述一致。
+复核修正：裸 defer 在 panic 时会把零值 decision 记成 `nacked{reason=""}`，产生 §4.3 枚举外的
+标签值。应把 decision 预置为 `consumeDecision{ack: false, reason: "retry"}`——panic 经 broker
+层转错误后走的正是重投路径——再由 `handle` 的正常返回覆盖它；若想单独标识 panic，需同步扩充
+§4.3 的 reason 枚举。
+
+**M-02 demo 的 claim runner 没有接 provider（接线）**
+
+`examples/demo-service/worker/group1/scan_claim.go:355-380` 构造 `gofyclaim.RunnerConfig` 时只设了
+`Config`、`HandlerTimeout`、`Handler` 与三个 hook，全文对 `MeterProvider`/`Metrics` 零命中。
+`claim.RunnerConfig` 这两个字段在 `support/claim/runner.go:188-194`，注释明确写"nil 表示不创建"。
+
+结果是：`gofy.claim.claimed`、`gofy.claim.outcomes`、`gofy.claim.handler.duration` 在示例 worker
+进程里永远是零序列，§5 Phase 3 声称的"claim/outcome/duration 落地"在实际进程上无法观测。
+（对比：六个消息消费者都经 `start()` 拿到 `rt.MeterProvider`/`rt.Metrics`，只有 claim 掉线。）
+修法：加 `MeterProvider: rt.MeterProvider, Metrics: rt.Metrics`——`rt` 是 `*core.Runtime`（`:324`
+的 `RuntimeFrom(ctx)` 取得，`:192` 处的 producer 同样持有），两个字段均为导出字段，改动可直接编译。
+
+**M-03 `lease.Run` 没有运行时入口，文档示例也没接指标（文档缺口，原判 P2 已降级）**
+
+复核修正：`rg "lease\.Run\("` 排除 `_test.go` 后确实为空，`lease.RunConfig.Name`
+（`support/lease/lease.go:132-136`）从未被赋值——但 `support/lease` 是面向应用的库能力，
+框架内部本就没有必须用租约的路径，仓库内无调用点本身不算缺陷，因此从 P2 降为 P3 文档缺口。
+真正的缺口在两处示例文档：`worker/README.md:433` 与 `docs/worker-guide.md:281` 的 `lease.Run`
+示例都没有 `Name`/`MeterProvider`/`Metrics` 字段——照抄的用户拿不到任何租约指标，这正是
+M-06 双字段陷阱在文档层的重现。
+
+修法：两处示例补上 `Name` 与经 `RuntimeFrom(ctx)` 取 provider 的写法（或注明"指标接线见 §4.1"）；
+§5 Phase 3 的验收口径注明 lease 为"库级实现 + 单元测试"，运行时验收依赖业务接入。
+
+**M-04 `gofy.health.*` 三个指标没有实现（文档缺口）**
+
+§4.2 列出了 `gofy.health.ready`、`gofy.health.check.status`、`gofy.health.check.duration`，
+§4.6 的第一条告警直接用 `gofy_health_ready`；但全仓 `rg "gofy\.health" --glob '*.go'` 零命中，
+Phase 1/2/3 的落地记录也都没提这一组。
+
+也就是说健康检查目前只有端点（`/readyz`、`/health`），没有指标。运维按 §4.6 配的
+"NotReady 持续 2m"告警会永久处于无数据状态（多数告警规则对"没有序列"是静默的）。
+
+两条出路：把它列进 Phase 4（registry 的 `Snapshot` 转成 gauge/直方图，`check` 与 `class` 标签
+都已在快照里），或在 §4.2 明确标注"未实现"，并删掉 §4.6 的对应告警。
+
+**M-05 `readyGate` 持锁记录指标（优化）**
+
+`worker/ready.go:91-100` 的 `publishLocked` 在持有 `g.mu` 时调用 `onChange`，而
+`worker/runner.go:358` 挂上的回调是 `setInstances`：它遍历 `names` × `pending` 并写两条 gauge。
+`signal`（`:110-127`）与 `add`（`:67-84`）都在同一把锁上，所以一个实例调用 `Ready()` 时，要等
+指标记录完成才能返回。
+
+hold 锁保证快照顺序是刻意的（`:76-78` 的注释解释了原因：两个并发上报乱序会让旧值覆盖最终计数）。
+在实例数多、消费者集中建连的场景里，这把锁会把指标开销串到就绪路径上。可行的折中：锁内只取
+快照并分配序号，锁外按序号记录——顺序仍可保持，`Ready()` 不再等 exporter。
+复核补充：这个回调只在闸门注册与每个实例首次上报时触发（重复上报是空操作），一个 Runner 生命
+周期约 `instances+1` 次，不是稳态热路径；优化的收益限于实例数很多的启动窗口，不紧迫。
+
+**M-06 `Metrics bool` 与 `MeterProvider` 必须成对（API）**
+
+四个配置结构都是"provider + 布尔"双字段：
+
+| 结构 | 位置 |
+|---|---|
+| `worker.RunConfig` | `worker/runner.go:60-69` |
+| `claim.RunnerConfig` | `support/claim/runner.go:188-194` |
+| `lease.RunConfig` | `support/lease/lease.go:137-143` |
+| `consumer.ProcessorConfig` | `support/consumer/consume.go:351-367` |
+
+`newXxxMetrics` 的判断是 `if !enabled || provider == nil`，因此只传 provider、忘了把布尔置 true
+时会**静默**退化成无指标——M-02 就是这么丢的（严格说 M-02 是两个字段都没传，属同族风险）。
+框架内部四处接线都成对（`worker_host.go:174-175`、`consume.go:84-85`），但第三方调用方没有保护。
+
+建议二选一：提供 `WithMeterProvider(rt)` 之类的帮助函数；至少在这四个结构体的 godoc 里写明
+"必须成对设置"。
+复核修正：原列的另一选项「布尔改为由 `provider != nil` 推导」**不可行**——`core.Runtime.MeterProvider`
+永不为 nil（指标关闭时 NewRuntime 填的是 noop provider，`runtime.go:116-118`），按 nil 推导会让
+所有经 Runtime 接线的调用方在指标关闭时也构造标签，破坏零分配目标（`AllocsPerRun` 断言会失败）。
+布尔字段正是为「provider 非 nil 但管道是 noop」这一状态存在的，只能靠成对约定或帮助函数约束。
+
+**M-07 `labelTopic` 在空白名单时透传（防御）**
+
+`support/consumer/metrics.go:116-121`：`len(m.topics)==0` 时直接返回原始 topic，与 §4.3
+"只允许配置里声明的值；空值记为 unknown"相反。
+
+实际触发概率低：六个适配器都传了配置值（`kafka.go:208`、`amqp.go:173`、`rocketmq.go:155`、
+`queues.go:155`、`delayamqp.go:245`、`delayqueues.go:133`），Kafka 还有 `topic is required`
+（`support/consumer/kafka.go:344`）。但 AMQP 传的是 `{BindingKey, RoutingKey}`，两者皆空时白名单
+里只剩空串、过滤后为空 map，就退化成透传。建议空白名单时统一记 `unknown`，或在构造期拒绝。
+
+**M-08 worker 进程不 `Shutdown` 指标 provider（生命周期）——复核撤销**
+
+复核撤销：原判误读了代码归属。`start.go:1162-1163` 的 `_ = a.metrics.Shutdown(ctx)` 与
+`_ = a.telemetry.Shutdown(ctx)` 位于 `cleanup()`（`start.go:1031-1198`）内部的 `cleanupOnce.Do`
+闭包里，而 worker 路径在 `worker_host.go:397` 调用的正是同一个 `a.cleanup()`；HTTP 路径的
+`start.go:296/988/1007` 也都走它。因此 worker 正常停机与 HTTP 一样会关闭两个 provider，
+「worker 与 HTTP 用同一套管道」的承诺在停机侧是成立的。唯一的跳过场景是实例超出 drain 预算
+被放弃——那时代码刻意连数据库都不关（`start.go:1130-1149` 的同一 `abandoned` 分支），指标
+随之下线是同一决策的一部分，不是缺口。
+
+**M-09 直方图把 `ledger` 并成 `retry`，与 §4.3 枚举冲突——复核撤销**
+
+复核撤销：§4.3 的 `outcome` 枚举（本文件 §4.3 的 outcome 行）是
+`success/duplicate/permanent/decode/retry/inflight/succeeded/failed/dead/lease_lost`，
+**不含** `ledger`——`ledger` 只出现在 `reason` 枚举里。代码把 reason=ledger 的投递在耗时
+直方图上记为 outcome=retry，恰好满足 outcome 枚举，且 `metrics.go:138-142` 的注释写明了归并
+理由（台账认领失败从 handler 角度是重试，另有 `ledger.errors` 序列）。「按 §4.3 枚举筛选
+outcome=ledger」这个看板写法本身违背 §4.3，不构成实现缺陷。为防再次误读，已在 §4.3 的
+outcome 行补注「reason=ledger 的投递在耗时直方图按 retry 计」。
+
+**M-10 worker 的 `/metrics` 监听条件忽略 `DisableMetrics`——复核撤销**
+
+复核撤销：症状本身属实（显式 `WithMetrics{Enabled:true}` + `WithDiagnostics{Enabled:true,
+DisableMetrics:true}` 时，worker 的诊断监听起来了而 `/metrics` 404），但它不是 worker 特有的
+缺陷：HTTP 路径对同一组合的行为完全相同——`start.go:208` 无条件 `startDiagnostics`，监听同样
+不挂 `/metrics`，`gofy.go:512-514` 的启动告警两边都会打。原建议「worker 条件补 `!DisableMetrics`」
+会让 worker 与 HTTP 在该组合下行为分叉，还会顺带关掉同一监听上的 pprof/health。worker 真正的
+不对称是「没有指标的 worker 完全不开诊断监听」（`worker_host.go:237-241` 注释声明的刻意设计），
+若要调整应连同 HTTP 语义一起设计，而不是单改这一处条件。
+
+### 9.4 已核对、确认无问题的项
+
+这些项在复核中逐一回读源码确认，列出来是为了区分"查过"与"没查"：
+
+- **直方图边界统一**：view 按 `(Kind=Histogram, Unit="s")` 匹配（`support/otel/metrics.go:167-172`），
+  四个新直方图都带了 `metric.WithUnit("s")`（`worker/metrics.go:72,77`、`consumer/metrics.go:91`、
+  `claim/metrics.go:50`），因此共用 `0.005…10`，不会落回 SDK 默认桶。
+- **`MeterProvider()` 对 nil 与禁用安全**：`support/otel/metrics.go:217-222`，禁用时返回 no-op
+  provider，调用方无需判空。
+- **`WithMetrics` 的优先级**：显式配置优先、`Enabled:false` 能关掉 diagnostics 原本打开的管道、
+  未传时保持旧行为（`gofy.go:507-540`），三条与 §4.1 一致。
+- **worker 的 `/metrics` 确实由 `startDiagnostics` 提供**（`worker_host.go:239-246`），
+  单有 provider 不会有端点——§4.1 的修正成立。
+- **消费决策单点**：`Handle` 只有一个 `record` 调用点，`handle` 的七个返回分支都收敛到
+  `consumeDecision`（`consume.go:513-670`），`dead` 只在 park 成功时置位。
+- **claim 每行一次 outcome**：`runner.go:369/397/409/419/428` 五处互斥，每条路径 `return` 前只调一次。
+- **broker 确认错误不混入 `OnError`**：`kafka/consumer.go:249,535`、`amqp/queue.go:287-288,440-449`、
+  `rocketmq/consumer.go:230` 新增专用钩子；queues 只有 `OnNackError`，因为 Redis 队列没有 ACK，
+  回写失败归为 nack，与 §5 Phase 3 落地记录第 3 条一致。
+- **禁用时零分配**：各 `newXxxMetrics` 在开关关闭时返回空结构，记录方法先判 `enabled` 再构造
+  属性，热路径无分配（M-06 修复后，`Metrics=true` 且 provider 为 nil 的矛盾组合在构造期报错，
+  不再进入该路径）。
+
+二次复核新增确认的项（撤销 M-08/M-09/M-10 的依据）：
+
+- **worker 停机关闭指标 provider，与 HTTP 一致**：`a.metrics`/`a.telemetry` 的 `Shutdown` 位于
+  共享的 `cleanup()` 内（`start.go:1161-1164`），worker 路径经 `worker_host.go:397` 调用同一函数；
+  `abandoned` 分支刻意跳过（与跳过关库同一理由）。
+- **reason/outcome 枚举与实现一致**：§4.3 的 outcome 枚举不含 `ledger`，`record` 把 reason=ledger
+  归入 retry（`metrics.go:168-171`）正是按枚举执行，代码注释已写明归并理由。
+- **业务 panic 不会击穿消费者**：四个 broker 包的 `callHandler` 都带 recover（`kafka/consumer.go:541-548`、
+  `amqp/queue.go:458-465`、`rocketmq/consumer.go:638-645`、`queues/consume.go:250-257`），panic
+  转错误后走失败重投路径——M-01 的影响因此限定在「单次投递漏计」。
+- **诊断监听对矛盾组合的行为两条入口一致**：显式 WithMetrics + diagnostics DisableMetrics 时，
+  HTTP（`start.go:208`）与 worker（`worker_host.go:242`）都启动监听、都不挂 `/metrics`、都触发
+  `gofy.go:512-514` 的启动告警。
+
+### 9.5 修复落地（2026-11-22 按上述顺序执行完毕）
+
+七项成立的问题已全部修复并通过验证；每项的回归测试都先在旧实现下复跑确认失败、修复后通过：
+
+1. **M-01**：`Handle` 的 `record` 改进 `defer`，`decision` 预置 `consumeDecision{reason: "retry"}`
+   ——panic 时该投递按 retry 计入 nack 与耗时，不会泄漏枚举外的空标签
+   （`support/consumer/consume.go`；回归 `TestConsumerMetricsCountPanicDelivery`）。
+2. **M-02**：demo 的 `scan_claim.go` 补 `MeterProvider: rt.MeterProvider, Metrics: rt.Metrics`。
+3. **M-03**：`worker/README.md` 与 `docs/worker-guide.md` 的 lease 示例补 `Name` 与经
+   `RuntimeFrom(ctx)` 的指标接线；§5 Phase 3 验收口径注明 lease 为库级实现。
+4. **M-04**：§4.2 健康指标标注「未实现、列入 Phase 4」，§4.6 删除 NotReady 告警行并注明
+   落地前摘流依赖端点探测。
+5. **M-06**：四个构造点对 `Metrics=true && MeterProvider==nil` 直接报错（没有任何合法配置
+   长这样）；四个配置结构 godoc 写明成对约定。反向组合（provider + 关闭开关）保持合法，
+   它就是 noop provider 的正常接线。回归测试四包各一条。
+6. **M-05**：`readyGate` 的回调改为 publishMu 串行化 + 每次发布在 mu 下重读当前集合
+   ——时序上最后一次发布必然携带最终状态，`Ready()` 不再等待指标记录
+   （回归 `TestReadyGateLastPublishCarriesFinalState`，-race 通过）。
+7. **M-07**：`labelTopic` 删除空白名单透传分支，所有名单外值（含空白名单下的全部值）
+   一律记 `unknown`（回归 `TestLabelTopicCollapsesWithoutWhitelist`）。
+
+验证：`gofmt -l .` 无输出，`go build ./...`、`go vet ./...`、`go test ./...`、扩展包 `-race`、
+`make guards` 与 demo 模块 build+vet 全部通过。
