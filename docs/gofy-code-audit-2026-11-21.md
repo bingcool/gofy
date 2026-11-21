@@ -9,27 +9,56 @@
 > **取证限制（必须说明）**：Rev.1 的执行环境禁止运行 Go 工具链
 > （`/usr/local/go/bin/go` 被沙箱拒绝，`go build` / `go vet` / `go test -race` 均无法执行），
 > 因此**初版 13 条发现的取证方式是静态阅读与源码交叉引用**，不含当时的构建、vet、race
-> 与端到端运行结果。Rev.2 的复核已在本机工具链上补齐基线验证，见 §0。
+> 与端到端运行结果。Rev.2 的复核环境报告已跑过基线验证，但未附日志；本次执行环境仍无法复核，见 §0 与 §6。
 > 每条发现都给出了可复核的 `文件:行号`；修复上线前请按 §6 的建议命令重跑一遍。
 
-## 0. 修订记录（Rev.2，2026-11-21 18:xx）
+## 0. 修订记录（Rev.2–Rev.5，2026-11-21）
 
-Rev.2 由主审在 `3a6a851` 上逐条回源码复核；该提交在入库前已通过 `go build ./...`、
-`go vet ./...`、`go test ./... -count=1` 与改动包的 `-race`。结论：**13 条全部成立，无撤销**；
+Rev.2 由主审在 `3a6a851` 上逐条回源码复核。复核环境报告该提交在入库前已通过
+`go build ./...`、`go vet ./...`、`go test ./... -count=1` 与改动包的 `-race`；该结论未附日志，
+本次执行环境仍禁止运行 Go 工具链，无法复核，按「待核实」记录（§6 同）。结论：**13 条全部成立，无撤销**；
 但有一条分级偏低、7 处描述或建议需要修正，已写入对应条目；P2-03 的建议代码已替换：
 
 | 位置 | 修订 | 原因 |
 |---|---|---|
-| P3-03 配置展开 | **级别 P3 → P2**（编号沿用） | `config.Load` 默认 `expandEnv: true`（`config/load.go:137`），多行环境变量（PEM、JSON、含 `#` 的口令）会静默破坏 YAML 结构；默认路径 + 静默失败 + 可能连错库，符合本报告 P2 的定义 |
+| P3-03 配置展开 | **级别 P3 → P2**；Rev.4 编号改为 `P2-04` 并移入 §2 | `config.Load` 默认 `expandEnv: true`（`config/load.go:137`），多行环境变量（PEM、JSON、含 `#` 的口令）会静默破坏 YAML 结构；默认路径 + 静默失败 + 可能连错库，符合本报告 P2 的定义 |
 | P3-05 日志权限 | 补充落地前提 | `os.OpenFile` 的 perm 只在**创建**时生效，已有文件改配置不会改权限；lumberjack v2.2.1 默认 `0600`（不是 0644），原文对它的描述需要修正。另外原文「SQL 默认脱敏」不准确：默认 `mode=placeholder`，日志里本就没有字面量，`mask.enabled` 默认关闭 |
-| P3-01 pid 刷新 | 补充触发前提 | 「旧 goroutine 覆盖新实例 pid」要求旧文件已删除且新实例已完成写入，正常启动会被 `duplicatePID` 拦住，窗口比原文描述更窄 |
+| P3-01 pid 刷新 | 补充触发前提（Rev.3 再修正理由） | 「旧 goroutine 覆盖新实例 pid」要求旧文件已删除且新实例已完成写入；`duplicatePID`（`start.go:727-739`）在此场景拦不住——文件已被 cleanup 删除，且 `Record.Verify` 对已退 pid 返回 `IdentityUnknown`。窗口更窄是因为时序要求苛刻，不是判重挡住了 |
 | O-01 Header 读取 | 修正建议 | `ContextWithHeaders` 写入时已按白名单过滤（`headerpropagation.go:161-167`），ctx 内的 map 只含允许的 header，直接读不会绕过白名单；`HeadersFromContext` 的复制是给调用方的**可变副本**，两者职责不同，建议改为新增只读单值访问器 |
-| O-02 台账建表 | 精确对象 | 不是「每个消费者实例」而是「每个 `Processor`」：各传输层在每个实例的 `Run` 里调用包级 `start`（`consume.go:64`），它再 `NewProcessor`（`:77`），deduper 与 `ensureSchema` 都在 `NewProcessor` 内（`:443-461`） |
+| O-02 台账建表 | 精确对象（Rev.3 去掉错误否定） | 对象是 `Processor`：各传输层在每个实例的 `Run` 里调用包级 `start`（`consume.go:64`），它再 `NewProcessor`（`:77`），deduper 与 `ensureSchema` 都在 `NewProcessor` 内（`:443-461`）。每个实例各建一个 Processor，所以并发度 N 仍对应 N 次建表检查 |
 | O-04 logConfig 被忽略 | 修正措辞 | `WithLogConfig` 本身会 `cfg.Validate()`，非法配置在 `New` 阶段就会失败；`WithLogger` 优先也是文档写明的语义（`option.go:228-230`）。真正缺的是**运行时提示**，不是校验或文档 |
 | O-05 停机错误 | 补充边界 | `Shutdown` 的 `ctx.Done()` 分支可能早于 `cleanup` 完成，此时 `cleanupErr` 尚未写入；`errors.Join(ctx.Err(), a.cleanupErr)` 只能在 `<-a.done` 之后读，或配合新的访问器 |
 
 另把 P2-03 的建议代码改为不丢失 `http.DefaultTransport` 默认值的写法——原文的
 `&http.Transport{}` 会连 `DialContext` 的 30s 超时与 `ForceAttemptHTTP2` 一起丢掉。
+
+### 0.1 Rev.3 修正（2026-11-21 18:10）
+
+Rev.3 只改两处**修订理由本身**，发现、分级与修复状态不变（13 条仍全部「未修复」）：
+
+| 位置 | 修正 | 依据 |
+|---|---|---|
+| P3-01 | 删掉「正常启动会被 `duplicatePID` 拦住」 | `duplicatePID`（`start.go:727-739`）只在文件存在且 `record.Verify()==IdentityMatch` 时判重；该竞态里文件已被 cleanup 删除，`Record.Verify`（`internal/pidfile/pidfile.go:78-90`）对已退 pid 返回 `IdentityUnknown`。窗口更窄是时序造成，不是判重挡住；影响随之改为「`stop` 报未运行而新实例仍在跑」，不再说误杀进程 |
+| O-02 | 删掉「不是每个消费者实例而是每个 `Processor`」 | 每个实例的 `Run` 都调用 `start → NewProcessor`（`consume.go:64,77`），实例数 N 等于 Processor 数 N，`ensureSchema` 仍执行 N 次；保留「对象是 Processor」的命名精确化 |
+
+### 0.2 Rev.4 修订（2026-11-21 18:12）
+
+| 位置 | 修订 | 依据 |
+|---|---|---|
+| 编号 | 原 P3-03 改为 `P2-04` 并移入 §2 | 级别在 Rev.2 已升为 P2，编号应随级别；§0、§1、§1.1 与 §6 的引用同步更新 |
+| 行号 | P2-02 的 `start.go:961-963/1052-1057/1077-1088` 改为 `969-971/1053-1057/1085-1091`；P3-01 的 `1076-1084` 改为 `1077-1084`；`duplicatePID` 统一为 `727-739` | 按当前工作树逐行核对 |
+| 证据 | §0 的 build/vet/test 断言改为「复核环境报告、未附日志、本次无法复核」 | 本环境仍禁止执行 Go 工具链（§6） |
+
+### 0.3 Rev.5 复核（2026-11-21 18:20）
+
+逐条回源核对 Rev.3 的两处理由修正：**方向都成立**，另据 `stop` 的实际判定顺序把 P3-01
+的影响再收精确一层。
+
+| 位置 | 结论 | 依据 |
+|---|---|---|
+| P3-01 守卫 | 成立 | `duplicatePID`（`start.go:727-739`）先 `ReadRecord`，读不到即返回 false；再要求 `Verify()==IdentityMatch`，而已退 pid 的 `process.Token` 为空，`Verify` 返回 `IdentityUnknown`。文件被 cleanup 删掉后判重根本不执行，确实不是它挡住 |
+| P3-01 影响 | 成立，但停机路径需再精确 | `stopPIDFile` 的顺序是 `ReadRecord` → `process.Alive`（`stop.go:89-92`）→ `Verify`（`:100-122`）。陈旧记录指向已退进程时先命中 `Alive=false`，报 `ErrNotRunning` 并删文件；`IdentityUnknown`（不带 `--force` 即拒绝）要求 pid 仍存活但无法验证，是另一条路径。另补：同配置下新实例的刷新 tick 会覆盖陈旧记录，最长存活一个 `pidRefresh` 周期 |
+| O-02 | 成立 | `Runner.Run` 按实例各起一个 goroutine（`runner.go:236-242`），每个实例的 `Run` 调用 `start → NewProcessor`（`consume.go:64,77`），因此实例数 N = Processor 数 N = `ensureSchema` 次数 N；原否定句确实会让读者以为重复次数变少 |
 
 
 ---
@@ -39,7 +68,7 @@ Rev.2 由主审在 `3a6a851` 上逐条回源码复核；该提交在入库前已
 | 级别 | 数量 | 说明 |
 |---|---|---|
 | P1（严重） | 0 | 未发现可直接导致越权、数据损坏或必现崩溃的缺陷 |
-| P2（重要） | 4 | 依赖外部条件或停机路径才会触发，但触发后影响明确；含 Rev.2 由 P3-03 上调的一条 |
+| P2（重要） | 4 | 依赖外部条件或停机路径才会触发，但触发后影响明确；含原 P3-03（现 P2-04）上调的一条 |
 | P3（一般） | 4 | 边界场景的正确性、健壮性或可运维性问题 |
 | 优化项 | 5 | 热路径分配、启动期重复工作、配置可诊断性 |
 
@@ -47,8 +76,8 @@ Rev.2 由主审在 `3a6a851` 上逐条回源码复核；该提交在入库前已
 文件名与路径约束等高风险面写得比一般框架更严谨，多处设计（`admissionGate` 的读写锁准入、
 `generationLease` 的 panic 安全释放、`tenant` 插件按绑定值而非形状判断去重）经核对成立。
 本轮问题集中在**停机与重连路径的上下文传播、超时后的资源释放顺序、配置展开的文本级
-替换，以及少数热路径分配**，不属于架构性缺陷。P3-03 因「默认开启 + 静默破坏 + 可能
-连错目标」在 Rev.2 上调为 P2。
+替换，以及少数热路径分配**，不属于架构性缺陷。原 P3-03（现 P2-04）因「默认开启 + 静默破坏 + 可能
+连错目标」在 Rev.2 上调为 P2，Rev.4 起按新编号归入 §2。
 
 ### 1.1 问题清单与修复状态
 
@@ -60,9 +89,9 @@ Rev.2 由主审在 `3a6a851` 上逐条回源码复核；该提交在入库前已
 | P2-01 | P2 | AMQP 重连忽略调用方 ctx，且在持锁状态下拨号 | `support/amqp/client.go:84-104,146-176` | 未修复 |
 | P2-02 | P2 | drain 超时后仍关闭 DB/logger，实例 goroutine 可能仍在运行 | `support/worker/runner.go:262-284`；`worker_host.go:320`；`start.go:1053` | 未修复 |
 | P2-03 | P2 | Nacos 对 `http.DefaultTransport` 做无保护类型断言 | `support/nacos/client.go:69` | 未修复 |
-| P3-01 | P3 | pid 刷新 goroutine 未 join 就删除 pid 文件 | `start.go:757-783,1076-1084` | 未修复 |
+| P3-01 | P3 | pid 刷新 goroutine 未 join 就删除 pid 文件 | `start.go:757-783,1077-1084` | 未修复 |
 | P3-02 | P3 | Reload 后注入模块的停止顺序发生变化 | `reload.go:276-278,312`；`start.go:1041` | 未修复 |
-| P3-03 | P2（原 P3，编号沿用） | 配置在 YAML 解析前展开 `${VAR}`，多行值可破坏结构 | `config/load.go:159-164,168-203` | 未修复 |
+| P2-04（原 P3-03） | P2 | 配置在 YAML 解析前展开 `${VAR}`，多行值可破坏结构 | `config/load.go:159-164,168-203` | 未修复 |
 | P3-04 | P3 | 未写响应体时访问日志记录 `bytes=-1` | `support/middleware/accesslog.go:200` | 未修复 |
 | P3-05 | P3 | 日志文件以 0644 创建 | `logger/logger.go:348`；`logger/rotation.go:200` | 未修复 |
 | O-01 | 优化 | `HeaderFromContext` 为取一个 header 复制整张表 | `support/headerpropagation/headerpropagation.go:230-251` | 未修复 |
@@ -120,7 +149,7 @@ broker 断开后，消费者在 `consumeOnce` 里重新 `Channel()`，而所有 
   若 `ctx.Err() != nil` 且 `!drained`，只告警并 `return nil`，**不等待** `wg.Wait()` 完成。
 - `support/worker/runner.go:236-248`：实例 goroutine 与 `wg.Wait()` 分离，`Run` 返回不代表 goroutine 退出。
 - `worker_host.go:270-320`：`errCh` 收齐各 runner 的返回值后调用 `a.cleanup()`。
-- `start.go:1052-1057`：`cleanup` 中 `gofydb.Close(a.db)`；`start.go:1077-1088` 同步并
+- `start.go:1053-1057`：`cleanup` 中 `gofydb.Close(a.db)`；`start.go:1085-1091` 同步并
   释放 logger（`ownLogger` 分支）。
 
 **触发条件**
@@ -142,7 +171,7 @@ broker 断开后，消费者在 `consumeOnce` 里重新 `Channel()`，而所有 
 - `wait`（`runner.go:345-354`）超时只是返回 false，确实不 join；`stopDrain()` 之后
   `ctx.Err() != nil` 分支直接 `return nil`，这条路径没有任何“仍有实例在跑”的信息传给宿主。
 - 走到这里的前提比原文更明确：`cleanup()` 开头就已经 `a.cancel(nil)` 取消了 `runCtx`
-  （`start.go:961-963`），handler 若仍不退出，说明它完全忽略了传入的 ctx——属于违反
+  （`start.go:969-971`），handler 若仍不退出，说明它完全忽略了传入的 ctx——属于违反
   消费契约的代码。但框架的职责是不让这类代码访问已关闭的 `*sql.DB`，建议仍然成立。
 - 「跳过 DB/logger 关闭」要配一条明确的 Error 日志（含 group、abandoned 数量），否则
   运维只会看到进程退出、日志没有落盘，却不知道原因。
@@ -189,73 +218,9 @@ transport.Proxy = nil
   `http.DefaultTransport`；真正会命中的是「测试注入自定义 RoundTripper」与少数在
   `init` 里全局替换的 APM SDK。
 
----
+### P2-04 配置加载在 YAML 解析之前做 `${VAR}` 展开，环境变量值可破坏结构（原 P3-03）
 
-## 3. P3 一般问题
-
-> P3-03 在 Rev.2 上调为 P2；为保持编号可引用，仍留在本节顺序中，级别以条目内说明为准。
-
-### P3-01 pid 刷新 goroutine 未 join 就删除 pid 文件
-
-**定位**
-- `start.go:757-783`：`startPIDRefresh` 起 goroutine，`select` 监听 `done` 与 `ticker.C`，
-  在 `ticker.C` 分支调用 `pidfile.WriteRecord`。
-- `start.go:1076-1084`：`cleanup` 先 `a.pidTicker.Stop()`、`close(a.pidTickerDone)`，
-  随后 `pidfile.RemoveIfOwner(a.pidPath, os.Getpid())`，**没有等待 goroutine 退出**。
-
-**触发条件**
-`WithPIDRefreshInterval` 启用了刷新，且 ticker 恰好在 `Stop()` 前已选中 `ticker.C`，
-或 goroutine 正处在 `WriteRecord` 的“临时文件 → rename”之间。
-
-**影响**
-`RemoveIfOwner` 删除文件后，goroutine 的 `rename` 仍可能把它重新创建：
-1. 进程已退出却留下 pid 文件（下次启动看到陈旧记录）；
-2. 更糟的是若新实例已写入自己的记录，旧 goroutine 的 `rename` 会**覆盖新实例的 pid 文件**，
-   之后 `stop` 会打到错误的进程。
-
-**Rev.2 复核补充**
-- 第 1 点是主路径：只要 `WriteRecord` 的 rename 晚于 `RemoveIfOwner`，文件就会复活，
-  窗口是「一次 `WriteRecord` 的写临时文件 + rename」。
-- 第 2 点需要三个条件同时成立：旧 cleanup 已删除文件、新实例已启动并写入记录、旧 goroutine
-  的 rename 还没执行。正常启动会被 `duplicatePID`（`start.go:727-739`）拦住，只有新实例
-  用 `--force` 或在删除后立刻启动才会命中。影响确实严重，但概率应标注为「极窄窗口」，
-  不宜与第 1 点并列。
-- 修复时除了 join，还要注意 `WriteRecord` 本身是「写临时文件 + rename」，只加锁不校验
-  归属仍可能覆盖；建议在 rename 前用 `RemoveIfOwner` 的逆检查确认文件仍属于本进程。
-
-**建议**
-给刷新 goroutine 一个 `sync.WaitGroup`（或单独的 `exited chan struct{}`），
-`cleanup` 中 `close(done)` 后 `<-exited` 再删除文件；`WriteRecord` 前再校验一次
-“文件仍属于本进程”（`RemoveIfOwner` 的逆检查），或在删除时先停 ticker 再等一个 interval。
-
----
-
-### P3-02 Reload 后注入模块的停止顺序发生变化
-
-**定位**
-- `start.go:582-594`：启动时 `a.started` 按“工厂模块 → 注入模块”的注册顺序排列。
-- `start.go:1041-1051`：`cleanup` 逆序停止，因此启动时注入模块最后停止。
-- `reload.go:276-278`：`allStarted = append(started, injectedStarted...)`，
-  注入模块被移到列表末尾；`reload.go:312` 写回 `a.started`。
-
-**触发条件**
-至少执行过一次 `Reload`，且存在经 `WithModules` 注入、与工厂模块有停止顺序依赖的模块
-（例如注入的“指标上报模块”依赖工厂构建的“DB 模块”仍可用）。
-
-**影响**
-Reload 之后注入模块变成**最先**停止，可能先于它依赖的模块停止：
-停机期间出现上报失败、连接已关等噪声错误，且同一份代码在“从未 Reload”与“Reload 过”
-两种运行轨迹下行为不同，难以归因。
-
-**建议**
-不要用“两段拼接”表达顺序：为每个模块记录稳定的序号（启动与 Reload 共用），
-或把注入模块固定放在列表头部（逆序时最后停止）；补一条“Reload 后停止顺序与启动一致”的断言。
-
----
-
-### P3-03 配置加载在 YAML 解析之前做 `${VAR}` 展开，环境变量值可破坏结构
-
-> **Rev.2 级别调整：P3 → P2**（编号沿用）。理由：`config.Load` 默认
+> **Rev.2 级别调整：P3 → P2；Rev.4 编号改为 P2-04 并移入 §2。** 理由：`config.Load` 默认
 > `expandEnv: true`（`config/load.go:137`），不是需要显式开启的旁路；破坏是静默的，
 > 且可能让进程连到错误的目标。按本报告 §1 的分级定义属于 P2。
 
@@ -288,6 +253,75 @@ Reload 之后注入模块变成**最先**停止，可能先于它依赖的模块
 - 「缺失变量替换为空串」在严格模式下是报错（`allowMissing=false` 返回
   `missing environment variables`），只有显式允许缺失时才静默变空——修复时两条路径
   要一起处理，否则严格模式修好了、宽松模式仍然静默。
+
+---
+
+## 3. P3 一般问题
+
+> P3-03 已在 Rev.4 改编号为 `P2-04` 并移入 §2；本节编号保留空缺、不重排，避免已有引用失效。
+
+### P3-01 pid 刷新 goroutine 未 join 就删除 pid 文件
+
+**定位**
+- `start.go:757-783`：`startPIDRefresh` 起 goroutine，`select` 监听 `done` 与 `ticker.C`，
+  在 `ticker.C` 分支调用 `pidfile.WriteRecord`。
+- `start.go:1077-1084`：`cleanup` 先 `a.pidTicker.Stop()`、`close(a.pidTickerDone)`，
+  随后 `pidfile.RemoveIfOwner(a.pidPath, os.Getpid())`，**没有等待 goroutine 退出**。
+
+**触发条件**
+`WithPIDRefreshInterval` 启用了刷新，且 ticker 恰好在 `Stop()` 前已选中 `ticker.C`，
+或 goroutine 正处在 `WriteRecord` 的“临时文件 → rename”之间。
+
+**影响**
+`RemoveIfOwner` 删除文件后，goroutine 的 `rename` 仍可能把它重新创建：
+1. 进程已退出却留下 pid 文件（下次启动看到陈旧记录）；
+2. 更糟的是若新实例已写入自己的记录，旧 goroutine 的 `rename` 会**覆盖新实例的 pid 文件**。
+   文件里是已退出进程的 pid，`stop` 先看 `process.Alive`（`stop.go:89-92`）就判否，
+   返回 `ErrNotRunning` 并删掉文件——新实例仍在运行，运维却被告知「未运行」。
+   `IdentityUnknown` 分支（`stop.go:100-122`，不带 `--force` 即拒绝）要求 pid 仍存活但
+   无法验证身份，与「已退出进程的记录」不是同一条路径；两条路径都不会向无关进程发信号。
+
+**Rev.2 复核补充**
+- 第 1 点是主路径：只要 `WriteRecord` 的 rename 晚于 `RemoveIfOwner`，文件就会复活，
+  窗口是「一次 `WriteRecord` 的写临时文件 + rename」。
+- 第 2 点需要三个条件同时成立：旧 cleanup 已删除文件、新实例已启动并写入记录、旧 goroutine
+  的 rename 还没执行。`duplicatePID`（`start.go:727-739`）在这个序列里拦不住：新实例启动时
+  文件已被删除，判重读不到记录；对已退出的旧 pid，`Record.Verify` 也返回 `IdentityUnknown`。
+  窗口极窄的原因是时序苛刻（rename 必须晚于新实例写入），不是判重挡住。影响是 `stop`
+  报「未运行」而新实例仍在跑，而不是误杀无关进程；仍不宜与第 1 点并列。
+- 文件还会自愈：本问题的前提是旧实例开着刷新（`start.go:187`、`worker_host.go:173`），
+  同一配置下新实例也开着，它下一次 tick 就会把自己的记录写回去。陈旧内容最多存在一个
+  `pidRefresh` 周期，运维是否需要 `--force` 的取舍也只在这个窗口内。
+- 修复时除了 join，还要注意 `WriteRecord` 本身是「写临时文件 + rename」，只加锁不校验
+  归属仍可能覆盖；建议在 rename 前用 `RemoveIfOwner` 的逆检查确认文件仍属于本进程。
+
+**建议**
+给刷新 goroutine 一个 `sync.WaitGroup`（或单独的 `exited chan struct{}`），
+`cleanup` 中 `close(done)` 后 `<-exited` 再删除文件；`WriteRecord` 前再校验一次
+“文件仍属于本进程”（`RemoveIfOwner` 的逆检查），或在删除时先停 ticker 再等一个 interval。
+
+---
+
+### P3-02 Reload 后注入模块的停止顺序发生变化
+
+**定位**
+- `start.go:582-594`：启动时 `a.started` 按“工厂模块 → 注入模块”的注册顺序排列。
+- `start.go:1041-1051`：`cleanup` 逆序停止，因此启动时注入模块最后停止。
+- `reload.go:276-278`：`allStarted = append(started, injectedStarted...)`，
+  注入模块被移到列表末尾；`reload.go:312` 写回 `a.started`。
+
+**触发条件**
+至少执行过一次 `Reload`，且存在经 `WithModules` 注入、与工厂模块有停止顺序依赖的模块
+（例如注入的“指标上报模块”依赖工厂构建的“DB 模块”仍可用）。
+
+**影响**
+Reload 之后注入模块变成**最先**停止，可能先于它依赖的模块停止：
+停机期间出现上报失败、连接已关等噪声错误，且同一份代码在“从未 Reload”与“Reload 过”
+两种运行轨迹下行为不同，难以归因。
+
+**建议**
+不要用“两段拼接”表达顺序：为每个模块记录稳定的序号（启动与 Reload 共用），
+或把注入模块固定放在列表头部（逆序时最后停止）；补一条“Reload 后停止顺序与启动一致”的断言。
 
 ---
 
@@ -404,9 +438,10 @@ if size < 0 {
 只让第一个实例建表，其余等待结果；或把建表移到 `NewProcessor` 之前的装配阶段统一执行一次。
 
 **Rev.2 复核补充**
-- 精确对象是 `Processor` 而不是「消费者实例」：各传输层在每个实例的 `Run` 里调用包级
-  `start` 辅助函数（`consume.go:64`），它再调 `NewProcessor`（`:77`）；deduper 与
-  `ensureSchema` 都在 `NewProcessor` 内完成（`:443-461`）。引用这条时按 Processor 计数。
+- 对象应写成 `Processor`：各传输层在每个实例的 `Run` 里调用包级 `start` 辅助函数
+  （`consume.go:64`），它再调 `NewProcessor`（`:77`）；deduper 与 `ensureSchema` 都在
+  `NewProcessor` 内完成（`:443-461`）。注意每个实例各建一个 Processor，因此「按实例计数」
+  与「按 Processor 计数」是同一个 N，这条问题的重复次数没有变。
 - 进程级 `sync.Once` 要以 `consumer + 表名` 为键：同一进程可能有多个不同 consumer
   共用一张台账表，键太粗会让第二个 consumer 跳过建表。
 - 建表本身有 `schemaTimeout` 预算（`ProcessorConfig`），singleflight 等待方应共享
@@ -489,7 +524,7 @@ if size < 0 {
 | `support/cors.go:60-70` | `AllowCredentials` + `"*"` 在 `Validate` 阶段被拒绝，`middleware/cors.go` 的回显分支不会落到该组合 |
 | `support/jwtauth/jwt.go:183-265` | 只接受白名单内的 HMAC 算法；`hmac.Equal` 常数时间比较；`exp` 存在但非数字日期一律按 malformed 拒绝；`iss`/`aud` 可选校验 |
 | `support/phpoffice/support.go:130-152` | 导出文件名只接受 basename，拒绝路径分隔符、控制字符、`.`/`..`；sheet 名按 Excel 规则校验 |
-| `support/phpoffice/export.go:174-186` | 目标文件 `O_CREATE|O_EXCL` 排他预留，失败路径删除半成品 |
+| `support/phpoffice/export.go:174-186` | 目标文件以 `O_CREATE` + `O_EXCL` 排他预留，失败路径删除半成品 |
 | `support/image/support.go:380-433` | 水印/字体路径拒绝 `..` 段、要求常规文件，并用 `EvalSymlinks` + `filepath.Rel` 限定在允许根目录内 |
 | `support/image/support.go:61-66,88-141` | 解码前用 `DecodeConfig` 预检像素数，`int64` 计算避免溢出；超大图不进入内存 |
 | `support/claim/claim.go:116-119` | 表名走 `identifierPattern` 白名单，值全部参数绑定 |
@@ -524,7 +559,7 @@ make cgo-free cross                 # CGO_ENABLED=0 构建 + Windows vet
    断言退出后 pid 文件不存在，且不存在“旧进程覆盖新进程 pid”的情况。
 5. **P3-02**：构造两个有停止依赖的模块（工厂 + 注入），执行一次 `Reload` 后 `Shutdown`，
    记录 `Stop` 调用顺序，应与启动时逆序一致。
-6. **P3-03（Rev.2 起按 P2 排期）**：用含换行的环境变量值加载 YAML，当前实现应产生
+6. **P2-04（原 P3-03）**：用含换行的环境变量值加载 YAML，当前实现应产生
    结构破坏；修复后应保持为单个标量（或明确报错）。同时覆盖 `allowMissing=true` 的
    空串替换路径。
 7. **O-01**：对 `HeaderFromContext` 做 benchmark，比较当前实现与“直接读 map”的
