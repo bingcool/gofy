@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Code-review fixes. The formatted metrics view built its label index with an
+  unsynchronised lazy init, so two concurrent `/metrics-format` requests could
+  abort the process with `fatal error: concurrent map writes` (a fatal error no
+  recover can catch); the index is now built through `sync.OnceValue`.
+  `worker stop/restart/status --group` now validate the value before it is
+  interpolated into a pid file name, closing a `../..` path traversal, and
+  `App.Stop` applies the same guard for programmatic callers. A worker instance
+  that restarts now drops out of the ready set until its new subscription
+  reports, so `/readyz` no longer stays green for a consumer that is not
+  consuming; the first-readiness channel keeps its one-shot contract.
+  代码复核修复。格式化指标视图的标签索引原先用无同步的惰性初始化，两个并发的
+  `/metrics-format` 请求可能以 `fatal error: concurrent map writes` 终止进程
+  （fatal error，无法 recover）；索引改为 `sync.OnceValue` 构建。
+  `worker stop/restart/status --group` 现在会在把值插入 pid 文件名之前校验，堵住
+  `../..` 路径穿越；`App.Stop` 对程序化调用方执行同一道守卫。重启的 worker 实例在
+  新订阅上报之前会退出就绪集合，`/readyz` 不再对一个没有在消费的消费者保持绿色；
+  首次就绪通道仍保持只关闭一次的契约。
+
 - Metrics review fixes (M-01–M-07). `Processor.Handle` records its delivery
   inside a `defer`, so a handler panic — recovered by the broker layer — is
   still counted as `nacked{reason="retry"}` instead of vanishing from the
