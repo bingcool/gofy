@@ -43,8 +43,22 @@ type readyKey struct{}
 type readyGate struct {
 	mu      sync.Mutex
 	pending map[Identity]struct{}
-	closed  bool
-	done    chan struct{}
+	// settled means every registered instance has signalled. retract moves an
+	// instance back into pending for a restart, so a group that was ready can
+	// become unready again. done is separate: it closes only once, for callers
+	// (Runner.Ready) that wait for the first readiness and never reopen.
+	// settled 表示所有已登记实例都上报过。实例重启时 retract 把它移回 pending，
+	// 已就绪的分组因此可以重新变成未就绪。done 是分开的：它只关闭一次，供等待首次
+	// 就绪的调用方（Runner.Ready）使用，且不会重新打开。
+	settled  bool
+	done     chan struct{}
+	doneOnce sync.Once
+	// onSettled runs every time the pending set drains, including after a
+	// restart. The first run closes done; later runs only move the runner's
+	// ready flag back to true.
+	// onSettled 在待上报集合每次排空时执行，包括重启之后。首次执行会关闭 done；
+	// 后续执行只把 runner 的就绪标志重新置真。
+	onSettled func()
 	// onChange reports a snapshot of the pending set after it changes. The
 	// runner turns it into an instances.ready gauge; nil keeps standalone gates
 	// free of metrics wiring. Callbacks are serialized by publishMu and each
@@ -77,9 +91,9 @@ func (g *readyGate) add(ids []Identity) {
 	for _, id := range ids {
 		g.pending[id] = struct{}{}
 	}
-	closeNow := len(g.pending) == 0 && !g.closed
-	if closeNow {
-		g.closed = true
+	settled := len(g.pending) == 0 && !g.settled
+	if settled {
+		g.settled = true
 	}
 	g.mu.Unlock()
 	// Publish after releasing the lock: the callback re-reads the set under mu
@@ -87,8 +101,8 @@ func (g *readyGate) add(ids []Identity) {
 	// 释放锁之后再发布：回调在自己被串行化的轮次里重新持 mu 读取集合，
 	// 任何快照都不会以过期状态落盘。
 	g.publish()
-	if closeNow {
-		close(g.done)
+	if settled {
+		g.settle()
 	}
 }
 
@@ -128,16 +142,48 @@ func (g *readyGate) signal(id Identity) {
 	if ok {
 		delete(g.pending, id)
 	}
-	closeNow := ok && len(g.pending) == 0 && !g.closed
-	if closeNow {
-		g.closed = true
+	settled := ok && len(g.pending) == 0 && !g.settled
+	if settled {
+		g.settled = true
 	}
 	g.mu.Unlock()
 	if ok {
 		g.publish()
 	}
-	if closeNow {
-		close(g.done)
+	if settled {
+		g.settle()
+	}
+}
+
+// retract makes the given instances unready again. The runner calls it before
+// restarting an instance that has already reported: the old subscription is
+// gone, so the group must not keep answering ready until the new one is in
+// place. The first-readiness channel stays closed (a caller that already saw
+// readiness cannot un-see it); only the live state moves back.
+// retract 让给定实例重新回到未就绪。runner 在重启一个已上报过的实例之前调用它：
+// 旧订阅已经消失，分组不能在新订阅建立之前继续回答就绪。首次就绪通道保持关闭
+// （已经看到就绪的调用方无法"取消看到"）；回退的只是实时状态。
+func (g *readyGate) retract(ids ...Identity) {
+	if len(ids) == 0 {
+		return
+	}
+	g.mu.Lock()
+	for _, id := range ids {
+		g.pending[id] = struct{}{}
+	}
+	g.settled = false
+	g.mu.Unlock()
+	g.publish()
+}
+
+// settle closes the first-readiness channel once and runs onSettled every time,
+// so a restarted group can report ready again without reopening the channel.
+// settle 只关闭首次就绪通道一次，并且每次都执行 onSettled，重启后的分组因此可以
+// 重新上报就绪，而不必重新打开通道。
+func (g *readyGate) settle() {
+	g.doneOnce.Do(func() { close(g.done) })
+	if g.onSettled != nil {
+		g.onSettled()
 	}
 }
 

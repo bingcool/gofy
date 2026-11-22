@@ -34,13 +34,19 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 	if err != nil {
 		return err
 	}
-	if worker := strings.TrimSpace(opts.Worker); worker != "" {
+	if group := strings.TrimSpace(opts.Worker); group != "" {
+		// The value becomes part of a pid file name below; reject anything that
+		// could clean into a path outside the pid directory.
+		// 该值会进入下面的 pid 文件名；能 clean 到 pid 目录之外的输入在这里拒绝。
+		if err := validateWorkerGroupSelector(group); err != nil {
+			return err
+		}
 		// The wildcard means "every worker process on this host", not one file:
 		// groups may have been started as separate processes, so resolving only
 		// the wildcard run would leave the others running.
 		// 通配符表示"本机所有 worker 进程"而不是某一个文件：分组可能是分别启动的，
 		// 只解析通配符启动写的那个文件会漏掉其余进程。
-		if commandline.IsAllWorkerGroup(worker) {
+		if commandline.IsAllWorkerGroup(group) {
 			return a.stopAllWorkers(ctx, pidfile.Resolve(path, workDir), opts.Force, opts.Timeout)
 		}
 		// A worker group writes its own pid file, so stopping one must resolve the
@@ -48,7 +54,7 @@ func (a *App) stop(ctx context.Context, opts commandline.StopOptions) error {
 		// API server that shares the configured pid_file.
 		// worker 分组写自己的 pid 文件，停止它必须解析同一个带后缀的路径。否则
 		// `stop --worker=order` 会打到共用 pid_file 的 API 服务上。
-		return a.stopPIDFile(ctx, pidfile.Resolve(workerPIDPath(path, worker), workDir), worker, opts.Force, opts.Timeout)
+		return a.stopPIDFile(ctx, pidfile.Resolve(workerPIDPath(path, group), workDir), group, opts.Force, opts.Timeout)
 	}
 	return a.stopPIDFile(ctx, pidfile.Resolve(path, workDir), "", opts.Force, opts.Timeout)
 }

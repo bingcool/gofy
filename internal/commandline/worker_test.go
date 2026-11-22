@@ -138,3 +138,83 @@ func TestWorkerStartArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkerRejectsGroupThatEscapesPIDPath covers every worker subcommand that
+// interpolates --group into a pid file name. workerPIDPath inserts the value
+// before the extension and filepath.Clean resolves "..", so without this guard
+// `worker stop --group=../../etc/cron` would read and delete a file outside the
+// pid directory. The command must fail before the callback runs.
+// TestWorkerRejectsGroupThatEscapesPIDPath 覆盖所有把 --group 插入 pid 文件名的
+// worker 子命令。workerPIDPath 把该值插在扩展名之前，filepath.Clean 会解析 ".."；
+// 没有这道守卫时 `worker stop --group=../../etc/cron` 会读写 pid 目录之外的文件。
+// 命令必须在回调执行之前失败。
+func TestWorkerRejectsGroupThatEscapesPIDPath(t *testing.T) {
+	const bad = "../../etc/cron"
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"start", []string{"worker", "--group", bad}},
+		{"stop", []string{"worker", "--group", bad, "stop"}},
+		{"restart", []string{"worker", "--group", bad, "restart"}},
+		{"status", []string{"worker", "--group", bad, "status"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			root := commandline.Build(commandline.Deps{
+				Name: "demo",
+				RunWorker: func(context.Context, commandline.WorkerOptions) error {
+					called = true
+					return nil
+				},
+				StopWorker: func(context.Context, commandline.WorkerOptions) error {
+					called = true
+					return nil
+				},
+				RestartWorker: func(context.Context, commandline.WorkerOptions) error {
+					called = true
+					return nil
+				},
+				StatusWorker: func(context.Context, commandline.WorkerOptions) error {
+					called = true
+					return nil
+				},
+			})
+			root.SetArgs(tc.args)
+			err := root.ExecuteContext(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "invalid worker group") {
+				t.Fatalf("error = %v, want invalid worker group", err)
+			}
+			if called {
+				t.Fatal("worker callback ran for a rejected group")
+			}
+		})
+	}
+}
+
+// TestWorkerAcceptsValidGroupAndWildcard keeps the guard from over-reaching:
+// a normal group, the "all" alias and the raw "*" wildcard must still start.
+// TestWorkerAcceptsValidGroupAndWildcard 防止守卫过度收紧：普通分组、"all"
+// 别名与原始 "*" 通配符都必须仍可启动。
+func TestWorkerAcceptsValidGroupAndWildcard(t *testing.T) {
+	for _, group := range []string{"order", "order-scan", "all", "*"} {
+		t.Run(group, func(t *testing.T) {
+			var got string
+			root := commandline.Build(commandline.Deps{
+				Name: "demo",
+				RunWorker: func(_ context.Context, opts commandline.WorkerOptions) error {
+					got = opts.Group
+					return nil
+				},
+			})
+			root.SetArgs([]string{"worker", "--group", group})
+			if err := root.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("worker --group=%q: %v", group, err)
+			}
+			if got != group {
+				t.Fatalf("RunWorker group = %q, want %q", got, group)
+			}
+		})
+	}
+}

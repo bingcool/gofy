@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bingcool/gofy/internal/commandline"
 	"github.com/bingcool/gofy/internal/pidfile"
 	"go.uber.org/zap"
 )
@@ -161,4 +162,30 @@ func TestStopHelperProcess(t *testing.T) {
 	signal.Ignore(syscall.SIGTERM)
 	fmt.Println("ready")
 	select {}
+}
+
+// TestStopRejectsWorkerGroupThatEscapesPIDPath covers the programmatic entry
+// point: App.Stop with a crafted Worker value must be refused before the pid
+// file path is built. The CLI validates the same value earlier, but a caller
+// using StopOptions directly must not be able to reach filepath.Clean with
+// "../../etc/cron".
+// TestStopRejectsWorkerGroupThatEscapesPIDPath 覆盖程序化入口：带构造值的
+// App.Stop 必须在拼出 pid 文件路径之前被拒绝。CLI 会更早校验同一个值，但直接使用
+// StopOptions 的调用方也不能把 "../../etc/cron" 交到 filepath.Clean 手上。
+func TestStopRejectsWorkerGroupThatEscapesPIDPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pid based stop is not supported on windows")
+	}
+	app, err := New(
+		WithName("stop-group-test"),
+		WithPIDFile(filepath.Join(t.TempDir(), "app.pid")),
+		WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = app.stop(context.Background(), commandline.StopOptions{Worker: "../../etc/cron"})
+	if err == nil || !strings.Contains(err.Error(), "invalid group") {
+		t.Fatalf("error = %v, want invalid group", err)
+	}
 }

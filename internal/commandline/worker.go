@@ -7,8 +7,38 @@ import (
 	"time"
 
 	"github.com/bingcool/gofy/internal/console"
+	"github.com/bingcool/gofy/worker"
 	"github.com/spf13/cobra"
 )
+
+// workerNameRule is the group/worker naming contract, quoted in errors so an
+// operator does not have to find it in the docs.
+// workerNameRule 是分组与 worker 的命名约定，出现在错误里，运维不必去文档里找。
+const workerNameRule = "^[a-z][a-z0-9-]{0,62}$"
+
+// validateWorkerGroup rejects a --group value that cannot name a worker group.
+// The value is interpolated into a pid file path, so a separator or ".." must
+// be refused here instead of reaching filepath.Clean: clean would resolve it
+// outside the directory that holds the pid file.
+// validateWorkerGroup 拒绝不可能是分组名的 --group 值。该值会被插入 pid 文件路径，
+// 因此分隔符或 ".." 必须在这里拒绝，而不是交给 filepath.Clean——clean 会把它解析到
+// pid 文件所在目录之外。
+func validateWorkerGroup(command, group string, required bool) error {
+	g := strings.TrimSpace(group)
+	if g == "" {
+		if required {
+			return fmt.Errorf("%s: --group is required (use --group=%s for every group, see worker --list)", command, WorkerGroupAllAlias)
+		}
+		return nil
+	}
+	if IsAllWorkerGroup(g) {
+		return nil
+	}
+	if !worker.ValidName(g) {
+		return fmt.Errorf("%s: invalid worker group %q; names must match %s", command, g, workerNameRule)
+	}
+	return nil
+}
 
 // WorkerGroupAll is the --group value that selects every registered group.
 // WorkerGroupAll 是选中全部已注册分组的 --group 取值。
@@ -136,8 +166,8 @@ func newWorkerCmd(d Deps) *cobra.Command {
 			if opts.List {
 				return listWorkers(d)
 			}
-			if strings.TrimSpace(opts.Group) == "" {
-				return d.Usage(fmt.Errorf("worker: --group is required (use --group=%s for every group, see worker --list)", WorkerGroupAllAlias))
+			if err := validateWorkerGroup("worker", opts.Group, true); err != nil {
+				return d.Usage(err)
 			}
 			if d.RunWorker == nil {
 				return fmt.Errorf("worker: no worker groups registered")
@@ -179,6 +209,9 @@ func newWorkerStopCmd(d Deps, group *string) *cobra.Command {
 		Short: "Stop worker processes using their pid files",
 		Args:  noArgs(d, "worker stop"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateWorkerGroup("worker stop", *group, false); err != nil {
+				return d.Usage(err)
+			}
 			if d.StopWorker == nil {
 				return fmt.Errorf("worker: stopping a group is not available")
 			}
@@ -207,6 +240,9 @@ func newWorkerRestartCmd(d Deps, group *string) *cobra.Command {
 		Short: "Stop worker processes, then start the group again",
 		Args:  noArgs(d, "worker restart"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateWorkerGroup("worker restart", *group, false); err != nil {
+				return d.Usage(err)
+			}
 			if d.RestartWorker == nil {
 				return fmt.Errorf("worker: restarting a group is not available")
 			}

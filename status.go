@@ -171,6 +171,11 @@ func (a *App) workerStatus(ctx context.Context, opts commandline.WorkerOptions) 
 	}
 
 	group := strings.TrimSpace(opts.Group)
+	// A single group is interpolated into a pid file name below.
+	// 单个分组会进入下面的 pid 文件名。
+	if err := validateWorkerGroupSelector(group); err != nil {
+		return err
+	}
 	var files []string
 	if group == "" || commandline.IsAllWorkerGroup(group) {
 		files, err = workerPIDFiles(base)

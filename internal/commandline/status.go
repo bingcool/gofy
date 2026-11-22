@@ -51,6 +51,9 @@ func newWorkerStatusCmd(d Deps, group *string) *cobra.Command {
 		Short: "Show the status of worker processes",
 		Args:  noArgs(d, "worker status"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateWorkerGroup("worker status", *group, false); err != nil {
+				return d.Usage(err)
+			}
 			if d.StatusWorker == nil {
 				return fmt.Errorf("worker: status is not available")
 			}

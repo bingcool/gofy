@@ -117,6 +117,15 @@ type Runner struct {
 	ready    chan struct{}
 	readyOne sync.Once
 
+	// readyState is the live readiness bit. It follows the gate: true when every
+	// reporting instance has signalled, false again while one of them is being
+	// restarted. IsReady reads this rather than the channel, so the probe can
+	// turn red during a restart instead of staying green on a stale close.
+	// readyState 是实时就绪位。它跟随闸门：所有上报实例都通过时为真，某个实例正在
+	// 重启时重新为假。IsReady 读它而不是通道，探针因此能在重启期间转红，而不是因为
+	// 通道曾经关闭过就一直保持绿色。
+	readyState atomic.Bool
+
 	// abandoned records that Run returned while instances were still working.
 	// The host must not tear down resources those instances are using.
 	// abandoned 记录 Run 返回时仍有实例在跑。宿主不能拆除这些实例正在使用的资源。
@@ -200,18 +209,14 @@ func (r *Runner) setState(s State) {
 	r.metrics.setReady(0)
 }
 
-// IsReady reports whether the ready channel is closed. Ready() keeps returning
-// the channel, because existing callers select on it; this boolean view is what
-// the worker probe needs.
-// IsReady 报告就绪通道是否已关闭。Ready() 继续返回通道（既有调用方在它上面 select），
-// 这个布尔视图供 worker 探针使用。
+// IsReady reports whether the group is ready right now. Ready() keeps returning
+// the first-readiness channel, because existing callers select on it; this
+// boolean view is what the worker probe needs, and it turns false again while
+// an instance restarts.
+// IsReady 报告分组当前是否就绪。Ready() 继续返回首次就绪通道（既有调用方在它上面
+// select），这个布尔视图供 worker 探针使用；实例重启期间它会重新变为假。
 func (r *Runner) IsReady() bool {
-	select {
-	case <-r.ready:
-		return true
-	default:
-		return false
-	}
+	return r.readyState.Load()
 }
 
 // NewRunner validates the group and its concurrency map.
@@ -262,13 +267,25 @@ func (r *Runner) Group() *Group { return r.group }
 // 不实现 ReadyReporter 的 worker 不会拖慢它。
 func (r *Runner) Ready() <-chan struct{} { return r.ready }
 
-// markReady closes the ready channel exactly once.
-// markReady 只关闭一次就绪通道。
+// markReady closes the ready channel exactly once and refreshes the live bit
+// every time it is called: a restarted group reports ready again without
+// reopening the channel.
+// markReady 只关闭一次就绪通道，并且每次调用都刷新实时就绪位：重启后的分组可以重新
+// 上报就绪，而不必重新打开通道。
 func (r *Runner) markReady() {
-	r.readyOne.Do(func() {
-		r.setState(StateReady)
-		close(r.ready)
-	})
+	r.readyState.Store(true)
+	r.setState(StateReady)
+	r.readyOne.Do(func() { close(r.ready) })
+}
+
+// markNotReady moves the live bit back while an instance restarts. The
+// first-readiness channel stays closed: a caller that already selected on it
+// must not block again.
+// markNotReady 在实例重启期间把实时就绪位改回未就绪。首次就绪通道保持关闭：已经
+// 在它上面返回过的调用方不能再阻塞一次。
+func (r *Runner) markNotReady() {
+	r.readyState.Store(false)
+	r.setState(StateStarting)
 }
 
 // Run blocks until the context is cancelled, a worker fails fatally, or every
@@ -365,6 +382,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	// 闸门持有待上报集合；回调把每次变化转成 instances.ready 快照。没有实现
 	// ReadyReporter 的 worker 不进入集合，因此从一开始就计入就绪数。
 	gate.onChange = func(pending []Identity) { r.metrics.setInstances(r.totals, pending) }
+	// Settling runs on every drain of the pending set, not just the first one:
+	// a restarted instance reports again and has to move the live bit back.
+	// 集合每次排空都会执行，而不是只有第一次：重启后的实例会重新上报，实时就绪位
+	// 因此必须能回到真。
+	gate.onSettled = r.markReady
 	var reporters []Identity
 	for _, inst := range instances {
 		if _, ok := inst.worker.(ReadyReporter); ok {
@@ -372,18 +394,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 	gate.add(reporters)
-	go func() {
-		select {
-		case <-gate.wait():
-			r.markReady()
-		case <-runCtx.Done():
-			// Shutting down (or failing) before every instance reported: ready
-			// stays unclosed on purpose, so a caller waiting for it with a ctx
-			// never sees a dead start as readiness.
-			// 在所有实例上报之前就停机（或失败）：ready 故意保持未关闭，带着 ctx
-			// 等待它的调用方因此不会把"启动失败"当成"已就绪"。
-		}
-	}()
 
 	for _, inst := range instances {
 		wg.Add(1)
@@ -492,6 +502,13 @@ func (r *Runner) supervise(ctx, drain context.Context, w Worker, id Identity, ga
 			fail(fmt.Errorf("worker %s: %w (restart limit %d reached)", id, err, policy.MaxRestarts))
 			return
 		}
+		// The old subscription is gone. Take this instance out of the ready set
+		// before waiting, so the probe is red for the whole restart window; the
+		// next successful Ready(ctx) puts it back.
+		// 旧订阅已经消失。等待之前把该实例移出就绪集合，探针在整个重启窗口内转红；
+		// 下一次成功的 Ready(ctx) 会把它放回去。
+		gate.retract(id)
+		r.markNotReady()
 		delay := policy.backoff(restarts)
 		r.warn("worker exited with error, restarting",
 			zap.String("group", id.Group),

@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync/atomic"
 
 	"github.com/bingcool/gofy/core"
 	"github.com/bingcool/gofy/internal/commandline"
@@ -217,16 +216,19 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	// 探针先于分组启动，调度器因就绪检查失败而重启时看到的是 503 而不是连接被拒，
 	// 这正是"还在启动"与"端口配错了"的区别。
 	// The worker registry carries group readiness plus the checks registered with
-	// WithWorkerHealthChecks. The group check reads an atomic flag that the ready
-	// path below flips, because only this function knows when every instance of
-	// every group has reported.
-	// worker 注册表承载分组就绪状态与 WithWorkerHealthChecks 注册的检查。分组检查读取下面
-	// 就绪路径翻起的原子标志，因为只有本函数知道每个分组的每个实例何时上报完毕。
-	var groupReady atomic.Bool
+	// WithWorkerHealthChecks. The group check reads each runner's live readiness
+	// bit rather than a flag set once: an instance that restarts drops out of the
+	// ready set, so the probe answers 503 for that window and 200 again once the
+	// new subscription is in place.
+	// worker 注册表承载分组就绪状态与 WithWorkerHealthChecks 注册的检查。分组检查读取
+	// 每个 runner 的实时就绪位，而不是只设置一次的标志：实例重启会退出就绪集合，探针
+	// 因此在那个窗口返回 503，新订阅建立后重新返回 200。
 	reg := a.newWorkerHealthRegistry(lg)
 	if err := reg.Register(health.Named("group", func(context.Context) error {
-		if !groupReady.Load() {
-			return errors.New("worker group is not ready")
+		for _, runner := range runners {
+			if !runner.IsReady() {
+				return errors.New("worker group is not ready")
+			}
 		}
 		return nil
 	})); err != nil {
@@ -344,10 +346,12 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 			ready = true
 			a.markReady()
 			// The registry cached the 503 it produced before readiness; invalidate it
-			// so the first probe after this signal sees the group as ready.
+			// so the first probe after this signal sees the group as ready. A later
+			// restart drops the runner out of the ready set on its own, so this only
+			// has to cover the first transition.
 			// 注册表缓存了就绪之前产生的 503；这里让它失效，信号之后的第一次探测才能看到
-			// 分组已就绪。
-			groupReady.Store(true)
+			// 分组已就绪。之后的重启会让 runner 自行退出就绪集合，因此这里只需覆盖第一次
+			// 状态翻转。
 			reg.Invalidate()
 			if probe != nil {
 				probe.setReady()
@@ -590,6 +594,9 @@ func (a *App) stopWorker(ctx context.Context, opts commandline.WorkerOptions) er
 	if group == "" {
 		group = commandline.WorkerGroupAllAlias
 	}
+	if err := validateWorkerGroupSelector(group); err != nil {
+		return err
+	}
 	return a.stop(ctx, commandline.StopOptions{
 		Worker:  group,
 		Force:   opts.Force,
@@ -607,6 +614,9 @@ func (a *App) restartWorker(ctx context.Context, opts commandline.WorkerOptions)
 	group := strings.TrimSpace(opts.Group)
 	if group == "" {
 		group = commandline.WorkerGroupAllAlias
+	}
+	if err := validateWorkerGroupSelector(group); err != nil {
+		return err
 	}
 	c := a.con()
 	c.Info("正在重启 worker 分组【%s】", group)
@@ -735,6 +745,27 @@ func (a *App) workerConcurrency(group *worker.Group, override int) map[string]in
 		}
 	}
 	return out
+}
+
+// validateWorkerGroupSelector rejects a group value that will be interpolated
+// into a pid file name. workerPIDPath inserts it before the extension and
+// filepath.Clean resolves ".." afterwards, so a value such as "../../etc/cron"
+// would step outside the directory holding the pid file. Group names written by
+// a running process come from worker.NewGroup and are already validated; this
+// guards the values that arrive from the command line.
+// validateWorkerGroupSelector 拒绝将被插入 pid 文件名的分组值。workerPIDPath 把它
+// 插在扩展名之前，随后 filepath.Clean 会解析 ".."，于是 "../../etc/cron" 这样的值
+// 会跳出 pid 文件所在目录。运行进程写下的分组名来自 worker.NewGroup、已经校验过；
+// 这里守的是命令行传入的值。
+func validateWorkerGroupSelector(group string) error {
+	g := strings.TrimSpace(group)
+	if g == "" || commandline.IsAllWorkerGroup(g) {
+		return nil
+	}
+	if !worker.ValidName(g) {
+		return fmt.Errorf("worker: invalid group %q: names must match ^[a-z][a-z0-9-]{0,62}$", g)
+	}
+	return nil
 }
 
 // workerPIDPath inserts -worker-<group> before the extension so one host can
