@@ -4,9 +4,9 @@ go 1.26.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.40.0
-	github.com/bingcool/gofy v0.0.0
+	github.com/bingcool/gofy v0.8.0
 	github.com/bingcool/gofy-adapter v0.0.0
-	github.com/bingcool/gofy-interface-api v0.0.0
+	github.com/bingcool/gofy-interface-api v0.8.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/google/uuid v1.6.0
