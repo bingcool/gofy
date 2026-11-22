@@ -19,12 +19,17 @@ MySQL 协议 / PostgreSQL / SQLite（GORM）接入、维护脚本和 CLI，同�
 - [LLM 接入（support/ai）](#llm-接入supportai)
 - [多语言文案（support/i18n）](#多语言文案supporti18n)
 - [支撑组件（support）](#支撑组件support)
-  - [数据库](#数据库)
-  - [缓存与消息队列](#缓存与消息队列)
-  - [命名实例](#命名实例)
-  - [可观测与安全](#可观测与安全)
-  - [其他工具包](#其他工具包)
-  - [装配与代际](#装配与代际)
+  - [HTTP 内核：handler / router / responder / middleware](#http-内核)
+  - [数据库：db / pg / sqlite](#数据库)
+  - [SQL 构造与租户：sqlbuilder / sqlmodel / tenant / sqllog](#sql-构造与租户)
+  - [缓存与分布式锁：redis / cache / queues / lock](#缓存与分布式锁)
+  - [消息队列：amqp / kafka / rocketmq](#消息队列)
+  - [命名实例：Configure / NewIO](#命名实例)
+  - [常驻任务：consumer / claim / lease](#常驻任务)
+  - [可观测性：otel / diagnostics / health](#可观测性)
+  - [安全与身份：encryption / jwtauth / ratelimit / headerpropagation](#安全与身份)
+  - [Excel 与图像：phpoffice / image](#excel-与图像)
+  - [ID 与装配：uuidint / registry / generation](#id-与装配)
 - [配置](#配置)
 - [日志](#日志)
   - [日志分流](#日志分流)
@@ -484,6 +489,17 @@ demo 的用法见 `examples/demo-service/app/locale` 与 `examples/demo-service/
 
 ## 支撑组件（support）
 
+### HTTP 内核
+
+`support` 根包是 controller 的骨架：`support.Handler[Req, Res]` 定义
+`func(ctx, *Req) (*Res, error)` 的形状，`GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`Any`
+与无返回体的 `NoContent` 把它注册到 `support.Router`；绑定、默认值与
+`message:"tag:text"` 校验消息由 handler 统一完成，`NewValidator` 暴露同一份校验器。
+响应侧由 `support.Responder` 决定包络（默认 `{code,msg,data,req_id,details}`），
+错误经 `apperr` 映射成状态码与业务码。中间件实现在 `support/middleware`：request id、
+访问日志、panic 恢复、CORS、body 上限、JWT、限流、安全头与请求头透传，安装顺序与
+别名见 [HTTP 安全与限流](#http-安全与限流)。
+
 ### 数据库
 
 数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
@@ -504,7 +520,10 @@ modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默�
 配置与示例见 [support/sqlite/README.md](support/sqlite/README.md)。
 
 三个包共用同一套 SQL 日志行为：`log_level`、`slow_threshold` 与
-`log_parameter_values` 语义一致，慢查询与错误日志同样只输出占位符模板。
+`log_parameter_values` 语义一致，慢查询与错误日志同样只输出占位符模板；具体实现在
+`support/sqllog`（见下）。
+
+### SQL 构造与租户
 
 需要 CTE、UNION、窗口函数或可组合的谓词树时用 `support/sqlbuilder`：它是 ent 的 SQL
 构造器，只产出 `(sql, args)`，语句仍交给 `db.Raw` / `db.Where` 执行——事务、SQL 日志
@@ -518,10 +537,45 @@ modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默�
 不带过滤的查询。它依赖 gorm，与只拼 SQL 的 `support/sqlbuilder` 互补。见
 [support/sqlmodel/README.md](support/sqlmodel/README.md)。
 
-### 缓存与消息队列
+租户条件本身由 `support/tenant` 提供：GORM 行级隔离插件，模型只要声明租户列
+（如 `tenant_id`）就会被自动加上谓词，`Create` 插入时自动填充；请求上下文没有租户时
+**失败关闭**（`ErrTenantRequired`），不会退化成不带过滤的全表查询。租户身份取自
+`frameworkcontext`，与 `sqlbuilder` 的 `TenantScope`、`sqlmodel` 共用同一份定义，
+三条路径不会给出不同答案。是否安装由部署配置的 `tenant` 段决定：整段缺失 = 完全
+不装，段存在且无 `enabled` = 安装；安装顺序必须在 otel 埋点之后。见
+[support/tenant/README.md](support/tenant/README.md)。
+
+SQL 日志统一走 `support/sqllog`：只记录占位符模板、按列脱敏（INSERT 按列位映射、
+IN 保留标识符槽）、进程级采样与限流，并带上请求的 trace id 与 span。它被
+`support/db`、`support/pg`、`support/sqlite` 共用，也可单独挂到已有 GORM 连接上。
+
+### 缓存与分布式锁
 
 Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
-客户端之上的缓存与队列门面。AMQP（RabbitMQ）用 `support/amqp`：支持多 host
+客户端之上的缓存与队列门面。
+
+分布式互斥用 `support/lock`：基于 redsync（DLM）的 Redis 锁，一把锁是「key + 随机
+token + TTL」。`Lock` 按配置重试、拿不到返回 `ErrAlreadyHeld`；`TryLock` 只尝试一次，
+适合请求内防重复提交；`Unlock` 只在 key 里仍是本锁 token 时删除，过期后被接管的锁不会
+被前任释放；临界区可能超过 TTL 时用 `Extend` 续租，锁已丢失会返回 `ErrNotHeld`。
+锁被占、Redis 故障、ctx 取消是三种不同的错误，因此"正在停机"不会被报成"锁忙"。
+`lock.Open` 直接吃 YAML 配置
+（`enabled`/`redis_instance_name`/`prefix`/`expiry`/`tries`/`retry_delay`），
+`enabled` 没有默认值——缺配置时不会悄悄开始写锁键。见
+[support/lock/README.md](support/lock/README.md)。
+
+```go
+locker, err := lock.New(lock.WithClient(redisClient), lock.WithPrefix("demo:lock"))
+mu, err := locker.Lock(ctx, "order:123")
+if errors.Is(err, lock.ErrAlreadyHeld) {
+    return nil // 别人在处理
+}
+defer mu.Unlock(ctx)
+```
+
+### 消息队列
+
+AMQP（RabbitMQ）用 `support/amqp`：支持多 host
 回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、断线重连，以及基于
 TTL + 死信交换机的延迟队列。配置与示例见
 [support/amqp/README.md](support/amqp/README.md)。
@@ -567,11 +621,44 @@ defer reg.Close()
 client, err := redis.NewIO(ctx, "default")
 ```
 
-### 可观测与安全
+### 常驻任务
+
+常驻任务有三个原语，选型顺序是「能不能拆」：能按行拆的扫描任务用 `support/claim`，
+消息到达型的用 `support/consumer`，只剩「绝不能执行两次」的动作才用 `support/lease`。
+
+`support/consumer` 是常驻消费者的完整实现：一个订阅一个文件，文件里是配置与业务
+handler，没有别的。每种 broker 一个构造器（`NewKafka` / `NewAMQP` / `NewRocketMQ` /
+`NewQueues`，延迟订阅另有 `NewDelayQueues` 与 `NewDelayAMQP`），返回值直接满足
+`worker.Worker`，和扫描循环一样注册进分组。背后统一处理消息信封、数据库幂等台账、
+trace 续接与「永久失败 / 可重试」错误分类；终态落库后才 ACK。见
+[support/consumer/README.md](support/consumer/README.md)。
+
+`support/claim` 在 MySQL 8 上用 `FOR UPDATE SKIP LOCKED` 做行级认领：同一个扫描
+循环可以跑在每个副本上而不会重复处理同一行。收尾用 `owner + attempts` 作围栏
+（`Succeed`/`Fail` 必须原样传回 `Claim` 返回的 `Task`），租约不续期，因此必须大于
+最慢的 handler；`Reap` 每副本可调且幂等。表结构由 `claim.DDL(table)` 给出，到期
+时间用数据库时钟。见 [support/claim/claim.go](support/claim/claim.go)。
+
+`support/lease` 是全局单例：同一时刻只有一个实例持有，并发出单调 token，让被保护
+的资源能拒绝已经过期的持有者。`lease.Run` 把获取、续期、释放与业务函数包成一个
+循环；Redis 实现随本仓库提供（`support/lease/redislease`），Kubernetes Lease 实现
+在配套的 `gofy-adapter` 仓库。它能接受切换窗口，所以只用于对账、日切、清理这类
+「重复执行有副作用」的动作。见 [support/lease/lease.go](support/lease/lease.go)。
+
+### 可观测性
 
 追踪用 `support/otel`：`WithTelemetry` 是框架级接入，负责 Gin 中间件和 App
 托管连接池；Redis、出站 HTTP、额外 GORM 连接用包内的埋点助手接入。配置与
 隐私约定见 [support/otel/README.md](support/otel/README.md)。
+
+指标与运行时诊断是 `support/otel` 的 metrics 管道加 `support/diagnostics`：后者在
+独立监听上暴露 `/metrics`、`/metrics-format` 与 pprof，不与业务端口共用路由，接线
+与端点语义见 [指标与运行时诊断](#指标与运行时诊断)。健康检查用 `support/health`：
+探针注册表支持单检查超时、轮次预算、并发上限、TTL 缓存、singleflight 与 panic
+隔离，内置数据库池、HTTP 下游与 Redis 检查器，配置见
+[support/health/README.md](support/health/README.md)。
+
+### 安全与身份
 
 对称加解密用 `support/encryption`：AES-128/256-CBC（HMAC-SHA256）与
 AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼容，
@@ -579,40 +666,15 @@ AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼
 一类可逆数据，不用于密码哈希。见
 [support/encryption/README.md](support/encryption/README.md)。
 
-### 其他工具包
+`support/jwtauth` 只做 HMAC 签名校验（不签发、不支持非对称、不访问网络）；
+`support/ratelimit` 是滑动窗口限流器，`Store` 接口可以把内存实现换成 Redis；
+CORS、安全响应头与请求体上限是框架选项（`WithCORS` / `WithSecurityHeaders` /
+`WithMaxBodyBytes`）。身份头的白名单透传用 `support/headerpropagation`，本地认证
+与透传身份的统一读取用 `support/frameworkcontext`，细节见
+[服务间请求头透传](#服务间请求头透传) 与
+[support/frameworkcontext](support/frameworkcontext/frameworkcontext.go)。
 
-分布式自增 ID 用 `support/uuidint`：Lua 把 Redis `TIME` 的毫秒前缀与段内序号
-拼成 `int64`（趋势递增、同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套
-Lua 和 ID 布局。`New` 可用 `WithClient` 注入本代客户端，或用
-`WithInstance("cache")` 走 `support/redis` 命名实例（每次取号经包级 `NewIO`
-懒解析，适合单 App 脚本）；还支持备用连接降级、批量取号，以及可选的本地预取池
-（`WithPool` 配合 `StartPool`/`StopPool`，降低 Redis QPS）。见
-[support/uuidint/README.md](support/uuidint/README.md)。
-
-```go
-gen, err := uuidint.New("uuid-key", uuidint.WithInstance("cache"))
-id, err := gen.Get(ctx)
-ids, err := gen.GetBatch(ctx, 10)
-```
-
-分布式互斥用 `support/lock`：基于 redsync（DLM）的 Redis 锁，一把锁是「key + 随机
-token + TTL」。`Lock` 按配置重试、拿不到返回 `ErrAlreadyHeld`；`TryLock` 只尝试一次，
-适合请求内防重复提交；`Unlock` 只在 key 里仍是本锁 token 时删除，过期后被接管的锁不会
-被前任释放；临界区可能超过 TTL 时用 `Extend` 续租，锁已丢失会返回 `ErrNotHeld`。
-锁被占、Redis 故障、ctx
-取消是三种不同的错误，因此"正在停机"不会被报成"锁忙"。`lock.Open` 直接吃 YAML 配置
-（`enabled`/`redis_instance_name`/`prefix`/`expiry`/`tries`/`retry_delay`），
-`enabled` 没有默认值——缺配置时不会悄悄开始写锁键。见
-[support/lock/README.md](support/lock/README.md)。
-
-```go
-locker, err := lock.New(lock.WithClient(redisClient), lock.WithPrefix("demo:lock"))
-mu, err := locker.Lock(ctx, "order:123")
-if errors.Is(err, lock.ErrAlreadyHeld) {
-    return nil // 别人在处理
-}
-defer mu.Unlock(ctx)
-```
+### Excel 与图像
 
 Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\Excel`，
 底层换成纯 Go 的 excelize（无扩展、无 cgo）。`Export` 支持声明式表头/列宽/
@@ -627,7 +689,21 @@ Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\E
 图片/文字水印、命名预设与 jpeg/png/gif 编码；`max_pixels` 与读取白名单防止
 超大图和路径穿越。见 [support/image/README.md](support/image/README.md)。
 
-### 装配与代际
+### ID 与装配
+
+分布式自增 ID 用 `support/uuidint`：Lua 把 Redis `TIME` 的毫秒前缀与段内序号
+拼成 `int64`（趋势递增、同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套
+Lua 和 ID 布局。`New` 可用 `WithClient` 注入本代客户端，或用
+`WithInstance("cache")` 走 `support/redis` 命名实例（每次取号经包级 `NewIO`
+懒解析，适合单 App 脚本）；还支持备用连接降级、批量取号，以及可选的本地预取池
+（`WithPool` 配合 `StartPool`/`StopPool`，降低 Redis QPS）。见
+[support/uuidint/README.md](support/uuidint/README.md)。
+
+```go
+gen, err := uuidint.New("uuid-key", uuidint.WithInstance("cache"))
+id, err := gen.Get(ctx)
+ids, err := gen.GetBatch(ctx, 10)
+```
 
 跨模块依赖只有一个实现时，在装配根（demo 的 `app/container`）构造实例、按对方
 `innerapi` 的接口注入消费方即可。需要按名字索引或多份同类型实例时，
