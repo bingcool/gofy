@@ -2,8 +2,8 @@
 
 `gofy` 是一个基于 [gin](https://github.com/gin-gonic/gin) 的轻量、约定优先的 Go 应用框架。
 它提供应用生命周期、类型化 HTTP handler、请求绑定与校验、统一响应包络、分类日志、
-MySQL 协议 / PostgreSQL / SQLite（GORM）接入、维护脚本和 CLI，同时没有全局状态、
-`init()` 副作用和固定配置文件。
+MySQL 协议 / PostgreSQL / SQLite（GORM）接入、常驻任务（worker）、维护脚本和 CLI，
+同时没有全局状态、`init()` 副作用和固定配置文件。
 
 ## 目录
 
@@ -19,17 +19,39 @@ MySQL 协议 / PostgreSQL / SQLite（GORM）接入、维护脚本和 CLI，同�
 - [LLM 接入（support/ai）](#llm-接入supportai)
 - [多语言文案（support/i18n）](#多语言文案supporti18n)
 - [支撑组件（support）](#支撑组件support)
-  - [HTTP 内核：handler / router / responder / middleware](#http-内核)
-  - [数据库：db / pg / sqlite](#数据库)
-  - [SQL 构造与租户：sqlbuilder / sqlmodel / tenant / sqllog](#sql-构造与租户)
-  - [缓存与分布式锁：redis / cache / queues / lock](#缓存与分布式锁)
-  - [消息队列：amqp / kafka / rocketmq](#消息队列)
+  - [support 根包：handler / router / responder](#support-根包)
+  - [support/db：MySQL 协议](#supportdb)
+  - [support/pg：PostgreSQL](#supportpg)
+  - [support/sqlite：SQLite](#supportsqlite)
   - [命名实例：Configure / NewIO](#命名实例)
-  - [常驻任务：consumer / claim / lease](#常驻任务)
-  - [可观测性：otel / diagnostics / health](#可观测性)
-  - [安全与身份：encryption / jwtauth / ratelimit / headerpropagation](#安全与身份)
-  - [Excel 与图像：phpoffice / image](#excel-与图像)
-  - [ID 与装配：uuidint / registry / generation](#id-与装配)
+  - [support/sqlbuilder：SQL 构造](#supportsqlbuilder)
+  - [support/sqlmodel：模型取表名](#supportsqlmodel)
+  - [support/tenant：行级租户隔离](#supporttenant)
+  - [support/sqllog：SQL 日志](#supportsqllog)
+  - [support/redis：Redis 客户端](#supportredis)
+  - [support/cache：缓存门面](#supportcache)
+  - [support/queues：Redis 队列](#supportqueues)
+  - [support/lock：分布式锁](#supportlock)
+  - [support/uuidint：分布式 ID](#supportuuidint)
+  - [support/amqp：RabbitMQ](#supportamqp)
+  - [support/kafka：Kafka](#supportkafka)
+  - [support/rocketmq：RocketMQ](#supportrocketmq)
+  - [support/consumer：常驻消费者](#supportconsumer)
+  - [support/claim：行级认领](#supportclaim)
+  - [support/lease：全局单例](#supportlease)
+  - [support/otel：追踪与指标](#supportotel)
+  - [support/diagnostics：运维端点](#supportdiagnostics)
+  - [support/health：健康探针](#supporthealth)
+  - [support/encryption：加解密](#supportencryption)
+  - [support/jwtauth：JWT 校验](#supportjwtauth)
+  - [support/ratelimit：限流](#supportratelimit)
+  - [support/headerpropagation：请求头透传](#supportheaderpropagation)
+  - [support/frameworkcontext：统一身份](#supportframeworkcontext)
+  - [support/middleware：中间件](#supportmiddleware)
+  - [support/phpoffice：Excel 导入导出](#supportphpoffice)
+  - [support/image：图像处理](#supportimage)
+  - [support/registry：命名注册表](#supportregistry)
+  - [support/generation：装配代际](#supportgeneration)
 - [配置](#配置)
 - [日志](#日志)
   - [日志分流](#日志分流)
@@ -39,6 +61,8 @@ MySQL 协议 / PostgreSQL / SQLite（GORM）接入、维护脚本和 CLI，同�
   - [服务注册与发现](#服务注册与发现)
 - [脚手架](#脚手架)
 - [CLI](#cli)
+- [worker 常驻任务](#worker-常驻任务)
+- [维护脚本与自定义命令](#维护脚本与自定义命令)
 - [测试](#测试)
 - [目录结构](#目录结构)
 
@@ -489,125 +513,54 @@ demo 的用法见 `examples/demo-service/app/locale` 与 `examples/demo-service/
 
 ## 支撑组件（support）
 
-### HTTP 内核
+下面每个包一节，按「HTTP → 数据 → 缓存/队列 → 消息 → 任务原语 → 可观测 → 安全 → 工具
+→ 装配」排列。每个包都可以单独使用，不依赖 `gofy.App` 启动。`support/ai` 与
+`support/i18n` 篇幅较长，各自单独成章：见 [LLM 接入](#llm-接入supportai) 与
+[多语言文案](#多语言文案supporti18n)。
+
+### support 根包
 
 `support` 根包是 controller 的骨架：`support.Handler[Req, Res]` 定义
 `func(ctx, *Req) (*Res, error)` 的形状，`GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`Any`
 与无返回体的 `NoContent` 把它注册到 `support.Router`；绑定、默认值与
 `message:"tag:text"` 校验消息由 handler 统一完成，`NewValidator` 暴露同一份校验器。
 响应侧由 `support.Responder` 决定包络（默认 `{code,msg,data,req_id,details}`），
-错误经 `apperr` 映射成状态码与业务码。中间件实现在 `support/middleware`：request id、
-访问日志、panic 恢复、CORS、body 上限、JWT、限流、安全头与请求头透传，安装顺序与
-别名见 [HTTP 安全与限流](#http-安全与限流)。
+错误经 `apperr` 映射成状态码与业务码。
 
-### 数据库
+### support/db
 
-数据库连接用 `support/db`（GORM，兼容 MySQL 协议的服务器均可：MySQL、
-MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase` 交给 App 托管连接池，
-`WithDB` 注入已有连接。慢查询和失败查询默认只记录 SQL 模板（`?` / `$n` 占位符）
-与耗时、行数、错误，不展开参数值；`log_parameter_values: true` 只用于本地调试。
-配置项、默认值和日志行为见 [support/db/README.md](support/db/README.md)。
+GORM + MySQL 协议（MySQL、MariaDB、TiDB、OceanBase、SelectDB 等）：`WithDatabase`
+交给 App 托管连接池，`WithDB` 注入已有连接。慢查询和失败查询默认只记录 SQL 模板
+（`?` / `$n` 占位符）与耗时、行数、错误，不展开参数值；`log_parameter_values: true`
+只用于本地调试。配置项、默认值和日志行为见 [support/db/README.md](support/db/README.md)。
 
-PostgreSQL 连接用 `support/pg`（GORM + `gorm.io/driver/postgres`，底层
-`jackc/pgx/v5`）：API 与 `support/db` 对齐（`New`/`Close`、命名实例
-`Configure`/`NewIO`），DSN 支持 URL 和 keyword/value 两种 pgx 形式，错误中的
-密码段两种形式都会脱敏。配置与示例见
+### support/pg
+
+GORM + `gorm.io/driver/postgres`（底层 `jackc/pgx/v5`）：API 与 `support/db` 对齐
+（`New`/`Close`、命名实例 `Configure`/`NewIO`），DSN 支持 URL 和 keyword/value 两种
+pgx 形式，错误中的密码段两种形式都会脱敏。配置与示例见
 [support/pg/README.md](support/pg/README.md)。
 
-SQLite 连接用 `support/sqlite`（GORM + `github.com/glebarez/sqlite`，纯 Go 的
-modernc 实现，无 cgo）：API 与 `support/db`、`support/pg` 对齐；默认单连接
-（SQLite 单写多读），WAL / `busy_timeout` 通过 DSN 的 `_pragma` 参数开启。
-配置与示例见 [support/sqlite/README.md](support/sqlite/README.md)。
+### support/sqlite
 
-三个包共用同一套 SQL 日志行为：`log_level`、`slow_threshold` 与
+GORM + `github.com/glebarez/sqlite`（纯 Go 的 modernc 实现，无 cgo）：API 与
+`support/db`、`support/pg` 对齐；默认单连接（SQLite 单写多读），WAL / `busy_timeout`
+通过 DSN 的 `_pragma` 参数开启。配置与示例见
+[support/sqlite/README.md](support/sqlite/README.md)。
+
+三个连接包共用同一套 SQL 日志行为：`log_level`、`slow_threshold` 与
 `log_parameter_values` 语义一致，慢查询与错误日志同样只输出占位符模板；具体实现在
 `support/sqllog`（见下）。
-
-### SQL 构造与租户
-
-需要 CTE、UNION、窗口函数或可组合的谓词树时用 `support/sqlbuilder`：它是 ent 的 SQL
-构造器，只产出 `(sql, args)`，语句仍交给 `db.Raw` / `db.Where` 执行——事务、SQL 日志
-与脱敏、连接代际都不变。引入它的原因很窄：gorm 1.31 没有 CTE 与 UNION 的 clause
-（`clause/with.go` 只是空结构，也没有 `Union` 类型），这两类语句否则只能整条手写 `Raw`
-并把 `?` 与参数人肉对齐。见
-[support/sqlbuilder/README.md](support/sqlbuilder/README.md)。
-
-需要按模型自动取表名并施加租户条件时用 `support/sqlmodel`：表名取自
-`TableName()`，模型声明了租户列而请求上下文没有租户时直接失败，不会退化成
-不带过滤的查询。它依赖 gorm，与只拼 SQL 的 `support/sqlbuilder` 互补。见
-[support/sqlmodel/README.md](support/sqlmodel/README.md)。
-
-租户条件本身由 `support/tenant` 提供：GORM 行级隔离插件，模型只要声明租户列
-（如 `tenant_id`）就会被自动加上谓词，`Create` 插入时自动填充；请求上下文没有租户时
-**失败关闭**（`ErrTenantRequired`），不会退化成不带过滤的全表查询。租户身份取自
-`frameworkcontext`，与 `sqlbuilder` 的 `TenantScope`、`sqlmodel` 共用同一份定义，
-三条路径不会给出不同答案。是否安装由部署配置的 `tenant` 段决定：整段缺失 = 完全
-不装，段存在且无 `enabled` = 安装；安装顺序必须在 otel 埋点之后。见
-[support/tenant/README.md](support/tenant/README.md)。
-
-SQL 日志统一走 `support/sqllog`：只记录占位符模板、按列脱敏（INSERT 按列位映射、
-IN 保留标识符槽）、进程级采样与限流，并带上请求的 trace id 与 span。它被
-`support/db`、`support/pg`、`support/sqlite` 共用，也可单独挂到已有 GORM 连接上。
-
-### 缓存与分布式锁
-
-Redis 连接用 `support/redis`；`support/cache` 和 `support/queues` 是在注入
-客户端之上的缓存与队列门面。
-
-分布式互斥用 `support/lock`：基于 redsync（DLM）的 Redis 锁，一把锁是「key + 随机
-token + TTL」。`Lock` 按配置重试、拿不到返回 `ErrAlreadyHeld`；`TryLock` 只尝试一次，
-适合请求内防重复提交；`Unlock` 只在 key 里仍是本锁 token 时删除，过期后被接管的锁不会
-被前任释放；临界区可能超过 TTL 时用 `Extend` 续租，锁已丢失会返回 `ErrNotHeld`。
-锁被占、Redis 故障、ctx 取消是三种不同的错误，因此"正在停机"不会被报成"锁忙"。
-`lock.Open` 直接吃 YAML 配置
-（`enabled`/`redis_instance_name`/`prefix`/`expiry`/`tries`/`retry_delay`），
-`enabled` 没有默认值——缺配置时不会悄悄开始写锁键。见
-[support/lock/README.md](support/lock/README.md)。
-
-```go
-locker, err := lock.New(lock.WithClient(redisClient), lock.WithPrefix("demo:lock"))
-mu, err := locker.Lock(ctx, "order:123")
-if errors.Is(err, lock.ErrAlreadyHeld) {
-    return nil // 别人在处理
-}
-defer mu.Unlock(ctx)
-```
-
-### 消息队列
-
-AMQP（RabbitMQ）用 `support/amqp`：支持多 host
-回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、断线重连，以及基于
-TTL + 死信交换机的延迟队列。配置与示例见
-[support/amqp/README.md](support/amqp/README.md)。
-
-Kafka 用 `support/kafka`（纯 Go 的 franz-go，无 cgo）：`New` 连接 seed brokers
-并由 metadata 发现集群，`Wrap` 注入已有客户端；`Producer` 同步发布，同一个 Key
-落到同一分区从而保序；`Consumer` 按消费组订阅，`CommitMode` 默认 `manual`：
-只提交 handler 处理成功的记录，失败消息不提交、重启后重投（at-least-once）。
-`CommitMode: "auto"` 让 franz-go 按 `AutoCommitInterval` 提交已拉取的位点，
-可能丢掉失败消息，必须显式开启；`DisableAutoCommit` 已弃用并让位于 `CommitMode`。
-earliest/latest 重置位点、rebalance 回调与 `ConsumeOptions.DiscardOnError` 跳过毒消息
-仍然可用。配置与示例见 [support/kafka/README.md](support/kafka/README.md)。
-
-RocketMQ 用 `support/rocketmq`（官方 apache/rocketmq-clients/golang v5，走 gRPC
-proxy，默认 8081，不需要 sidecar）：`New` 启动 producer，可选配置
-`StartupTopics` 做启动探测；`Client.Publish` / `PublishJSON` 同步发送，支持
-Tag、业务 Key、自定义属性、绝对时间的延时消息和 FIFO 的 `MessageGroup`；
-消费者用同一份 `Config` 调用 `NewConsumer` 创建，内部是拉取型的
-SimpleConsumer（v5 没有 push consumer），支持 Tag / SQL92 过滤、逐条 ack 和
-失败重投（at-least-once）。配置与示例见
-[support/rocketmq/README.md](support/rocketmq/README.md)。
 
 ### 命名实例
 
 `support/db`、`support/pg`、`support/sqlite`、`support/redis`、`support/amqp`、
-`support/kafka`、`support/rocketmq` 还支持命名
-实例：启动时用 `Configure(map[string]Config)` 注册配置别名，之后任意位置用
-`NewIO(ctx, "default")` 按需建连并缓存。首次建连在注册表锁外执行（不同别名
-并行、同名合并），失败不缓存；每次 `Configure` 生成一代注册表，`Close` 只关闭
-本代连接，因此热更新可以先启动新模块再关闭旧模块。包级 `NewIO` /
-`CloseAllIO` 是单 App 的便捷入口，同一进程内多个 App 需要隔离时持有
-`*Registry` 用 `reg.NewIO` / `reg.Close`：
+`support/kafka`、`support/rocketmq` 还支持命名实例：启动时用
+`Configure(map[string]Config)` 注册配置别名，之后任意位置用 `NewIO(ctx, "default")`
+按需建连并缓存。首次建连在注册表锁外执行（不同别名并行、同名合并），失败不缓存；
+每次 `Configure` 生成一代注册表，`Close` 只关闭本代连接，因此热更新可以先启动新模块
+再关闭旧模块。包级 `NewIO` / `CloseAllIO` 是单 App 的便捷入口，同一进程内多个 App
+需要隔离时持有 `*Registry` 用 `reg.NewIO` / `reg.Close`：
 
 ```go
 reg, err := redis.Configure(map[string]redis.Config{
@@ -621,83 +574,87 @@ defer reg.Close()
 client, err := redis.NewIO(ctx, "default")
 ```
 
-### 常驻任务
+### support/sqlbuilder
 
-常驻任务有三个原语，选型顺序是「能不能拆」：能按行拆的扫描任务用 `support/claim`，
-消息到达型的用 `support/consumer`，只剩「绝不能执行两次」的动作才用 `support/lease`。
+需要 CTE、UNION、窗口函数或可组合的谓词树时用 `support/sqlbuilder`：它是 ent 的 SQL
+构造器，只产出 `(sql, args)`，语句仍交给 `db.Raw` / `db.Where` 执行——事务、SQL 日志
+与脱敏、连接代际都不变。引入它的原因很窄：gorm 1.31 没有 CTE 与 UNION 的 clause
+（`clause/with.go` 只是空结构，也没有 `Union` 类型），这两类语句否则只能整条手写 `Raw`
+并把 `?` 与参数人肉对齐。见
+[support/sqlbuilder/README.md](support/sqlbuilder/README.md)。
 
-`support/consumer` 是常驻消费者的完整实现：一个订阅一个文件，文件里是配置与业务
-handler，没有别的。每种 broker 一个构造器（`NewKafka` / `NewAMQP` / `NewRocketMQ` /
-`NewQueues`，延迟订阅另有 `NewDelayQueues` 与 `NewDelayAMQP`），返回值直接满足
-`worker.Worker`，和扫描循环一样注册进分组。背后统一处理消息信封、数据库幂等台账、
-trace 续接与「永久失败 / 可重试」错误分类；终态落库后才 ACK。见
-[support/consumer/README.md](support/consumer/README.md)。
+### support/sqlmodel
 
-`support/claim` 在 MySQL 8 上用 `FOR UPDATE SKIP LOCKED` 做行级认领：同一个扫描
-循环可以跑在每个副本上而不会重复处理同一行。收尾用 `owner + attempts` 作围栏
-（`Succeed`/`Fail` 必须原样传回 `Claim` 返回的 `Task`），租约不续期，因此必须大于
-最慢的 handler；`Reap` 每副本可调且幂等。表结构由 `claim.DDL(table)` 给出，到期
-时间用数据库时钟。见 [support/claim/claim.go](support/claim/claim.go)。
+需要按模型自动取表名并施加租户条件时用 `support/sqlmodel`：表名取自
+`TableName()`，模型声明了租户列而请求上下文没有租户时直接失败，不会退化成
+不带过滤的查询。它依赖 gorm，与只拼 SQL 的 `support/sqlbuilder` 互补。见
+[support/sqlmodel/README.md](support/sqlmodel/README.md)。
 
-`support/lease` 是全局单例：同一时刻只有一个实例持有，并发出单调 token，让被保护
-的资源能拒绝已经过期的持有者。`lease.Run` 把获取、续期、释放与业务函数包成一个
-循环；Redis 实现随本仓库提供（`support/lease/redislease`），Kubernetes Lease 实现
-在配套的 `gofy-adapter` 仓库。它能接受切换窗口，所以只用于对账、日切、清理这类
-「重复执行有副作用」的动作。见 [support/lease/lease.go](support/lease/lease.go)。
+### support/tenant
 
-### 可观测性
+GORM 行级隔离插件：模型只要声明租户列（如 `tenant_id`）就会被自动加上谓词，
+`Create` 插入时自动填充；请求上下文没有租户时**失败关闭**（`ErrTenantRequired`），
+不会退化成不带过滤的全表查询。租户身份取自 `frameworkcontext`，与 `sqlbuilder` 的
+`TenantScope`、`sqlmodel` 共用同一份定义，三条路径不会给出不同答案。是否安装由部署
+配置的 `tenant` 段决定：整段缺失 = 完全不装，段存在且无 `enabled` = 安装；安装顺序
+必须在 otel 埋点之后。见 [support/tenant/README.md](support/tenant/README.md)。
 
-追踪用 `support/otel`：`WithTelemetry` 是框架级接入，负责 Gin 中间件和 App
-托管连接池；Redis、出站 HTTP、额外 GORM 连接用包内的埋点助手接入。配置与
-隐私约定见 [support/otel/README.md](support/otel/README.md)。
+### support/sqllog
 
-指标与运行时诊断是 `support/otel` 的 metrics 管道加 `support/diagnostics`：后者在
-独立监听上暴露 `/metrics`、`/metrics-format` 与 pprof，不与业务端口共用路由，接线
-与端点语义见 [指标与运行时诊断](#指标与运行时诊断)。健康检查用 `support/health`：
-探针注册表支持单检查超时、轮次预算、并发上限、TTL 缓存、singleflight 与 panic
-隔离，内置数据库池、HTTP 下游与 Redis 检查器，配置见
-[support/health/README.md](support/health/README.md)。
+SQL 日志统一层：只记录占位符模板、按列脱敏（INSERT 按列位映射、IN 保留标识符槽）、
+进程级采样与限流，并带上请求的 trace id 与 span。它被 `support/db`、`support/pg`、
+`support/sqlite` 共用，也可单独挂到已有 GORM 连接上；`WithSQLPolicy` 在 App 层统一
+配置。
 
-### 安全与身份
+### support/redis
 
-对称加解密用 `support/encryption`：AES-128/256-CBC（HMAC-SHA256）与
-AES-128/256-GCM（AEAD），密文格式与 swoolefy PHP Encryption 逐字节兼容，
-`EncryptString`/`DecryptString` 可跨语言互解。用于保护配置、Token、Cookie
-一类可逆数据，不用于密码哈希。见
-[support/encryption/README.md](support/encryption/README.md)。
+Redis 客户端：校验配置、建立连接、`Ping` 校验、关闭连接，基于
+`github.com/redis/go-redis/v9`，默认不保留全局状态，调用方自己持有 `*redis.Client`；
+需要按别名取用时用可选的 `Configure` / `NewIO`。`support/cache`、`support/queues`、
+`support/uuidint` 都建立在它之上，`support/ratelimit/redisstore` 则用 Redis 做多实例
+共享的限流存储。见 [support/redis/README.md](support/redis/README.md)。
 
-`support/jwtauth` 只做 HMAC 签名校验（不签发、不支持非对称、不访问网络）；
-`support/ratelimit` 是滑动窗口限流器，`Store` 接口可以把内存实现换成 Redis；
-CORS、安全响应头与请求体上限是框架选项（`WithCORS` / `WithSecurityHeaders` /
-`WithMaxBodyBytes`）。身份头的白名单透传用 `support/headerpropagation`，本地认证
-与透传身份的统一读取用 `support/frameworkcontext`，细节见
-[服务间请求头透传](#服务间请求头透传) 与
-[support/frameworkcontext](support/frameworkcontext/frameworkcontext.go)。
+### support/cache
 
-### Excel 与图像
+在注入的 Redis 客户端之上提供统一的键值缓存门面：`Cache` 是业务使用的接口，`Redis`
+是默认实现；不持有全局状态，也不接管客户端生命周期，业务注入已连接的
+`*redis.Client` 或任意 `goredis.Cmdable`。见 [support/cache/README.md](support/cache/README.md)。
 
-Excel 导出/导入用 `support/phpoffice`：移植自 swoolefy PHP `PhpOffice\Excel`，
-底层换成纯 Go 的 excelize（无扩展、无 cgo）。`Export` 支持声明式表头/列宽/
-冻结/筛选与生命周期钩子，`ExportStream` 用 StreamWriter 流式写大数据；
-`Read` 全量读取、`Import` 流式逐行处理。小数据用常规 API，大数据必须用流式
-接口，注意内存占用与 excelize 要求的 Go 版本。导出文件名安全校验且绝不覆盖
-已有文件。见 [support/phpoffice/README.md](support/phpoffice/README.md)。
+### support/queues
 
-图像处理用 `support/image`：移植自 swoolefy PHP `Image` 组件，基于标准库与
-`golang.org/x/image`（纯 Go、无 GD/Imagick）。`Open`/`Create` 返回请求级
-`Editor`，支持缩放（contain/cover/scale/stretch）、缩略图、裁剪、旋转、灰度、
-图片/文字水印、命名预设与 jpeg/png/gif 编码；`max_pixels` 与读取白名单防止
-超大图和路径穿越。见 [support/image/README.md](support/image/README.md)。
+在注入的 Redis 客户端之上提供两类队列：`Queue` 是即时队列（Redis List，支持优先队列
+与失败重试），`DelayQueue` 是延迟队列（Redis ZSET，到期后才能被取出）。常驻消费用
+`support/consumer` 的 `NewQueues` / `NewDelayQueues`。见
+[support/queues/README.md](support/queues/README.md)。
 
-### ID 与装配
+### support/lock
 
-分布式自增 ID 用 `support/uuidint`：Lua 把 Redis `TIME` 的毫秒前缀与段内序号
-拼成 `int64`（趋势递增、同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套
-Lua 和 ID 布局。`New` 可用 `WithClient` 注入本代客户端，或用
-`WithInstance("cache")` 走 `support/redis` 命名实例（每次取号经包级 `NewIO`
-懒解析，适合单 App 脚本）；还支持备用连接降级、批量取号，以及可选的本地预取池
-（`WithPool` 配合 `StartPool`/`StopPool`，降低 Redis QPS）。见
-[support/uuidint/README.md](support/uuidint/README.md)。
+基于 redsync（DLM）的 Redis 分布式锁，一把锁是「key + 随机 token + TTL」。`Lock` 按
+配置重试、拿不到返回 `ErrAlreadyHeld`；`TryLock` 只尝试一次，适合请求内防重复提交；
+`Unlock` 只在 key 里仍是本锁 token 时删除，过期后被接管的锁不会被前任释放；临界区
+可能超过 TTL 时用 `Extend` 续租，锁已丢失会返回 `ErrNotHeld`。锁被占、Redis 故障、
+ctx 取消是三种不同的错误，因此"正在停机"不会被报成"锁忙"。`lock.Open` 直接吃 YAML
+配置（`enabled`/`redis_instance_name`/`prefix`/`expiry`/`tries`/`retry_delay`），
+`enabled` 没有默认值——缺配置时不会悄悄开始写锁键。见
+[support/lock/README.md](support/lock/README.md)。
+
+```go
+locker, err := lock.New(lock.WithClient(redisClient), lock.WithPrefix("demo:lock"))
+mu, err := locker.Lock(ctx, "order:123")
+if errors.Is(err, lock.ErrAlreadyHeld) {
+    return nil // 别人在处理
+}
+defer mu.Unlock(ctx)
+```
+
+### support/uuidint
+
+分布式自增 ID：Lua 把 Redis `TIME` 的毫秒前缀与段内序号拼成 `int64`（趋势递增、
+同毫秒冲突重试），与 swoolefy PHP Uuid 共用同一套 Lua 和 ID 布局。`New` 可用
+`WithClient` 注入本代客户端，或用 `WithInstance("cache")` 走 `support/redis` 命名
+实例（每次取号经包级 `NewIO` 懒解析，适合单 App 脚本）；还支持备用连接降级、批量
+取号，以及可选的本地预取池（`WithPool` 配合 `StartPool`/`StopPool`，降低 Redis QPS）。
+见 [support/uuidint/README.md](support/uuidint/README.md)。
 
 ```go
 gen, err := uuidint.New("uuid-key", uuidint.WithInstance("cache"))
@@ -705,18 +662,149 @@ id, err := gen.Get(ctx)
 ids, err := gen.GetBatch(ctx, 10)
 ```
 
-跨模块依赖只有一个实现时，在装配根（demo 的 `app/container`）构造实例、按对方
-`innerapi` 的接口注入消费方即可。需要按名字索引或多份同类型实例时，
-再用 `support/registry`：显式的「名字 → 实例」注册表，启动装配时登记
-client/service，按名字取用（`Get[T]` 带类型检查）；空名字、nil 实例、重复注册
-都直接报错，每次启动/热更新新建一份，不做包级全局。见
-[support/registry/README.md](support/registry/README.md)。
+### support/amqp
 
-持有代际资源（DB/Redis 连接等）的服务用 `support/generation` 保证一次请求只
-使用同一代：入口（HTTP 中间件、脚本、守护进程）发布并固定当前代，共享代码只
-调用 `WithContext(ctx)`；Reload 期间固定值优先，旧模块停止时用
-`CompareAndSwap` 只撤回自己那一代。见
-[support/generation/README.md](support/generation/README.md)。
+AMQP（RabbitMQ）：支持多 host 回退、`Wrap` 注入已有连接、发布确认、手动 ack/nack、
+断线重连，以及基于 TTL + 死信交换机的延迟队列。配置与示例见
+[support/amqp/README.md](support/amqp/README.md)。
+
+### support/kafka
+
+Kafka（纯 Go 的 franz-go，无 cgo）：`New` 连接 seed brokers 并由 metadata 发现集群，
+`Wrap` 注入已有客户端；`Producer` 同步发布，同一个 Key 落到同一分区从而保序；
+`Consumer` 按消费组订阅，`CommitMode` 默认 `manual`：只提交 handler 处理成功的记录，
+失败消息不提交、重启后重投（at-least-once）。`CommitMode: "auto"` 让 franz-go 按
+`AutoCommitInterval` 提交已拉取的位点，可能丢掉失败消息，必须显式开启；
+`DisableAutoCommit` 已弃用并让位于 `CommitMode`。earliest/latest 重置位点、rebalance
+回调与 `ConsumeOptions.DiscardOnError` 跳过毒消息仍然可用。配置与示例见
+[support/kafka/README.md](support/kafka/README.md)。
+
+### support/rocketmq
+
+RocketMQ（官方 apache/rocketmq-clients/golang v5，走 gRPC proxy，默认 8081，不需要
+sidecar）：`New` 启动 producer，可选配置 `StartupTopics` 做启动探测；`Client.Publish` /
+`PublishJSON` 同步发送，支持 Tag、业务 Key、自定义属性、绝对时间的延时消息和 FIFO 的
+`MessageGroup`；消费者用同一份 `Config` 调用 `NewConsumer` 创建，内部是拉取型的
+SimpleConsumer（v5 没有 push consumer），支持 Tag / SQL92 过滤、逐条 ack 和失败重投
+（at-least-once）。配置与示例见 [support/rocketmq/README.md](support/rocketmq/README.md)。
+
+### support/consumer
+
+常驻消费者的完整实现：一个订阅一个文件，文件里是配置与业务 handler，没有别的。每种
+broker 一个构造器（`NewKafka` / `NewAMQP` / `NewRocketMQ` / `NewQueues`，延迟订阅另有
+`NewDelayQueues` 与 `NewDelayAMQP`），返回值直接满足 `worker.Worker`，和扫描循环一样
+注册进分组。背后统一处理消息信封、数据库幂等台账、trace 续接与「永久失败 / 可重试」
+错误分类；终态落库后才 ACK。见 [support/consumer/README.md](support/consumer/README.md)。
+
+### support/claim
+
+MySQL 8 的行级认领：用 `FOR UPDATE SKIP LOCKED` 让同一个扫描循环可以跑在每个副本上
+而不会重复处理同一行。收尾用 `owner + attempts` 作围栏（`Succeed`/`Fail` 必须原样传回
+`Claim` 返回的 `Task`），租约不续期，因此必须大于最慢的 handler；`Reap` 每副本可调且
+幂等。表结构由 `claim.DDL(table)` 给出，到期时间用数据库时钟。见
+[support/claim/claim.go](support/claim/claim.go)。
+
+### support/lease
+
+全局单例原语：同一时刻只有一个实例持有，并发出单调 token，让被保护的资源能拒绝已经
+过期的持有者。`lease.Run` 把获取、续期、释放与业务函数包成一个循环；Redis 实现随本
+仓库提供（`support/lease/redislease`），Kubernetes Lease 实现在配套的 `gofy-adapter`
+仓库。它能接受切换窗口，所以只用于对账、日切、清理这类「重复执行有副作用」的动作。
+见 [support/lease/lease.go](support/lease/lease.go)。
+
+### support/otel
+
+追踪入口：`WithTelemetry` 是框架级接入，负责 Gin 中间件和 App 托管连接池；Redis、出站
+HTTP、额外 GORM 连接用包内的助手（`InstrumentGORM` / `InstrumentRedis` / `HTTPClient`）
+接入；OTLP 支持 gRPC 与 HTTP，传播用 W3C TraceContext。metrics 是独立管道：
+`NewMetrics` 建 Prometheus registry 与 meter provider，`WithMetrics` 装配。配置与隐私
+约定见 [support/otel/README.md](support/otel/README.md)。
+
+### support/diagnostics
+
+独立监听上的运维端点：`/metrics`、`/metrics-format`（同一份数据的表格视图，直方图合并
+为 count/sum 与近似 p50/p90/p99）与 `/debug/pprof/*`。它不与业务端口共用路由与中间件；
+pprof 暴露堆与命令行，默认只绑回环。接线、基数控制与安全边界见
+[指标与运行时诊断](#指标与运行时诊断)。
+
+### support/health
+
+探针注册表：`/healthz`、`/readyz` 与诊断 `/health` 共用一套检查执行。支持单检查超时
+（默认 2s）、轮次预算（3s）、并发上限（4）、TTL 缓存、singleflight 与 panic 隔离；
+预算耗尽的 readiness 检查失败关闭，诊断检查则报 `unknown` + `reason=budget`。内置
+数据库池、HTTP 下游与 Redis 检查器。见 [support/health/README.md](support/health/README.md)。
+
+### support/encryption
+
+对称加解密：AES-128/256-CBC（HMAC-SHA256）与 AES-128/256-GCM（AEAD），密文格式与
+swoolefy PHP Encryption 逐字节兼容，`EncryptString`/`DecryptString` 可跨语言互解。
+用于保护配置、Token、Cookie 一类可逆数据，不用于密码哈希。见
+[support/encryption/README.md](support/encryption/README.md)。
+
+### support/jwtauth
+
+HMAC 签名的 JWT 校验：只校验、不签发，不支持非对称算法，不访问网络；签名密钥由应用
+自己配置。校验成功的身份写入统一身份上下文，供 `headerpropagation` 与
+`frameworkcontext` 读取，`WithJWTAuth` 把它挂到模块路由。见
+[support/jwtauth/jwt.go](support/jwtauth/jwt.go)。
+
+### support/ratelimit
+
+滑动窗口限流器：内存实现开箱可用，`Store` 接口可换成共享后端（`support/ratelimit/redisstore`
+即为 Redis 实现），中间件按别名 `rate-limit` 挂到模块路由。到达限制返回 429，响应头
+带上重试时间。见 [support/ratelimit/ratelimit.go](support/ratelimit/ratelimit.go)。
+
+### support/headerpropagation
+
+把入站请求白名单内的身份与 trace 头写入 request context，供下游客户端注入：`X-Trace-Id`、
+`X-User-Id`、`X-User-Code`、`X-Tenant-Id`、`X-User-Name`、`X-Client-Ip`、`X-User-Agent`。
+身份头只在直连对端命中 `WithTrustedProxies` 时采信，公网直连携带的同名头会被丢弃。
+细节见 [服务间请求头透传](#服务间请求头透传)。
+
+### support/frameworkcontext
+
+统一身份读取入口：合并「本地认证身份」与「可信上游透传身份」，并承载租户覆盖
+（`WithTenant`）、显式绕过（`WithoutTenant`）与绕过判定。`sqlbuilder`、`sqlmodel`、
+`tenant` 都从这里取租户，因此三条路径不会给出不同答案。见
+[support/frameworkcontext/frameworkcontext.go](support/frameworkcontext/frameworkcontext.go)。
+
+### support/middleware
+
+框架中间件的实现：request id、访问日志、panic 恢复、CORS、body 上限、JWT、限流、
+安全头与请求头透传。全局链顺序固定、契约路由按别名引用；顺序与别名见
+[中间件顺序](#中间件顺序) 与 [中间件别名](#中间件别名)，说明见
+[support/middleware/README.md](support/middleware/README.md)。
+
+### support/phpoffice
+
+Excel 导出/导入：移植自 swoolefy PHP `PhpOffice\Excel`，底层换成纯 Go 的 excelize
+（无扩展、无 cgo）。`Export` 支持声明式表头/列宽/冻结/筛选与生命周期钩子，
+`ExportStream` 用 StreamWriter 流式写大数据；`Read` 全量读取、`Import` 流式逐行处理。
+小数据用常规 API，大数据必须用流式接口，注意内存占用与 excelize 要求的 Go 版本。导出
+文件名安全校验且绝不覆盖已有文件。见
+[support/phpoffice/README.md](support/phpoffice/README.md)。
+
+### support/image
+
+图像处理：移植自 swoolefy PHP `Image` 组件，基于标准库与 `golang.org/x/image`（纯 Go、
+无 GD/Imagick）。`Open`/`Create` 返回请求级 `Editor`，支持缩放（contain/cover/scale/
+stretch）、缩略图、裁剪、旋转、灰度、图片/文字水印、命名预设与 jpeg/png/gif 编码；
+`max_pixels` 与读取白名单防止超大图和路径穿越。见
+[support/image/README.md](support/image/README.md)。
+
+### support/registry
+
+显式的「名字 → 实例」注册表：启动装配时登记 client/service，按名字取用（`Get[T]` 带
+类型检查）；空名字、nil 实例、重复注册都直接报错，每次启动/热更新新建一份，不做包级
+全局。跨模块依赖只有一个实现时，直接在装配根构造实例、按对方 `innerapi` 接口注入即可，
+不需要注册表。见 [support/registry/README.md](support/registry/README.md)。
+
+### support/generation
+
+持有代际资源（DB/Redis 连接等）的服务用 `support/generation` 保证一次请求只使用同一
+代：入口（HTTP 中间件、脚本、守护进程）发布并固定当前代，共享代码只调用
+`WithContext(ctx)`；Reload 期间固定值优先，旧模块停止时用 `CompareAndSwap` 只撤回自己
+那一代。见 [support/generation/README.md](support/generation/README.md)。
 
 ## 配置
 
@@ -1145,7 +1233,94 @@ gofy new .
 
 健康检查列只有在目标配置了 `/healthz` 时才有意义：HTTP 实例看 `WithHealthEndpoints`，worker 看 `WithWorkerHealth`；未配置时显示 `disabled`（worker 表格里整列省略，避免一排 `--` 被读成故障）。探测走本机回环且不走环境代理——经 `HTTP_PROXY` 发出的本机健康检查拿到的是代理的答复。
 
-worker 的 `health` 列探测的是 `/healthz`，而 `/healthz` 自 v1.x 起只表示**进程存活**：drain 窗口内它仍然 200。因此 worker 的该列回答"进程还在"，不再回答"可以接活"；就绪要看新增的 `/readyz`（分组已就绪且 readiness 检查通过）。HTTP 实例不受影响：`/healthz` 仍是存活、`/readyz` 仍是就绪。
+worker 的 `health` 列探测的是 `/healthz`，而 `/healthz` 只表示**进程存活**：drain 窗口内它仍然 200。因此 worker 的该列回答"进程还在"，不再回答"可以接活"；就绪要看 `/readyz`（分组已就绪且 readiness 检查通过）。HTTP 实例不受影响：`/healthz` 仍是存活、`/readyz` 仍是就绪。
+
+## worker 常驻任务
+
+worker 把循环跑在**独立进程**里，而不是挂在 HTTP 服务上：`start` 只启动 HTTP，
+`worker --group=<g>` 只跑这一组，不开端口、不注册路由。两者是同一个镜像、两个进程，
+共用 config.yaml、日志与数据库。
+
+分组是部署单位：同组 worker 同生共死，一个分组对应一个 Deployment；并发是 goroutine
+数量，不是进程数。
+
+```go
+scan, err := worker.NewGroup("order",
+    worker.Func("order-scan", 2, func(ctx context.Context) error {
+        return scanLoop(ctx, svc) // 与 HTTP handler 调用同一个 service
+    }),
+)
+if err != nil {
+    return err
+}
+
+app, err := gofy.New(
+    gofy.WithWorkerGroups(scan),
+    gofy.WithWorkerDrainTimeout(20*time.Second),
+    gofy.WithWorkerHealth("0.0.0.0:9091"), // 可选，供 readinessProbe 使用
+)
+```
+
+选原语比写循环重要：消息用 `worker/consumer/*`（消费组分片），Redis 队列用
+`queuesconsumer`（出队即删），表里的待办行用 `support/claim`（行级认领），只有
+「绝不能执行两次」的动作才用 `support/lease`（选主 + fencing token）；跟随本实例的
+循环（nacos watch、预热）才挂 `support.Starter`——把扫表循环挂上去会让每个 Pod 都扫
+同一张表。
+
+生命周期由 `worker.Policy` 控制：`RestartOnError`（默认，带上限的指数退避 + ±20%
+抖动）与 `ExitOnError`（配置错误、订阅不存在这类重启也修不好的失败）。停机时 ctx 先
+取消，在途任务最多再跑 `drain_timeout`（默认 20s），它必须小于进程关闭总预算；worker
+进程用 `<pid 文件>.lock` 的 flock 独占，锁随进程退出释放。`/healthz` 只报存活，
+`/readyz` 要求分组已就绪且 readiness 检查全部通过。
+
+```bash
+./service worker --group=order                  # 前台运行
+./service worker --group=order --daemon=1       # 脱离到后台，等子进程上报 ready
+./service worker --group=order --name=order-scan --concurrency=4
+./service worker --list                         # 列出分组、worker 与并发数，不连数据库
+./service worker stop --group=order             # 只停 worker，不碰 HTTP
+./service worker restart --group=order          # 默认后台
+./service worker status --group=order --json
+```
+
+分组装配、四种循环的完整写法、部署与排障见
+[docs/worker-guide.md](docs/worker-guide.md)。
+
+## 维护脚本与自定义命令
+
+`script` 跑一次性维护任务，`command` 扩展 CLI 子命令。两者都在 `main` 里注册，与
+HTTP 侧共用同一套配置、日志与数据库，但各自在独立进程里运行，不参与路由注册。
+
+```go
+gofy.WithScripts(script.Script{
+    Name:  "backfill-order-total",
+    Short: "回填历史订单总额",
+    Flags: func(fs *pflag.FlagSet) { fs.Int("days", 30, "回溯天数") },
+    Run: func(ctx context.Context, rt *script.Runtime, fs *pflag.FlagSet) error {
+        days, _ := fs.GetInt("days")
+        return backfill(ctx, rt.DB, days)
+    },
+    // WithoutDatabase: true // 不需要数据库时跳过初始化
+}),
+gofy.WithCommands(command.Command{
+    Use:   "migrate",
+    Short: "执行数据库迁移",
+    Run: func(ctx context.Context, rt *command.Runtime, fs *pflag.FlagSet) error {
+        return migrate(ctx, rt.DB)
+    },
+}),
+```
+
+名字必须匹配 `^[a-z][a-z0-9-]{0,62}$`，且不能与内建子命令重名（脚本避开 `list`、
+`help`、`completion`、`restart`，命令避开 `start`、`stop`、`worker` 等）；冲突在启动
+装配时直接失败，不会等到执行才报错。`Run` 是唯一必填字段，`WithoutDatabase` 让不需要
+库的任务跳过连接初始化，因此数据库不可达时脚本仍能运行。
+
+```bash
+./service script --list                        # 不读数据库、不访问 Nacos
+./service script backfill-order-total --days=90
+./service migrate
+```
 
 ## 测试
 
