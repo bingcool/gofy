@@ -707,8 +707,11 @@ func TestWatcherAppliesChanges(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Watch returned %v, want context.Canceled", err)
+		// Cancellation is a normal stop: callers log a non-nil return as a
+		// watcher failure, and shutdown is not one.
+		// 取消是正常停止：调用方把非 nil 返回值当作 watcher 失败，而停机不是失败。
+		if err != nil {
+			t.Fatalf("Watch returned %v, want nil after cancel", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("watcher did not stop after cancel")
@@ -819,8 +822,8 @@ func TestWatcherRunClosesItsClient(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run = %v, want context.Canceled", err)
+		if err != nil {
+			t.Fatalf("Run = %v, want nil after cancel", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("watcher did not stop after cancel")

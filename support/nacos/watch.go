@@ -153,10 +153,14 @@ func (w *Watcher) Close() error {
 	return w.client.Close()
 }
 
-// Run blocks until ctx is cancelled. Listener and apply failures are logged
-// and retried after RetryDelay; a bad remote config never replaces the file.
-// Run 阻塞直到 ctx 被取消。监听或应用失败会记录日志并在 RetryDelay 后重试；
-// 远端配置非法时不会替换本地文件。
+// Run blocks until ctx is cancelled. Cancellation is a normal stop and returns
+// nil — callers treat the return value as "the watcher failed", and shutdown is
+// not a failure; every other package in this repository follows the same rule.
+// Listener and apply failures are logged and retried after RetryDelay; a bad
+// remote config never replaces the file.
+// Run 阻塞直到 ctx 被取消。取消是正常停止并返回 nil——调用方把返回值当作"watcher 失败"
+// 看待，而停机不是失败；本仓库其它包遵循同一规则。监听或应用失败会记录日志并在 RetryDelay
+// 后重试；远端配置非法时不会替换本地文件。
 func (w *Watcher) Run(ctx context.Context) error {
 	// The watcher builds its own client in NewWatcher; close its idle
 	// connections on every return path. Exec skips defers, but the process
@@ -205,18 +209,18 @@ func (w *Watcher) Run(ctx context.Context) error {
 	written := current
 
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx.Err() != nil {
+			return nil
 		}
 		listenStart := time.Now()
 		changed, err := w.client.Listen(ctx, current)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil
 			}
 			w.logger.Warn("nacos listen failed", zap.Error(err))
 			if !sleep(ctx, cfg.RetryDelay) {
-				return ctx.Err()
+				return nil
 			}
 			continue
 		}
@@ -239,7 +243,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 				if syncErr != nil {
 					w.logger.Error("nacos config resync failed", zap.Error(syncErr))
 					if !sleep(ctx, cfg.RetryDelay) {
-						return ctx.Err()
+						return nil
 					}
 					continue
 				}
@@ -260,7 +264,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			// 这种情况按 RetryDelay 退避。
 			if time.Since(listenStart) < w.client.listenHold()/2 {
 				if !sleep(ctx, cfg.RetryDelay) {
-					return ctx.Err()
+					return nil
 				}
 			}
 			continue
@@ -270,7 +274,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		if err != nil {
 			w.logger.Error("nacos config update failed", zap.Error(err))
 			if !sleep(ctx, cfg.RetryDelay) {
-				return ctx.Err()
+				return nil
 			}
 			continue
 		}
@@ -285,6 +289,14 @@ func (w *Watcher) Run(ctx context.Context) error {
 			// 没有需要执行的内容：要么这份内容本进程已经应用过，要么服务端报的变更在
 			// Sync 看来与本地文件一致。无论哪种，游标都可以往前走。
 			current = result.Digest
+			// Listen returns as soon as it reports a change, so there is no hold
+			// to absorb a server that keeps answering "changed" with content this
+			// process already applied. Without this wait the loop would spin.
+			// Listen 一旦报出变更就返回，因此没有挂起时间可以吸收"反复报变更、内容却
+			// 与已应用摘要相同"的服务端行为。没有这段等待，循环会空转。
+			if !sleep(ctx, cfg.RetryDelay) {
+				return nil
+			}
 			continue
 		}
 		w.logger.Info("nacos config updated", zap.String("file", result.File))
@@ -300,7 +312,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			// 某个值无法接受）紧循环。
 			w.logger.Error("nacos config change handler failed", zap.Error(err))
 			if !sleep(ctx, cfg.RetryDelay) {
-				return ctx.Err()
+				return nil
 			}
 			continue
 		}
