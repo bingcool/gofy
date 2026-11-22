@@ -8,4 +8,4 @@ package gofy
 // `App.Version()` still reports build information (commit, build time, Go
 // version); this constant is the version field it starts from.
 // Version 是gofy版本，也是它唯一的定义处
-const Version = "1.0.0"
+const Version = "0.8.0"
