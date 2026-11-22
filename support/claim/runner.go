@@ -380,9 +380,16 @@ func (r *Runner) process(ctx context.Context, task Task) error {
 	}
 
 	started := time.Now()
-	handleCtx, cancel := context.WithTimeout(ctx, r.handlerTimeout)
-	taskID, handleErr := r.handler(handleCtx, task.Payload)
-	cancel()
+	// The deadline is cancelled in a defer, inside a closure: the handler must
+	// not leave a timer armed when it panics, and nothing after this point uses
+	// handleCtx, so the timer should not outlive the call either.
+	// 截止时间在闭包里用 defer 取消：handler panic 时不能留下一个仍在计时的 timer；此后
+	// 已没有任何代码使用 handleCtx，timer 也不该比这次调用活得更久。
+	taskID, handleErr := func() (uint64, error) {
+		handleCtx, cancel := context.WithTimeout(ctx, r.handlerTimeout)
+		defer cancel()
+		return r.handler(handleCtx, task.Payload)
+	}()
 
 	res.TaskID = taskID
 	res.Err = handleErr

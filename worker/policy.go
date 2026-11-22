@@ -84,6 +84,15 @@ func (p Policy) backoff(attempt int) time.Duration {
 		if d >= p.MaxBackoff {
 			break
 		}
+		// Saturate before doubling: MaxBackoff is a Duration, so a caller that
+		// sets it near MaxInt64 ("no cap, effectively") would otherwise let d*=2
+		// wrap negative and turn the delay into a busy loop.
+		// 加倍之前先饱和：MaxBackoff 是 Duration，把它设到接近 MaxInt64（相当于"没有上限"）
+		// 的调用方，否则会让 d*=2 溢出成负数，把等待变成忙循环。
+		if d > p.MaxBackoff/2 {
+			d = p.MaxBackoff
+			break
+		}
 		d *= 2
 	}
 	if d > p.MaxBackoff {
@@ -91,8 +100,9 @@ func (p Policy) backoff(attempt int) time.Duration {
 	}
 	if p.Jitter {
 		// ±20% keeps the average delay unchanged while breaking lockstep.
-		// ±20% 保持平均延迟不变，同时打散同步重连。
-		spread := int64(d) * 2 / 5
+		// Divided before multiplying so a saturated delay cannot overflow.
+		// ±20% 保持平均延迟不变，同时打散同步重连。先除后乘，饱和后的延迟因此不会溢出。
+		spread := int64(d/5) * 2
 		if spread > 0 {
 			d += time.Duration(rand.Int64N(spread+1)) - time.Duration(spread/2)
 		}

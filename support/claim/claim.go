@@ -227,6 +227,13 @@ func backoffFor(base, max time.Duration, attempts int) time.Duration {
 		if d >= max {
 			break
 		}
+		// Saturate before doubling so a max near MaxInt64 cannot wrap the delay
+		// negative and turn retries into a busy loop.
+		// 加倍之前先饱和，max 接近 MaxInt64 时延迟不会溢出成负数、把重试变成忙循环。
+		if d > max/2 {
+			d = max
+			break
+		}
 		d *= 2
 	}
 	if d > max {

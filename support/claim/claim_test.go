@@ -3,6 +3,7 @@ package claim
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -193,6 +194,15 @@ func TestBackoffGrowsAndCaps(t *testing.T) {
 	}
 	if got := backoffFor(base, 5*time.Second, 1); got != 5*time.Second {
 		t.Fatalf("backoffFor with max < base = %v, want 5s", got)
+	}
+	// A max near MaxInt64 is how a caller says "effectively no cap". Doubling
+	// must saturate instead of wrapping negative, which would turn the retry
+	// into a busy loop.
+	// 接近 MaxInt64 的 max 是调用方表示"实际不设上限"的方式。加倍必须饱和而不是溢出成
+	// 负数，否则重试会变成忙循环。
+	unbounded := time.Duration(math.MaxInt64)
+	if got := backoffFor(time.Second, unbounded, 100); got != unbounded {
+		t.Fatalf("backoffFor(no cap) = %v, want %v", got, unbounded)
 	}
 }
 
