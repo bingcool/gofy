@@ -141,3 +141,25 @@ func TestNewReportsUnopenablePath(t *testing.T) {
 		t.Fatalf("error lacks the package prefix: %v", err)
 	}
 }
+
+// TestNewKeepsDSNParametersOutOfErrors pins the redaction promise. A file: URI
+// carries pragmas and can carry a credential, so an open failure must name the
+// database file without echoing the query string.
+// TestNewKeepsDSNParametersOutOfErrors 固定脱敏承诺。file: URI 里装着 pragma，也可能
+// 装着凭据；打开失败时只能给出数据库文件，不能回显查询串。
+func TestNewKeepsDSNParametersOutOfErrors(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "missing-dir", "app.db") + "?_pragma=secret-token"
+	_, err := sqlite.New(context.Background(), sqlite.Config{
+		DSN:         dsn,
+		PingTimeout: time.Second,
+	}, zap.NewNop())
+	if err == nil {
+		t.Fatal("New accepted an unopenable path")
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("error echoed the DSN parameters: %v", err)
+	}
+	if !strings.Contains(err.Error(), "app.db") {
+		t.Fatalf("error lost the database file: %v", err)
+	}
+}

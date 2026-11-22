@@ -113,9 +113,13 @@ func (c Config) withDefaults() Config {
 }
 
 // New opens a SQLite connection, configures the pool and verifies it with a
-// ping. It never panics and never logs the DSN.
-// New 打开 SQLite 连接、配置 pool 并用 ping 验证；不会 panic，也不会在日志或错误
-// 里输出完整 DSN。ping 失败时会先关闭已打开的连接再返回错误。
+// ping. It never panics and never echoes the full DSN: errors carry only the
+// database file (see dsnTarget), so pragmas and any credential in a file: URI
+// stay out of logs. A failed ping closes the connection it opened before
+// returning.
+// New 打开 SQLite 连接、配置 pool 并用 ping 验证；不会 panic，也不会回显完整 DSN：
+// 错误里只带数据库文件（见 dsnTarget），file: URI 中的 pragma 与可能的凭据不会进入日志。
+// ping 失败时会先关闭已打开的连接再返回错误。
 func New(ctx context.Context, cfg Config, lg *zap.Logger, opts ...Option) (*gorm.DB, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -139,7 +143,7 @@ func New(ctx context.Context, cfg Config, lg *zap.Logger, opts ...Option) (*gorm
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: open %s: %w", cfg.DSN, err)
+		return nil, fmt.Errorf("sqlite: open %s: %w", dsnTarget(cfg.DSN), err)
 	}
 
 	sqlDB, err := conn.DB()
@@ -155,9 +159,23 @@ func New(ctx context.Context, cfg Config, lg *zap.Logger, opts ...Option) (*gorm
 	defer cancel()
 	if err := sqlDB.PingContext(pingCtx); err != nil {
 		_ = sqlDB.Close()
-		return nil, fmt.Errorf("sqlite: ping %s: %w", cfg.DSN, err)
+		return nil, fmt.Errorf("sqlite: ping %s: %w", dsnTarget(cfg.DSN), err)
 	}
 	return conn, nil
+}
+
+// dsnTarget reduces a DSN to the database file it names, dropping the query
+// string. Those parameters carry pragmas (and, in a file: URI, sometimes
+// credentials), so echoing the whole value would contradict the promise above;
+// the path is what tells two SQLite stores apart in an error.
+// dsnTarget 把 DSN 缩减为它指向的数据库文件，去掉查询串。那些参数装着 pragma（在
+// file: URI 里有时还带凭据），回显整个值会与上面的承诺矛盾；而在错误里区分两个 SQLite
+// 库，路径已经够了。
+func dsnTarget(dsn string) string {
+	if i := strings.IndexByte(dsn, '?'); i >= 0 {
+		return dsn[:i]
+	}
+	return dsn
 }
 
 // Close releases the underlying connection pool. A nil conn is a no-op.
