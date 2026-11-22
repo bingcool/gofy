@@ -15,7 +15,11 @@ http:
 # 限制在管理网络，或设置 disable_pprof: true。
 diagnostics:
   enabled: true          # 打开后 /metrics 与 /debug/pprof/ 同时可用
-  addr: 127.0.0.1:6060    # Prometheus 从其他 Pod 抓取时改为 0.0.0.0:6060
+  addr: 127.0.0.1:6060    # HTTP 服务使用该地址；Prometheus 从其他 Pod 抓取时改为 0.0.0.0:6060
+  # worker 进程使用该地址；不配置则沿用上面的 addr。HTTP 与 worker 部署在同一台主机
+  # 时必须错开，否则后启动的进程会因端口被占用而启动失败；两者分处不同主机或不同 Pod
+  # 时可以留空，共用 addr 不会冲突。
+  worker_addr: 127.0.0.1:6061    # Prometheus 从其他 Pod 抓取时改为 0.0.0.0:6061
   # disable_pprof: true   # 不允许堆转储离开进程时关掉
   # disable_metrics: true # 只要 pprof
   # metrics_path: /metrics

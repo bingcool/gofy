@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `diagnostics.worker_addr`: a worker process can bind its operational listener
+  to a different address than the HTTP server. A small deployment that runs both
+  on one host would otherwise have the second process fail to start, because two
+  sockets cannot share a port and a diagnostics bind failure is fatal. Empty
+  keeps the previous behaviour: the worker uses `addr`.
+  `diagnostics.worker_addr`：worker 进程的运维监听可以与 HTTP 服务绑定不同地址。小项目
+  把两者放在同一台主机时，后启动的进程原本会因端口被占用而启动失败（诊断端口绑定失败是
+  致命的）。留空保持原行为：worker 沿用 `addr`。
+
 ### Changed
 
 - The startup banner prints 启动时间 instead of 版本: the value is the runtime's

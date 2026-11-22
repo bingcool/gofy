@@ -53,6 +53,18 @@ type Config struct {
 	// 容器部署通常设为 0.0.0.0:6060，由网络策略负责隔离。
 	Addr string `yaml:"addr" default:"127.0.0.1:6060"`
 
+	// WorkerAddr is the listen address a worker process uses. Empty means "same
+	// as Addr". It exists because a small deployment often runs the HTTP server
+	// and a worker group on the same host: two processes binding the same
+	// diagnostics port would make whichever starts second fail to start. Leave it
+	// empty when they run on different hosts (or in different Pods), where
+	// sharing Addr is harmless.
+	// WorkerAddr 是 worker 进程使用的监听地址，空表示与 Addr 相同。它的存在是因为
+	// 小项目常把 HTTP 服务与 worker 分组跑在同一台主机上：两个进程绑定同一个诊断端口，
+	// 后启动的那个会启动失败。两者跑在不同主机（或不同 Pod）上时留空即可，共用 Addr
+	// 没有影响。
+	WorkerAddr string `yaml:"worker_addr"`
+
 	// DisableMetrics omits /metrics. Both endpoints are on by default, so a
 	// config that only turns Enabled on exposes both; the inverted flag avoids
 	// the "enabled: true but everything still off" trap that plain booleans
@@ -106,6 +118,14 @@ func (c Config) Validate() error {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		return fmt.Errorf("diagnostics: invalid addr %q: %w", c.Addr, err)
 	}
+	// WorkerAddr is optional, but a malformed one must not be discovered at bind
+	// time by the process that starts last.
+	// WorkerAddr 可选，但写错的地址不能等到最后启动的那个进程绑定时才发现。
+	if workerAddr := strings.TrimSpace(c.WorkerAddr); workerAddr != "" {
+		if _, _, err := net.SplitHostPort(workerAddr); err != nil {
+			return fmt.Errorf("diagnostics: invalid worker_addr %q: %w", c.WorkerAddr, err)
+		}
+	}
 	// The rule is "all three off", not "metrics and pprof off": a health-only
 	// listener is a legitimate deployment, and rejecting it would leave the
 	// operator with no diagnostics port at all.
@@ -128,6 +148,21 @@ func (c Config) withDefaults() Config {
 	out.Addr = strings.TrimSpace(out.Addr)
 	if out.Addr == "" {
 		out.Addr = DefaultAddr
+	}
+	out.WorkerAddr = strings.TrimSpace(out.WorkerAddr)
+	return out
+}
+
+// ForWorker returns the configuration a worker process should use: the same
+// endpoints and paths, with Addr replaced by WorkerAddr when that is set. An
+// empty WorkerAddr keeps Addr, which is what a deployment with one process per
+// host wants.
+// ForWorker 返回 worker 进程应使用的配置：端点与路径不变，WorkerAddr 非空时用它替换
+// Addr。WorkerAddr 为空则沿用 Addr，这正是"每台主机一个进程"的部署所需要的。
+func (c Config) ForWorker() Config {
+	out := c.withDefaults()
+	if out.WorkerAddr != "" {
+		out.Addr = out.WorkerAddr
 	}
 	return out
 }

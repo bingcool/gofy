@@ -392,6 +392,20 @@ app, err := gofy.New(
 )
 ```
 
+同一份配置服务两种角色：`addr` 给 HTTP 服务，`worker_addr` 给 worker 进程；不配
+`worker_addr` 时 worker 沿用 `addr`。
+
+```yaml
+diagnostics:
+  enabled: true
+  addr: 127.0.0.1:6060        # HTTP 服务
+  worker_addr: 127.0.0.1:6061 # worker 进程；留空则与 addr 相同
+```
+
+**同一台主机上同时跑 HTTP 与 worker 时必须填 `worker_addr`**。诊断端口绑定失败是致命
+的，两个进程抢同一个端口时，后启动的那个会直接启动失败；小项目把两者放在一台云主机上
+正是这种情形。分处不同主机或不同 Pod 时留空即可，共用 `addr` 不会冲突。
+
 启用后框架负责：
 
 - `/metrics` 输出 HTTP 服务指标：`http_server_request_duration_seconds`（直方图，

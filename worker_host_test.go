@@ -3,12 +3,16 @@ package gofy_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bingcool/gofy"
+	"github.com/bingcool/gofy/support/diagnostics"
 	"github.com/bingcool/gofy/worker"
+	"go.uber.org/zap"
 )
 
 func TestExecuteWorkerRequiresGroup(t *testing.T) {
@@ -329,5 +333,72 @@ func TestShutdownStopsAWorkerProcess(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker command did not stop after Shutdown")
+	}
+}
+
+// TestWorkerDiagnosticsBindWorkerAddr pins the same-host deployment: the HTTP
+// server and a worker group may share a machine, and two processes cannot bind
+// one diagnostics port. The worker must listen on worker_addr while addr stays
+// reserved for the HTTP server, which is why the resolution lives in the worker
+// path instead of in shared config.
+// TestWorkerDiagnosticsBindWorkerAddr 固定同主机部署：HTTP 服务与 worker 分组可能共用
+// 一台机器，而两个进程不能绑定同一个诊断端口。worker 必须监听 worker_addr，把 addr 留给
+// HTTP 服务——这也是地址解析放在 worker 路径而不是共享配置里的原因。
+func TestWorkerDiagnosticsBindWorkerAddr(t *testing.T) {
+	httpPort := freePort(t)
+	workerPort := freePort(t)
+
+	var started int32
+	group, err := worker.NewGroup("order", worker.Func("tick", 1, func(ctx context.Context) error {
+		atomic.AddInt32(&started, 1)
+		<-ctx.Done()
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+
+	app, err := gofy.New(
+		gofy.WithName("worker-diagnostics-test"),
+		gofy.WithLogger(zap.NewNop()),
+		gofy.WithWorkerGroups(group),
+		gofy.WithDiagnostics(diagnostics.Config{
+			Enabled:      true,
+			Addr:         fmt.Sprintf("127.0.0.1:%d", httpPort),
+			WorkerAddr:   fmt.Sprintf("127.0.0.1:%d", workerPort),
+			DisablePprof: true,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- app.ExecuteArgs(ctx, []string{"worker", "--group=order"}) }()
+
+	client := &http.Client{Timeout: time.Second}
+	probe := func(port int) error {
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/metrics", port))
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+		return nil
+	}
+	waitFor(t, func() bool { return probe(workerPort) == nil }, "the worker diagnostics listener")
+
+	if err := probe(httpPort); err == nil {
+		t.Fatal("worker bound the HTTP diagnostics address instead of worker_addr")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ExecuteArgs error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker command did not stop after cancellation")
 	}
 }

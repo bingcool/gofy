@@ -242,7 +242,7 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 	// 只构建 provider 会让 worker 进程完全没有抓取端点。HTTP 路径在 run() 里启动
 	// 监听，worker 没有那段代码，因此必须在这里启动；未开启指标的 worker 不监听。
 	if a.metrics.Enabled() && a.opts.diagnostics != nil && a.opts.diagnostics.Enabled {
-		if err := a.startDiagnostics(lg); err != nil {
+		if err := a.startWorkerDiagnostics(lg); err != nil {
 			return a.abort(fmt.Errorf("gofy: worker diagnostics: %w", err))
 		}
 	}

@@ -361,3 +361,46 @@ func TestClampPprofSeconds(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigForWorkerUsesWorkerAddr pins the address resolution: a worker uses
+// worker_addr when it is set and addr otherwise, and resolving never mutates
+// the shared config the HTTP server reads.
+// TestConfigForWorkerUsesWorkerAddr 固定地址解析：配置了 worker_addr 时 worker 用它，
+// 否则沿用 addr；解析过程不会改动 HTTP 服务读取的那份共享配置。
+func TestConfigForWorkerUsesWorkerAddr(t *testing.T) {
+	shared := Config{Addr: "127.0.0.1:6060", WorkerAddr: "127.0.0.1:6061"}
+	if got := shared.ForWorker().Addr; got != "127.0.0.1:6061" {
+		t.Fatalf("ForWorker().Addr = %q, want worker_addr", got)
+	}
+	if shared.Addr != "127.0.0.1:6060" {
+		t.Fatalf("ForWorker mutated the shared config: Addr = %q", shared.Addr)
+	}
+
+	if got := (Config{Addr: "0.0.0.0:6060"}).ForWorker().Addr; got != "0.0.0.0:6060" {
+		t.Fatalf("ForWorker().Addr without worker_addr = %q, want addr", got)
+	}
+
+	// Worker-only config: the HTTP server keeps the default, the worker listens
+	// where it was told. Surrounding spaces are trimmed like every other field.
+	// 只配 worker 地址：HTTP 服务保持默认，worker 监听指定地址。首尾空白与其它字段一样
+	// 会被去掉。
+	if got := (Config{WorkerAddr: " 127.0.0.1:6062 "}).ForWorker().Addr; got != "127.0.0.1:6062" {
+		t.Fatalf("ForWorker().Addr with only worker_addr = %q", got)
+	}
+	if got := (Config{WorkerAddr: "127.0.0.1:6062"}).withDefaults().Addr; got != DefaultAddr {
+		t.Fatalf("withDefaults().Addr = %q, want the default", got)
+	}
+}
+
+// TestConfigValidateRejectsBadWorkerAddr keeps a typo from surfacing at bind
+// time in whichever process starts second.
+// TestConfigValidateRejectsBadWorkerAddr 让写错的地址不会等到后启动的那个进程绑定时才暴露。
+func TestConfigValidateRejectsBadWorkerAddr(t *testing.T) {
+	err := (Config{Addr: "127.0.0.1:6060", WorkerAddr: "127.0.0.1"}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "worker_addr") {
+		t.Fatalf("Validate() = %v, want a worker_addr error", err)
+	}
+	if err := (Config{Addr: "127.0.0.1:6060", WorkerAddr: "127.0.0.1:6061"}).Validate(); err != nil {
+		t.Fatalf("Validate() rejected a valid worker_addr: %v", err)
+	}
+}

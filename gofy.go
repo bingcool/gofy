@@ -552,7 +552,26 @@ func (a *App) startDiagnostics(logger *zap.Logger) error {
 	if a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled {
 		return nil
 	}
-	srv, err := diagnostics.New(*a.opts.diagnostics, diagnostics.WithLogger(logger))
+	return a.startDiagnosticsWith(*a.opts.diagnostics, logger)
+}
+
+// startWorkerDiagnostics binds the worker process's operational listener. It
+// resolves diagnostics.WorkerAddr here rather than at the call site: the same
+// config serves both roles, and only this path knows it is the worker one. A
+// worker sharing a host with the HTTP server would otherwise fail to bind the
+// port the other process already owns.
+// startWorkerDiagnostics 绑定 worker 进程的运维监听。WorkerAddr 在这里解析而不是在调用
+// 点：同一份配置服务两种角色，只有这条路径知道自己是 worker。否则与 HTTP 服务同主机部署
+// 的 worker 会去绑定对方已占用的端口。
+func (a *App) startWorkerDiagnostics(logger *zap.Logger) error {
+	if a.opts.diagnostics == nil || !a.opts.diagnostics.Enabled {
+		return nil
+	}
+	return a.startDiagnosticsWith(a.opts.diagnostics.ForWorker(), logger)
+}
+
+func (a *App) startDiagnosticsWith(cfg diagnostics.Config, logger *zap.Logger) error {
+	srv, err := diagnostics.New(cfg, diagnostics.WithLogger(logger))
 	if err != nil {
 		return fmt.Errorf("gofy: diagnostics: %w", err)
 	}
