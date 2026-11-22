@@ -14,6 +14,17 @@ import (
 // defaultPopLimit 是 DelayQueue.Pop 未指定 limit 时一次取出的最大条数。
 const defaultPopLimit = 10
 
+// maxPopLimit caps one Pop regardless of what the caller asks for. The Lua
+// script deletes the batch with unpack(members), and Redis' Lua interpreter
+// refuses to unpack more than about 8000 values, which would turn a large batch
+// into a script error for the whole poll. It also bounds the handler work one
+// round can create, since a popped batch lives only in the caller's slice.
+// maxPopLimit 是 Pop 无论调用方要求多少都不超过的上限。Lua 脚本用
+// unpack(members) 删除整批，而 Redis 的 Lua 解释器最多只能 unpack 约 8000 个值，
+// 超过会让整次轮询变成脚本错误；它同时限制了一轮能产生的 handler 工作量，因为弹出的
+// 一批消息只存在于调用方的切片里。
+const maxPopLimit = 1000
+
 // DelayQueue is a delayed queue backed by a Redis ZSET: the due timestamp is the
 // score and Pop takes and deletes due messages atomically through a Lua script.
 // DelayQueue 是基于 Redis ZSET 的延迟队列：消息以到期时间戳作为 score，
@@ -73,12 +84,16 @@ func (q *DelayQueue) Add(ctx context.Context, payload any, delay time.Duration) 
 }
 
 // Pop takes and deletes up to limit due messages, returned in ascending due-time
-// order. limit <= 0 uses the default of 10; an empty slice means nothing is due.
+// order. limit <= 0 uses the default of 10, and anything above maxPopLimit is
+// clamped to it; an empty slice means nothing is due.
 // Pop 取出并删除至多 limit 条已到期的消息，按到期时间升序返回。
-// limit <= 0 时使用默认值 10；没有到期消息时返回空切片。
+// limit <= 0 时使用默认值 10，超过 maxPopLimit 时按上限截断；没有到期消息时返回空切片。
 func (q *DelayQueue) Pop(ctx context.Context, limit int) ([]*Message, error) {
 	if limit <= 0 {
 		limit = defaultPopLimit
+	}
+	if limit > maxPopLimit {
+		limit = maxPopLimit
 	}
 	raw, err := popDueScript.Run(contextOrBackground(ctx), q.client, []string{q.key}, score(time.Now()), limit).StringSlice()
 	if errors.Is(err, goredis.Nil) {

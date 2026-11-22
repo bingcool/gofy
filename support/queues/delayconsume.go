@@ -102,7 +102,7 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 					// 另一实例仍持有这条消息。重新入队但不改 RetryNum；
 					// DiscardOnError 同样不适用。
 					if err := q.RetryInFlight(ctx, msg, opts.InFlightDelay); err != nil {
-						report(opts, err)
+						reportNack(opts, err)
 					}
 					continue
 				}
@@ -112,7 +112,7 @@ func (q *DelayQueue) Consume(ctx context.Context, handler HandlerFunc, opts Cons
 				}
 				retried, retryErr := q.Retry(ctx, msg, opts.RetryDelay)
 				if retryErr != nil {
-					report(opts, retryErr)
+					reportNack(opts, retryErr)
 					continue
 				}
 				if !retried {
@@ -140,7 +140,7 @@ func (q *DelayQueue) requeueAfterCancel(ctx context.Context, opts ConsumeOptions
 	defer cancel()
 	for _, msg := range msgs {
 		if err := q.RetryInFlight(writeCtx, msg, 0); err != nil {
-			report(opts, err)
+			reportNack(opts, err)
 		}
 	}
 }

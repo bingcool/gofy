@@ -340,10 +340,17 @@ func (q *Queue) Consume(ctx context.Context, handler HandlerFunc, opts ConsumeOp
 		if opts.OnError != nil && err != nil {
 			opts.OnError(err)
 		}
+		timer := time.NewTimer(opts.ReconnectDelay)
 		select {
 		case <-ctx.Done():
+			// Stop before returning: the wait is often the longest one in this
+			// loop, and leaving its timer armed holds a runtime timer for a
+			// goroutine that is already gone.
+			// 返回前先 Stop：这是本循环里通常最长的等待，让 timer 继续计时会给一个已经
+			// 结束的 goroutine 白留一个运行时定时器。
+			timer.Stop()
 			return nil
-		case <-time.After(opts.ReconnectDelay):
+		case <-timer.C:
 		}
 	}
 }
@@ -489,7 +496,15 @@ func requeueInFlight(ctx context.Context, delivery amqp091.Delivery, opts Consum
 			return
 		case <-timer.C:
 		}
-		if err := delivery.Nack(false, true); err != nil {
+		// A reconnect closes the channel this delivery arrived on, and the broker
+		// requeues everything unacknowledged on close — which is exactly the Nack
+		// this goroutine wanted to send. The call therefore fails with ErrClosed
+		// for a message that is already back in the queue; reporting it would
+		// raise a broker error for a message that was never lost.
+		// 重连会关闭这条投递所属的 channel，broker 在关闭时重新入队所有未确认投递——正是这个
+		// goroutine 想发的 Nack。因此调用会以 ErrClosed 失败，而消息其实已经回到队列；报出来
+		// 只会为一条从未丢失的消息记一次 broker 错误。
+		if err := delivery.Nack(false, true); err != nil && !errors.Is(err, amqp091.ErrClosed) {
 			report(opts, fmt.Errorf("amqp: requeue in-flight message: %w", err))
 		}
 	}()
