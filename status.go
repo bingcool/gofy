@@ -141,7 +141,6 @@ func (a *App) status(ctx context.Context, opts commandline.StatusOptions) error 
 			{"监听地址", "http://" + a.httpAddr()},
 			{"健康检查", orDash(entry.Health)},
 			{"PID 文件", a.displayPIDFile(file)},
-			{"版本", a.version.Version},
 		})
 	}
 	// The failure is returned, not printed here: a command that both prints an

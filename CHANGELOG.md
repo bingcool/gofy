@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The startup banner prints 启动时间 instead of 版本: the value is the runtime's
+  start time in `2006-01-02 15:04:05`, which is the one fact the process cannot
+  be asked for later. The version stays in the "application started" log line
+  and in `status --json`; the `status` table drops its version row the same way.
+  启动横幅用「启动时间」替换「版本」：取运行时构建时刻，格式
+  `2006-01-02 15:04:05`，这是进程运行之后再也问不到的信息。版本仍保留在
+  "application started" 日志行与 `status --json` 里；`status` 的表格同样去掉了版本行。
+
 ### Fixed
 
 - Boundary fixes from the same code review. `health.Registry.Invalidate` now
