@@ -314,3 +314,50 @@ func TestHandlerHealthPathAndDisable(t *testing.T) {
 		t.Fatalf("metrics with health disabled: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+// TestClampPprofSeconds pins the bound on profile and trace. Both standard
+// handlers stream for as long as `seconds` asks, so an unbounded value lets one
+// request hold a goroutine and the profiler; the wrapper must rewrite only that
+// parameter, and only when it is too large.
+// TestClampPprofSeconds 固定 profile 与 trace 的上限。两个标准处理器都按 `seconds`
+// 要求持续输出，无界值会让一个请求占住 goroutine 与剖析器；包装器只能改写这个参数，
+// 且只在它过大时改写。
+func TestClampPprofSeconds(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{"oversized", "seconds=9999", "60"},
+		{"at the bound", "seconds=60", "60"},
+		{"below the bound", "seconds=5", "5"},
+		{"absent", "", ""},
+		{"not a number", "seconds=abc", "abc"},
+		{"other parameters survive", "seconds=9999&debug=1", "60"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			var debug string
+			h := clampPprofSeconds(func(_ http.ResponseWriter, r *http.Request) {
+				got = r.URL.Query().Get("seconds")
+				debug = r.URL.Query().Get("debug")
+			})
+			req := httptest.NewRequest(http.MethodGet, "/debug/pprof/profile?"+tc.query, nil)
+			h(httptest.NewRecorder(), req)
+
+			if got != tc.want {
+				t.Fatalf("seconds seen by the handler = %q, want %q", got, tc.want)
+			}
+			// The clone must not leak back into the caller's request.
+			// 克隆出来的请求不能反向污染调用方的请求。
+			original := req.URL.Query().Get("seconds")
+			if tc.query == "seconds=9999" && original != "9999" {
+				t.Fatalf("original request mutated: seconds = %q", original)
+			}
+			if strings.Contains(tc.query, "debug=1") && debug != "1" {
+				t.Fatalf("debug = %q, want 1", debug)
+			}
+		})
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -399,9 +400,41 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func registerPprof(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/profile", clampPprofSeconds(pprof.Profile))
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.HandleFunc("/debug/pprof/trace", clampPprofSeconds(pprof.Trace))
+}
+
+// maxProfileSeconds bounds one CPU profile or execution trace. Both handlers
+// stream for as long as the caller asks and neither caps the value, so an
+// unbounded `seconds` lets one request hold a goroutine and the profiler for
+// hours. 60s is well above the 30s default and still bounds the damage. The
+// bound is enforced by rewriting the request instead of wrapping the handler in
+// http.TimeoutHandler: that wrapper buffers the body and replaces a slow
+// profile with a 503, which truncates the very artifact being collected.
+// maxProfileSeconds 限制单次 CPU profile 或执行 trace。两个处理器都按调用方要求的时长
+// 持续输出，且都不设上限，因此无界的 `seconds` 能让一个请求占住 goroutine 与剖析器数小时。
+// 60s 远高于默认的 30s，同时把损害限制住。这里用改写请求来实现上限，而不是套
+// http.TimeoutHandler：后者会缓冲响应体并用 503 替换慢响应，恰好截断正在收集的产物。
+const maxProfileSeconds = 60
+
+// clampPprofSeconds rewrites an oversized seconds parameter before the standard
+// handler reads it. Only the parameter is changed; every other query value and
+// the request itself are passed through untouched.
+// clampPprofSeconds 在标准处理器读取之前改写超限的 seconds 参数。它只改这个参数，其它
+// 查询值与请求本身原样透传。
+func clampPprofSeconds(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if raw := q.Get("seconds"); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil && n > maxProfileSeconds {
+				q.Set("seconds", strconv.Itoa(maxProfileSeconds))
+				r = r.Clone(r.Context())
+				r.URL.RawQuery = q.Encode()
+			}
+		}
+		next(w, r)
+	}
 }
 
 // isLoopbackAddr reports whether addr is provably loopback-only. A hostname that
