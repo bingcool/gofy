@@ -398,6 +398,15 @@ func (a *App) runWorker(parent context.Context, opts commandline.WorkerOptions) 
 		)
 		a.abandonWorkers(abandonedGroups)
 	}
+	// A runner that dies before the group ever reported ready takes the process
+	// down through runErr; without this line the detached parent would see EOF
+	// on the startup pipe and could only report an exit code, because the
+	// child's stdout and stderr are /dev/null. report is a no-op after ready was
+	// sent, so a failure during drain cannot overwrite the success line.
+	// 在分组报告就绪之前就退出的 runner 会通过 runErr 带走整个进程；没有这一行，脱离的
+	// 父进程只会在启动管道上读到 EOF，最多报出一个退出码——子进程的 stdout 与 stderr 都是
+	// /dev/null。report 在已发送 ready 之后是空操作，drain 期间的失败因此不会覆盖成功那行。
+	a.notifier.failed(runErr)
 	if cerr := a.cleanup(); cerr != nil {
 		runErr = errors.Join(runErr, cerr)
 	}

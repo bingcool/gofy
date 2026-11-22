@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -93,7 +92,12 @@ func (a *App) stopPIDFile(ctx context.Context, fullPath, worker string, force bo
 	}
 	pid := record.PID
 	if !process.Alive(pid) {
-		_ = os.Remove(fullPath)
+		// RemoveIfOwner, not os.Remove: a concurrent `start` may already have
+		// rewritten this path for a new pid, and deleting it would make the new
+		// instance unknown to the next stop.
+		// 用 RemoveIfOwner 而不是 os.Remove：并发的 `start` 可能已经把这个路径重写成新的
+		// pid，直接删除会让新实例对下一次 stop 不可见。
+		removePIDFile(a.Logger(), fullPath, pid)
 		return fmt.Errorf("%w: pid %d", ErrNotRunning, pid)
 	}
 	// A pid file outlives a crash, and the kernel recycles pid numbers. Signalling
@@ -105,7 +109,10 @@ func (a *App) stopPIDFile(ctx context.Context, fullPath, worker string, force bo
 	// 照着它动手。
 	verdict := record.Verify()
 	if verdict == pidfile.IdentityMismatch {
-		_ = os.Remove(fullPath)
+		// The file describes a process that is gone; drop it, but only while it
+		// still names that pid.
+		// 这份文件描述的进程已经消失；删掉它，但只在这个路径仍然写着那个 pid 时删。
+		removePIDFile(a.Logger(), fullPath, pid)
 		return fmt.Errorf("%w: pid %d (%s) now belongs to another process", ErrNotRunning, pid, fullPath)
 	}
 
