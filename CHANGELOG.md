@@ -8,6 +8,39 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Boundary fixes from the same code review. `health.Registry.Invalidate` now
+  detaches the round that is already running and bumps a generation, so a probe
+  that started before the readiness flip can neither cache its pre-flip answer
+  nor be joined by the probes that follow (a stale round used to keep `/readyz`
+  on 503 for a whole TTL). `claim` cancels the handler deadline inside a defer,
+  so a panicking handler no longer leaves a timer armed for `HandlerTimeout`,
+  and both `claim` and the worker restart policy saturate the backoff before
+  doubling so a `MaxBackoff` near `MaxInt64` cannot wrap the delay negative. A
+  worker that dies before its group reported ready now writes the reason to the
+  daemon startup pipe instead of leaving the parent with an exit code. Stale pid
+  files are removed through `RemoveIfOwner`, so a concurrent `start` keeps the
+  file it just wrote. In AMQP the reconnect wait uses a timer it stops, and a
+  parked in-flight requeue ignores `ErrClosed` after a reconnect (the broker has
+  already requeued the delivery). The delayed Redis consumer reports write-back
+  failures through `OnNackError`, and `DelayQueue.Pop` caps one batch at 1000
+  messages, below the Lua `unpack` limit. SQLite errors keep the DSN query
+  parameters out of the message. `nacos.Watcher.Run` returns nil on
+  cancellation, like every other loop in this repository, and backs off when the
+  server reports a change whose content is already applied. The diagnostics
+  profile and trace endpoints clamp `seconds` to 60.
+  同一轮代码复核的边界修复。`health.Registry.Invalidate` 现在会摘掉已在运行的轮次并
+  递增代号，翻转之前开始的探针既不能缓存翻转前的答案，也不会被后续探针加入（过期轮次
+  原先会让 `/readyz` 在整个 TTL 内停在 503）。`claim` 在 defer 里取消 handler 的截止
+  时间，panic 的 handler 不再留下一个跑满 `HandlerTimeout` 的 timer；`claim` 与 worker
+  重启策略都在加倍之前先饱和，`MaxBackoff` 接近 `MaxInt64` 时延迟不会溢出成负数。分组
+  报告就绪之前就退出的 worker 会把原因写进 daemon 启动管道，父进程不再只拿到退出码。
+  陈旧 pid 文件改由 `RemoveIfOwner` 删除，并发的 `start` 不会丢掉刚写入的文件。AMQP
+  的重连等待改用可停止的 timer，滞留的在途重投在重连后忽略 `ErrClosed`（broker 已经
+  重新入队）。Redis 延迟消费者把回写失败报给 `OnNackError`，`DelayQueue.Pop` 单批
+  上限 1000 条，低于 Lua `unpack` 的限制。SQLite 的错误信息不再带 DSN 查询参数。
+  `nacos.Watcher.Run` 在取消时返回 nil（与本仓库其它循环一致），服务端反复报变更而
+  内容已应用时按退避等待。诊断端点的 profile 与 trace 把 `seconds` 截到 60。
+
 - Code-review fixes. The formatted metrics view built its label index with an
   unsynchronised lazy init, so two concurrent `/metrics-format` requests could
   abort the process with `fatal error: concurrent map writes` (a fatal error no
