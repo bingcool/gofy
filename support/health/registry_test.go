@@ -311,3 +311,63 @@ func TestRegistryRejectsNegativeProviderTimeout(t *testing.T) {
 		t.Fatal("Register accepted a checker whose CheckTimeout is negative")
 	}
 }
+
+// TestRegistryInvalidateDiscardsInflightRound pins the ordering between
+// Invalidate and a round that is already running. The worker host flips the
+// group readiness flag while a probe may be inside a check; before this guard
+// the in-flight round finished afterwards and wrote its pre-flip snapshot back
+// as valid=true, so /readyz kept answering 503 for a whole TTL. The stale round
+// must finish for its own waiters but must neither publish nor detach the newer
+// round that replaced it.
+// TestRegistryInvalidateDiscardsInflightRound 固定 Invalidate 与已在运行的轮次之间的
+// 先后关系。worker 宿主翻起分组就绪标志时，可能正有探针在检查函数里；此守卫之前，在途
+// 轮次结束后会把翻转前的快照以 valid=true 写回，/readyz 于是在整个 TTL 内继续返回 503。
+// 过期轮次必须为自己的等待者结束，但既不能发布结果，也不能摘掉取代它的新一轮。
+func TestRegistryInvalidateDiscardsInflightRound(t *testing.T) {
+	var calls int32
+	release := make(chan struct{})
+
+	reg := New(Options{ReadinessTTL: time.Hour})
+	if err := reg.Register(Named("flaky", func(context.Context) error {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			<-release
+			return errors.New("down")
+		}
+		return nil
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	first := make(chan Snapshot, 1)
+	go func() { first <- reg.Ready(context.Background()) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&calls) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("checks run = %d, want the first round in flight", got)
+	}
+
+	// Flip the state the check reports while the old round is still blocked.
+	// 在旧轮次仍被阻塞时翻转检查将报告的状态。
+	reg.Invalidate()
+
+	if snap := reg.Ready(context.Background()); !snap.Ready {
+		t.Fatal("probe after Invalidate joined the round that started before it")
+	}
+
+	close(release)
+	if snap := <-first; snap.Ready {
+		t.Fatal("the stale round reported the post-invalidation state")
+	}
+
+	// The stale round has now finished; its result must not be in the cache.
+	// 过期轮次此时已经结束；它的结果不能留在缓存里。
+	if snap := reg.Ready(context.Background()); !snap.Ready {
+		t.Fatal("stale round overwrote the cache with its pre-invalidation snapshot")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("checks run = %d, want 2 (stale round must not re-run)", got)
+	}
+}

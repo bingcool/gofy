@@ -47,6 +47,13 @@ type slot struct {
 	at       time.Time
 	valid    bool
 	inflight *round
+	// gen counts invalidations. A round captures it when it starts and only
+	// publishes its snapshot while the value still matches, so a round that was
+	// already running when the caller asked for a fresh answer cannot write the
+	// old state back into the cache.
+	// gen 记录失效次数。轮次在开始时捕获它，只有在值仍然相同时才发布快照；因此在调用方
+	// 要求新答案时已经开始的那一轮，无法把旧状态写回缓存。
+	gen uint64
 }
 
 // Registry holds the checks of one process. It is safe for concurrent use: probe
@@ -153,13 +160,16 @@ func (r *Registry) Entries() []Entry {
 	return out
 }
 
-// Invalidate drops both cached snapshots. The worker host calls it when the
-// group ready flag flips, so the first probe after readiness does not answer
-// from the 503 cached before it. A reload that replaces the pool builds a new
-// registry instead, so its checks never see the retired connection.
-// Invalidate 丢弃两个类别的缓存快照。worker 宿主在分组就绪标志翻起时调用它，就绪之后的
-// 第一次探测因此不会用之前缓存下来的 503 作答。替换连接池的 Reload 会重建注册表，
-// 它的检查因此不会看到已退役的连接。
+// Invalidate drops both cached snapshots and detaches any round that is still
+// running. The worker host calls it when the group ready flag flips, so the
+// first probe after readiness does not answer from the 503 cached before it —
+// and does not join a round that started before the flip either. A reload that
+// replaces the pool builds a new registry instead, so its checks never see the
+// retired connection.
+// Invalidate 丢弃两个类别的缓存快照，并摘掉仍在运行的轮次。worker 宿主在分组就绪标志
+// 翻起时调用它，就绪之后的第一次探测因此不会用之前缓存下来的 503 作答，也不会加入在
+// 翻转之前就开始的那一轮。替换连接池的 Reload 会重建注册表，它的检查因此不会看到已退役
+// 的连接。
 func (r *Registry) Invalidate() {
 	r.mu.Lock()
 	r.invalidateLocked()
@@ -168,8 +178,17 @@ func (r *Registry) Invalidate() {
 
 func (r *Registry) invalidateLocked() {
 	for i := range r.slots {
-		r.slots[i].valid = false
-		r.slots[i].at = time.Time{}
+		s := &r.slots[i]
+		s.valid = false
+		s.at = time.Time{}
+		// Detaching the in-flight round matters as much as dropping the cached
+		// snapshot: a probe that joined it would still wait for an answer that was
+		// decided before the invalidation. The detached round keeps its own
+		// waiters and finishes normally; the next probe starts a new one.
+		// 摘掉在途轮次与丢弃缓存快照同样重要：加入它的探针仍会等到一个在失效之前就已
+		// 决定的答案。被摘掉的轮次保留自己的等待者并正常结束，下一个探针会开启新一轮。
+		s.inflight = nil
+		s.gen++
 	}
 }
 
@@ -206,6 +225,7 @@ func (r *Registry) snapshot(ctx context.Context, c Class) Snapshot {
 	}
 	rt := &round{done: make(chan struct{})}
 	s.inflight = rt
+	gen := s.gen
 	r.mu.Unlock()
 
 	// The round runs in its own goroutine on purpose: a probe that times out and
@@ -213,7 +233,7 @@ func (r *Registry) snapshot(ctx context.Context, c Class) Snapshot {
 	// still has to be cached for the probes that follow.
 	// 本轮刻意跑在自己的 goroutine 里：超时放弃的探针不能取消已经发出的检查，结果也必须
 	// 仍然为之后的探针写入缓存。
-	go r.execute(c, rt)
+	go r.execute(c, rt, gen)
 	return r.await(ctx, rt, c)
 }
 
@@ -232,15 +252,27 @@ func (r *Registry) await(ctx context.Context, rt *round, c Class) Snapshot {
 	}
 }
 
-func (r *Registry) execute(c Class, rt *round) {
+func (r *Registry) execute(c Class, rt *round, gen uint64) {
 	snap := r.run(c)
 
 	idx := classIndex(c)
 	r.mu.Lock()
-	r.slots[idx].snap = snap
-	r.slots[idx].at = snap.CheckedAt
-	r.slots[idx].valid = true
-	r.slots[idx].inflight = nil
+	s := &r.slots[idx]
+	// Publish only if no invalidation happened while the checks ran. A stale
+	// round must not mark the slot valid again (that is what kept /readyz on the
+	// pre-ready answer for a whole TTL), and it must not detach the newer round
+	// that replaced it.
+	// 只有在检查运行期间没有发生失效时才发布。过期轮次不能把槽位重新标记为有效
+	// （正是这一点让 /readyz 在整个 TTL 内继续返回就绪之前的答案），也不能把取代它的
+	// 新一轮从 inflight 上摘掉。
+	if s.gen == gen {
+		s.snap = snap
+		s.at = snap.CheckedAt
+		s.valid = true
+		if s.inflight == rt {
+			s.inflight = nil
+		}
+	}
 	r.mu.Unlock()
 
 	// snap is written before done is closed, so every goroutine that returns from
