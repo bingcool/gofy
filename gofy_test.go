@@ -183,7 +183,7 @@ func TestVersionFallsBackToTheFramework(t *testing.T) {
 	if got := app.Version().Version; got != gofy.Version {
 		t.Fatalf("Version().Version = %q, want gofy.Version %q", got, gofy.Version)
 	}
-	if gofy.Version != "1.0.0" {
+	if gofy.Version != "0.8.0" {
 		t.Fatalf("gofy.Version = %q; changing it means a release", gofy.Version)
 	}
 }
