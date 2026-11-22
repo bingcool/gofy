@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // noiseLabels are exporter-internal scopes; they are identical on every series
@@ -276,16 +277,26 @@ func orderLabels(labels map[string]string) string {
 	return strings.Join(parts, " ")
 }
 
-var identityIndexCache map[string]struct{}
+// identityIndexCache is built once, on first use. The formatted endpoint is
+// served by net/http, one goroutine per connection, so a plain `if m == nil {
+// m = ... }` lazy init lets two first requests write the same map and abort the
+// process with "concurrent map writes" — a fatal error no recover can catch.
+// sync.OnceValue keeps the build off the request path after the first call and
+// makes every reader observe the same completed map.
+// identityIndexCache 只构建一次。格式化端点由 net/http 提供服务，每个连接一个
+// goroutine；若用 `if m == nil { m = ... }` 惰性初始化，两个首次请求会同时写同一张
+// map，触发不可 recover 的 "concurrent map writes" 直接终止进程。sync.OnceValue 让
+// 构建在首次调用后离开请求路径，并保证所有读者看到同一张已完成的表。
+var identityIndexCache = sync.OnceValue(func() map[string]struct{} {
+	index := make(map[string]struct{}, len(identityOrder))
+	for _, k := range identityOrder {
+		index[k] = struct{}{}
+	}
+	return index
+})
 
 func identityIndex() map[string]struct{} {
-	if identityIndexCache == nil {
-		identityIndexCache = map[string]struct{}{}
-		for _, k := range identityOrder {
-			identityIndexCache[k] = struct{}{}
-		}
-	}
-	return identityIndexCache
+	return identityIndexCache()
 }
 
 // renderFamilies produces the human-readable text for a set of families.

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -139,4 +140,37 @@ func TestPrettyMetricsPassesErrorsThrough(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "collector unavailable") {
 		t.Fatalf("error passthrough broken: status=%d body=%q", rec.Code, rec.Body.String())
 	}
+}
+
+// TestIdentityIndexIsConcurrencySafe pins the fix for the lazy-init race. The
+// formatted endpoint is served by net/http, one goroutine per connection; a
+// plain `if index == nil` build lets two first requests write the same map and
+// abort the process with "concurrent map writes", which is a fatal error and
+// cannot be recovered. Every reader must see one completed map instead.
+// TestIdentityIndexIsConcurrencySafe 钉住惰性初始化的并发修复。格式化端点由
+// net/http 每连接一个 goroutine 提供服务；`if index == nil` 的构建方式会让两个首次
+// 请求同时写同一张 map，触发 "concurrent map writes" 直接终止进程（fatal error，
+// 不可 recover）。所有读者必须看到同一张已完成的表。
+func TestIdentityIndexIsConcurrencySafe(t *testing.T) {
+	const goroutines = 64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if got, want := len(identityIndex()), len(identityOrder); got != want {
+				t.Errorf("identityIndex size = %d, want %d", got, want)
+				return
+			}
+			// orderLabels is the request-path caller; exercise it too so the
+			// test fails if the index is ever reread through a mutable map.
+			// orderLabels 是请求路径上的调用方；一并覆盖，索引若被改成可变 map
+			// 重新读取，这里会失败。
+			_ = orderLabels(map[string]string{"group": "g", "unknown": "x"})
+		}()
+	}
+	close(start)
+	wg.Wait()
 }
