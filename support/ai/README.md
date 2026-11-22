@@ -1,8 +1,19 @@
 # support/ai
 
-配置驱动的 LLM 客户端，底层是 [goai](https://github.com/zendev-sh/goai)（已在
-`v0.11.0` 上验证）。应用在 `config.yaml` 的 `llm_ai` 段声明若干具名模型
-（alias），业务代码按 alias 调用，不再关心 provider、base URL 与凭证从哪来。
+本包是对 [`github.com/zendev-sh/goai`](https://github.com/zendev-sh/goai) 的封装（已在
+`v0.11.0` 上验证）：provider 接入、请求构造与流式解析都由 goai 完成，这里只做配置驱动、
+模型别名与统一的调用入口。
+
+- goai 仓库：<https://github.com/zendev-sh/goai>
+- 官方文档：<https://goai.sh/getting-started/installation.html>（Getting Started / Installation）
+
+goai 是一个**轻量统一**的模型 SDK，核心理念是 "One SDK, 25+ providers"：用一套 API
+统一对接 OpenAI、Anthropic、Google、Ollama、DeepSeek 等主流模型，只专注模型调用层的
+简洁抽象。chains、agents、memory、RAG 这类上层编排不在它的范围内——如果需要 LangChain、
+Spring AI 那样的全功能 AI 框架，用字节开源的 [Eino](https://github.com/cloudwego/eino)。
+
+应用在 `config.yaml` 的 `llm_ai` 段声明若干具名模型（alias），业务代码按 alias 调用，
+不再关心 provider、base URL 与凭证从哪来。
 
 支持三类 provider：
 
